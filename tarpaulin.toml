@@ -15,9 +15,17 @@
 #     thin by design (specs/06) and exercised via the rlib where possible.
 #   * crates/*/tests/* — we measure the code under test, not the tests.
 #
-# Coverage mandate (specs/07): 100% lines for plugmem-arena and plugmem-core,
-# >= 90% for the rest. Enforced as a CI gate at stage 5; run locally with
-# `cargo tarpaulin` anytime — reports land in coverage/ (gitignored).
+# Coverage mandate (specs/07): 100% of *executable* lines for plugmem-arena
+# and plugmem-core, >= 90% for the rest. Enforced as a CI gate at stage 5;
+# run locally with `cargo tarpaulin --all-features` — reports land in
+# coverage/ (gitignored).
+#
+# Known analyzer noise: tarpaulin marks some non-executable lines as
+# "uncovered" — struct-literal field lines, macro invocation lines
+# (`bump!(...)`), attributes, and const-folded `const fn` bodies. Every such
+# line in a report must be audited by hand (does a test exercise the
+# surrounding statement?) before being dismissed as an artifact; the audit
+# happens in review, not by silently lowering the number.
 [default]
 workspace = true
 out = ["Html", "Lcov", "Stdout"]
