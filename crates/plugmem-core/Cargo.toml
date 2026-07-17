@@ -1,0 +1,25 @@
+[package]
+name = "plugmem-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "plugmem engine: data model, temporal facts, indexes (BM25, graph, time, vectors incl. HNSW), hybrid recall, snapshot/journal."
+
+[dependencies]
+plugmem-arena = { workspace = true }
+thiserror = { workspace = true }
+xxhash-rust = { workspace = true }
+hashbrown = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }
+insta = { workspace = true }
+
+[features]
+default = ["std"]
+std = ["plugmem-arena/std"]
+counters = ["plugmem-arena/counters"]

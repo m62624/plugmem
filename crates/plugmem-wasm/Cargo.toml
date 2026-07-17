@@ -1,0 +1,24 @@
+[package]
+name = "plugmem-wasm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "WebAssembly build of the plugmem engine: storage and embedder bridged to host callbacks; published to npm."
+# Published to npm (via wasm-pack), not to crates.io.
+publish = false
+
+[lib]
+# cdylib: the wasm artifact. rlib: so native `cargo test` can exercise the wrapper logic.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+plugmem-core = { workspace = true, features = ["std"] }
+wasm-bindgen = { workspace = true }
+js-sys = { workspace = true }
+
+# wasm-pack runs wasm-opt on release builds; optimize for size (size budget: specs/07).
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-Oz"]

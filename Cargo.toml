@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/plugmem-arena",
+    "crates/plugmem-core",
+    "crates/plugmem-host",
+    "crates/plugmem-cli",
+    "crates/plugmem-mcp",
+    "crates/plugmem-wasm",
+    "crates/plugmem-testgen",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Mansur Azatbek <mansur62624@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/m62624/plugmem"
+homepage = "https://github.com/m62624/plugmem"
+
+[workspace.dependencies]
+# Local crates (version pinned so the crates can be published to crates.io)
+plugmem-arena = { path = "crates/plugmem-arena", version = "0.1.0", default-features = false }
+plugmem-core = { path = "crates/plugmem-core", version = "0.1.0", default-features = false }
+plugmem-host = { path = "crates/plugmem-host", version = "0.1.0" }
+
+# Core dependencies (no_std; each entry build-verified against wasm32v1-none — specs/08)
+thiserror = { version = "2.0.18", default-features = false }
+xxhash-rust = { version = "0.8.17", default-features = false, features = ["xxh3"] }
+hashbrown = { version = "0.17.1", default-features = false }
+
+# Wrapper dependencies (std)
+clap = { version = "4.6.2", features = ["derive"] }
+ureq = "3.3.0"
+serde_json = "1.0.150"
+wasm-bindgen = "0.2.126"
+js-sys = "0.3.103"
+
+# Dev dependencies
+proptest = "1.11.0"
+criterion = "0.8.2"
+insta = "1.48.0"
+rand_xoshiro = "0.8.1"

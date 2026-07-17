@@ -1,0 +1,23 @@
+[package]
+name = "plugmem-arena"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Flat byte-pool storage structures for plugmem: sharded sorted arena, blob heap, chunked lists, interner."
+
+[dependencies]
+thiserror = { workspace = true }
+xxhash-rust = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }
+
+[features]
+default = ["std"]
+std = []
+# Deterministic work counters (perf gates); zero cost when disabled.
+counters = []

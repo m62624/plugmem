@@ -1,0 +1,15 @@
+[package]
+name = "plugmem-testgen"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Deterministic synthetic corpus generator for plugmem tests and benchmarks. Internal."
+# Internal tooling, never published.
+publish = false
+
+[dependencies]
+plugmem-core = { workspace = true, features = ["std"] }
+rand_xoshiro = { workspace = true }
