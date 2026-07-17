@@ -1,0 +1,24 @@
+# build
+/target/
+**/*.rs.bk
+
+# agent/tooling state
+.claude/
+.codex/
+.cursor/
+.aider*
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# node (wasm wrapper dev)
+node_modules/
+pkg/
+
+# local databases & scratch
+*.plugmem
+*.journal
+scratch/
+bench-history/local-*
