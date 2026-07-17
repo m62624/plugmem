@@ -41,3 +41,13 @@ proptest = "1.11.0"
 criterion = "0.8.2"
 insta = "1.48.0"
 rand_xoshiro = "0.8.1"
+
+# Every crate opts in via `[lints] workspace = true`. Documentation is not
+# optional in this project: any public item without docs fails the build.
+# All code and docs are English-only.
+[workspace.lints.rust]
+missing_docs = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"

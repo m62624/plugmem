@@ -12,3 +12,6 @@ description = "Native host layer for plugmem: file storage with locking, Embedde
 plugmem-core = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }
 ureq = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,32 @@
+# cargo-tarpaulin coverage config — read automatically by `cargo tarpaulin`.
+#
+# Scope = the library crates (plugmem-arena / -core / -host / -testgen), where
+# line coverage reflects what the unit + property tests actually reach. The
+# whole workspace is still *built and tested* (binaries' integration tests run
+# and must pass); only the coverage *metric* is narrowed via `exclude-files`:
+#
+#   * crates/plugmem-cli/src/main.rs, crates/plugmem-mcp/* — the binaries are
+#     exercised by integration tests that spawn the built executable as a
+#     separate process; tarpaulin's ptrace engine cannot attribute a
+#     subprocess's executed lines back to source, so their src/ would always
+#     read ~0% despite being covered. Excluding them keeps the number honest.
+#   * crates/plugmem-wasm/* — the cdylib bridge runs inside a wasm runtime
+#     (Node smoke tests), outside tarpaulin's reach; its pure logic is kept
+#     thin by design (specs/06) and exercised via the rlib where possible.
+#   * crates/*/tests/* — we measure the code under test, not the tests.
+#
+# Coverage mandate (specs/07): 100% lines for plugmem-arena and plugmem-core,
+# >= 90% for the rest. Enforced as a CI gate at stage 5; run locally with
+# `cargo tarpaulin` anytime — reports land in coverage/ (gitignored).
+[default]
+workspace = true
+out = ["Html", "Lcov", "Stdout"]
+output-dir = "coverage"
+exclude-files = [
+    "crates/plugmem-cli/src/main.rs",
+    "crates/plugmem-mcp/*",
+    "crates/plugmem-wasm/*",
+    "crates/*/tests/*",
+    # Legacy reference sources: not a workspace member, never measured.
+    "reference/*",
+]

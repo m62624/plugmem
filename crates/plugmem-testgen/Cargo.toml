@@ -13,3 +13,6 @@ publish = false
 [dependencies]
 plugmem-core = { workspace = true, features = ["std"] }
 rand_xoshiro = { workspace = true }
+
+[lints]
+workspace = true

@@ -12,3 +12,6 @@ description = "plugmem MCP server (stdio JSON-RPC)."
 plugmem-core = { workspace = true, features = ["std"] }
 plugmem-host = { workspace = true }
 serde_json = { workspace = true }
+
+[lints]
+workspace = true

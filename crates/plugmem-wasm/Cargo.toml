@@ -22,3 +22,6 @@ js-sys = { workspace = true }
 # wasm-pack runs wasm-opt on release builds; optimize for size (size budget: specs/07).
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-Oz"]
+
+[lints]
+workspace = true

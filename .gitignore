@@ -22,3 +22,6 @@ pkg/
 *.journal
 scratch/
 bench-history/local-*
+
+# coverage reports (cargo tarpaulin)
+/coverage/

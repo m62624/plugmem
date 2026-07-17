@@ -23,3 +23,6 @@ insta = { workspace = true }
 default = ["std"]
 std = ["plugmem-arena/std"]
 counters = ["plugmem-arena/counters"]
+
+[lints]
+workspace = true
