@@ -63,6 +63,15 @@ seed testgen-корпуса → эталонные операции → assert �
 
 `benches/` в arena и core; прогон локально и по PR-лейблу `benchmark`
 (не гейт). Матрица: операции бюджетной таблицы × S/M/L × native/wasmtime.
+
+Механика разделения (решено): criterion-бенчи и так opt-in — `cargo test` их
+не запускает, исполняет только явный `cargo bench` (CI зовёт его лишь в
+бенч-джобе). Отдельный feature для них не нужен; если бенчам понадобится
+доступ к внутренностям — приватные API открываются через
+`#[cfg(feature = "bench-internals")]`, а бенч-таргет получает нативное
+`[[bench]] required-features = ["bench-internals"]`. Перф-гейты — другое:
+это обычные тесты за feature `counters` (`cargo test --features counters`),
+они в CI обязательны.
 Отдельно: микробенчи арены (см. `01`), квантизация, hamming-скан, RRF-слияние.
 Результаты складываются в `bench-history/` (json) — тренд руками.
 
