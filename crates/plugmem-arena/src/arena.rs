@@ -1,10 +1,12 @@
 //! Sharded sorted arena over one flat byte pool.
 //!
-//! This is the v1 layer of the design in `specs/01-arena.md`: **one page per
-//! shard** (the semantics of the original test version, `reference/opaque-v1`),
-//! wearing the final v2 interfaces (key-prefix [`Slot`]s, big-endian keys,
-//! byte-denominated pages). The v2 mechanics — page chains with range splits,
-//! a page free-list — will grow on top without changing this API.
+//! Full v2 mechanics of `specs/01-arena.md`: each shard owns a **chain of
+//! range-partitioned pages** — every page holds a sorted run of keys, pages
+//! in a chain follow each other in ascending key ranges (a B+-tree leaf
+//! level without interior nodes; chains stay short because shard hashing
+//! spreads the load). A full page **splits** in half instead of failing, and
+//! a page emptied by removals is unlinked into a **free-list** for reuse, so
+//! capacity is bounded only by [`ArenaCfg::max_bytes`].
 //!
 //! The structure is tuned for **wasm environments first**: `no_std + alloc`,
 //! a single linear byte pool (snapshot = memcpy), no threads, and the one
@@ -24,17 +26,18 @@ use crate::slot::Slot;
 /// Size of one arena page in bytes.
 ///
 /// Fixed, not per-slot-count: whatever the slot size, a page is one
-/// L1-friendly unit of work, and every operation touches exactly one page.
+/// L1-friendly unit of work, and every operation touches O(1) pages.
 pub const PAGE_BYTES: usize = 4096;
 
-/// Sentinel for "shard has no page yet".
+/// Sentinel for "no page": an empty chain head, the end of a chain, or an
+/// empty free-list.
 const NONE: u32 = u32::MAX;
 
 /// Fibonacci hashing multiplier (2^64 / phi), used by [`ShardMode::Uniform`].
 const FIB: u64 = 0x9E37_79B9_7F4A_7C15;
 
 /// `true` when the `counters` feature is enabled; lets hot loops keep their
-/// counting code in one branch that constant-folds away otherwise.
+/// counting code in one expression that constant-folds away otherwise.
 const COUNT: bool = cfg!(feature = "counters");
 
 /// Adds `$n` to counter field `$field` when the `counters` feature is on;
@@ -59,10 +62,10 @@ pub enum ShardMode {
     /// iteration order is *not* the key order. Use for lookup tables.
     Uniform,
     /// Shard = top bits of the key's leading bytes. Shard index order equals
-    /// key order, so [`Arena::iter`] yields globally ascending keys. Use for
-    /// range-oriented data (temporal indexes, edges). Keys arriving in a
-    /// narrow value range will concentrate in few shards — that is the
-    /// trade-off for ordering.
+    /// key order, so [`Arena::iter`] yields globally ascending keys and
+    /// [`Arena::range`] scans work. Keys arriving in a narrow value range
+    /// will concentrate in few shards — their chains simply grow longer;
+    /// that is the trade-off for ordering.
     Ordered,
 }
 
@@ -116,15 +119,6 @@ pub enum Error {
         /// The configured ceiling that would have been crossed.
         max_bytes: usize,
     },
-    /// The target shard's page is full (v1 semantics: one page per shard;
-    /// the v2 range-split mechanics will remove this error).
-    #[error("shard {shard} is full ({slots} slots per page)")]
-    ShardFull {
-        /// Shard whose page had no free slot.
-        shard: usize,
-        /// Slots a page holds for this slot size.
-        slots: usize,
-    },
     /// The [`Slot`] layout constants are invalid.
     #[error(
         "invalid slot layout: size {size}, key_len {key_len} (require 1 <= key_len <= size <= {PAGE_BYTES})"
@@ -153,38 +147,51 @@ pub enum Error {
 pub struct Counters {
     /// Key comparisons performed by binary searches.
     pub cmp_ops: u64,
-    /// Bytes moved by insert/remove shifts.
+    /// Bytes moved by insert/remove shifts and page splits.
     pub bytes_shifted: u64,
-    /// Pages allocated in the pool.
+    /// Pages taken from the pool or the free-list.
     pub pages_allocated: u64,
+    /// Steps taken walking page chains (each step peeks one page's first
+    /// key — one cache line).
+    pub chain_steps: u64,
+    /// Page splits performed by inserts into full pages.
+    pub splits: u64,
 }
 
 /// A sharded collection of fixed-size records in one contiguous byte pool,
 /// sorted by key prefix within each shard.
 ///
 /// See the [crate-level documentation](crate) for the philosophy and the
-/// [module documentation](self) for the v1-layer scope. Highlights:
+/// [module documentation](self) for the chain/split mechanics. Highlights:
 ///
 /// - all state is `pool` + three small arrays — persisting the arena is a
 ///   `memcpy` of defined bytes (`specs/03`);
-/// - every operation is confined to one 4 KiB page: binary search over at
-///   most `PAGE_BYTES / T::SIZE` slots, shifts of at most one page;
+/// - every operation touches O(1) pages: a short chain walk (one first-key
+///   peek per step), then binary search and shifts inside one 4 KiB page;
+/// - capacity is bounded only by [`ArenaCfg::max_bytes`] — full pages split,
+///   emptied pages are recycled through a free-list;
 /// - `Arena` deliberately implements neither `Clone` nor `PartialEq`: pages
 ///   are allocated **uninitialized** (the measured wasm optimization), and a
 ///   byte-wise clone/compare would read the uninitialized tails.
 pub struct Arena<T: Slot> {
     /// Page pool; length is always a multiple of [`PAGE_BYTES`]. Bytes of a
-    /// page beyond `counts[shard] * T::SIZE` are uninitialized and must
+    /// page beyond `counts[page] * T::SIZE` are uninitialized and must
     /// never be read.
     pool: Vec<u8>,
-    /// Shard -> page index (`NONE` until first insert; pages are lazy).
+    /// Shard -> first page of its chain (`NONE` = empty shard).
     heads: Vec<u32>,
-    /// Shard -> number of occupied slots in its page.
+    /// Page -> successor: the next page in a shard chain, or the next free
+    /// page when the page sits in the free-list.
+    next: Vec<u32>,
+    /// Page -> number of occupied slots.
     counts: Vec<u16>,
+    /// Head of the free-list of recycled pages (linked through `next`).
+    free_head: u32,
     /// Total records across all shards.
     total: usize,
     /// Reusable serialization buffer for [`Arena::insert`] (`T::SIZE` bytes,
-    /// allocated once) — inserts do not allocate after the first call.
+    /// allocated once) — inserts do not allocate after the first call except
+    /// when growing the pool itself.
     scratch: Vec<u8>,
     cfg: ArenaCfg,
     #[cfg(feature = "counters")]
@@ -192,6 +199,14 @@ pub struct Arena<T: Slot> {
     /// `fn() -> T` keeps the arena `Send`/`Sync`-neutral and avoids bounding
     /// auto-traits on `T` itself.
     _marker: PhantomData<fn() -> T>,
+}
+
+/// Where a key's record lives (or would live).
+struct Target {
+    /// Page preceding `page` in its chain, `NONE` when `page` is the head.
+    prev: u32,
+    /// The chain page whose key range covers the key.
+    page: u32,
 }
 
 impl<T: Slot> Arena<T> {
@@ -215,7 +230,9 @@ impl<T: Slot> Arena<T> {
         Ok(Self {
             pool: Vec::new(),
             heads: alloc::vec![NONE; cfg.shards],
-            counts: alloc::vec![0u16; cfg.shards],
+            next: Vec::new(),
+            counts: Vec::new(),
+            free_head: NONE,
             total: 0,
             scratch: Vec::new(),
             cfg,
@@ -225,7 +242,7 @@ impl<T: Slot> Arena<T> {
         })
     }
 
-    /// Number of slots one page holds for this slot size.
+    /// Number of slots one page holds for this slot size (at least 1).
     pub const fn slots_per_page() -> usize {
         PAGE_BYTES / T::SIZE
     }
@@ -240,7 +257,8 @@ impl<T: Slot> Arena<T> {
         self.total == 0
     }
 
-    /// Bytes currently allocated in the page pool.
+    /// Bytes currently allocated in the page pool (including recycled
+    /// free-list pages — the pool never shrinks; emptied pages are reused).
     pub fn pool_bytes(&self) -> usize {
         self.pool.len()
     }
@@ -250,18 +268,17 @@ impl<T: Slot> Arena<T> {
         &self.cfg
     }
 
-    /// Inserts a record, keeping its shard sorted by key prefix.
+    /// Inserts a record, keeping its shard's chain sorted by key prefix.
     ///
     /// Returns `Ok(false)` if a record with the same key prefix already
     /// exists (the arena is a map keyed by prefix; existing payload is left
-    /// untouched — use [`Arena::payload_mut`] to update in place).
+    /// untouched — use [`Arena::payload_mut`] to update in place). A full
+    /// target page splits in half — inserts never fail on page capacity.
     ///
     /// # Errors
     ///
-    /// - [`Error::CapacityExceeded`] if a needed page allocation would cross
-    ///   [`ArenaCfg::max_bytes`];
-    /// - [`Error::ShardFull`] if the shard's page has no free slot (v1
-    ///   semantics; removed by the v2 split mechanics).
+    /// [`Error::CapacityExceeded`] if a needed page allocation would cross
+    /// [`ArenaCfg::max_bytes`].
     pub fn insert(&mut self, value: &T) -> Result<bool, Error> {
         // Take the scratch buffer out of `self` to sidestep aliasing between
         // `&self.scratch` and `&mut self.pool` below.
@@ -277,30 +294,36 @@ impl<T: Slot> Arena<T> {
     fn insert_bytes(&mut self, slot: &[u8]) -> Result<bool, Error> {
         let key = &slot[..T::KEY_LEN];
         let shard = self.shard_of(key);
-        let page_idx = self.ensure_page(shard)?;
-        let count = self.counts[shard] as usize;
-        let page_start = page_idx as usize * PAGE_BYTES;
 
-        let mut cmps = 0u64;
-        let pos = {
-            let page = &self.pool[page_start..page_start + PAGE_BYTES];
-            match search::<T>(page, count, key, &mut cmps) {
-                Ok(_) => {
-                    bump!(self, cmp_ops, cmps);
-                    return Ok(false);
-                }
+        let target = match self.find_page(shard, key) {
+            Some(t) => t,
+            None => {
+                // Empty shard: allocate its first chain page.
+                let page = self.alloc_page()?;
+                self.heads[shard] = page;
+                Target { prev: NONE, page }
+            }
+        };
+
+        let mut page = target.page;
+        let mut count = self.counts[page as usize] as usize;
+        let mut pos = {
+            let mut cmps = 0u64;
+            let found = self.search_in(page, count, key, &mut cmps);
+            bump!(self, cmp_ops, cmps);
+            match found {
+                Ok(_) => return Ok(false),
                 Err(pos) => pos,
             }
         };
-        bump!(self, cmp_ops, cmps);
 
         if count == Self::slots_per_page() {
-            return Err(Error::ShardFull {
-                shard,
-                slots: Self::slots_per_page(),
-            });
+            // Split the full page; afterwards (page, pos, count) address the
+            // half that must receive the new record.
+            (page, pos, count) = self.split(page, pos)?;
         }
 
+        let page_start = page as usize * PAGE_BYTES;
         let slot_start = page_start + pos * T::SIZE;
         let used_end = page_start + count * T::SIZE;
         let shifted = used_end - slot_start;
@@ -312,9 +335,58 @@ impl<T: Slot> Arena<T> {
         self.pool[slot_start..slot_start + T::SIZE].copy_from_slice(slot);
         bump!(self, bytes_shifted, shifted);
 
-        self.counts[shard] += 1;
+        self.counts[page as usize] += 1;
         self.total += 1;
         Ok(true)
+    }
+
+    /// Splits full `page`, given the insert position `pos` inside it.
+    /// Returns `(target_page, target_pos, target_count)` for the record that
+    /// triggered the split.
+    fn split(&mut self, page: u32, pos: usize) -> Result<(u32, usize, usize), Error> {
+        let spp = Self::slots_per_page();
+        let fresh = self.alloc_page()?;
+        bump!(self, splits, 1);
+
+        // Link the fresh page right after the split one.
+        self.next[fresh as usize] = self.next[page as usize];
+        self.next[page as usize] = fresh;
+
+        if spp == 1 {
+            // Degenerate single-slot pages (T::SIZE > PAGE_BYTES / 2): the
+            // "upper half" is the whole record when the new key precedes it,
+            // otherwise the fresh page simply receives the new record.
+            return Ok(if pos == 0 {
+                let src = page as usize * PAGE_BYTES;
+                let dst = fresh as usize * PAGE_BYTES;
+                self.pool.copy_within(src..src + T::SIZE, dst);
+                bump!(self, bytes_shifted, T::SIZE);
+                self.counts[page as usize] = 0;
+                self.counts[fresh as usize] = 1;
+                (page, 0, 0)
+            } else {
+                (fresh, 0, 0)
+            });
+        }
+
+        // Move the upper half [half..spp) into the fresh page.
+        let half = spp / 2;
+        let moved = spp - half;
+        let src = page as usize * PAGE_BYTES + half * T::SIZE;
+        let dst = fresh as usize * PAGE_BYTES;
+        self.pool.copy_within(src..src + moved * T::SIZE, dst);
+        bump!(self, bytes_shifted, moved * T::SIZE);
+        self.counts[page as usize] = half as u16;
+        self.counts[fresh as usize] = moved as u16;
+
+        // `pos` was computed against the full page; place the new record in
+        // whichever half now owns that position (pos == half belongs at the
+        // end of the lower page: the key sorts before the fresh page's first).
+        Ok(if pos <= half {
+            (page, pos, half)
+        } else {
+            (fresh, pos - half, moved)
+        })
     }
 
     /// Returns the record with the given key prefix, if present.
@@ -362,19 +434,31 @@ impl<T: Slot> Arena<T> {
     }
 
     /// Removes the record with the given key prefix. Returns `true` if it
-    /// existed. The shard's page stays allocated (v1 semantics; the v2
-    /// free-list reclaims empty pages).
+    /// existed. A page emptied by the removal is unlinked from its chain and
+    /// recycled through the free-list.
     ///
     /// # Panics
     ///
     /// Panics if `key.len() != T::KEY_LEN`.
     pub fn remove(&mut self, key: &[u8]) -> bool {
-        let Some(slot_start) = self.locate(key) else {
+        assert_eq!(key.len(), T::KEY_LEN, "key length must equal Slot::KEY_LEN");
+        let shard = self.shard_of(key);
+        let Some(Target { prev, page }) = self.find_page(shard, key) else {
             return false;
         };
-        let shard = self.shard_of(key);
-        let count = self.counts[shard] as usize;
-        let page_start = self.heads[shard] as usize * PAGE_BYTES;
+        let count = self.counts[page as usize] as usize;
+        let pos = {
+            let mut cmps = 0u64;
+            let found = self.search_in(page, count, key, &mut cmps);
+            bump!(self, cmp_ops, cmps);
+            match found {
+                Ok(pos) => pos,
+                Err(_) => return false,
+            }
+        };
+
+        let page_start = page as usize * PAGE_BYTES;
+        let slot_start = page_start + pos * T::SIZE;
         let used_end = page_start + count * T::SIZE;
         let tail = used_end - (slot_start + T::SIZE);
         if tail > 0 {
@@ -383,23 +467,91 @@ impl<T: Slot> Arena<T> {
                 .copy_within(slot_start + T::SIZE..used_end, slot_start);
         }
         bump!(self, bytes_shifted, tail);
-        self.counts[shard] -= 1;
+        self.counts[page as usize] -= 1;
         self.total -= 1;
+
+        if self.counts[page as usize] == 0 {
+            // Unlink the emptied page and recycle it.
+            let successor = self.next[page as usize];
+            if prev == NONE {
+                self.heads[shard] = successor;
+            } else {
+                self.next[prev as usize] = successor;
+            }
+            self.next[page as usize] = self.free_head;
+            self.free_head = page;
+        }
         true
     }
 
-    /// Iterates all records shard by shard.
+    /// Iterates all records shard by shard, following each shard's chain.
     ///
-    /// In [`ShardMode::Ordered`] the shard index order equals key order, so
-    /// this yields **globally ascending keys**. In [`ShardMode::Uniform`]
-    /// the global order is unspecified (each shard is still internally
-    /// sorted).
+    /// In [`ShardMode::Ordered`] the shard index order equals key order and
+    /// chains are range-partitioned, so this yields **globally ascending
+    /// keys**. In [`ShardMode::Uniform`] the global order is unspecified
+    /// (each shard is still internally sorted).
     pub fn iter(&self) -> Iter<'_, T> {
         Iter {
             arena: self,
             shard: 0,
+            page: NONE,
             idx: 0,
             remaining: self.total,
+        }
+    }
+
+    /// Iterates records whose key prefix lies in `[from, to)` — `from`
+    /// inclusive, `to` exclusive — in ascending key order.
+    ///
+    /// Only meaningful when shard order equals key order, hence restricted
+    /// to [`ShardMode::Ordered`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the arena is in [`ShardMode::Uniform`], or if either bound's
+    /// length differs from `T::KEY_LEN`.
+    pub fn range<'a>(&'a self, from: &[u8], to: &'a [u8]) -> Range<'a, T> {
+        assert_eq!(
+            self.cfg.mode,
+            ShardMode::Ordered,
+            "range scans require ShardMode::Ordered"
+        );
+        assert_eq!(
+            from.len(),
+            T::KEY_LEN,
+            "key length must equal Slot::KEY_LEN"
+        );
+        assert_eq!(to.len(), T::KEY_LEN, "key length must equal Slot::KEY_LEN");
+
+        // Position on the first record with key >= `from`.
+        let shard = self.shard_of(from);
+        let mut page = NONE;
+        let mut idx = 0usize;
+        if let Some(t) = self.find_page(shard, from) {
+            let count = self.counts[t.page as usize] as usize;
+            let mut cmps = 0u64;
+            let pos = match self.search_in(t.page, count, from, &mut cmps) {
+                Ok(p) | Err(p) => p,
+            };
+            bump!(self, cmp_ops, cmps);
+            if pos < count {
+                page = t.page;
+                idx = pos;
+            } else {
+                // Past the last record of the covering page: continue with
+                // the next page in this chain, or fall through to the next
+                // shard.
+                page = self.next[t.page as usize];
+            }
+        }
+        Range {
+            arena: self,
+            // The shard the iterator moves to once the current chain (if
+            // any) is exhausted.
+            shard: shard + 1,
+            page,
+            idx,
+            to,
         }
     }
 
@@ -415,21 +567,64 @@ impl<T: Slot> Arena<T> {
         self.counters.set(Counters::default());
     }
 
-    /// Byte offset of the slot with the given key, if present.
-    fn locate(&self, key: &[u8]) -> Option<usize> {
-        assert_eq!(key.len(), T::KEY_LEN, "key length must equal Slot::KEY_LEN");
-        let shard = self.shard_of(key);
+    /// Walks the shard's chain to the page whose key range covers `key`.
+    /// `None` when the shard is empty.
+    fn find_page(&self, shard: usize, key: &[u8]) -> Option<Target> {
         let head = self.heads[shard];
         if head == NONE {
             return None;
         }
-        let count = self.counts[shard] as usize;
-        let page_start = head as usize * PAGE_BYTES;
-        let page = &self.pool[page_start..page_start + PAGE_BYTES];
+        let mut prev = NONE;
+        let mut page = head;
+        let mut steps = 0u64;
+        loop {
+            let nxt = self.next[page as usize];
+            // Advance while the next page's range can still contain the key
+            // (its first key is <= key). Peeking a first key touches one
+            // cache line.
+            if nxt == NONE || self.first_key(nxt) > key {
+                break;
+            }
+            steps += COUNT as u64;
+            prev = page;
+            page = nxt;
+        }
+        bump!(self, chain_steps, steps);
+        let _ = steps; // read only by the counters feature
+        Some(Target { prev, page })
+    }
+
+    /// First key of a page. Caller guarantees the page is non-empty (every
+    /// page in a chain holds at least one record — emptied pages are
+    /// unlinked immediately).
+    fn first_key(&self, page: u32) -> &[u8] {
+        let start = page as usize * PAGE_BYTES;
+        &self.pool[start..start + T::KEY_LEN]
+    }
+
+    /// Binary search inside a page; wraps the free-function search with the
+    /// page slice resolution.
+    fn search_in(
+        &self,
+        page: u32,
+        count: usize,
+        key: &[u8],
+        cmps: &mut u64,
+    ) -> Result<usize, usize> {
+        let start = page as usize * PAGE_BYTES;
+        search::<T>(&self.pool[start..start + PAGE_BYTES], count, key, cmps)
+    }
+
+    /// Byte offset of the slot with the given key, if present.
+    fn locate(&self, key: &[u8]) -> Option<usize> {
+        assert_eq!(key.len(), T::KEY_LEN, "key length must equal Slot::KEY_LEN");
+        let shard = self.shard_of(key);
+        let Target { page, .. } = self.find_page(shard, key)?;
+        let count = self.counts[page as usize] as usize;
         let mut cmps = 0u64;
-        let found = search::<T>(page, count, key, &mut cmps).ok();
+        let found = self.search_in(page, count, key, &mut cmps).ok();
         bump!(self, cmp_ops, cmps);
-        found.map(|pos| page_start + pos * T::SIZE)
+        found.map(|pos| page as usize * PAGE_BYTES + pos * T::SIZE)
     }
 
     /// Maps a key to its shard. Only the first 8 key bytes participate;
@@ -451,12 +646,17 @@ impl<T: Slot> Arena<T> {
         (h >> (64 - bits)) as usize
     }
 
-    /// Returns the shard's page index, allocating the page on first use.
-    fn ensure_page(&mut self, shard: usize) -> Result<u32, Error> {
-        let head = self.heads[shard];
-        if head != NONE {
-            return Ok(head);
+    /// Takes a page from the free-list, or grows the pool by one page.
+    fn alloc_page(&mut self) -> Result<u32, Error> {
+        if self.free_head != NONE {
+            let page = self.free_head;
+            self.free_head = self.next[page as usize];
+            self.next[page as usize] = NONE;
+            self.counts[page as usize] = 0;
+            bump!(self, pages_allocated, 1);
+            return Ok(page);
         }
+
         let old_len = self.pool.len();
         let new_len = old_len + PAGE_BYTES;
         if new_len > self.cfg.max_bytes {
@@ -464,26 +664,28 @@ impl<T: Slot> Arena<T> {
                 max_bytes: self.cfg.max_bytes,
             });
         }
-        let page_idx = (old_len / PAGE_BYTES) as u32;
+        let page = (old_len / PAGE_BYTES) as u32;
         self.pool.reserve(PAGE_BYTES);
         // SAFETY: the new page is left uninitialized on purpose — this is the
         // one measured unsafe of the crate. Zeroing fresh pages was benched
         // at 12x slower on the wasm allocation path (wasmtime, 32k pages:
         // 3889 us zeroed vs 316 us uninit; native: noise) — and wasm is this
         // structure's primary environment. The invariant making it sound:
-        // *no byte of a page beyond `counts[shard] * T::SIZE` is ever read*.
-        // Every read (search, get, iter, shifts) is bounded by the shard
-        // count, and a slot's bytes are fully written before the count is
-        // incremented. Consequently `Arena` exposes no whole-pool reads
-        // (no `Clone`/`PartialEq`/`as_bytes`); the future snapshot writer
-        // emits only the initialized prefixes of pages (`specs/03`).
+        // *no byte of a page beyond `counts[page] * T::SIZE` is ever read*.
+        // Every read (search, get, iter, range, first_key, shifts) is
+        // bounded by the page count, and a slot's bytes are fully written
+        // before the count is incremented. Consequently `Arena` exposes no
+        // whole-pool reads (no `Clone`/`PartialEq`/`as_bytes`); the future
+        // snapshot writer emits only the initialized prefixes of pages
+        // (`specs/03`).
         #[allow(clippy::uninit_vec)]
         unsafe {
             self.pool.set_len(new_len);
         }
-        self.heads[shard] = page_idx;
+        self.next.push(NONE);
+        self.counts.push(0);
         bump!(self, pages_allocated, 1);
-        Ok(page_idx)
+        Ok(page)
     }
 }
 
@@ -529,6 +731,8 @@ impl<T: Slot> fmt::Debug for Arena<T> {
 pub struct Iter<'a, T: Slot> {
     arena: &'a Arena<T>,
     shard: usize,
+    /// Current chain page; `NONE` means "advance to the next shard's head".
+    page: u32,
     idx: usize,
     remaining: usize,
 }
@@ -537,18 +741,25 @@ impl<T: Slot> Iterator for Iter<'_, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<T> {
-        while self.shard < self.arena.cfg.shards {
-            if self.idx < self.arena.counts[self.shard] as usize {
-                let page_start = self.arena.heads[self.shard] as usize * PAGE_BYTES;
-                let off = page_start + self.idx * T::SIZE;
+        loop {
+            if self.page == NONE {
+                if self.shard >= self.arena.cfg.shards {
+                    return None;
+                }
+                self.page = self.arena.heads[self.shard];
+                self.idx = 0;
+                self.shard += 1;
+                continue;
+            }
+            if self.idx < self.arena.counts[self.page as usize] as usize {
+                let off = self.page as usize * PAGE_BYTES + self.idx * T::SIZE;
                 self.idx += 1;
                 self.remaining -= 1;
                 return Some(T::read(&self.arena.pool[off..off + T::SIZE]));
             }
-            self.shard += 1;
+            self.page = self.arena.next[self.page as usize];
             self.idx = 0;
         }
-        None
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -564,5 +775,45 @@ impl<'a, T: Slot> IntoIterator for &'a Arena<T> {
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
+    }
+}
+
+/// Iterator over a key range of an [`Arena`]; see [`Arena::range`].
+pub struct Range<'a, T: Slot> {
+    arena: &'a Arena<T>,
+    shard: usize,
+    /// Current chain page; `NONE` means "advance to the next shard's head".
+    page: u32,
+    idx: usize,
+    /// Exclusive upper bound on key prefixes.
+    to: &'a [u8],
+}
+
+impl<T: Slot> Iterator for Range<'_, T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        loop {
+            if self.page == NONE {
+                if self.shard >= self.arena.cfg.shards {
+                    return None;
+                }
+                self.page = self.arena.heads[self.shard];
+                self.idx = 0;
+                self.shard += 1;
+                continue;
+            }
+            if self.idx < self.arena.counts[self.page as usize] as usize {
+                let off = self.page as usize * PAGE_BYTES + self.idx * T::SIZE;
+                if &self.arena.pool[off..off + T::KEY_LEN] >= self.to {
+                    // Keys only grow from here on — the scan is complete.
+                    return None;
+                }
+                self.idx += 1;
+                return Some(T::read(&self.arena.pool[off..off + T::SIZE]));
+            }
+            self.page = self.arena.next[self.page as usize];
+            self.idx = 0;
+        }
     }
 }

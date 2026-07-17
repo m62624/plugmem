@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use plugmem_arena::{Arena, ArenaCfg, Error, ShardMode, Slot, key};
+use plugmem_arena::{Arena, ArenaCfg, ShardMode, Slot, key};
 use proptest::prelude::*;
 
 /// Same 5-byte record as the boundary tests: 4-byte BE key + 1-byte payload.
@@ -68,21 +68,14 @@ fn run_model(mode: ShardMode, shards: usize, ops: Vec<Op>) {
     for op in ops {
         match op {
             Op::Insert(id, val) => {
-                match arena.insert(&Rec { id, val }) {
-                    Ok(inserted) => {
-                        // The arena inserts iff the model does (soft duplicates).
-                        let model_inserted = !model.contains_key(&id);
-                        assert_eq!(inserted, model_inserted, "insert({id})");
-                        if model_inserted {
-                            model.insert(id, val);
-                        }
-                    }
-                    // v1 semantics: a full shard refuses the insert; the
-                    // model mirrors the refusal (record stays absent).
-                    Err(Error::ShardFull { .. }) => {
-                        assert!(!model.contains_key(&id));
-                    }
-                    Err(other) => panic!("unexpected error: {other}"),
+                // v2 semantics: full pages split, so an insert only ever
+                // reports "new" or "duplicate" (soft), never a capacity
+                // error at page granularity.
+                let inserted = arena.insert(&Rec { id, val }).unwrap();
+                let model_inserted = !model.contains_key(&id);
+                assert_eq!(inserted, model_inserted, "insert({id})");
+                if model_inserted {
+                    model.insert(id, val);
                 }
             }
             Op::Remove(id) => {
