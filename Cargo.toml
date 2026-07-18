@@ -8,6 +8,7 @@ members = [
     "crates/plugmem-mcp",
     "crates/plugmem-wasm",
     "crates/plugmem-testgen",
+    "tools/bench-matrix",
 ]
 
 [workspace.package]

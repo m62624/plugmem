@@ -12,7 +12,10 @@ description = "Flat byte-pool storage structures for plugmem: sharded sorted are
 thiserror = { workspace = true }
 xxhash-rust = { workspace = true }
 
-[dev-dependencies]
+# Test/bench harnesses are native-only: proptest's transitive deps do not
+# compile for wasm targets, and the wasm builds only need the library and
+# the dependency-free bench_repro example.
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 proptest = { workspace = true }
 criterion = { workspace = true }
 

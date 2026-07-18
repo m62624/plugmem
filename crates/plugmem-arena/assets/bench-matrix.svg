@@ -1,0 +1,133 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="460" viewBox="0 0 960 460" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+<rect width="960" height="460" fill="#fcfcfb" rx="8"/>
+<text x="24" y="34" font-size="17" font-weight="600" fill="#0b0b0b">plugmem-arena vs Rust std collections &#8212; one thread, 100k records, 16-byte slots</text>
+<text x="24" y="54" font-size="12" fill="#52514e">Deterministic workload (seeded keys) &#183; best of 3 &#183; lower is better &#183; reproduce: cargo run --release -p plugmem-bench-matrix</text>
+<rect x="24" y="66" width="10" height="10" rx="2" fill="#2a78d6"/>
+<text x="39" y="75" font-size="12" fill="#0b0b0b">Arena (Ordered)</text>
+<rect x="185" y="66" width="10" height="10" rx="2" fill="#008300"/>
+<text x="200" y="75" font-size="12" fill="#0b0b0b">Arena (Uniform)</text>
+<rect x="346" y="66" width="10" height="10" rx="2" fill="#e87ba4"/>
+<text x="361" y="75" font-size="12" fill="#0b0b0b">BTreeMap</text>
+<rect x="451" y="66" width="10" height="10" rx="2" fill="#eda100"/>
+<text x="466" y="75" font-size="12" fill="#0b0b0b">HashMap</text>
+<rect x="548" y="66" width="10" height="10" rx="2" fill="#1baf7a"/>
+<text x="563" y="75" font-size="12" fill="#0b0b0b">sorted Vec</text>
+<text x="60" y="98" font-size="13" font-weight="600" fill="#0b0b0b">Insert (random keys)</text>
+<line x1="60" y1="400.0" x2="360" y2="400.0" stroke="#e8e8e6" stroke-width="1"/>
+<text x="54" y="403.0" font-size="10" fill="#8a897f" text-anchor="end">0</text>
+<line x1="60" y1="327.5" x2="360" y2="327.5" stroke="#e8e8e6" stroke-width="1"/>
+<text x="54" y="330.5" font-size="10" fill="#8a897f" text-anchor="end">35</text>
+<line x1="60" y1="255.0" x2="360" y2="255.0" stroke="#e8e8e6" stroke-width="1"/>
+<text x="54" y="258.0" font-size="10" fill="#8a897f" text-anchor="end">70</text>
+<line x1="60" y1="182.5" x2="360" y2="182.5" stroke="#e8e8e6" stroke-width="1"/>
+<text x="54" y="185.5" font-size="10" fill="#8a897f" text-anchor="end">105</text>
+<line x1="60" y1="110.0" x2="360" y2="110.0" stroke="#e8e8e6" stroke-width="1"/>
+<text x="54" y="113.0" font-size="10" fill="#8a897f" text-anchor="end">140</text>
+<line x1="60" y1="400" x2="360" y2="400" stroke="#c9c8c0" stroke-width="1"/>
+<path d="M71.0,400 v-132.67857142857142 q0,-3 3,-3 h8 q3,0 3,3 v132.67857142857142 z" fill="#2a78d6"/>
+<text x="78.0" y="260.3" font-size="9" fill="#52514e" text-anchor="middle">66</text>
+<path d="M87.0,400 v-135.37142857142857 q0,-3 3,-3 h8 q3,0 3,3 v135.37142857142857 z" fill="#008300"/>
+<text x="94.0" y="257.6" font-size="9" fill="#52514e" text-anchor="middle">67</text>
+<path d="M103.0,400 v-190.88571428571427 q0,-3 3,-3 h8 q3,0 3,3 v190.88571428571427 z" fill="#e87ba4"/>
+<text x="110.0" y="202.1" font-size="9" fill="#52514e" text-anchor="middle">94</text>
+<path d="M119.0,400 v-40.292857142857144 q0,-3 3,-3 h8 q3,0 3,3 v40.292857142857144 z" fill="#eda100"/>
+<text x="126.0" y="352.7" font-size="9" fill="#52514e" text-anchor="middle">21</text>
+<path d="M135.0,400 v-34.07857142857143 q0,-3 3,-3 h8 q3,0 3,3 v34.07857142857143 z" fill="#1baf7a"/>
+<text x="142.0" y="358.9" font-size="9" fill="#52514e" text-anchor="middle">18</text>
+<text x="110.0" y="418" font-size="12" fill="#0b0b0b" text-anchor="middle">native</text>
+<path d="M171.0,400 v-184.25714285714287 q0,-3 3,-3 h8 q3,0 3,3 v184.25714285714287 z" fill="#2a78d6"/>
+<text x="178.0" y="208.7" font-size="9" fill="#52514e" text-anchor="middle">90</text>
+<path d="M187.0,400 v-185.9142857142857 q0,-3 3,-3 h8 q3,0 3,3 v185.9142857142857 z" fill="#008300"/>
+<text x="194.0" y="207.1" font-size="9" fill="#52514e" text-anchor="middle">91</text>
+<path d="M203.0,400 v-266.0785714285714 q0,-3 3,-3 h8 q3,0 3,3 v266.0785714285714 z" fill="#e87ba4"/>
+<text x="210.0" y="126.9" font-size="9" fill="#52514e" text-anchor="middle">130</text>
+<path d="M219.0,400 v-55.621428571428574 q0,-3 3,-3 h8 q3,0 3,3 v55.621428571428574 z" fill="#eda100"/>
+<text x="226.0" y="337.4" font-size="9" fill="#52514e" text-anchor="middle">28</text>
+<path d="M235.0,400 v-38.635714285714286 q0,-3 3,-3 h8 q3,0 3,3 v38.635714285714286 z" fill="#1baf7a"/>
+<text x="242.0" y="354.4" font-size="9" fill="#52514e" text-anchor="middle">20</text>
+<text x="210.0" y="418" font-size="12" fill="#0b0b0b" text-anchor="middle">wasmtime</text>
+<path d="M271.0,400 v-167.27142857142857 q0,-3 3,-3 h8 q3,0 3,3 v167.27142857142857 z" fill="#2a78d6"/>
+<text x="278.0" y="225.7" font-size="9" fill="#52514e" text-anchor="middle">82</text>
+<path d="M287.0,400 v-169.34285714285716 q0,-3 3,-3 h8 q3,0 3,3 v169.34285714285716 z" fill="#008300"/>
+<text x="294.0" y="223.7" font-size="9" fill="#52514e" text-anchor="middle">83</text>
+<path d="M303.0,400 v-227.75714285714287 q0,-3 3,-3 h8 q3,0 3,3 v227.75714285714287 z" fill="#e87ba4"/>
+<text x="310.0" y="165.2" font-size="9" fill="#52514e" text-anchor="middle">111</text>
+<path d="M319.0,400 v-55.207142857142856 q0,-3 3,-3 h8 q3,0 3,3 v55.207142857142856 z" fill="#eda100"/>
+<text x="326.0" y="337.8" font-size="9" fill="#52514e" text-anchor="middle">28</text>
+<path d="M335.0,400 v-39.67142857142857 q0,-3 3,-3 h8 q3,0 3,3 v39.67142857142857 z" fill="#1baf7a"/>
+<text x="342.0" y="353.3" font-size="9" fill="#52514e" text-anchor="middle">21</text>
+<text x="310.0" y="418" font-size="12" fill="#0b0b0b" text-anchor="middle">wasmer</text>
+<text x="210.0" y="438" font-size="11" fill="#52514e" text-anchor="middle">ns / element</text>
+<text x="420" y="98" font-size="13" font-weight="600" fill="#0b0b0b">Point lookup (hit)</text>
+<line x1="420" y1="400.0" x2="720" y2="400.0" stroke="#e8e8e6" stroke-width="1"/>
+<text x="414" y="403.0" font-size="10" fill="#8a897f" text-anchor="end">0</text>
+<line x1="420" y1="327.5" x2="720" y2="327.5" stroke="#e8e8e6" stroke-width="1"/>
+<text x="414" y="330.5" font-size="10" fill="#8a897f" text-anchor="end">25</text>
+<line x1="420" y1="255.0" x2="720" y2="255.0" stroke="#e8e8e6" stroke-width="1"/>
+<text x="414" y="258.0" font-size="10" fill="#8a897f" text-anchor="end">50</text>
+<line x1="420" y1="182.5" x2="720" y2="182.5" stroke="#e8e8e6" stroke-width="1"/>
+<text x="414" y="185.5" font-size="10" fill="#8a897f" text-anchor="end">75</text>
+<line x1="420" y1="110.0" x2="720" y2="110.0" stroke="#e8e8e6" stroke-width="1"/>
+<text x="414" y="113.0" font-size="10" fill="#8a897f" text-anchor="end">100</text>
+<line x1="420" y1="400" x2="720" y2="400" stroke="#c9c8c0" stroke-width="1"/>
+<path d="M431.0,400 v-175.64 q0,-3 3,-3 h8 q3,0 3,3 v175.64 z" fill="#2a78d6"/>
+<text x="438.0" y="217.4" font-size="9" fill="#52514e" text-anchor="middle">62</text>
+<path d="M447.0,400 v-174.48 q0,-3 3,-3 h8 q3,0 3,3 v174.48 z" fill="#008300"/>
+<text x="454.0" y="218.5" font-size="9" fill="#52514e" text-anchor="middle">61</text>
+<path d="M463.0,400 v-247.27 q0,-3 3,-3 h8 q3,0 3,3 v247.27 z" fill="#e87ba4"/>
+<text x="470.0" y="145.7" font-size="9" fill="#52514e" text-anchor="middle">86</text>
+<path d="M479.0,400 v-26.58 q0,-3 3,-3 h8 q3,0 3,3 v26.58 z" fill="#eda100"/>
+<text x="486.0" y="366.4" font-size="9" fill="#52514e" text-anchor="middle">10</text>
+<path d="M495.0,400 v-87.48 q0,-3 3,-3 h8 q3,0 3,3 v87.48 z" fill="#1baf7a"/>
+<text x="502.0" y="305.5" font-size="9" fill="#52514e" text-anchor="middle">31</text>
+<text x="470.0" y="418" font-size="12" fill="#0b0b0b" text-anchor="middle">native</text>
+<path d="M531.0,400 v-221.75 q0,-3 3,-3 h8 q3,0 3,3 v221.75 z" fill="#2a78d6"/>
+<text x="538.0" y="171.2" font-size="9" fill="#52514e" text-anchor="middle">78</text>
+<path d="M547.0,400 v-224.94 q0,-3 3,-3 h8 q3,0 3,3 v224.94 z" fill="#008300"/>
+<text x="554.0" y="168.1" font-size="9" fill="#52514e" text-anchor="middle">79</text>
+<path d="M563.0,400 v-263.51 q0,-3 3,-3 h8 q3,0 3,3 v263.51 z" fill="#e87ba4"/>
+<text x="570.0" y="129.5" font-size="9" fill="#52514e" text-anchor="middle">92</text>
+<path d="M579.0,400 v-35.86 q0,-3 3,-3 h8 q3,0 3,3 v35.86 z" fill="#eda100"/>
+<text x="586.0" y="357.1" font-size="9" fill="#52514e" text-anchor="middle">13</text>
+<path d="M595.0,400 v-100.24 q0,-3 3,-3 h8 q3,0 3,3 v100.24 z" fill="#1baf7a"/>
+<text x="602.0" y="292.8" font-size="9" fill="#52514e" text-anchor="middle">36</text>
+<text x="570.0" y="418" font-size="12" fill="#0b0b0b" text-anchor="middle">wasmtime</text>
+<path d="M631.0,400 v-217.98 q0,-3 3,-3 h8 q3,0 3,3 v217.98 z" fill="#2a78d6"/>
+<text x="638.0" y="175.0" font-size="9" fill="#52514e" text-anchor="middle">76</text>
+<path d="M647.0,400 v-217.4 q0,-3 3,-3 h8 q3,0 3,3 v217.4 z" fill="#008300"/>
+<text x="654.0" y="175.6" font-size="9" fill="#52514e" text-anchor="middle">76</text>
+<path d="M663.0,400 v-273.08 q0,-3 3,-3 h8 q3,0 3,3 v273.08 z" fill="#e87ba4"/>
+<text x="670.0" y="119.9" font-size="9" fill="#52514e" text-anchor="middle">95</text>
+<path d="M679.0,400 v-37.6 q0,-3 3,-3 h8 q3,0 3,3 v37.6 z" fill="#eda100"/>
+<text x="686.0" y="355.4" font-size="9" fill="#52514e" text-anchor="middle">14</text>
+<path d="M695.0,400 v-103.14 q0,-3 3,-3 h8 q3,0 3,3 v103.14 z" fill="#1baf7a"/>
+<text x="702.0" y="289.9" font-size="9" fill="#52514e" text-anchor="middle">37</text>
+<text x="670.0" y="418" font-size="12" fill="#0b0b0b" text-anchor="middle">wasmer</text>
+<text x="570.0" y="438" font-size="11" fill="#52514e" text-anchor="middle">ns / lookup</text>
+<text x="790" y="98" font-size="13" font-weight="600" fill="#0b0b0b">Memory footprint</text>
+<line x1="790" y1="400.0" x2="930" y2="400.0" stroke="#e8e8e6" stroke-width="1"/>
+<text x="784" y="403.0" font-size="10" fill="#8a897f" text-anchor="end">0</text>
+<line x1="790" y1="342.0" x2="930" y2="342.0" stroke="#e8e8e6" stroke-width="1"/>
+<text x="784" y="345.0" font-size="10" fill="#8a897f" text-anchor="end">10</text>
+<line x1="790" y1="284.0" x2="930" y2="284.0" stroke="#e8e8e6" stroke-width="1"/>
+<text x="784" y="287.0" font-size="10" fill="#8a897f" text-anchor="end">20</text>
+<line x1="790" y1="226.0" x2="930" y2="226.0" stroke="#e8e8e6" stroke-width="1"/>
+<text x="784" y="229.0" font-size="10" fill="#8a897f" text-anchor="end">30</text>
+<line x1="790" y1="168.0" x2="930" y2="168.0" stroke="#e8e8e6" stroke-width="1"/>
+<text x="784" y="171.0" font-size="10" fill="#8a897f" text-anchor="end">40</text>
+<line x1="790" y1="110.0" x2="930" y2="110.0" stroke="#e8e8e6" stroke-width="1"/>
+<text x="784" y="113.0" font-size="10" fill="#8a897f" text-anchor="end">50</text>
+<line x1="790" y1="400" x2="930" y2="400" stroke="#c9c8c0" stroke-width="1"/>
+<path d="M821.0,400 v-240.6 q0,-3 3,-3 h8 q3,0 3,3 v240.6 z" fill="#2a78d6"/>
+<text x="828.0" y="152.4" font-size="9" fill="#52514e" text-anchor="middle">42</text>
+<path d="M837.0,400 v-240.6 q0,-3 3,-3 h8 q3,0 3,3 v240.6 z" fill="#008300"/>
+<text x="844.0" y="152.4" font-size="9" fill="#52514e" text-anchor="middle">42</text>
+<path d="M853.0,400 v-117.06 q0,-3 3,-3 h8 q3,0 3,3 v117.06 z" fill="#e87ba4"/>
+<text x="860.0" y="275.9" font-size="9" fill="#52514e" text-anchor="middle">21</text>
+<path d="M869.0,400 v-126.34 q0,-3 3,-3 h8 q3,0 3,3 v126.34 z" fill="#eda100"/>
+<text x="876.0" y="266.7" font-size="9" fill="#52514e" text-anchor="middle">22</text>
+<path d="M885.0,400 v-89.8 q0,-3 3,-3 h8 q3,0 3,3 v89.8 z" fill="#1baf7a"/>
+<text x="892.0" y="303.2" font-size="9" fill="#52514e" text-anchor="middle">16</text>
+<text x="860.0" y="418" font-size="12" fill="#0b0b0b" text-anchor="middle">100k records</text>
+<text x="860.0" y="438" font-size="11" fill="#52514e" text-anchor="middle">bytes / element (all runtimes)</text>
+</svg>

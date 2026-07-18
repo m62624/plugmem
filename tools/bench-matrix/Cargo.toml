@@ -1,0 +1,17 @@
+[package]
+name = "plugmem-bench-matrix"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Cross-runtime benchmark runner: builds and runs bench_repro on native, wasmtime and wasmer, and merges the results."
+publish = false
+
+[[bin]]
+name = "bench-matrix"
+path = "src/main.rs"
+
+[lints]
+workspace = true

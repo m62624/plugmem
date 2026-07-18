@@ -621,6 +621,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "plugmem-bench-matrix"
+version = "0.1.0"
+
+[[package]]
 name = "plugmem-cli"
 version = "0.1.0"
 dependencies = [
