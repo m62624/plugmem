@@ -146,20 +146,29 @@ Config сохраняется в снапшоте; при `open` заданны�
 ## Ошибки
 
 ```rust
+#[non_exhaustive]                   // варианты доклеиваются вместе с этапами
 pub enum Error {
     CapacityExceeded { what: &'static str },
     TooLarge { what: &'static str, len: usize, max: usize },
     DimMismatch { got: usize, want: usize },
     NotFound(FactId),
     AlreadyClosed(FactId),          // revise поверх closed
-    ConfigMismatch(&'static str),
+    ConfigMismatch(&'static str),   // невалидный Config или несовместимость с базой
     Corrupt(&'static str),          // снапшот/журнал
-    UnsupportedVersion(u16),
-    Storage(...),                   // обёртка ошибки Storage
+    UnsupportedVersion(u16),        // снапшот неизвестной версии формата
+    Invalid(&'static str),          // структурное нарушение входа не по размеру
+                                    // (link без субъекта, пустой тег, имя без
+                                    // индексируемых символов)
+    Storage(String),               // debug-рендер ошибки Storage (ядро остаётся
+                                    // generic и Clone; исходную ошибку логирует обёртка)
+    Arena(plugmem_arena::Error),   // #[from] — ошибка нижнего слоя арены с контекстом
 }
 ```
 
-Паника в ядре = баг по определению (фиксируется fuzz'ом и review-политикой).
+Все поля — как в `crate::error` (реализовано); enum `#[non_exhaustive]`,
+выводит `Debug + Clone + PartialEq + Eq` и `thiserror::Error` (у каждого
+варианта — `#[error(...)]`-сообщение). Паника в ядре = баг по определению
+(фиксируется fuzz'ом и review-политикой).
 
 ## Семантика глаголов — сводка
 
