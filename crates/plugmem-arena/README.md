@@ -24,6 +24,50 @@ serialized form, you can lift it into your own project as-is.
 3. **32-bit friendly.** Ids and offsets are `u32`; pools are inherently
    capped at 4 GiB — a deliberate fit for wasm32 linear memory.
 
+### Memory image = file format
+
+The property everything else here trades for, spelled out. A pointer-based
+container (a `BTreeMap`'s nodes, every `String` in a `HashMap`) stores
+heap addresses that are only meaningful inside the current process, so
+persisting it requires walking the structure and re-encoding it, and
+loading requires rebuilding it node by node — at 1M records that rebuild
+is 133,419 allocations and ~126 ms of inserts before the first query.
+
+The arena's entire state is four flat arrays with no pointers in them:
+
+| section | type | contents |
+|---|---|---|
+| `pool` | `Vec<u8>` | the records themselves, in 4 KiB pages |
+| `heads` | `Vec<u32>` | shard → first page of its chain |
+| `next` | `Vec<u32>` | page → next page (chain or free-list) |
+| `counts` | `Vec<u16>` | page → occupied slots |
+
+Page references are indexes, not addresses — "page 7" means the same
+thing in any process, on any machine, under any runtime. Keys are stored
+big-endian, so the byte order of the format does not depend on the host.
+Consequently:
+
+- **Save** = write the sections to disk in sequence. No traversal, no
+  per-record encoding.
+- **Load** = read the file into memory, then validate *metadata only*, in
+  O(pages): every page index in bounds, every count within page capacity,
+  chains cycle-free (one bitmap pass). Record contents are not inspected —
+  they are the owner's data. After validation the structure is live; not
+  a single record was re-inserted, not a single per-element allocation
+  happened.
+
+Cold start therefore costs disk bandwidth (a 1M-record arena is ~33 MB
+sequential read) plus microseconds of validation, versus a full rebuild
+for pointer-based structures. `BlobHeap` (two sections), `ChunkPool`
+(pool + fill counts) and `Interner` (heap + probe table, stored rather
+than rebuilt) follow the same contract.
+
+Status: the property is structural and holds today (every structure's
+state is exactly these flat sections); the public `dump`/`load` API with
+the validation pass and corrupt-input tests lands with the snapshot layer
+(`specs/03`), which also defines how the arena's uninitialized page tails
+are excluded from written output.
+
 ### Relation to a B-tree
 
 `Arena` is the leaf level of a B+-tree without interior nodes. Where
