@@ -160,6 +160,39 @@ impl<const TF: bool> PostingStore<TF> {
     pub fn keys(&self) -> usize {
         self.handles.len()
     }
+
+    /// Section dumps (specs/03): handle-arena meta.
+    pub(crate) fn handles_meta(&self) -> alloc::vec::Vec<u8> {
+        let mut out = alloc::vec::Vec::new();
+        self.handles.dump_meta(&mut out);
+        out
+    }
+
+    /// Section dumps: handle-arena pool.
+    pub(crate) fn handles_pool(&self) -> alloc::vec::Vec<u8> {
+        let mut out = alloc::vec::Vec::new();
+        self.handles.dump_pool(&mut out);
+        out
+    }
+
+    /// Section dumps: chunk-pool meta.
+    pub(crate) fn chunks_meta(&self) -> alloc::vec::Vec<u8> {
+        let mut out = alloc::vec::Vec::new();
+        self.pool.dump_meta(&mut out);
+        out
+    }
+
+    /// Section dumps: chunk-pool bytes.
+    pub(crate) fn chunks_pool(&self) -> alloc::vec::Vec<u8> {
+        let mut out = alloc::vec::Vec::new();
+        self.pool.dump_pool(&mut out);
+        out
+    }
+
+    /// Assembles a store from already-validated parts (the load path).
+    pub(crate) fn from_parts(handles: Arena<IdListSlot>, pool: ChunkPool) -> Self {
+        Self { handles, pool }
+    }
 }
 
 /// Iterator over one list's `(id, tf)` entries; see

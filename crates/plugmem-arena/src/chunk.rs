@@ -294,6 +294,68 @@ impl ChunkPool {
         self.pool[at..at + 4].copy_from_slice(&to.to_le_bytes());
     }
 
+    /// Number of chunks the pool holds (used and free alike).
+    pub fn chunks(&self) -> usize {
+        self.used.len()
+    }
+
+    /// Walks one list's chain, marking every chunk in `visited`
+    /// (`visited.len()` must equal [`ChunkPool::chunks`]).
+    ///
+    /// This is the owner's load-time validation hook (`specs/03`): the
+    /// pool cannot see the owners' handles, so cycle-freedom and
+    /// exclusive ownership of chains are checked here — a shared bitmap
+    /// across all of an owner's handles catches a chunk claimed twice,
+    /// a cycle (the chain would revisit), and a chain that leaks past
+    /// its tail. Never panics on untrusted handle bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Corrupt`] naming the violated invariant.
+    pub fn validate_chain(&self, list: &ListHandle, visited: &mut [bool]) -> Result<(), Error> {
+        debug_assert_eq!(visited.len(), self.chunks());
+        if list.head == NONE || list.tail == NONE {
+            if list.head != list.tail {
+                return Err(Error::Corrupt("chunk chain head/tail disagree"));
+            }
+            return Ok(());
+        }
+        let mut chunk = list.head;
+        loop {
+            let c = chunk as usize;
+            if c >= visited.len() {
+                return Err(Error::Corrupt("chunk chain reaches out of bounds"));
+            }
+            if core::mem::replace(&mut visited[c], true) {
+                return Err(Error::Corrupt("chunk claimed by two chains"));
+            }
+            if chunk == list.tail {
+                // Live tails never link onward (only freed chains do, and
+                // those are reachable through the free-list instead).
+                if self.link(chunk) != NONE {
+                    return Err(Error::Corrupt("chunk chain tail links onward"));
+                }
+                return Ok(());
+            }
+            let next = self.link(chunk);
+            if next == NONE {
+                return Err(Error::Corrupt("chunk chain ends before its tail"));
+            }
+            chunk = next;
+        }
+    }
+
+    /// Counts chunks that are neither claimed (per the owner's `visited`
+    /// map from [`ChunkPool::validate_chain`] walks) nor in the
+    /// free-list — leaked chunks that no snapshot writer produces, so a
+    /// loader treats any as corruption.
+    pub fn orphan_count(&self, claimed: &[bool]) -> usize {
+        let free = self.free_map();
+        (0..self.used.len())
+            .filter(|&c| !claimed[c] && !free[c])
+            .count()
+    }
+
     /// Marks every chunk currently sitting in the free-list. Free chunks
     /// carry stale `used` values and payload bytes ([`ChunkPool::free`] is
     /// an O(1) splice, cleanup happens on reuse), so dumps consult this map

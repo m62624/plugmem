@@ -38,6 +38,7 @@ use crate::tokenizer::Tokenizer;
 /// Most recent same-entity facts examined by similar-detection.
 const SIMILAR_CANDIDATE_CAP: usize = 32;
 
+mod persist;
 mod recall;
 
 pub use recall::{RecallQuery, RecallResult, RecalledEdge, RecalledFact, source};
@@ -239,12 +240,10 @@ impl Memory {
         journal: &[u8],
         cfg: Config,
     ) -> Result<(Self, OpenReport), Error> {
-        if snapshot.is_some() {
-            return Err(Error::Corrupt(
-                "snapshot loading lands with the section composition",
-            ));
-        }
-        let mut mem = Self::new(cfg)?;
+        let mut mem = match snapshot {
+            Some(bytes) => Self::load_snapshot(bytes, cfg)?,
+            None => Self::new(cfg)?,
+        };
         let report = mem.replay(journal)?;
         Ok((mem, report))
     }

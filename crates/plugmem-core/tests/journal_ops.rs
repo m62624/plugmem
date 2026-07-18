@@ -197,10 +197,10 @@ fn replay_rejects_semantically_corrupt_journals() {
 }
 
 #[test]
-fn snapshot_bytes_are_rejected_until_composition_lands() {
+fn garbage_snapshot_bytes_are_container_errors() {
     assert_eq!(
         Memory::from_bytes(Some(b"PLGM"), &[], cfg()).unwrap_err(),
-        Error::Corrupt("snapshot loading lands with the section composition")
+        Error::Corrupt("snapshot shorter than its header")
     );
 }
 

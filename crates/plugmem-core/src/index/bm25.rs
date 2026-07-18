@@ -217,6 +217,39 @@ impl Bm25Index {
         self.postings.pool_bytes() + self.doc_len.pool_bytes()
     }
 
+    /// Total token count across the corpus (persisted in the engine
+    /// state).
+    pub fn total_len(&self) -> u64 {
+        self.total_len
+    }
+
+    /// The underlying posting store (the persistence composer dumps it).
+    pub(crate) fn postings(&self) -> &PostingStore<true> {
+        &self.postings
+    }
+
+    /// The per-document length arena (the persistence composer dumps it).
+    pub(crate) fn doc_len_arena(&self) -> &Arena<DocLenSlot> {
+        &self.doc_len
+    }
+
+    /// Assembles an index from already-validated parts (the load path).
+    pub(crate) fn from_parts(
+        postings: PostingStore<true>,
+        doc_len: Arena<DocLenSlot>,
+        total_docs: u64,
+        total_len: u64,
+    ) -> Self {
+        Self {
+            postings,
+            doc_len,
+            total_docs,
+            total_len,
+            #[cfg(feature = "counters")]
+            decoded: Cell::new(0),
+        }
+    }
+
     /// Posting entries decoded so far (feature `counters`).
     #[cfg(feature = "counters")]
     pub fn decoded(&self) -> u64 {
