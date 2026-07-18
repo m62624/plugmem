@@ -35,6 +35,10 @@ use crate::model::{
 use crate::storage::Storage;
 use crate::tokenizer::Tokenizer;
 
+mod recall;
+
+pub use recall::{RecallQuery, RecallResult, RecalledEdge, RecalledFact, source};
+
 /// Input of `remember` and `revise` (specs/05).
 #[derive(Clone, Copy, Debug)]
 pub struct RememberInput<'a> {
@@ -140,6 +144,7 @@ pub struct Memory {
     tokenizer: Tokenizer,
     tf_scratch: Vec<(u32, u8)>,
     name_scratch: String,
+    recall_scratch: recall::RecallScratch,
 }
 
 impl Memory {
@@ -182,6 +187,7 @@ impl Memory {
             tokenizer: Tokenizer::new(),
             tf_scratch: Vec::new(),
             name_scratch: String::new(),
+            recall_scratch: recall::RecallScratch::default(),
             cfg,
         })
     }
@@ -645,13 +651,10 @@ impl Memory {
         Ok(())
     }
 
-    /// Looks an entity up by its already-normalized name.
-    fn lookup_entity_by_norm(&mut self, norm: &str) -> Option<EntityId> {
-        // Interning is create-on-miss; peeking would need a lookup-only
-        // API. Cheap trick: a term that resolves back to `norm` and has a
-        // by-name record is a hit; interning a fresh term for a missed
-        // lookup costs a few bytes once and keeps the interner append-only.
-        let term = self.terms.intern(norm).ok()?;
+    /// Looks an entity up by its already-normalized name (read-only:
+    /// neither the vocabulary nor the arenas change on a miss).
+    fn lookup_entity_by_norm(&self, norm: &str) -> Option<EntityId> {
+        let term = self.terms.lookup(norm)?;
         let mut from = [0u8; 8];
         key::write_u32(&mut from, term.0);
         let mut to = [0u8; 8];

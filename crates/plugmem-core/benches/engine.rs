@@ -185,11 +185,79 @@ fn bench_idlist(c: &mut Criterion) {
     g.finish();
 }
 
+fn bench_recall(c: &mut Criterion) {
+    use plugmem_core::{Config, MemStorage, Memory, RecallQuery, RecallResult, RememberInput};
+
+    let mut g = c.benchmark_group("recall");
+    g.sample_size(50);
+    let mut cfg = Config::default();
+    cfg.shards_postings = 2048;
+    let mut mem = Memory::new(cfg).unwrap();
+    let mut store = MemStorage::new();
+    let entities = ["user", "plugmem", "tokio", "work", "home", "team", "city"];
+    // Realistic text: 10 words per fact from a 3000-word Zipf-ish
+    // vocabulary (the testgen profile) — query-term document frequencies
+    // in the low thousands, like real prose, not like a looped template.
+    let mut rng = xorshift(0x5EED_0000_0000_0007);
+    let word = |skew: &mut dyn FnMut() -> u64| -> String {
+        let r = (skew() % 10_000) as f32 / 10_000.0;
+        format!("w{}", ((r * r * r) * 3000.0) as u32)
+    };
+    for i in 0..100_000u64 {
+        let text: String = (0..10)
+            .map(|_| word(&mut rng))
+            .collect::<Vec<_>>()
+            .join(" ");
+        mem.remember(
+            &mut store,
+            RememberInput {
+                entity: Some(entities[(i % 7) as usize]),
+                tags: if i % 3 == 0 { &["pref"] } else { &[] },
+                links: if i % 50 == 0 {
+                    &[("works_on", "plugmem")]
+                } else {
+                    &[]
+                },
+                ..RememberInput::text(i * 1_000, &text)
+            },
+        )
+        .unwrap();
+    }
+    let mut out = RecallResult::default();
+    // One common, one mid, one rare query term.
+    let q = RecallQuery {
+        entities: &["user"],
+        ..RecallQuery::text(200_000_000, "w1 w400 w2500")
+    };
+    g.throughput(Throughput::Elements(1));
+    g.bench_function("structural_100k", |b| {
+        b.iter(|| {
+            mem.recall_into(black_box(q), &mut out).unwrap();
+            out.facts.len()
+        });
+    });
+    // Tag filter plus a ~5k-fact recorded_at window (range cost is
+    // proportional to the window by design).
+    let tagged = RecallQuery {
+        tags: &["pref"],
+        range: Some((95_000_000, 100_000_000)),
+        ..RecallQuery::text(200_000_000, "w1 w400")
+    };
+    g.bench_function("tags_and_range_100k", |b| {
+        b.iter(|| {
+            mem.recall_into(black_box(tagged), &mut out).unwrap();
+            out.facts.len()
+        });
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_tokenizer,
     bench_record_codec,
     bench_bm25,
-    bench_idlist
+    bench_idlist,
+    bench_recall
 );
 criterion_main!(benches);

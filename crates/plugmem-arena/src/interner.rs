@@ -113,6 +113,25 @@ impl Interner {
         }
     }
 
+    /// Returns the id of an already-interned string, without creating it.
+    ///
+    /// The read-only sibling of [`Interner::intern`] — query paths must
+    /// not grow the vocabulary (a query is not a mutation).
+    pub fn lookup(&self, s: &str) -> Option<TermId> {
+        let bytes = s.as_bytes();
+        let mask = self.table.len() - 1;
+        let mut idx = xxh3_64(bytes) as usize & mask;
+        loop {
+            match self.table[idx] {
+                0 => return None,
+                entry if self.heap.get(BlobId(entry - 1)) == bytes => {
+                    return Some(TermId(entry - 1));
+                }
+                _ => idx = (idx + 1) & mask,
+            }
+        }
+    }
+
     /// Returns the string behind an id. O(1).
     ///
     /// # Panics

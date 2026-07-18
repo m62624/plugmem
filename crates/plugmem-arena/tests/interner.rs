@@ -7,6 +7,17 @@ use plugmem_arena::{BlobHeapCfg, Error, Interner, TermId};
 use proptest::prelude::*;
 
 #[test]
+fn lookup_never_creates() {
+    let mut it = Interner::new(BlobHeapCfg::new());
+    assert_eq!(it.lookup("ghost"), None);
+    assert_eq!(it.len(), 0, "lookup must not intern");
+    let id = it.intern("real").unwrap();
+    assert_eq!(it.lookup("real"), Some(id));
+    assert_eq!(it.lookup("ghost"), None);
+    assert_eq!(it.len(), 1);
+}
+
+#[test]
 fn empty_interner() {
     let terms = Interner::new(BlobHeapCfg::new());
     assert_eq!(terms.len(), 0);
