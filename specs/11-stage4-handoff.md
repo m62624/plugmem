@@ -21,6 +21,12 @@
 
 ## 1. Этап A — векторный слой (specs/04 §6, specs/02)
 
+> **Статус: реализовано 2026-07-19** (Opus по этому плану). `index/vecpool.rs`,
+> интеграция в verbs/recall/similar/journal/snapshot, тесты `tests/vectors.rs`
+> + юнит-тесты в vecpool + counters-гейт; vecpool покрыт на 100%, ворота
+> зелёные, wasm32v1-none собирается. Детали ушли в `specs/04 §5`. Осталось
+> по плану: этапы B (maintain), C (testgen), D (README/стенд).
+
 Цель: flat-поиск по квантованным векторам как четвёртый источник recall,
 плюс векторный сигнал в similar-detection. Без HNSW (это этап 6, specs/10).
 

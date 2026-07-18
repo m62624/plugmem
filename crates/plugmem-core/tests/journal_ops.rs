@@ -25,6 +25,7 @@ fn sample_ops() -> Vec<Op<'static>> {
             text: "prefers tokio",
             tags: vec!["pref", "rust"],
             links: vec![("works_on", "plugmem")],
+            vector: vec![],
             revises: FactId::NONE,
             assigned: FactId(0),
         },
@@ -35,6 +36,7 @@ fn sample_ops() -> Vec<Op<'static>> {
             text: "",
             tags: vec![],
             links: vec![],
+            vector: vec![],
             revises: FactId(0),
             assigned: FactId(1),
         },
@@ -117,6 +119,7 @@ fn decode_rejects_op_revises_disagreement() {
         text: "x",
         tags: vec![],
         links: vec![],
+        vector: vec![],
         revises: FactId(5),
         assigned: FactId(6),
     }
@@ -148,6 +151,7 @@ fn replay_rejects_semantically_corrupt_journals() {
         text: "x",
         tags: vec![],
         links: vec![],
+        vector: vec![],
         revises: FactId::NONE,
         assigned: FactId(7),
     }])
@@ -162,6 +166,7 @@ fn replay_rejects_semantically_corrupt_journals() {
         text: "x",
         tags: vec![],
         links: vec![],
+        vector: vec![],
         revises: FactId(3),
         assigned: FactId(0),
     }])
@@ -189,6 +194,7 @@ fn replay_rejects_semantically_corrupt_journals() {
         text: "once",
         tags: vec![],
         links: vec![],
+        vector: vec![],
         revises: FactId::NONE,
         assigned: FactId(0),
     };

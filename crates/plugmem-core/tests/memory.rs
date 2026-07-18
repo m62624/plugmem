@@ -295,13 +295,12 @@ fn duplicate_tags_collapse() {
 }
 
 #[test]
-fn vector_config_is_rejected_until_stage_4() {
+fn a_vector_config_is_accepted() {
     let mut c = cfg();
     c.dim = 384;
-    assert_eq!(
-        Memory::new(c).unwrap_err(),
-        Error::ConfigMismatch("vector layer lands in stage 4: dim must be 0")
-    );
+    // The vector layer is built now: a positive dim constructs cleanly
+    // (full vector behavior is exercised in tests/vectors.rs).
+    assert!(Memory::new(c).is_ok());
 }
 
 /// Replay equivalence: run a scripted mix of verbs, reopen from the

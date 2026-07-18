@@ -7,11 +7,11 @@
 //! internal `apply_*` path on open — the journal's ids are authoritative,
 //! so replay is deterministic and idempotent over a reapplied tail.
 //!
-//! This stage covers the structural engine (facts, entities, edges, tags,
-//! BM25, temporal). The vector layer lands in stage 4 — a config with
-//! `dim != 0` is rejected until then, so nobody can hold vectors the
-//! engine would silently drop. Recall and similar-detection land with the
-//! fusion layer; `maintain` with compaction.
+//! The engine carries the structural sources (facts, entities, edges,
+//! tags, BM25, temporal) and — when `Config::dim > 0` — the vector layer:
+//! quantized vectors in a flat [`VecPool`], searched as a fourth recall
+//! source and used by similar-detection. `maintain` (compaction) still
+//! lands separately.
 
 use alloc::format;
 use alloc::string::String;
@@ -27,6 +27,7 @@ use crate::error::Error;
 use crate::id::{EntityId, FactId, NONE_U32};
 use crate::index::IdListIndex;
 use crate::index::bm25::Bm25Index;
+use crate::index::vecpool::VecPool;
 use crate::journal::{JournalScan, Op, scan};
 use crate::model::{
     EdgeSlot, EntityByName, EntityRecord, FactAux, FactRecord, TemporalSlot, VALID_TO_OPEN,
@@ -56,6 +57,10 @@ pub struct RememberInput<'a> {
     pub tags: &'a [&'a str],
     /// `(rel, target_entity)` pairs, ≤ 16; edges go subject → target.
     pub links: &'a [(&'a str, &'a str)],
+    /// Optional embedding, `len == Config::dim`; quantized on the way in.
+    /// Requires `dim > 0` and is dropped by the engine's own re-quantized
+    /// replay, so nothing float-nondeterministic reaches the state.
+    pub vector: Option<&'a [f32]>,
     /// Validity start; defaults to `now`.
     pub valid_from: Option<u64>,
 }
@@ -69,6 +74,7 @@ impl<'a> RememberInput<'a> {
             entity: None,
             tags: &[],
             links: &[],
+            vector: None,
             valid_from: None,
         }
     }
@@ -115,13 +121,15 @@ pub struct Similar {
     pub reason: SimilarReason,
 }
 
-/// Why a fact was flagged as similar (specs/05). The vector variant
-/// arrives with the vector layer.
+/// Why a fact was flagged as similar (specs/05).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SimilarReason {
     /// Same subject entity and a term-set overlap above the configured
     /// Jaccard threshold.
     LexicalOverlap,
+    /// Same subject entity and a quantized-vector cosine above the
+    /// configured `similar_cos` threshold.
+    VectorCosine,
 }
 
 /// A read view of one fact.
@@ -166,6 +174,8 @@ pub struct Memory {
     bm25: Bm25Index,
     tags_idx: IdListIndex,
     entity_facts: IdListIndex,
+    /// Quantized vectors (empty and inert when `cfg.dim == 0`).
+    vecs: VecPool,
     // -- id allocation (derived from the arenas on load) --
     next_fact: u32,
     next_entity: u32,
@@ -181,15 +191,10 @@ impl Memory {
     ///
     /// # Errors
     ///
-    /// [`Error::ConfigMismatch`] for an invalid config, including
-    /// `dim != 0` while the vector layer is not built.
+    /// [`Error::ConfigMismatch`] for an invalid config (see
+    /// [`Config::validate`]).
     pub fn new(cfg: Config) -> Result<Self, Error> {
         cfg.validate()?;
-        if cfg.dim != 0 {
-            return Err(Error::ConfigMismatch(
-                "vector layer lands in stage 4: dim must be 0",
-            ));
-        }
         let uni =
             |shards: usize| ArenaCfg::new(shards, ShardMode::Uniform).with_max_bytes(cfg.max_bytes);
         let ord =
@@ -211,6 +216,7 @@ impl Memory {
             bm25: Bm25Index::new(cfg.shards_postings, cfg.max_bytes)?,
             tags_idx: IdListIndex::new(cfg.shards_postings, cfg.max_bytes)?,
             entity_facts: IdListIndex::new(cfg.shards_entities, cfg.max_bytes)?,
+            vecs: VecPool::new(cfg.dim, cfg.max_bytes),
             next_fact: 0,
             next_entity: 0,
             tokenizer: Tokenizer::new(),
@@ -271,6 +277,7 @@ impl Memory {
                     text,
                     ref tags,
                     ref links,
+                    ref vector,
                     revises,
                     assigned,
                 } => {
@@ -280,6 +287,11 @@ impl Memory {
                     }
                     if assigned.0 != self.next_fact {
                         return Err(Error::Corrupt("journal fact ids are not contiguous"));
+                    }
+                    if !vector.is_empty() && vector.len() != self.cfg.dim {
+                        return Err(Error::Corrupt(
+                            "journal vector dimension disagrees with dim",
+                        ));
                     }
                     if let Some(target) = revises.some() {
                         self.check_revisable(target)
@@ -292,6 +304,7 @@ impl Memory {
                             entity,
                             tags: &tags.to_vec(),
                             links: &links.to_vec(),
+                            vector: (!vector.is_empty()).then_some(vector.as_slice()),
                             valid_from: Some(valid_from),
                         },
                         revises,
@@ -381,7 +394,12 @@ impl Memory {
         // The new fact's term set is still in tf_scratch (apply_remember
         // filled it); snapshot the term ids.
         let new_terms: Vec<u32> = self.tf_scratch.iter().map(|&(t, _)| t).collect();
-        if new_terms.is_empty() {
+        // The new fact's vector slot, if it has one (for the cosine signal).
+        let new_vec = self
+            .fact(outcome.id)
+            .filter(|r| r.has_vector())
+            .map(|r| r.vector);
+        if new_terms.is_empty() && new_vec.is_none() {
             return;
         }
         // Most recent candidates of the entity (ring over the list).
@@ -401,29 +419,53 @@ impl Memory {
             if record.is_tombstone() || record.is_closed() {
                 continue;
             }
-            let text = core::str::from_utf8(self.texts.get(record.text))
-                .expect("fact texts are written from &str");
-            cand_terms.clear();
-            let terms = &self.terms;
-            let cand = &mut cand_terms;
-            self.tokenizer.tokenize(text, &mut |token| {
-                if let Some(term) = terms.lookup(token)
-                    && !cand.contains(&term.0)
-                {
-                    cand.push(term.0);
+
+            // Lexical signal: term-set Jaccard over the entity's text.
+            let mut lexical = None;
+            if !new_terms.is_empty() {
+                let text = core::str::from_utf8(self.texts.get(record.text))
+                    .expect("fact texts are written from &str");
+                cand_terms.clear();
+                let terms = &self.terms;
+                let cand = &mut cand_terms;
+                self.tokenizer.tokenize(text, &mut |token| {
+                    if let Some(term) = terms.lookup(token)
+                        && !cand.contains(&term.0)
+                    {
+                        cand.push(term.0);
+                    }
+                });
+                if !cand_terms.is_empty() {
+                    let both = cand_terms.iter().filter(|t| new_terms.contains(t)).count();
+                    let union = cand_terms.len() + new_terms.len() - both;
+                    let jaccard = both as f32 / union as f32;
+                    if jaccard > self.cfg.similar_jaccard {
+                        lexical = Some(jaccard);
+                    }
                 }
-            });
-            if cand_terms.is_empty() {
-                continue;
             }
-            let both = cand_terms.iter().filter(|t| new_terms.contains(t)).count();
-            let union = cand_terms.len() + new_terms.len() - both;
-            let jaccard = both as f32 / union as f32;
-            if jaccard > self.cfg.similar_jaccard {
+
+            // Vector signal: quantized cosine when both facts carry one.
+            let mut vector = None;
+            if let (Some(a), true) = (new_vec, record.has_vector()) {
+                let cos = self.vecs.cosine_slots(a, record.vector);
+                if cos > self.cfg.similar_cos {
+                    vector = Some(cos);
+                }
+            }
+
+            // Keep the stronger signal; a tie prefers the lexical reason.
+            let best = match (lexical, vector) {
+                (Some(l), Some(v)) if v > l => Some((v, SimilarReason::VectorCosine)),
+                (Some(l), _) => Some((l, SimilarReason::LexicalOverlap)),
+                (None, Some(v)) => Some((v, SimilarReason::VectorCosine)),
+                (None, None) => None,
+            };
+            if let Some((score, reason)) = best {
                 outcome.similar.push(Similar {
                     id: fact,
-                    score: jaccard,
-                    reason: SimilarReason::LexicalOverlap,
+                    score,
+                    reason,
                 });
             }
         }
@@ -596,6 +638,17 @@ impl Memory {
         if !input.links.is_empty() && input.entity.is_none() {
             return Err(Error::Invalid("links require a subject entity"));
         }
+        if let Some(v) = input.vector {
+            if self.cfg.dim == 0 {
+                return Err(Error::Invalid("vector given but dim is 0"));
+            }
+            if v.len() != self.cfg.dim {
+                return Err(Error::DimMismatch {
+                    got: v.len(),
+                    want: self.cfg.dim,
+                });
+            }
+        }
         Ok(())
     }
 
@@ -694,15 +747,23 @@ impl Memory {
             self.entity_facts.push(src.0, id, 0)?;
         }
 
+        // Vector: quantized into the flat pool; the fact keeps the slot
+        // index. Pushed before the record so a capacity failure aborts the
+        // whole op (replay rebuilds consistently, like the other indexes).
+        let (vector, flags) = match input.vector {
+            Some(v) => (self.vecs.push(id, v)?, fact_flags::HAS_VECTOR),
+            None => (NONE_U32, 0),
+        };
+
         let recorded_at = input.now;
         let valid_from = input.valid_from.unwrap_or(input.now);
         self.facts.insert(&FactRecord {
             id,
             entity: EntityId::from_opt(entity),
-            flags: 0,
+            flags,
             kind: 0,
             text: text_id,
-            vector: NONE_U32,
+            vector,
             revises,
             recorded_at,
             valid_from,
@@ -831,6 +892,7 @@ impl Memory {
             text: input.text,
             tags: input.tags.to_vec(),
             links: input.links.to_vec(),
+            vector: input.vector.map(<[f32]>::to_vec).unwrap_or_default(),
             revises,
             assigned,
         }

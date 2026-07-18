@@ -10,6 +10,7 @@
 pub mod bm25;
 pub mod postings;
 pub mod varint;
+pub mod vecpool;
 
 use alloc::vec::Vec;
 

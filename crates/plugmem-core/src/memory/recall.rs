@@ -35,6 +35,7 @@ use plugmem_arena::TermId;
 use crate::error::Error;
 use crate::id::{EntityId, FactId};
 use crate::index::bm25::Bm25Scratch;
+use crate::index::vecpool::VecScratch;
 use crate::index::{IntersectScratch, intersect};
 use crate::model::{FactRecord, VALID_TO_OPEN};
 
@@ -48,6 +49,8 @@ pub mod source {
     pub const GRAPH: u8 = 1 << 1;
     /// The temporal-range source.
     pub const TIME: u8 = 1 << 2;
+    /// The vector (quantized flat) source.
+    pub const VEC: u8 = 1 << 3;
 }
 
 /// Per-source candidate cap (specs/04 §7).
@@ -82,6 +85,8 @@ pub struct RecallQuery<'a> {
     pub now: u64,
     /// Free-text query for the lexical source.
     pub text: Option<&'a str>,
+    /// Query embedding for the vector source (`len == Config::dim`).
+    pub vector: Option<&'a [f32]>,
     /// Tag filter: a fact must carry *all* of these.
     pub tags: &'a [&'a str],
     /// Entity anchors for the graph source.
@@ -104,6 +109,7 @@ impl<'a> RecallQuery<'a> {
         Self {
             now,
             text: Some(text),
+            vector: None,
             tags: &[],
             entities: &[],
             as_of: None,
@@ -172,6 +178,8 @@ pub(super) struct RecallScratch {
     tag_terms: Vec<u32>,
     query_terms: Vec<u32>,
     bm25_out: Vec<(FactId, f32)>,
+    vec: VecScratch,
+    vec_out: Vec<(FactId, f32)>,
     graph_out: Vec<(FactId, f32)>,
     time_out: Vec<(FactId, f32)>,
     visited: Vec<(EntityId, f32)>,
@@ -261,6 +269,25 @@ impl Memory {
             );
         }
 
+        // Vector source (flat quantized search) when an embedding is given.
+        s.vec_out.clear();
+        if let Some(v) = q.vector
+            && self.cfg.dim > 0
+        {
+            let facts = &self.facts;
+            let allow = &s.allow;
+            if let Err(e) = self.vecs.search(
+                v,
+                SOURCE_CAP,
+                &mut |id| admit(facts, allow, filtered, as_of, q.include_closed, id).is_some(),
+                &mut s.vec,
+                &mut s.vec_out,
+            ) {
+                self.recall_scratch = s;
+                return Err(e);
+            }
+        }
+
         // Graph anchors resolve here (name normalization needs the
         // mutable tokenizer scratch); expansion itself is read-only.
         s.visited.clear();
@@ -282,6 +309,7 @@ impl Memory {
         s.fused.clear();
         for (list, weight, bit) in [
             (&s.bm25_out, self.cfg.w_bm25, source::BM25),
+            (&s.vec_out, self.cfg.w_vec, source::VEC),
             (&s.graph_out, self.cfg.w_graph, source::GRAPH),
             (&s.time_out, self.cfg.w_time, source::TIME),
         ] {

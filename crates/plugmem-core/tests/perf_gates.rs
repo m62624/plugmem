@@ -8,6 +8,7 @@
 
 use plugmem_core::FactId;
 use plugmem_core::index::bm25::{Bm25Index, Bm25Scratch};
+use plugmem_core::index::vecpool::{VecPool, VecScratch};
 
 /// The bench corpus shape: 10k docs × 8 terms, 3000-term vocabulary,
 /// power-law skew (same generator as `benches/engine.rs`).
@@ -61,4 +62,41 @@ fn bm25_decode_work_is_bounded() {
     let df_sum = u64::from(idx.df(1) + idx.df(400) + idx.df(2500));
     assert_eq!(idx.decoded(), df_sum, "decodes must equal Σ df");
     assert_eq!(df_sum, 1_399, "corpus drifted: Σ df changed");
+}
+
+#[test]
+fn vector_rescore_work_is_bounded() {
+    // The signature prefilter must cap exact dot products at
+    // `max(4·k, 64)` regardless of corpus size — the whole point of the
+    // two-phase search (a full linear rescore would be O(N)).
+    let dim = 128;
+    let n = 5000u32;
+    let mut s = 0x9E37_79B9_7F4A_7C15u64;
+    let mut rng = move || {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        ((s >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
+    };
+    let mut pool = VecPool::new(dim, usize::MAX);
+    for i in 0..n {
+        let v: Vec<f32> = (0..dim).map(|_| rng()).collect();
+        pool.push(FactId(i), &v).unwrap();
+    }
+    let query: Vec<f32> = (0..dim).map(|_| rng()).collect();
+    let mut scratch = VecScratch::new();
+    let mut out = Vec::new();
+    let k = 8;
+    pool.reset_dots();
+    pool.search(&query, k, &mut |_| true, &mut scratch, &mut out)
+        .unwrap();
+    assert!(!out.is_empty());
+    // Every admitted candidate is rescored once; with all admitted the
+    // count is exactly the candidate budget.
+    let budget = (4 * k).max(64) as u64;
+    assert_eq!(
+        pool.dots(),
+        budget,
+        "rescored dots must equal the candidate budget"
+    );
 }

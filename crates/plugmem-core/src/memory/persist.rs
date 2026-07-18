@@ -27,6 +27,7 @@ use crate::index::IdListIndex;
 use crate::index::bm25::Bm25Index;
 use crate::index::postings::PostingStore;
 use crate::index::varint::decode_u32;
+use crate::index::vecpool::VecPool;
 use crate::snapshot::{Snapshot, SnapshotWriter};
 
 use super::Memory;
@@ -70,6 +71,7 @@ mod kind {
     pub const ENTFACTS_CHUNKS_META: u16 = 34;
     pub const ENTFACTS_CHUNKS_POOL: u16 = 35;
     pub const ENGINE_STATE: u16 = 36;
+    pub const VEC_POOL: u16 = 37;
 }
 
 /// Byte length of the engine-state section.
@@ -267,10 +269,18 @@ impl Memory {
         state.extend_from_slice(&self.bm25.docs().to_le_bytes());
         state.extend_from_slice(&self.bm25.total_len().to_le_bytes());
         push(kind::ENGINE_STATE, state);
+        // The vector pool is one flat section (empty when dim is 0); dim
+        // and stride are derived from the stored config on load.
+        push(kind::VEC_POOL, self.vecs.bytes().to_vec());
 
         let mut cfg_bytes = Vec::new();
         self.cfg.encode(&mut cfg_bytes);
-        w.finish(&cfg_bytes, 0, created_at, env!("CARGO_PKG_VERSION"))
+        let flags = if self.cfg.dim > 0 {
+            crate::snapshot::FLAG_VECTORS
+        } else {
+            0
+        };
+        w.finish(&cfg_bytes, flags, created_at, env!("CARGO_PKG_VERSION"))
     }
 
     /// Writes a full snapshot and clears the journal (specs/05).
@@ -400,6 +410,7 @@ impl Memory {
             section(&snap, kind::ENTFACTS_CHUNKS_META)?,
             section(&snap, kind::ENTFACTS_CHUNKS_POOL)?,
         )?;
+        mem.vecs = VecPool::from_parts(cfg.dim, cfg.max_bytes, section(&snap, kind::VEC_POOL)?)?;
         let state = section(&snap, kind::ENGINE_STATE)?;
         if state.len() != STATE_LEN {
             return Err(Error::Corrupt("engine state section has a wrong length"));
@@ -421,16 +432,34 @@ impl Memory {
     fn validate_references(&self) -> Result<(), Error> {
         let texts = self.texts.len() as u32;
         let terms = self.terms.len() as u32;
+        // Vectors: structural self-check, then a bijection between facts
+        // flagged HAS_VECTOR and pool slots (each fact points at a slot
+        // that names it back; no slot is orphaned).
+        self.vecs.validate()?;
+        let vslots = self.vecs.len() as u32;
+        let mut with_vec = 0u32;
         for fact in self.facts.iter() {
             if fact.id.0 >= self.next_fact
                 || fact.text.0 >= texts
                 || (fact.entity.0 != NONE_U32 && fact.entity.0 >= self.next_entity)
                 || (fact.revises.0 != NONE_U32 && fact.revises.0 >= self.next_fact)
-                || fact.vector != NONE_U32
                 || fact.kind != 0
             {
                 return Err(Error::Corrupt("fact record references out of range"));
             }
+            if fact.has_vector() {
+                if fact.vector >= vslots || self.vecs.slot_fact(fact.vector as usize) != fact.id.0 {
+                    return Err(Error::Corrupt(
+                        "fact vector slot is out of range or mismatched",
+                    ));
+                }
+                with_vec += 1;
+            } else if fact.vector != NONE_U32 {
+                return Err(Error::Corrupt("fact without a vector flag carries a slot"));
+            }
+        }
+        if with_vec != vslots {
+            return Err(Error::Corrupt("vector pool has orphan slots"));
         }
         let mut visited = alloc::vec![false; self.tag_lists.chunks()];
         for aux in self.fact_aux.iter() {

@@ -79,7 +79,10 @@ pub fn encode_entry(out: &mut Vec<u8>, op: u8, payload: &[u8]) {
 /// One decoded engine operation (specs/03 op table). `Revise` is
 /// `Remember` with `revises` set — the two share a payload, only the op
 /// byte differs.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Not `Eq`: the raw `f32` vector rides along so replay can re-quantize
+/// it deterministically (specs/04 §5), and `f32` is only `PartialEq`.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Op<'a> {
     /// Op 1/2: a new fact (op 2 additionally closes `revises`).
     Remember {
@@ -96,6 +99,10 @@ pub enum Op<'a> {
         tags: Vec<&'a str>,
         /// `(rel, target_entity)` link pairs.
         links: Vec<(&'a str, &'a str)>,
+        /// The raw embedding as remembered (empty = none). Stored
+        /// pre-quantization so replay re-quantizes with the same pure
+        /// function and reproduces every slot byte for byte.
+        vector: Vec<f32>,
         /// Predecessor being revised ([`FactId::NONE`] for op 1).
         revises: crate::id::FactId,
         /// The fact id assigned at execution time — authoritative on
@@ -170,6 +177,23 @@ fn take_u64(bytes: &[u8], at: &mut usize) -> Result<u64, Error> {
     Ok(v)
 }
 
+/// Reads a `u32 LE` count followed by that many `f32 LE`; advances `at`.
+fn take_vec_f32(bytes: &[u8], at: &mut usize) -> Result<Vec<f32>, Error> {
+    let count = take_u32(bytes, at)? as usize;
+    let end = at
+        .checked_add(count * 4)
+        .filter(|&e| e <= bytes.len())
+        .ok_or(Error::Corrupt("journal vector overruns its record"))?;
+    let mut v = Vec::with_capacity(count);
+    let mut p = *at;
+    while p < end {
+        v.push(f32::from_le_bytes(bytes[p..p + 4].try_into().unwrap()));
+        p += 4;
+    }
+    *at = end;
+    Ok(v)
+}
+
 impl<'a> Op<'a> {
     /// Encodes the operation as one framed journal entry appended to
     /// `out` (via [`encode_entry`]).
@@ -183,6 +207,7 @@ impl<'a> Op<'a> {
                 text,
                 tags,
                 links,
+                vector,
                 revises,
                 assigned,
             } => {
@@ -206,6 +231,10 @@ impl<'a> Op<'a> {
                 for (rel, dst) in links {
                     put_str(&mut payload, rel);
                     put_str(&mut payload, dst);
+                }
+                payload.extend_from_slice(&(vector.len() as u32).to_le_bytes());
+                for &x in vector {
+                    payload.extend_from_slice(&x.to_le_bytes());
                 }
                 if revises.is_none() { 1 } else { 2 }
             }
@@ -282,6 +311,7 @@ impl<'a> Op<'a> {
                     let dst = take_str(payload, at)?;
                     links.push((rel, dst));
                 }
+                let vector = take_vec_f32(payload, at)?;
                 Op::Remember {
                     now,
                     valid_from,
@@ -289,6 +319,7 @@ impl<'a> Op<'a> {
                     text,
                     tags,
                     links,
+                    vector,
                     revises,
                     assigned,
                 }
