@@ -157,6 +157,112 @@ impl Interner {
         self.table = table;
     }
 
+    /// Appends the string heap's index section to `out` (`specs/03`);
+    /// see [`BlobHeap::dump_index`].
+    pub fn dump_index(&self, out: &mut Vec<u8>) {
+        self.heap.dump_index(out);
+    }
+
+    /// Appends the string heap's pool section to `out` (`specs/03`);
+    /// see [`BlobHeap::dump_pool`].
+    pub fn dump_pool(&self, out: &mut Vec<u8>) {
+        self.heap.dump_pool(out);
+    }
+
+    /// Appends the hash-table section to `out` (`specs/03`).
+    ///
+    /// Layout (little-endian): `[slots u32][len u32]` then `slots × u32`
+    /// entries (`0` = empty, else `TermId + 1`). The table is persisted
+    /// rather than rebuilt on load: rebuilding is O(terms × hash) and the
+    /// cold-start budget is tighter than the 4 bytes per slot.
+    pub fn dump_table(&self, out: &mut Vec<u8>) {
+        out.reserve(8 + self.table.len() * 4);
+        out.extend_from_slice(&(self.table.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.len.to_le_bytes());
+        for &entry in &self.table {
+            out.extend_from_slice(&entry.to_le_bytes());
+        }
+    }
+
+    /// Rebuilds an interner from its three dumped sections.
+    ///
+    /// The input is **untrusted** — no panic on arbitrary bytes. On top of
+    /// [`BlobHeap::load`], validation covers:
+    ///
+    /// - every stored blob is valid UTF-8 (O(pool bytes), SIMD-speed) —
+    ///   this is what keeps [`Interner::resolve`] infallible;
+    /// - table shape: power-of-two slot count `>= 16`, exact section
+    ///   length, the ≤ 0.7 load factor, `len` equal to the heap's blob
+    ///   count;
+    /// - table entries: in bounds, no id stored twice, and exactly `len`
+    ///   of them (checked with a visited bitmap).
+    ///
+    /// Entry *placement* (that each id sits on its hash's probe path) is
+    /// not re-verified — that would cost the full rebuild the stored table
+    /// exists to avoid. A well-formed but misplaced table cannot cause
+    /// memory unsafety or a panic; it degrades `intern` to assigning a
+    /// duplicate id for the affected terms. Section checksums (`specs/03`)
+    /// cover accidental corruption.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Corrupt`] for any inconsistency.
+    pub fn load(cfg: BlobHeapCfg, index: &[u8], pool: &[u8], table: &[u8]) -> Result<Self, Error> {
+        let heap = BlobHeap::load(cfg, index, pool)?;
+        for (_, blob) in heap.iter() {
+            if core::str::from_utf8(blob).is_err() {
+                return Err(Error::Corrupt("interned term is not valid UTF-8"));
+            }
+        }
+        if table.len() < 8 {
+            return Err(Error::Corrupt("interner table shorter than its header"));
+        }
+        let slots = u32::from_le_bytes(table[0..4].try_into().unwrap()) as usize;
+        let len = u32::from_le_bytes(table[4..8].try_into().unwrap());
+        if slots < INITIAL_SLOTS || !slots.is_power_of_two() {
+            return Err(Error::Corrupt("interner table size is not a power of two"));
+        }
+        if table.len() as u64 != 8 + slots as u64 * 4 {
+            return Err(Error::Corrupt("interner table length mismatch"));
+        }
+        if len as usize != heap.len() {
+            return Err(Error::Corrupt("interner length disagrees with its heap"));
+        }
+        if len as u64 * 10 > slots as u64 * 7 {
+            return Err(Error::Corrupt("interner table over the load factor"));
+        }
+        let mut entries = Vec::with_capacity(slots);
+        let mut seen = alloc::vec![false; heap.len()];
+        let mut filled = 0u64;
+        for i in 0..slots {
+            let at = 8 + i * 4;
+            let entry = u32::from_le_bytes(table[at..at + 4].try_into().unwrap());
+            if entry != 0 {
+                let id = (entry - 1) as usize;
+                if id >= heap.len() {
+                    return Err(Error::Corrupt("interner table entry out of bounds"));
+                }
+                if core::mem::replace(&mut seen[id], true) {
+                    return Err(Error::Corrupt("interner table stores an id twice"));
+                }
+                filled += 1;
+            }
+            entries.push(entry);
+        }
+        if filled != u64::from(len) {
+            return Err(Error::Corrupt(
+                "interner table entry count disagrees with len",
+            ));
+        }
+        Ok(Self {
+            heap,
+            table: entries,
+            len,
+            #[cfg(feature = "counters")]
+            probes: 0,
+        })
+    }
+
     /// Table probes performed so far (see the field docs). Feature
     /// `counters` only.
     #[cfg(feature = "counters")]

@@ -293,6 +293,127 @@ impl ChunkPool {
         let at = chunk as usize * CHUNK_BYTES;
         self.pool[at..at + 4].copy_from_slice(&to.to_le_bytes());
     }
+
+    /// Marks every chunk currently sitting in the free-list. Free chunks
+    /// carry stale `used` values and payload bytes ([`ChunkPool::free`] is
+    /// an O(1) splice, cleanup happens on reuse), so dumps consult this map
+    /// to canonicalize them.
+    fn free_map(&self) -> Vec<bool> {
+        let mut free = alloc::vec![false; self.used.len()];
+        let mut chunk = self.free_head;
+        while chunk != NONE {
+            free[chunk as usize] = true;
+            chunk = self.link(chunk);
+        }
+        free
+    }
+
+    /// Appends the pool's metadata section to `out` (`specs/03`).
+    ///
+    /// Layout (little-endian): `[chunks u32][free_head u32]` then one
+    /// `used u8` per chunk. Free chunks are written with `used = 0`
+    /// regardless of their stale in-memory value, making the dump
+    /// canonical. Together with [`ChunkPool::dump_pool`] this is the
+    /// complete pool-side state; the list handles live with their owners.
+    pub fn dump_meta(&self, out: &mut Vec<u8>) {
+        let free = self.free_map();
+        out.reserve(8 + self.used.len());
+        out.extend_from_slice(&(self.used.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.free_head.to_le_bytes());
+        for (chunk, &used) in self.used.iter().enumerate() {
+            out.push(if free[chunk] { 0 } else { used });
+        }
+    }
+
+    /// Appends the pool section to `out` (`specs/03`).
+    ///
+    /// Each chunk contributes its 4-byte link, its used payload prefix and
+    /// zero padding to [`CHUNK_BYTES`]; free chunks contribute link plus
+    /// zeros. This canonicalizes the stale bytes recycling leaves behind
+    /// (see [`ChunkPool::free`]) — identical logical state, identical
+    /// bytes.
+    pub fn dump_pool(&self, out: &mut Vec<u8>) {
+        let free = self.free_map();
+        out.reserve(self.pool.len());
+        for (chunk, &used) in self.used.iter().enumerate() {
+            let at = chunk * CHUNK_BYTES;
+            let used = if free[chunk] { 0 } else { used as usize };
+            out.extend_from_slice(&self.pool[at..at + 4 + used]);
+            out.resize(out.len() + (CHUNK_PAYLOAD - used), 0);
+        }
+    }
+
+    /// Rebuilds a pool from its two dumped sections.
+    ///
+    /// The input is **untrusted** — validation is O(chunks), never panics
+    /// on arbitrary bytes: exact section lengths (within `cfg.max_bytes`),
+    /// per-chunk `used` within [`CHUNK_PAYLOAD`], every chain link in
+    /// bounds (or the `NONE` sentinel — this is what keeps a later
+    /// [`ChunkPool::iter`] from indexing out of bounds), and a free-list
+    /// that is acyclic (visited bitmap) with `used = 0` on every member.
+    ///
+    /// What this method *cannot* check: cycles among chunks referenced by
+    /// the owners' [`ListHandle`]s — the handles live in the owner's
+    /// records, so the owning engine walks its handles with a shared
+    /// visited bitmap as part of its own load (`specs/03`).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Corrupt`] for any inconsistency.
+    pub fn load(cfg: ChunkPoolCfg, meta: &[u8], pool: &[u8]) -> Result<Self, Error> {
+        if meta.len() < 8 {
+            return Err(Error::Corrupt("chunk meta shorter than its header"));
+        }
+        let chunks = u32::from_le_bytes(meta[0..4].try_into().unwrap());
+        let free_head = u32::from_le_bytes(meta[4..8].try_into().unwrap());
+        if chunks == NONE {
+            return Err(Error::Corrupt("chunk count overflows the index space"));
+        }
+        if meta.len() as u64 != 8 + u64::from(chunks) {
+            return Err(Error::Corrupt("chunk meta length mismatch"));
+        }
+        if pool.len() as u64 != u64::from(chunks) * CHUNK_BYTES as u64 {
+            return Err(Error::Corrupt("chunk pool length mismatch"));
+        }
+        if pool.len() > cfg.max_bytes {
+            return Err(Error::Corrupt("chunk pool exceeds the configured ceiling"));
+        }
+        let used: Vec<u8> = meta[8..].to_vec();
+        if used.iter().any(|&u| u as usize > CHUNK_PAYLOAD) {
+            return Err(Error::Corrupt("chunk used bytes exceed the payload size"));
+        }
+        let link_of = |chunk: usize| {
+            let at = chunk * CHUNK_BYTES;
+            u32::from_le_bytes(pool[at..at + 4].try_into().unwrap())
+        };
+        for chunk in 0..chunks as usize {
+            let link = link_of(chunk);
+            if link != NONE && link >= chunks {
+                return Err(Error::Corrupt("chunk link out of bounds"));
+            }
+        }
+        let mut seen = alloc::vec![false; chunks as usize];
+        let mut chunk = free_head;
+        while chunk != NONE {
+            let c = chunk as usize;
+            if c >= chunks as usize {
+                return Err(Error::Corrupt("chunk free-list head out of bounds"));
+            }
+            if core::mem::replace(&mut seen[c], true) {
+                return Err(Error::Corrupt("chunk free-list contains a cycle"));
+            }
+            if used[c] != 0 {
+                return Err(Error::Corrupt("free chunk has nonzero used bytes"));
+            }
+            chunk = link_of(c);
+        }
+        Ok(Self {
+            pool: pool.to_vec(),
+            used,
+            free_head,
+            cfg,
+        })
+    }
 }
 
 impl fmt::Debug for ChunkPool {

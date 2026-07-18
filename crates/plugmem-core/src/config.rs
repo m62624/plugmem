@@ -5,7 +5,12 @@
 //! database with an incompatible config (different `dim`, different shard
 //! counts) is a typed error, not a silent reinterpretation.
 
+use alloc::vec::Vec;
+
 use crate::error::Error;
+
+/// Exact byte length of the encoded config block (see [`Config::encode`]).
+pub const ENCODED_LEN: usize = 172;
 
 /// Full engine configuration with the specs/05 defaults.
 ///
@@ -204,5 +209,152 @@ impl Config {
             return Err(Error::ConfigMismatch("flat_to_hnsw must be >= 1"));
         }
         Ok(())
+    }
+
+    /// Appends the fixed binary form of the config to `out` — the config
+    /// block of the snapshot (specs/03). Layout, all little-endian, in
+    /// field-declaration order: `usize` fields as `u64`, `f32` fields as
+    /// their IEEE 754 bits, then `rrf_k`/`half_life_days`/`graph_depth` as
+    /// `u32`, `fast_load` as one byte, 7 reserved zero bytes; exactly
+    /// [`ENCODED_LEN`] bytes. Encoding is lossless and canonical (float
+    /// bits round-trip exactly).
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        out.reserve(ENCODED_LEN);
+        for v in [
+            self.dim,
+            self.max_bytes,
+            self.max_text,
+            self.max_blob,
+            self.shards_facts,
+            self.shards_entities,
+            self.shards_edges,
+            self.shards_temporal,
+            self.shards_postings,
+            self.hnsw_m,
+            self.hnsw_m0,
+            self.hnsw_ef_construction,
+            self.hnsw_ef_search,
+            self.flat_to_hnsw,
+        ] {
+            out.extend_from_slice(&(v as u64).to_le_bytes());
+        }
+        for v in [
+            self.bm25_k1,
+            self.bm25_b,
+            self.w_bm25,
+            self.w_vec,
+            self.w_graph,
+            self.w_time,
+            self.w_recency,
+            self.graph_decay,
+            self.similar_cos,
+            self.similar_jaccard,
+        ] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [self.rrf_k, self.half_life_days, self.graph_depth] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.push(u8::from(self.fast_load));
+        out.extend_from_slice(&[0u8; 7]);
+    }
+
+    /// Decodes a config block written by [`Config::encode`] and runs
+    /// [`Config::validate`] on the result.
+    ///
+    /// The input is untrusted: a wrong length, nonzero reserved bytes, a
+    /// non-boolean `fast_load` byte or a value that overflows this
+    /// platform's `usize` is [`Error::Corrupt`]; out-of-range field values
+    /// surface as the same [`Error::ConfigMismatch`] a hand-built config
+    /// would get.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        if bytes.len() != ENCODED_LEN {
+            return Err(Error::Corrupt("config block length mismatch"));
+        }
+        let mut at = 0usize;
+        let mut take_usize = || -> Result<usize, Error> {
+            let v = u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+            at += 8;
+            usize::try_from(v).map_err(|_| Error::Corrupt("config value overflows usize"))
+        };
+        let dim = take_usize()?;
+        let max_bytes = take_usize()?;
+        let max_text = take_usize()?;
+        let max_blob = take_usize()?;
+        let shards_facts = take_usize()?;
+        let shards_entities = take_usize()?;
+        let shards_edges = take_usize()?;
+        let shards_temporal = take_usize()?;
+        let shards_postings = take_usize()?;
+        let hnsw_m = take_usize()?;
+        let hnsw_m0 = take_usize()?;
+        let hnsw_ef_construction = take_usize()?;
+        let hnsw_ef_search = take_usize()?;
+        let flat_to_hnsw = take_usize()?;
+        let mut at = 112usize;
+        let mut take_f32 = || {
+            let v = f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+            at += 4;
+            v
+        };
+        let bm25_k1 = take_f32();
+        let bm25_b = take_f32();
+        let w_bm25 = take_f32();
+        let w_vec = take_f32();
+        let w_graph = take_f32();
+        let w_time = take_f32();
+        let w_recency = take_f32();
+        let graph_decay = take_f32();
+        let similar_cos = take_f32();
+        let similar_jaccard = take_f32();
+        let mut at = 152usize;
+        let mut take_u32 = || {
+            let v = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+            at += 4;
+            v
+        };
+        let rrf_k = take_u32();
+        let half_life_days = take_u32();
+        let graph_depth = take_u32();
+        let fast_load = match bytes[164] {
+            0 => false,
+            1 => true,
+            _ => return Err(Error::Corrupt("config fast_load byte must be 0 or 1")),
+        };
+        if bytes[165..172] != [0u8; 7] {
+            return Err(Error::Corrupt("reserved config bytes must be zero"));
+        }
+        let cfg = Self {
+            dim,
+            max_bytes,
+            max_text,
+            max_blob,
+            shards_facts,
+            shards_entities,
+            shards_edges,
+            shards_temporal,
+            shards_postings,
+            bm25_k1,
+            bm25_b,
+            rrf_k,
+            w_bm25,
+            w_vec,
+            w_graph,
+            w_time,
+            w_recency,
+            half_life_days,
+            graph_depth,
+            graph_decay,
+            similar_cos,
+            similar_jaccard,
+            hnsw_m,
+            hnsw_m0,
+            hnsw_ef_construction,
+            hnsw_ef_search,
+            flat_to_hnsw,
+            fast_load,
+        };
+        cfg.validate()?;
+        Ok(cfg)
     }
 }

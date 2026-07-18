@@ -55,4 +55,10 @@ pub enum Error {
         /// Length of the rejected value.
         len: usize,
     },
+    /// A serialized image failed load-time validation (`load` methods).
+    ///
+    /// The message names the violated invariant. Loading never panics on
+    /// arbitrary bytes — every inconsistency maps to this variant.
+    #[error("corrupt image: {0}")]
+    Corrupt(&'static str),
 }

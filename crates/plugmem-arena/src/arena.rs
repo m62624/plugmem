@@ -37,6 +37,10 @@ const NONE: u32 = u32::MAX;
 /// Fibonacci hashing multiplier (2^64 / phi), used by [`ShardMode::Uniform`].
 const FIB: u64 = 0x9E37_79B9_7F4A_7C15;
 
+/// Fixed prefix of the serialized metadata section (see
+/// [`Arena::dump_meta`]).
+const IMAGE_HEADER: usize = 24;
+
 /// `true` when the `counters` feature is enabled; lets hot loops keep their
 /// counting code in one expression that constant-folds away otherwise.
 const COUNT: bool = cfg!(feature = "counters");
@@ -538,6 +542,204 @@ impl<T: Slot> Arena<T> {
     #[cfg(feature = "counters")]
     pub fn reset_counters(&self) {
         self.counters.set(Counters::default());
+    }
+
+    /// Appends the arena's metadata section to `out` (`specs/03`).
+    ///
+    /// Layout (all little-endian): `[shards u32][pages u32][free_head u32]
+    /// [total u64][mode u8][reserved 3]`, then `heads` (`shards × u32`),
+    /// `next` (`pages × u32`), `counts` (`pages × u16`). Together with
+    /// [`Arena::dump_pool`] this is the complete state; both dumps are
+    /// canonical — dump → [`Arena::load`] → dump reproduces identical
+    /// bytes.
+    pub fn dump_meta(&self, out: &mut Vec<u8>) {
+        let pages = self.pool.len() / PAGE_BYTES;
+        debug_assert!(self.cfg.shards <= u32::MAX as usize && pages < u32::MAX as usize);
+        out.reserve(IMAGE_HEADER + self.heads.len() * 4 + pages * 6);
+        out.extend_from_slice(&(self.cfg.shards as u32).to_le_bytes());
+        out.extend_from_slice(&(pages as u32).to_le_bytes());
+        out.extend_from_slice(&self.free_head.to_le_bytes());
+        out.extend_from_slice(&(self.total as u64).to_le_bytes());
+        out.push(match self.cfg.mode {
+            ShardMode::Uniform => 0,
+            ShardMode::Ordered => 1,
+        });
+        out.extend_from_slice(&[0u8; 3]);
+        for &head in &self.heads {
+            out.extend_from_slice(&head.to_le_bytes());
+        }
+        for &next in &self.next {
+            out.extend_from_slice(&next.to_le_bytes());
+        }
+        for &count in &self.counts {
+            out.extend_from_slice(&count.to_le_bytes());
+        }
+    }
+
+    /// Appends the arena's pool section to `out` (`specs/03`).
+    ///
+    /// Each page contributes its initialized prefix (`counts[page] ×
+    /// SIZE` bytes) followed by zero padding to [`PAGE_BYTES`]: the
+    /// uninitialized page tails (see [`Arena::insert`] internals) are
+    /// never read, and zero-filling them makes the image canonical and
+    /// leak-free.
+    pub fn dump_pool(&self, out: &mut Vec<u8>) {
+        out.reserve(self.pool.len());
+        for (page, &count) in self.counts.iter().enumerate() {
+            let used = count as usize * T::SIZE;
+            let start = page * PAGE_BYTES;
+            out.extend_from_slice(&self.pool[start..start + used]);
+            out.resize(out.len() + (PAGE_BYTES - used), 0);
+        }
+    }
+
+    /// Rebuilds an arena from its two dumped sections.
+    ///
+    /// The input is **untrusted**: every metadata invariant is checked
+    /// before adoption and any inconsistency returns
+    /// [`Error::Corrupt`] — this method never panics on arbitrary bytes.
+    /// Cost is O(pages) on top of the pool copy:
+    ///
+    /// - exact section lengths; `cfg` agreement (shards, mode);
+    /// - per-page slot counts within `PAGE_BYTES / SIZE`;
+    /// - every page reachable exactly once — shard chains and the
+    ///   free-list are walked with a visited bitmap (no cycles, no shared
+    ///   or orphan pages); chain pages are non-empty, free pages empty;
+    /// - chain pages ascend by key range and sit in the shard their first
+    ///   key maps to; the record total matches the page counts.
+    ///
+    /// Slot *content* is not validated beyond the per-page first/last key
+    /// reads — record payloads are semantically validated lazily by the
+    /// owning engine (`specs/03`).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::BadSlot`] / [`Error::BadShardCount`] for an invalid `cfg`
+    /// (same gates as [`Arena::new`]); [`Error::Corrupt`] for any image
+    /// inconsistency.
+    pub fn load(cfg: ArenaCfg, meta: &[u8], pool: &[u8]) -> Result<Self, Error> {
+        let mut arena = Self::new(cfg)?;
+        if meta.len() < IMAGE_HEADER {
+            return Err(Error::Corrupt("arena meta shorter than its header"));
+        }
+        let shards = u32::from_le_bytes(meta[0..4].try_into().unwrap()) as usize;
+        let pages = u32::from_le_bytes(meta[4..8].try_into().unwrap()) as usize;
+        let free_head = u32::from_le_bytes(meta[8..12].try_into().unwrap());
+        let total = u64::from_le_bytes(meta[12..20].try_into().unwrap());
+        let mode = meta[20];
+        if meta[21..24] != [0u8; 3] {
+            return Err(Error::Corrupt("arena meta reserved bytes must be zero"));
+        }
+        if shards != cfg.shards {
+            return Err(Error::Corrupt("arena meta shard count disagrees with cfg"));
+        }
+        let want_mode = match cfg.mode {
+            ShardMode::Uniform => 0u8,
+            ShardMode::Ordered => 1,
+        };
+        if mode != want_mode {
+            return Err(Error::Corrupt("arena meta shard mode disagrees with cfg"));
+        }
+        if pages as u64 >= u64::from(NONE) {
+            return Err(Error::Corrupt("arena page count overflows the index space"));
+        }
+        let want_meta = IMAGE_HEADER as u64 + shards as u64 * 4 + pages as u64 * 6;
+        if meta.len() as u64 != want_meta {
+            return Err(Error::Corrupt("arena meta length mismatch"));
+        }
+        if pool.len() as u64 != pages as u64 * PAGE_BYTES as u64 {
+            return Err(Error::Corrupt("arena pool length mismatch"));
+        }
+
+        let mut heads = Vec::with_capacity(shards);
+        for i in 0..shards {
+            let at = IMAGE_HEADER + i * 4;
+            heads.push(u32::from_le_bytes(meta[at..at + 4].try_into().unwrap()));
+        }
+        let next_base = IMAGE_HEADER + shards * 4;
+        let mut next = Vec::with_capacity(pages);
+        for i in 0..pages {
+            let at = next_base + i * 4;
+            next.push(u32::from_le_bytes(meta[at..at + 4].try_into().unwrap()));
+        }
+        let counts_base = next_base + pages * 4;
+        let mut counts = Vec::with_capacity(pages);
+        for i in 0..pages {
+            let at = counts_base + i * 2;
+            counts.push(u16::from_le_bytes(meta[at..at + 2].try_into().unwrap()));
+        }
+
+        let spp = Self::slots_per_page();
+        if counts.iter().any(|&c| c as usize > spp) {
+            return Err(Error::Corrupt("arena page count exceeds slots per page"));
+        }
+
+        // Reachability walk: every page must appear exactly once across all
+        // shard chains and the free-list; the bitmap catches cycles, shared
+        // pages and (after the walks) orphans.
+        let mut seen = alloc::vec![false; pages];
+        let mut live = 0u64;
+        for (shard, &head) in heads.iter().enumerate() {
+            let mut page = head;
+            let mut prev: Option<u32> = None;
+            while page != NONE {
+                let p = page as usize;
+                if p >= pages {
+                    return Err(Error::Corrupt("arena chain page out of bounds"));
+                }
+                if core::mem::replace(&mut seen[p], true) {
+                    return Err(Error::Corrupt("arena page linked more than once"));
+                }
+                let count = counts[p] as usize;
+                if count == 0 {
+                    return Err(Error::Corrupt("arena chain contains an empty page"));
+                }
+                live += count as u64;
+                let first = &pool[p * PAGE_BYTES..p * PAGE_BYTES + T::KEY_LEN];
+                if arena.shard_of(first) != shard {
+                    return Err(Error::Corrupt("arena page sits in the wrong shard"));
+                }
+                if let Some(pr) = prev {
+                    let last_at =
+                        pr as usize * PAGE_BYTES + (counts[pr as usize] as usize - 1) * T::SIZE;
+                    if pool[last_at..last_at + T::KEY_LEN] >= *first {
+                        return Err(Error::Corrupt("arena chain pages out of key order"));
+                    }
+                }
+                prev = Some(page);
+                page = next[p];
+            }
+        }
+        let mut page = free_head;
+        while page != NONE {
+            let p = page as usize;
+            if p >= pages {
+                return Err(Error::Corrupt("arena free page out of bounds"));
+            }
+            if core::mem::replace(&mut seen[p], true) {
+                return Err(Error::Corrupt("arena page linked more than once"));
+            }
+            if counts[p] != 0 {
+                return Err(Error::Corrupt("arena free page has a nonzero count"));
+            }
+            page = next[p];
+        }
+        if seen.iter().any(|&s| !s) {
+            return Err(Error::Corrupt("arena has an orphan page"));
+        }
+        if live != total {
+            return Err(Error::Corrupt(
+                "arena record total disagrees with page counts",
+            ));
+        }
+
+        arena.pool = pool.to_vec();
+        arena.heads = heads;
+        arena.next = next;
+        arena.counts = counts;
+        arena.free_head = free_head;
+        arena.total = total as usize;
+        Ok(arena)
     }
 
     /// Walks the shard's chain to the page whose key range covers `key`.

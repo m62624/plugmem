@@ -30,6 +30,14 @@ fn prose_and_case() {
         // The one two-char lowercase (İ) folds to a clean "i".
         ("İstanbul", &["istanbul"]),
         ("STRAẞE", &["straße"]),
+        // Ignorable format chars vanish from inside words: soft hyphen,
+        // zero-width joiner.
+        ("co\u{AD}operate ab\u{200D}cd", &["cooperate", "abcd"]),
+        // An alphabetic combining mark glued (via UAX #29 Extend) onto a
+        // space: the space is dropped, the mark stands alone — exactly
+        // what the mark yields without a space in front.
+        (" \u{F71}", &["\u{F71}"]),
+        ("\u{F71}", &["\u{F71}"]),
     ];
     for (input, want) in cases {
         assert_eq!(&tokens(input), want, "input: {input:?}");

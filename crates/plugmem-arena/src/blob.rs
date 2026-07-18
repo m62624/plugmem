@@ -177,6 +177,79 @@ impl BlobHeap {
             )
         })
     }
+
+    /// Appends the heap's index section to `out` (`specs/03`).
+    ///
+    /// Layout (little-endian): `[blobs u32]` then one `len u32` per blob.
+    /// Offsets are not stored — blobs are contiguous in push order, so the
+    /// lengths alone reconstruct the index (one redundancy less to
+    /// validate). Together with [`BlobHeap::dump_pool`] this is the
+    /// complete state; dumps are canonical.
+    pub fn dump_index(&self, out: &mut Vec<u8>) {
+        out.reserve(4 + self.index.len() * 4);
+        out.extend_from_slice(&(self.index.len() as u32).to_le_bytes());
+        for &(_, len) in &self.index {
+            out.extend_from_slice(&len.to_le_bytes());
+        }
+    }
+
+    /// Appends the heap's pool section to `out` (`specs/03`) — a straight
+    /// copy: every pool byte is initialized blob content.
+    pub fn dump_pool(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.pool);
+    }
+
+    /// Rebuilds a heap from its two dumped sections.
+    ///
+    /// The input is **untrusted** — validation is O(blobs), never panics
+    /// on arbitrary bytes: exact index length, per-blob length within
+    /// `cfg.max_blob`, and the lengths summing exactly to the pool size
+    /// (which itself must fit `cfg.max_bytes` and the `u32` offset
+    /// ceiling). Blob *content* is the owner's data and is not
+    /// interpreted.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Corrupt`] for any inconsistency.
+    pub fn load(cfg: BlobHeapCfg, index: &[u8], pool: &[u8]) -> Result<Self, Error> {
+        if index.len() < 4 {
+            return Err(Error::Corrupt("blob index shorter than its header"));
+        }
+        let blobs = u32::from_le_bytes(index[0..4].try_into().unwrap());
+        if blobs == u32::MAX {
+            return Err(Error::Corrupt("blob count overflows the id space"));
+        }
+        if index.len() as u64 != 4 + u64::from(blobs) * 4 {
+            return Err(Error::Corrupt("blob index length mismatch"));
+        }
+        if pool.len() > cfg.max_bytes || pool.len() > u32::MAX as usize {
+            return Err(Error::Corrupt("blob pool exceeds the configured ceiling"));
+        }
+        let mut rebuilt = Vec::with_capacity(blobs as usize);
+        let mut offset = 0u64;
+        for i in 0..blobs as usize {
+            let at = 4 + i * 4;
+            let len = u32::from_le_bytes(index[at..at + 4].try_into().unwrap());
+            if len as usize > cfg.max_blob {
+                return Err(Error::Corrupt(
+                    "blob length exceeds the configured max_blob",
+                ));
+            }
+            rebuilt.push((offset as u32, len));
+            offset += u64::from(len);
+            if offset > pool.len() as u64 {
+                return Err(Error::Corrupt("blob lengths overrun the pool"));
+            }
+        }
+        if offset != pool.len() as u64 {
+            return Err(Error::Corrupt("blob lengths do not cover the pool"));
+        }
+        Ok(Self {
+            pool: pool.to_vec(),
+            index: rebuilt,
+            cfg,
+        })
+    }
 }
 
 impl fmt::Debug for BlobHeap {

@@ -149,24 +149,55 @@ impl Tokenizer {
     }
 }
 
+/// `true` for the default-ignorable format characters that occur inside
+/// running text (soft hyphen, zero-width space/joiners, bidi marks, word
+/// joiner block, BOM). UAX #29 glues them into word segments (they are
+/// `Format`/`Extend` for word breaking) but they carry no lexical content
+/// and must never survive into a term.
+fn is_ignorable_format(c: char) -> bool {
+    matches!(
+        c as u32,
+        0xAD | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0xFEFF
+    )
+}
+
 /// Pushes one lowercased char into the token, applying the folding rules:
-/// `ё` → `е`; Latin precomposed diacritics stripped to their ASCII base;
-/// combining marks dropped after an ASCII base (this also absorbs the one
-/// Unicode lowercase expansion that emits a mark, `İ` → `i` + U+0307).
-/// Everything else — Cyrillic `й`, Greek, Kana — is kept precomposed.
+///
+/// - `ё` → `е`;
+/// - ignorable format characters are dropped ([`is_ignorable_format`]);
+/// - combining marks are dropped after an ASCII base (this also absorbs
+///   the one Unicode lowercase expansion that emits a mark, `İ` → `i` +
+///   U+0307) and kept otherwise — including a mark opening the token,
+///   which happens when UAX #29 glues a mark onto a separator base (the
+///   separator itself is dropped by the next rule);
+/// - other non-alphanumeric chars survive only *after* an alphanumeric
+///   one: that keeps the word-internal joiners UAX #29 admits (`don't`,
+///   `3.14`, `snake_case`) while separator bases glued to a segment start
+///   (a space carrying a combining mark) never enter the term;
+/// - Latin precomposed diacritics are stripped to their ASCII base;
+///   everything else — Cyrillic `й`, Greek, Kana — is kept precomposed.
 fn fold_into(c: char, out: &mut String) {
     if c == 'ё' {
         out.push('е');
         return;
     }
-    if c.is_ascii() {
-        out.push(c);
+    if is_ignorable_format(c) {
         return;
     }
     if is_combining_mark(c) {
         if !out.ends_with(|p: char| p.is_ascii_alphanumeric()) {
             out.push(c);
         }
+        return;
+    }
+    if !c.is_alphanumeric() {
+        if out.ends_with(char::is_alphanumeric) {
+            out.push(c);
+        }
+        return;
+    }
+    if c.is_ascii() {
+        out.push(c);
         return;
     }
     // Canonical decomposition into a tiny fixed buffer (canonical

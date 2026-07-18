@@ -22,6 +22,7 @@ pub mod error;
 pub mod id;
 pub mod journal;
 pub mod model;
+pub mod snapshot;
 pub mod storage;
 pub mod tokenizer;
 
