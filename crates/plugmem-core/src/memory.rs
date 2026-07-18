@@ -35,6 +35,9 @@ use crate::model::{
 use crate::storage::Storage;
 use crate::tokenizer::Tokenizer;
 
+/// Most recent same-entity facts examined by similar-detection.
+const SIMILAR_CANDIDATE_CAP: usize = 32;
+
 mod recall;
 
 pub use recall::{RecallQuery, RecallResult, RecalledEdge, RecalledFact, source};
@@ -85,14 +88,39 @@ pub struct LinkInput<'a> {
     pub provenance: Option<FactId>,
 }
 
-/// Result of `remember`/`revise` (specs/05). Similar-detection hints land
-/// with the recall layer.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Result of `remember`/`revise` (specs/05).
+#[derive(Clone, Debug, PartialEq)]
 pub struct RememberOutcome {
     /// The new fact's id.
     pub id: FactId,
     /// The subject entity (resolved or created), if one was named.
     pub entity: Option<EntityId>,
+    /// Similar / potentially conflicting **live** facts, best match
+    /// first (≤ 8). The engine never revises on its own — it surfaces
+    /// the candidates, the agent judges: `revise`, keep both, or
+    /// `forget` (specs/05).
+    pub similar: Vec<Similar>,
+}
+
+/// One similar-fact hint (specs/05).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Similar {
+    /// The existing fact.
+    pub id: FactId,
+    /// Match strength (for the lexical detector: the Jaccard overlap of
+    /// the term sets, in `(similar_jaccard, 1]`).
+    pub score: f32,
+    /// What triggered the hint.
+    pub reason: SimilarReason,
+}
+
+/// Why a fact was flagged as similar (specs/05). The vector variant
+/// arrives with the vector layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SimilarReason {
+    /// Same subject entity and a term-set overlap above the configured
+    /// Jaccard threshold.
+    LexicalOverlap,
 }
 
 /// A read view of one fact.
@@ -311,9 +339,99 @@ impl Memory {
         input: RememberInput<'_>,
     ) -> Result<RememberOutcome, Error> {
         self.validate_input(&input)?;
-        let outcome = self.apply_remember(&input, FactId::NONE)?;
+        let mut outcome = self.apply_remember(&input, FactId::NONE)?;
+        self.find_similar(&mut outcome);
         self.journal_remember(store, &input, FactId::NONE, outcome.id)?;
         Ok(outcome)
+    }
+
+    /// Batch import: a sequence of remembers in one call, journaled
+    /// individually (specs/05). `skip_similar` turns off the
+    /// similar-detection pass — imports don't need hints, and skipping
+    /// them makes a bulk load cheaper.
+    ///
+    /// Stops at the first error; already-applied inputs stay applied and
+    /// journaled (replay reproduces exactly the applied prefix).
+    pub fn remember_batch<S: Storage>(
+        &mut self,
+        store: &mut S,
+        inputs: &[RememberInput<'_>],
+        skip_similar: bool,
+    ) -> Result<Vec<RememberOutcome>, Error> {
+        let mut out = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            self.validate_input(input)?;
+            let mut outcome = self.apply_remember(input, FactId::NONE)?;
+            if !skip_similar {
+                self.find_similar(&mut outcome);
+            }
+            self.journal_remember(store, input, FactId::NONE, outcome.id)?;
+            out.push(outcome);
+        }
+        Ok(out)
+    }
+
+    /// Lexical similar-detection (specs/05): live facts of the same
+    /// entity whose term sets overlap the new fact's above the
+    /// `similar_jaccard` threshold. Bounded: the entity's most recent
+    /// [`SIMILAR_CANDIDATE_CAP`] facts are compared (a hub's full list is
+    /// not re-tokenized), candidate texts are tokenized against the
+    /// term-frequency scratch the new fact just filled.
+    fn find_similar(&mut self, outcome: &mut RememberOutcome) {
+        let Some(entity) = outcome.entity else { return };
+        // The new fact's term set is still in tf_scratch (apply_remember
+        // filled it); snapshot the term ids.
+        let new_terms: Vec<u32> = self.tf_scratch.iter().map(|&(t, _)| t).collect();
+        if new_terms.is_empty() {
+            return;
+        }
+        // Most recent candidates of the entity (ring over the list).
+        let mut ring = [FactId::NONE; SIMILAR_CANDIDATE_CAP];
+        let mut n = 0usize;
+        for (fact, _) in self.entity_facts.entries(entity.0) {
+            if fact != outcome.id {
+                ring[n % SIMILAR_CANDIDATE_CAP] = fact;
+                n += 1;
+            }
+        }
+        let mut cand_terms: Vec<u32> = Vec::new();
+        for &fact in ring.iter().take(n.min(SIMILAR_CANDIDATE_CAP)) {
+            let Some(record) = self.fact(fact) else {
+                continue;
+            };
+            if record.is_tombstone() || record.is_closed() {
+                continue;
+            }
+            let text = core::str::from_utf8(self.texts.get(record.text))
+                .expect("fact texts are written from &str");
+            cand_terms.clear();
+            let terms = &self.terms;
+            let cand = &mut cand_terms;
+            self.tokenizer.tokenize(text, &mut |token| {
+                if let Some(term) = terms.lookup(token)
+                    && !cand.contains(&term.0)
+                {
+                    cand.push(term.0);
+                }
+            });
+            if cand_terms.is_empty() {
+                continue;
+            }
+            let both = cand_terms.iter().filter(|t| new_terms.contains(t)).count();
+            let union = cand_terms.len() + new_terms.len() - both;
+            let jaccard = both as f32 / union as f32;
+            if jaccard > self.cfg.similar_jaccard {
+                outcome.similar.push(Similar {
+                    id: fact,
+                    score: jaccard,
+                    reason: SimilarReason::LexicalOverlap,
+                });
+            }
+        }
+        outcome
+            .similar
+            .sort_unstable_by(|a, b| b.score.total_cmp(&a.score).then(a.id.cmp(&b.id)));
+        outcome.similar.truncate(8);
     }
 
     /// Revises `target`: closes its validity at the new fact's
@@ -596,7 +714,11 @@ impl Memory {
             fact: id,
         })?;
         self.next_fact += 1;
-        Ok(RememberOutcome { id, entity })
+        Ok(RememberOutcome {
+            id,
+            entity,
+            similar: Vec::new(),
+        })
     }
 
     fn apply_forget(&mut self, id: FactId) -> Result<bool, Error> {

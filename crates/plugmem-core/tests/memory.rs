@@ -467,3 +467,122 @@ proptest! {
         assert_observably_equal(&mem, &reopened);
     }
 }
+
+#[test]
+fn similar_detection_surfaces_conflicts_but_never_acts() {
+    let (mut mem, mut store) = engine();
+    let first = mem
+        .remember(
+            &mut store,
+            RememberInput {
+                entity: Some("user"),
+                ..RememberInput::text(100, "lives in Moscow city")
+            },
+        )
+        .unwrap();
+    assert!(first.similar.is_empty(), "nothing to be similar to yet");
+    // A near-duplicate statement about the same entity.
+    let second = mem
+        .remember(
+            &mut store,
+            RememberInput {
+                entity: Some("user"),
+                ..RememberInput::text(200, "lives in Moscow now")
+            },
+        )
+        .unwrap();
+    assert_eq!(second.similar.len(), 1, "the overlap must surface");
+    assert_eq!(second.similar[0].id, first.id);
+    assert!(second.similar[0].score > 0.5);
+    assert_eq!(
+        second.similar[0].reason,
+        plugmem_core::SimilarReason::LexicalOverlap
+    );
+    // The engine did NOT revise anything by itself.
+    assert!(!mem.get(first.id).unwrap().record.is_closed());
+
+    // A different entity or unrelated text stays silent.
+    let other = mem
+        .remember(
+            &mut store,
+            RememberInput {
+                entity: Some("кот Барсик"),
+                ..RememberInput::text(300, "lives in Moscow too")
+            },
+        )
+        .unwrap();
+    assert!(other.similar.is_empty(), "different entity, no hint");
+    let unrelated = mem
+        .remember(
+            &mut store,
+            RememberInput {
+                entity: Some("user"),
+                ..RememberInput::text(400, "prefers strong coffee")
+            },
+        )
+        .unwrap();
+    assert!(unrelated.similar.is_empty(), "no lexical overlap, no hint");
+    // Closed facts are not conflict candidates: revise the first, then a
+    // third "lives in Moscow" statement flags only the live successor.
+    let successor = mem
+        .revise(
+            &mut store,
+            first.id,
+            RememberInput {
+                entity: Some("user"),
+                ..RememberInput::text(500, "lives in Moscow region")
+            },
+        )
+        .unwrap();
+    let third = mem
+        .remember(
+            &mut store,
+            RememberInput {
+                entity: Some("user"),
+                ..RememberInput::text(600, "lives in Moscow region still")
+            },
+        )
+        .unwrap();
+    let flagged: Vec<_> = third.similar.iter().map(|s| s.id).collect();
+    assert!(flagged.contains(&successor.id));
+    assert!(
+        !flagged.contains(&first.id),
+        "closed facts are history, not conflicts"
+    );
+}
+
+#[test]
+fn remember_batch_imports_and_skips_similar() {
+    let (mut mem, mut store) = engine();
+    let inputs = [
+        RememberInput {
+            entity: Some("user"),
+            ..RememberInput::text(100, "likes green tea a lot")
+        },
+        RememberInput {
+            entity: Some("user"),
+            ..RememberInput::text(200, "likes green tea very much")
+        },
+    ];
+    let outcomes = mem.remember_batch(&mut store, &inputs, true).unwrap();
+    assert_eq!(outcomes.len(), 2);
+    assert!(
+        outcomes[1].similar.is_empty(),
+        "skip_similar suppresses hints"
+    );
+    // The same near-duplicates without the skip do produce a hint.
+    let outcomes = mem
+        .remember_batch(
+            &mut store,
+            &[RememberInput {
+                entity: Some("user"),
+                ..RememberInput::text(300, "likes green tea very")
+            }],
+            false,
+        )
+        .unwrap();
+    assert!(!outcomes[0].similar.is_empty());
+    // Batch is journaled per record: reopen sees all three facts.
+    let (reopened, _) = Memory::open(&mut store, cfg()).unwrap();
+    assert_eq!(reopened.facts_len(), 3);
+}
