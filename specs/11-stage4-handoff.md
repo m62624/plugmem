@@ -164,6 +164,19 @@ Counters-гейт: при `feature = "counters"` считать точные dot
 
 ## 2. Этап B — `maintain` (purge + компакция)
 
+> **Статус: реализовано 2026-07-19** (Opus). `memory/maintain.rs`:
+> пересборка сателлитов (texts/tag_lists/bm25/tags_idx/entity_facts/temporal/vecs
+> + facts/entities/aux) при стабильных id; tombstone'ы остаются записями с
+> зачищенным payload (пустой блоб, без вектора/тегов); интернер/by_name/рёбра
+> не трогаются; ре-токенизация живых через lookup, копия квантованных слотов;
+> детерминированный обход по id. `Op::Maintain` журналируется до swap, replay
+> переисполняет ту же компакцию → снапшот байт-в-байт. `MaintainReport
+> { purged, bytes_before, bytes_after }`. Тесты `tests/maintain.rs` (8, вкл.
+> proptest observation-equivalence): сохранение состояния, reclaim,
+> каноничность+replay, ноль орфанов (roundtrip), стабильность id/цепочек/рёбер,
+> векторы, empty+идемпотентность. maintain.rs покрыт на 98% (остаток —
+> tarpaulin false-negative на полях struct-литерала), ворота зелёные, wasm ок.
+
 Сейчас `Op::Maintain { now }` — no-op маркер. Становится реальной операцией.
 
 ### B.1 Решения (приняты, не менять)

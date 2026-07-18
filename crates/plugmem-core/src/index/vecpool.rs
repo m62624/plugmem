@@ -231,6 +231,20 @@ impl VecPool {
         res
     }
 
+    /// Copies slot `i` of `src` verbatim (already quantized) into `self`,
+    /// returning its new index. Used by `maintain` compaction — the
+    /// quantized bytes are reproduced exactly, so a compacted snapshot is
+    /// byte-identical to a replayed one. `src` must share this pool's `dim`.
+    pub(crate) fn copy_slot(&mut self, src: &VecPool, i: u32) -> u32 {
+        debug_assert_eq!(self.dim, src.dim, "copy_slot across differing dims");
+        let stride = self.stride();
+        let base = i as usize * stride;
+        let index = (self.bytes.len() / stride) as u32;
+        self.bytes
+            .extend_from_slice(&src.bytes[base..base + stride]);
+        index
+    }
+
     /// The exact quantized cosine of two slots by their scales and i8
     /// components.
     fn cosine_at(&self, a: usize, b: usize) -> f32 {

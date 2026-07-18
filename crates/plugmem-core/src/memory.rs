@@ -39,9 +39,11 @@ use crate::tokenizer::Tokenizer;
 /// Most recent same-entity facts examined by similar-detection.
 const SIMILAR_CANDIDATE_CAP: usize = 32;
 
+mod maintain;
 mod persist;
 mod recall;
 
+pub use maintain::MaintainReport;
 pub use recall::{RecallQuery, RecallResult, RecalledEdge, RecalledFact, source};
 
 /// Input of `remember` and `revise` (specs/05).
@@ -336,7 +338,10 @@ impl Memory {
                     report.replayed += 1;
                 }
                 Op::Maintain { .. } => {
-                    // v1 replay: the marker carries no state to reapply.
+                    // Re-execute the compaction deterministically, so a
+                    // replayed image matches one snapshotted after a live
+                    // maintain byte for byte.
+                    self.replay_maintain()?;
                     report.replayed += 1;
                 }
             }
