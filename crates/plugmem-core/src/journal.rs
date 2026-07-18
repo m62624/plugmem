@@ -76,6 +76,253 @@ pub fn encode_entry(out: &mut Vec<u8>, op: u8, payload: &[u8]) {
     out[check_pos..check_pos + 4].copy_from_slice(&check.to_le_bytes());
 }
 
+/// One decoded engine operation (specs/03 op table). `Revise` is
+/// `Remember` with `revises` set — the two share a payload, only the op
+/// byte differs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Op<'a> {
+    /// Op 1/2: a new fact (op 2 additionally closes `revises`).
+    Remember {
+        /// Host timestamp of the operation.
+        now: u64,
+        /// Resolved validity start (the engine defaults it before
+        /// journaling — replay never re-derives).
+        valid_from: u64,
+        /// Subject entity name, if any.
+        entity: Option<&'a str>,
+        /// Fact text.
+        text: &'a str,
+        /// Tags, verbatim.
+        tags: Vec<&'a str>,
+        /// `(rel, target_entity)` link pairs.
+        links: Vec<(&'a str, &'a str)>,
+        /// Predecessor being revised ([`FactId::NONE`] for op 1).
+        revises: crate::id::FactId,
+        /// The fact id assigned at execution time — authoritative on
+        /// replay.
+        assigned: crate::id::FactId,
+    },
+    /// Op 3: tombstone a fact.
+    Forget {
+        /// Host timestamp of the operation.
+        now: u64,
+        /// The fact being forgotten.
+        fact: crate::id::FactId,
+    },
+    /// Op 4: upsert a typed edge between two entities.
+    Link {
+        /// Host timestamp of the operation.
+        now: u64,
+        /// Source entity name.
+        src: &'a str,
+        /// Relation term, verbatim.
+        rel: &'a str,
+        /// Destination entity name.
+        dst: &'a str,
+        /// Provenance fact, or [`FactId::NONE`].
+        provenance: crate::id::FactId,
+    },
+    /// Op 5: marker that a maintenance pass ran at this point.
+    Maintain {
+        /// Host timestamp of the operation.
+        now: u64,
+    },
+}
+
+/// Appends a length-prefixed string (`u32 LE` + bytes).
+fn put_str(out: &mut Vec<u8>, s: &str) {
+    out.extend_from_slice(&(s.len() as u32).to_le_bytes());
+    out.extend_from_slice(s.as_bytes());
+}
+
+/// Reads a length-prefixed string; advances `at`.
+fn take_str<'a>(bytes: &'a [u8], at: &mut usize) -> Result<&'a str, Error> {
+    let len = take_u32(bytes, at)? as usize;
+    let end = at
+        .checked_add(len)
+        .filter(|&e| e <= bytes.len())
+        .ok_or(Error::Corrupt("journal string overruns its record"))?;
+    let s = core::str::from_utf8(&bytes[*at..end])
+        .map_err(|_| Error::Corrupt("journal string is not UTF-8"))?;
+    *at = end;
+    Ok(s)
+}
+
+/// Reads a `u32 LE`; advances `at`.
+fn take_u32(bytes: &[u8], at: &mut usize) -> Result<u32, Error> {
+    let end = *at + 4;
+    if end > bytes.len() {
+        return Err(Error::Corrupt("journal record truncated inside a field"));
+    }
+    let v = u32::from_le_bytes(bytes[*at..end].try_into().unwrap());
+    *at = end;
+    Ok(v)
+}
+
+/// Reads a `u64 LE`; advances `at`.
+fn take_u64(bytes: &[u8], at: &mut usize) -> Result<u64, Error> {
+    let end = *at + 8;
+    if end > bytes.len() {
+        return Err(Error::Corrupt("journal record truncated inside a field"));
+    }
+    let v = u64::from_le_bytes(bytes[*at..end].try_into().unwrap());
+    *at = end;
+    Ok(v)
+}
+
+impl<'a> Op<'a> {
+    /// Encodes the operation as one framed journal entry appended to
+    /// `out` (via [`encode_entry`]).
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        let mut payload = Vec::new();
+        let op = match self {
+            Op::Remember {
+                now,
+                valid_from,
+                entity,
+                text,
+                tags,
+                links,
+                revises,
+                assigned,
+            } => {
+                payload.extend_from_slice(&now.to_le_bytes());
+                payload.extend_from_slice(&valid_from.to_le_bytes());
+                payload.extend_from_slice(&revises.0.to_le_bytes());
+                payload.extend_from_slice(&assigned.0.to_le_bytes());
+                match entity {
+                    Some(name) => {
+                        payload.push(1);
+                        put_str(&mut payload, name);
+                    }
+                    None => payload.push(0),
+                }
+                put_str(&mut payload, text);
+                payload.push(tags.len() as u8);
+                for tag in tags {
+                    put_str(&mut payload, tag);
+                }
+                payload.push(links.len() as u8);
+                for (rel, dst) in links {
+                    put_str(&mut payload, rel);
+                    put_str(&mut payload, dst);
+                }
+                if revises.is_none() { 1 } else { 2 }
+            }
+            Op::Forget { now, fact } => {
+                payload.extend_from_slice(&now.to_le_bytes());
+                payload.extend_from_slice(&fact.0.to_le_bytes());
+                3
+            }
+            Op::Link {
+                now,
+                src,
+                rel,
+                dst,
+                provenance,
+            } => {
+                payload.extend_from_slice(&now.to_le_bytes());
+                payload.extend_from_slice(&provenance.0.to_le_bytes());
+                put_str(&mut payload, src);
+                put_str(&mut payload, rel);
+                put_str(&mut payload, dst);
+                4
+            }
+            Op::Maintain { now } => {
+                payload.extend_from_slice(&now.to_le_bytes());
+                5
+            }
+        };
+        encode_entry(out, op, &payload);
+    }
+
+    /// Decodes one operation from a scanned entry. The payload is
+    /// untrusted (the checksum guards transport integrity, not origin):
+    /// every read is bounds-checked, malformed input is
+    /// [`Error::Corrupt`], never a panic.
+    pub fn decode(op: u8, payload: &'a [u8]) -> Result<Op<'a>, Error> {
+        use crate::id::FactId;
+        let at = &mut 0usize;
+        let decoded = match op {
+            1 | 2 => {
+                let now = take_u64(payload, at)?;
+                let valid_from = take_u64(payload, at)?;
+                let revises = FactId(take_u32(payload, at)?);
+                let assigned = FactId(take_u32(payload, at)?);
+                if (op == 2) == revises.is_none() {
+                    return Err(Error::Corrupt("journal revises field disagrees with op"));
+                }
+                let entity = match payload.get(*at) {
+                    Some(0) => {
+                        *at += 1;
+                        None
+                    }
+                    Some(1) => {
+                        *at += 1;
+                        Some(take_str(payload, at)?)
+                    }
+                    _ => return Err(Error::Corrupt("journal entity flag is invalid")),
+                };
+                let text = take_str(payload, at)?;
+                let tag_cnt = *payload
+                    .get(*at)
+                    .ok_or(Error::Corrupt("journal record truncated inside a field"))?;
+                *at += 1;
+                let mut tags = Vec::with_capacity(tag_cnt as usize);
+                for _ in 0..tag_cnt {
+                    tags.push(take_str(payload, at)?);
+                }
+                let link_cnt = *payload
+                    .get(*at)
+                    .ok_or(Error::Corrupt("journal record truncated inside a field"))?;
+                *at += 1;
+                let mut links = Vec::with_capacity(link_cnt as usize);
+                for _ in 0..link_cnt {
+                    let rel = take_str(payload, at)?;
+                    let dst = take_str(payload, at)?;
+                    links.push((rel, dst));
+                }
+                Op::Remember {
+                    now,
+                    valid_from,
+                    entity,
+                    text,
+                    tags,
+                    links,
+                    revises,
+                    assigned,
+                }
+            }
+            3 => Op::Forget {
+                now: take_u64(payload, at)?,
+                fact: FactId(take_u32(payload, at)?),
+            },
+            4 => {
+                let now = take_u64(payload, at)?;
+                let provenance = FactId(take_u32(payload, at)?);
+                let src = take_str(payload, at)?;
+                let rel = take_str(payload, at)?;
+                let dst = take_str(payload, at)?;
+                Op::Link {
+                    now,
+                    src,
+                    rel,
+                    dst,
+                    provenance,
+                }
+            }
+            5 => Op::Maintain {
+                now: take_u64(payload, at)?,
+            },
+            _ => return Err(Error::Corrupt("unknown journal op")),
+        };
+        if *at != payload.len() {
+            return Err(Error::Corrupt("journal record has trailing bytes"));
+        }
+        Ok(decoded)
+    }
+}
+
 /// Scans a whole journal buffer into records (validation + tail-recovery
 /// rules in the module docs).
 pub fn scan(journal: &[u8]) -> Result<JournalScan<'_>, Error> {

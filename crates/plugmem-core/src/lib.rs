@@ -22,6 +22,7 @@ pub mod error;
 pub mod id;
 pub mod index;
 pub mod journal;
+pub mod memory;
 pub mod model;
 pub mod snapshot;
 pub mod storage;
@@ -30,6 +31,7 @@ pub mod tokenizer;
 pub use config::Config;
 pub use error::Error;
 pub use id::{EntityId, FactId, NONE_U32};
+pub use memory::{FactView, LinkInput, Memory, OpenReport, RememberInput, RememberOutcome};
 pub use model::{
     EdgeSlot, EntityByName, EntityRecord, FactAux, FactRecord, TemporalSlot, VALID_TO_OPEN,
     fact_flags,

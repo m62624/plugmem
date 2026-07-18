@@ -6,6 +6,8 @@
 
 use crate::id::FactId;
 
+extern crate alloc;
+
 /// Every way an engine call can fail.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -58,6 +60,18 @@ pub enum Error {
     /// The snapshot was written by an unknown format version.
     #[error("unsupported snapshot format version {0}")]
     UnsupportedVersion(u16),
+
+    /// An input violates a structural rule that is not a size limit
+    /// (a link without a subject entity, an empty tag, a name with no
+    /// indexable characters).
+    #[error("invalid input: {0}")]
+    Invalid(&'static str),
+
+    /// The [`Storage`](crate::storage::Storage) implementation failed;
+    /// carries the implementation error's debug rendering (the engine
+    /// stays generic and cloneable, the wrapper logs the original).
+    #[error("storage: {0}")]
+    Storage(alloc::string::String),
 
     /// An underlying storage-structure error (bubbled up from the arena
     /// layer with its context intact).
