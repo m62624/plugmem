@@ -7,6 +7,8 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Flat byte-pool storage structures for plugmem: sharded sorted arena, blob heap, chunked lists, interner."
+keywords = ["arena", "no-std", "storage", "interner", "wasm"]
+categories = ["data-structures", "memory-management", "no-std", "embedded", "wasm"]
 
 [dependencies]
 thiserror = { workspace = true }

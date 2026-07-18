@@ -7,6 +7,8 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "plugmem engine: data model, temporal facts, indexes (BM25, graph, time, vectors incl. HNSW), hybrid recall, snapshot/journal."
+keywords = ["memory", "search", "bm25", "llm", "embeddings"]
+categories = ["database-implementations", "artificial-intelligence", "text-processing", "no-std", "wasm"]
 
 [dependencies]
 plugmem-arena = { workspace = true }

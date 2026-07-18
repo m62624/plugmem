@@ -7,6 +7,8 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Native host layer for plugmem: file storage with locking, Embedder trait and HTTP embedder implementations."
+keywords = ["plugmem", "storage", "embedder", "memory", "llm"]
+categories = ["filesystem", "api-bindings", "database"]
 
 [dependencies]
 plugmem-core = { workspace = true, features = ["std"] }

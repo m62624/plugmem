@@ -7,6 +7,8 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "plugmem command-line interface."
+keywords = ["plugmem", "cli", "memory", "llm", "search"]
+categories = ["command-line-utilities", "database", "text-processing"]
 
 [[bin]]
 name = "plugmem"
