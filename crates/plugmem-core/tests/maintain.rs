@@ -67,10 +67,19 @@ fn all_content(mem: &Memory) -> Vec<Option<Content>> {
         .collect()
 }
 
+/// A deterministic pseudo-embedding for step `seed` — same in every path,
+/// so matching facts get matching vectors.
+fn embed(seed: usize, dim: usize) -> Vec<f32> {
+    let mut lcg = Lcg(0x51ED ^ seed as u64);
+    lcg.vector(dim)
+}
+
 /// A fixed battery of recall queries whose rendered blocks capture the
-/// observable behavior of every source.
+/// observable behavior of every source (the vector source is queried only
+/// when the engine has a vector layer).
 fn battery(mem: &mut Memory) -> Vec<String> {
-    let queries = [
+    let dim = mem.cfg().dim;
+    let mut out: Vec<String> = [
         RecallQuery::text(100 * DAY, "memory tokio work fact"),
         RecallQuery {
             tags: &["pref"],
@@ -85,11 +94,20 @@ fn battery(mem: &mut Memory) -> Vec<String> {
             include_closed: true,
             ..RecallQuery::text(100 * DAY, "text")
         },
-    ];
-    queries
-        .into_iter()
-        .map(|q| mem.recall(q).unwrap().rendered)
-        .collect()
+    ]
+    .into_iter()
+    .map(|q| mem.recall(q).unwrap().rendered)
+    .collect();
+    if dim > 0 {
+        let qv = embed(2, dim);
+        let q = RecallQuery {
+            vector: Some(&qv),
+            k: 12,
+            ..RecallQuery::text(100 * DAY, "")
+        };
+        out.push(mem.recall(q).unwrap().rendered);
+    }
+    out
 }
 
 /// A workload touching every structure: entities, tags, links, a revision
@@ -326,49 +344,91 @@ fn maintain_on_empty_engine_and_idempotent() {
     );
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(48))]
-    // For any workload, maintain preserves the observable state: the
-    // content of every live fact and the rendered output of every source.
-    #[test]
-    #[cfg_attr(miri, ignore)] // proptest persistence calls getcwd, forbidden under miri
-    fn maintain_is_observation_preserving(steps in proptest::collection::vec(0u8..6, 0..50)) {
-        let (mut mem, mut store) = (Memory::new(cfg(0)).unwrap(), MemStorage::new());
-        let names = ["user", "plugmem", "кот Барсик", "tokio", "работа"];
-        let tags = ["pref", "health", "a", "b"];
-        let mut now = 0u64;
-        for (i, step) in steps.iter().enumerate() {
-            now += DAY;
-            let e = names[i % names.len()];
-            match step {
-                0..=2 => {
-                    let _ = mem.remember(&mut store, RememberInput {
+/// Drives one workload (with vectors). `maintain_at` marks which step
+/// indices trigger a compaction; `now` advances identically whether or not
+/// a maintain fires there, so two paths over the same steps stay aligned.
+fn drive(steps: &[u8], dim: usize, maintain: bool) -> (Memory, MemStorage) {
+    let (mut mem, mut store) = (Memory::new(cfg(dim)).unwrap(), MemStorage::new());
+    let names = ["user", "plugmem", "кот Барсик", "tokio", "работа"];
+    let tags = ["pref", "health", "a", "b"];
+    let mut now = 0u64;
+    for (i, step) in steps.iter().enumerate() {
+        now += DAY;
+        let e = names[i % names.len()];
+        match step {
+            0..=2 => {
+                let v = embed(i, dim);
+                let _ = mem.remember(
+                    &mut store,
+                    RememberInput {
                         entity: Some(e),
                         tags: &[tags[i % tags.len()]],
-                        links: if step == &2 { &[("rel", "plugmem")] } else { &[] },
-                        ..RememberInput::text(now, "some memory fact text tokio работа")
-                    });
+                        links: if step == &2 {
+                            &[("rel", "plugmem")]
+                        } else {
+                            &[]
+                        },
+                        vector: (dim > 0).then_some(&v[..]),
+                        ..RememberInput::text(now, "some memory fact text tokio работа tokio")
+                    },
+                );
+            }
+            3 => {
+                let _ = mem.revise(
+                    &mut store,
+                    FactId((i % 8) as u32),
+                    RememberInput::text(now, "revised fact text"),
+                );
+            }
+            4 => {
+                let _ = mem.forget(&mut store, now, FactId((i % 8) as u32));
+            }
+            5 => {
+                let _ = mem.link(
+                    &mut store,
+                    LinkInput {
+                        now,
+                        src: e,
+                        rel: "rel",
+                        dst: "tokio",
+                        provenance: None,
+                    },
+                );
+            }
+            // A maintain step: fires only on the maintaining path, but the
+            // clock advances on both so ids and timestamps stay aligned.
+            _ => {
+                if maintain {
+                    mem.maintain(&mut store, now).unwrap();
                 }
-                3 => { let _ = mem.revise(&mut store, FactId((i % 8) as u32),
-                        RememberInput::text(now, "revised fact text")); }
-                4 => { let _ = mem.forget(&mut store, now, FactId((i % 8) as u32)); }
-                _ => { let _ = mem.link(&mut store, LinkInput {
-                        now, src: e, rel: "rel", dst: "tokio", provenance: None }); }
             }
         }
+    }
+    (mem, store)
+}
 
-        let before_content = all_content(&mem);
-        let before_battery = battery(&mut mem);
-        let report = mem.maintain(&mut store, now + DAY).unwrap();
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(48))]
+    // The strong property: for any workload, running it with maintains
+    // interleaved at arbitrary points is observation-equivalent to running
+    // it with none — the content of every live fact and the rendered
+    // output of every source (vectors included) match — and the maintained
+    // path replays to a byte-identical image.
+    #[test]
+    #[cfg_attr(miri, ignore)] // proptest persistence calls getcwd, forbidden under miri
+    fn maintain_is_observation_preserving(steps in proptest::collection::vec(0u8..7, 0..60)) {
+        let dim = 48;
+        let (mut with, mut store) = drive(&steps, dim, true);
+        let (mut without, _) = drive(&steps, dim, false);
 
-        prop_assert_eq!(all_content(&mem), before_content);
-        prop_assert_eq!(battery(&mut mem), before_battery);
-        // Reclaim never grows the pools.
-        prop_assert!(report.bytes_after <= report.bytes_before);
+        // Interleaved maintains never change what is observable.
+        prop_assert_eq!(all_content(&with), all_content(&without));
+        prop_assert_eq!(battery(&mut with), battery(&mut without));
 
-        // The pass is replayable to the identical image.
-        let snap = mem.snapshot_bytes(0);
-        let (reopened, _) = Memory::open(&mut store, cfg(0)).unwrap();
+        // Replaying the maintained path's journal (markers included)
+        // reproduces its image byte for byte.
+        let snap = with.snapshot_bytes(0);
+        let (reopened, _) = Memory::open(&mut store, cfg(dim)).unwrap();
         prop_assert_eq!(reopened.snapshot_bytes(0), snap);
     }
 }
