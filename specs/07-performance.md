@@ -109,7 +109,11 @@ size) -> impl Iterator<Item = Op>` (операции, не состояние �
 - **Property-тесты (proptest)** — на каждую структуру эквивалентность
   референс-модели (перечислены в спеках 01–04).
 - **miri** — весь plugmem-arena + unsafe-пути core, еженедельный полный прогон
-  + обязательный на PR, трогающий unsafe.
+  + обязательный на PR, трогающий unsafe. Механика: miri — интерпретатор MIR
+  (замедление ×100–500), поэтому объёмные сдвиговые стресс-тесты помечены
+  `#[cfg_attr(miri, ignore)]` (UB-пути покрыты малыми тестами тех же ветвей).
+  Property-тесты под miri тоже игнорируются: харнесс proptest ходит в ОС
+  (getcwd для persistence упавших кейсов), что запрещено изоляцией miri.
 - **Fuzz (cargo-fuzz, nightly job)**: снапшот-загрузчик (произвольные байты →
   только Err), журнал-реплей, токенизатор, разбор RecallQuery из MCP.
   Любая паника/UB из fuzz = P0-баг.
@@ -119,8 +123,13 @@ size) -> impl Iterator<Item = Op>` (операции, не состояние �
 
 ## 8. Состав CI (PR-гейты)
 
-1. fmt + clippy (deny warnings) — весь workspace.
-2. Тесты native (stable) + доктесты.
+1. fmt + clippy (deny warnings) — весь workspace, **матрица фич** для
+   библиотек: `default` / `--no-default-features` /
+   `--no-default-features --features counters` / `--features counters`
+   (проверено руками 2026-07-18: все 4 комбинации по нулям; фичи меняют
+   набор компилируемого кода, clippy одной комбинации не ловит остальные).
+2. Тесты native (stable) + доктесты — тоже в обеих feature-конфигурациях
+   (`default` и `--features counters`).
 3. Тесты core под wasmtime; build `wasm32v1-none`.
 4. Perf-гейты (счётчики) — корпус S в PR (быстро), M — в merge-queue/nightly.
 5. Zero-alloc тест.

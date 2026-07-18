@@ -114,6 +114,10 @@ fn run_model(mode: ShardMode, shards: usize, ops: Vec<Op>) {
 proptest! {
     /// Uniform sharding: the general-purpose lookup configuration.
     #[test]
+    // proptest's harness calls into the OS (cwd for failure
+    // persistence), which miri's isolation forbids; UB-paths are covered
+    // by the boundary tests.
+    #[cfg_attr(miri, ignore)]
     fn behaves_like_btreemap_uniform(ops in proptest::collection::vec(op_strategy(), 1..400)) {
         run_model(ShardMode::Uniform, 64, ops);
     }
@@ -121,6 +125,10 @@ proptest! {
     /// Ordered sharding, several shards: iteration must additionally be
     /// globally key-ascending (checked implicitly: BTreeMap order == sorted).
     #[test]
+    // proptest's harness calls into the OS (cwd for failure
+    // persistence), which miri's isolation forbids; UB-paths are covered
+    // by the boundary tests.
+    #[cfg_attr(miri, ignore)]
     fn behaves_like_btreemap_ordered(ops in proptest::collection::vec(op_strategy(), 1..400)) {
         let mut arena = Arena::<Rec>::new(ArenaCfg::new(16, ShardMode::Ordered)).unwrap();
         let mut model: BTreeMap<u32, u8> = BTreeMap::new();
@@ -140,6 +148,10 @@ proptest! {
     /// A single shard is the stress case for in-page shifting: every key
     /// lands in one page, so inserts/removes constantly move memory.
     #[test]
+    // proptest's harness calls into the OS (cwd for failure
+    // persistence), which miri's isolation forbids; UB-paths are covered
+    // by the boundary tests.
+    #[cfg_attr(miri, ignore)]
     fn behaves_like_btreemap_single_shard(ops in proptest::collection::vec(op_strategy(), 1..300)) {
         run_model(ShardMode::Ordered, 1, ops);
     }

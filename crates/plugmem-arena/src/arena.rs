@@ -21,6 +21,7 @@ use core::marker::PhantomData;
 #[cfg(feature = "counters")]
 use core::cell::Cell;
 
+use crate::error::Error;
 use crate::slot::Slot;
 
 /// Size of one arena page in bytes.
@@ -107,34 +108,6 @@ impl Default for ArenaCfg {
     fn default() -> Self {
         Self::new(1024, ShardMode::Uniform)
     }
-}
-
-/// Errors returned by arena operations. No arena operation panics on
-/// resource exhaustion — capacity problems are always typed errors.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum Error {
-    /// Growing the pool would exceed [`ArenaCfg::max_bytes`].
-    #[error("arena capacity exceeded: pool would grow past {max_bytes} bytes")]
-    CapacityExceeded {
-        /// The configured ceiling that would have been crossed.
-        max_bytes: usize,
-    },
-    /// The [`Slot`] layout constants are invalid.
-    #[error(
-        "invalid slot layout: size {size}, key_len {key_len} (require 1 <= key_len <= size <= {PAGE_BYTES})"
-    )]
-    BadSlot {
-        /// Declared [`Slot::SIZE`].
-        size: usize,
-        /// Declared [`Slot::KEY_LEN`].
-        key_len: usize,
-    },
-    /// [`ArenaCfg::shards`] is not a non-zero power of two.
-    #[error("shard count must be a non-zero power of two, got {got}")]
-    BadShardCount {
-        /// The rejected shard count.
-        got: usize,
-    },
 }
 
 /// Deterministic work counters (feature `counters`).

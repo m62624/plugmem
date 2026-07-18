@@ -20,6 +20,15 @@
 //!    equal the numeric comparison of its source value, so binary search and
 //!    ordered iteration work directly on raw bytes. Helpers live in [`key`].
 //!
+//! # The four structures
+//!
+//! | Structure | Shape | Typical use |
+//! |---|---|---|
+//! | [`Arena`] | sorted fixed-size records, sharded 4 KiB pages | primary record store, ordered indexes |
+//! | [`BlobHeap`] | append-only variable-length blobs, dense ids | texts, names, raw vectors |
+//! | [`ChunkPool`] | many small growable lists over 64-byte chunks | posting lists, adjacency lists |
+//! | [`Interner`] | string -> dense `u32` (heap + flat hash table) | terms, tags, entity names |
+//!
 //! # Quick start
 //!
 //! ```
@@ -93,9 +102,17 @@ extern crate std;
 pub mod key;
 
 mod arena;
+mod blob;
+mod chunk;
+mod error;
+mod interner;
 mod slot;
 
-pub use arena::{Arena, ArenaCfg, Error, Iter, PAGE_BYTES, ShardMode};
+pub use arena::{Arena, ArenaCfg, Iter, PAGE_BYTES, ShardMode};
+pub use blob::{BlobHeap, BlobHeapCfg, BlobId};
+pub use chunk::{CHUNK_BYTES, CHUNK_PAYLOAD, ChunkIter, ChunkPool, ChunkPoolCfg, ListHandle};
+pub use error::Error;
+pub use interner::{Interner, TermId};
 pub use slot::Slot;
 
 #[cfg(feature = "counters")]

@@ -273,6 +273,9 @@ fn full_page_splits_instead_of_failing() {
 }
 
 #[test]
+// Heavy shift workload: minutes under the miri interpreter; the same
+// code paths are exercised by the small tests above.
+#[cfg_attr(miri, ignore)]
 fn descending_and_interleaved_inserts_split_correctly() {
     // Descending order forces every insert to position 0 — splits happen at
     // the front repeatedly; then a second pass fills the gaps (odd ids) so
@@ -290,6 +293,9 @@ fn descending_and_interleaved_inserts_split_correctly() {
 }
 
 #[test]
+// Heavy shift workload: minutes under the miri interpreter; the same
+// code paths are exercised by the small tests above.
+#[cfg_attr(miri, ignore)]
 fn stress_against_btreemap_with_splits_and_removals() {
     // Deterministic xorshift workload big enough to force many splits and
     // page recyclings in a single shard; lockstep with a BTreeMap.
@@ -324,6 +330,9 @@ fn stress_against_btreemap_with_splits_and_removals() {
 }
 
 #[test]
+// Heavy shift workload: minutes under the miri interpreter; the same
+// code paths are exercised by the small tests above.
+#[cfg_attr(miri, ignore)]
 fn emptied_pages_are_recycled_through_the_free_list() {
     let mut a = ordered_arena(1);
     let n = Arena::<Rec>::slots_per_page() as u32 * 4;
@@ -349,6 +358,9 @@ fn emptied_pages_are_recycled_through_the_free_list() {
 }
 
 #[test]
+// Heavy shift workload: minutes under the miri interpreter; the same
+// code paths are exercised by the small tests above.
+#[cfg_attr(miri, ignore)]
 fn removing_a_middle_page_keeps_the_chain_intact() {
     let mut a = ordered_arena(1);
     let slots = Arena::<Rec>::slots_per_page() as u32;
@@ -630,7 +642,7 @@ fn error_display_messages_are_stable() {
     // humans and agents), so pin them.
     assert_eq!(
         Error::CapacityExceeded { max_bytes: 4095 }.to_string(),
-        "arena capacity exceeded: pool would grow past 4095 bytes"
+        "capacity exceeded: pool would grow past 4095 bytes"
     );
     assert_eq!(
         Error::BadShardCount { got: 3 }.to_string(),
@@ -643,6 +655,18 @@ fn error_display_messages_are_stable() {
         }
         .to_string()
         .starts_with("invalid slot layout")
+    );
+    assert_eq!(
+        Error::BlobTooLarge {
+            len: 9,
+            max_blob: 8
+        }
+        .to_string(),
+        "blob of 9 bytes exceeds the configured max_blob of 8 bytes"
+    );
+    assert_eq!(
+        Error::ValueTooLarge { len: 61 }.to_string(),
+        "value of 61 bytes exceeds the chunk payload of 60 bytes"
     );
 }
 
