@@ -102,6 +102,32 @@ impl ListHandle {
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
+
+    /// Serializes the handle into 12 bytes: `[head BE | tail BE | len BE]`.
+    ///
+    /// This is the *stable* wire form — owners embed handles inside their
+    /// own fixed-size records (and, later, snapshots), so the encoding is
+    /// part of the crate's format contract and is fixed by tests.
+    pub fn to_bytes(self) -> [u8; 12] {
+        let mut out = [0u8; 12];
+        out[0..4].copy_from_slice(&self.head.to_be_bytes());
+        out[4..8].copy_from_slice(&self.tail.to_be_bytes());
+        out[8..12].copy_from_slice(&self.len.to_be_bytes());
+        out
+    }
+
+    /// Inverse of [`ListHandle::to_bytes`].
+    ///
+    /// The bytes are trusted bookkeeping, not validated content: a handle
+    /// is only meaningful with the pool that produced it (same rule as the
+    /// in-memory value — see the type docs).
+    pub fn from_bytes(bytes: [u8; 12]) -> Self {
+        Self {
+            head: u32::from_be_bytes(bytes[0..4].try_into().unwrap()),
+            tail: u32::from_be_bytes(bytes[4..8].try_into().unwrap()),
+            len: u32::from_be_bytes(bytes[8..12].try_into().unwrap()),
+        }
+    }
 }
 
 impl Default for ListHandle {

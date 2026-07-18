@@ -14,10 +14,17 @@ thiserror = { workspace = true }
 xxhash-rust = { workspace = true }
 hashbrown = { workspace = true }
 
-[dev-dependencies]
+# Gated off wasm targets: proptest's harness (via wait-timeout) does not
+# compile there, and `cargo build --examples/--benches` for wasm would pull
+# dev-deps in.
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 proptest = { workspace = true }
 criterion = { workspace = true }
 insta = { workspace = true }
+
+[[bench]]
+name = "engine"
+harness = false
 
 [features]
 default = ["std"]

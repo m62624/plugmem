@@ -196,6 +196,35 @@ fn cfg_default_and_builder() {
     assert_eq!(ChunkPoolCfg::new().with_max_bytes(64).max_bytes, 64);
 }
 
+#[test]
+fn handle_byte_encoding_is_stable() {
+    // The wire form is a format contract: [head BE | tail BE | len BE].
+    // EMPTY has head = tail = NONE (u32::MAX) and len = 0.
+    assert_eq!(
+        ListHandle::EMPTY.to_bytes(),
+        [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0]
+    );
+    assert_eq!(
+        ListHandle::from_bytes(ListHandle::EMPTY.to_bytes()),
+        ListHandle::EMPTY
+    );
+
+    // A populated handle survives the roundtrip and keeps working with its
+    // pool: chunk 0 is both head and tail after two small pushes.
+    let mut pool = ChunkPool::new(ChunkPoolCfg::new());
+    let mut list = ListHandle::EMPTY;
+    pool.push(&mut list, b"ab").unwrap();
+    pool.push(&mut list, b"cd").unwrap();
+    let restored = ListHandle::from_bytes(list.to_bytes());
+    assert_eq!(restored, list);
+    assert_eq!(
+        list.to_bytes(),
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
+        "head = tail = chunk 0, len = 2"
+    );
+    assert_eq!(bytes_of(&pool, &restored), b"abcd");
+}
+
 /// One step of the property workload.
 #[derive(Debug, Clone)]
 enum Op {

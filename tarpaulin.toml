@@ -35,6 +35,12 @@ exclude-files = [
     "crates/plugmem-mcp/*",
     "crates/plugmem-wasm/*",
     "crates/*/tests/*",
+    # The cross-runtime reproduction stand and its runner: measurement
+    # tooling, not the library under test. The stand is exercised by
+    # actually running the bench matrix (native + wasm runtimes), which
+    # tarpaulin's ptrace engine cannot attribute anyway.
+    "crates/*/examples/*",
+    "tools/bench-matrix/*",
     # Legacy reference sources: not a workspace member, never measured.
     "reference/*",
 ]
