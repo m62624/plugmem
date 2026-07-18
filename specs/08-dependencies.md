@@ -14,6 +14,7 @@
 | `hashbrown` | 0.17.1 | `default-features = false` | ✅ собран | **только скретч-структуры запросов** (аккумулятор BM25 и т.п.); в персистентных данных запрещён (принцип плоских арен) |
 | `unicode-segmentation` | 1.13.3 | `default-features = false` | ✅ собран (2026-07-18) | UAX #29 word boundaries токенизатора v2 |
 | `unicode-normalization` | 0.1.25 | `default-features = false` | ✅ собран (2026-07-18) | NFKC + канонич. декомпозиция (фолдинг диакритики) |
+| `libm` | 0.2.16 | `default-features = false` | ✅ собран (2026-07-18) | float-математика BM25/recency в no_std |
 | — baseline | — | пустой `#![no_std]` крейт | ✅ собран | контроль методики |
 
 Цена unicode-таблиц в wasm-бинаре измерена минимальным cdylib-пробником

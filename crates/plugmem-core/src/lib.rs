@@ -20,6 +20,7 @@ extern crate std;
 pub mod config;
 pub mod error;
 pub mod id;
+pub mod index;
 pub mod journal;
 pub mod model;
 pub mod snapshot;

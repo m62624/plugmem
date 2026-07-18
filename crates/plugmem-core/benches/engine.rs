@@ -78,5 +78,118 @@ fn bench_record_codec(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_tokenizer, bench_record_codec);
+/// Deterministic pseudo-random u64 stream.
+fn xorshift(seed: u64) -> impl FnMut() -> u64 {
+    let mut s = seed;
+    move || {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        s
+    }
+}
+
+/// A skewed synthetic corpus: `docs` documents of `terms_per_doc` terms
+/// drawn from a 3000-term vocabulary with a power-law bias (common terms
+/// dominate, as in real text).
+fn corpus(docs: usize, terms_per_doc: usize) -> Vec<Vec<(u32, u8)>> {
+    const VOCAB: u64 = 3000;
+    let mut rng = xorshift(0xC0FF_EE00_0000_0001);
+    (0..docs)
+        .map(|_| {
+            let mut tfs: Vec<(u32, u8)> = Vec::with_capacity(terms_per_doc);
+            for _ in 0..terms_per_doc {
+                let r = (rng() % 10_000) as f32 / 10_000.0;
+                let term = ((r * r * r) * VOCAB as f32) as u32;
+                match tfs.iter_mut().find(|(t, _)| *t == term) {
+                    Some((_, tf)) => *tf = tf.saturating_add(1),
+                    None => tfs.push((term, 1)),
+                }
+            }
+            tfs
+        })
+        .collect()
+}
+
+fn bench_bm25(c: &mut Criterion) {
+    use plugmem_core::index::bm25::{Bm25Index, Bm25Scratch};
+
+    let mut g = c.benchmark_group("bm25");
+    const DOCS: usize = 10_000;
+    let docs = corpus(DOCS, 8);
+    g.throughput(Throughput::Elements(DOCS as u64));
+    g.bench_function("index_10k_docs", |b| {
+        b.iter(|| {
+            let mut idx = Bm25Index::new(2048, usize::MAX).unwrap();
+            for (fact, terms) in docs.iter().enumerate() {
+                idx.index_doc(plugmem_core::FactId(fact as u32), terms)
+                    .unwrap();
+            }
+            idx
+        });
+    });
+    let mut idx = Bm25Index::new(2048, usize::MAX).unwrap();
+    for (fact, terms) in docs.iter().enumerate() {
+        idx.index_doc(plugmem_core::FactId(fact as u32), terms)
+            .unwrap();
+    }
+    // A mixed query: one very common term, one mid, one rare.
+    let query = [1u32, 400, 2500];
+    let mut scratch = Bm25Scratch::new();
+    let mut out = Vec::new();
+    g.throughput(Throughput::Elements(1));
+    g.bench_function("search_3_terms_of_10k", |b| {
+        b.iter(|| {
+            idx.search(
+                (1.2, 0.75),
+                black_box(&query),
+                8,
+                &mut |_| true,
+                &mut scratch,
+                &mut out,
+            );
+            out.len()
+        });
+    });
+    g.finish();
+}
+
+fn bench_idlist(c: &mut Criterion) {
+    use plugmem_core::index::{IdListIndex, IntersectScratch, intersect};
+
+    let mut g = c.benchmark_group("idlist");
+    // Three tag lists over 100k facts: 10%, 5% and 2% selectivity.
+    let mut idx = IdListIndex::new(512, usize::MAX).unwrap();
+    let mut rng = xorshift(0x7A67_0000_0000_0001);
+    for id in 0..100_000u32 {
+        let r = rng();
+        if r.is_multiple_of(10) {
+            idx.push(1, plugmem_core::FactId(id), 0).unwrap();
+        }
+        if r.is_multiple_of(20) {
+            idx.push(2, plugmem_core::FactId(id), 0).unwrap();
+        }
+        if r.is_multiple_of(50) {
+            idx.push(3, plugmem_core::FactId(id), 0).unwrap();
+        }
+    }
+    let mut scratch = IntersectScratch::new();
+    let mut out = Vec::new();
+    g.throughput(Throughput::Elements(1));
+    g.bench_function("intersect_3_tags_of_100k", |b| {
+        b.iter(|| {
+            intersect(&idx, black_box(&[1, 2, 3]), &mut scratch, &mut out);
+            out.len()
+        });
+    });
+    g.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_tokenizer,
+    bench_record_codec,
+    bench_bm25,
+    bench_idlist
+);
 criterion_main!(benches);
