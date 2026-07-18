@@ -12,8 +12,8 @@ use core::hint::black_box;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use plugmem_arena::{
-    Arena, ArenaCfg, BlobHeapCfg, ChunkPool, ChunkPoolCfg, Interner, ListHandle, ShardMode, Slot,
-    key,
+    Arena, ArenaCfg, BlobHeap, BlobHeapCfg, BlobId, ChunkPool, ChunkPoolCfg, Interner, ListHandle,
+    ShardMode, Slot, key,
 };
 
 /// A realistic 16-byte record: 12-byte composite key `[u64 | u32]` (entity
@@ -206,6 +206,44 @@ fn bench_interner(c: &mut Criterion) {
     g.finish();
 }
 
+fn bench_blob_heap(c: &mut Criterion) {
+    let mut g = c.benchmark_group("blob_heap");
+    const N: usize = 100_000;
+    let mut rng = xorshift(0x0B10_B0B5_0000_0001);
+    let blobs: Vec<Vec<u8>> = (0..N)
+        .map(|_| {
+            let len = 16 + (rng() % 185) as usize;
+            (0..len).map(|i| i as u8).collect()
+        })
+        .collect();
+    g.throughput(Throughput::Elements(N as u64));
+    g.bench_function("push_100k_var_len", |b| {
+        b.iter(|| {
+            let mut h = BlobHeap::new(BlobHeapCfg::new());
+            for blob in &blobs {
+                h.push(blob).unwrap();
+            }
+            h
+        });
+    });
+    let mut heap = BlobHeap::new(BlobHeapCfg::new());
+    for blob in &blobs {
+        heap.push(blob).unwrap();
+    }
+    let ids: Vec<u32> = (0..10_000).map(|_| (rng() % N as u64) as u32).collect();
+    g.throughput(Throughput::Elements(ids.len() as u64));
+    g.bench_function("get_10k", |b| {
+        b.iter(|| {
+            let mut acc = 0usize;
+            for &id in &ids {
+                acc += heap.get(BlobId(id)).len();
+            }
+            acc
+        });
+    });
+    g.finish();
+}
+
 fn bench_chunk_pool(c: &mut Criterion) {
     let mut g = c.benchmark_group("chunk_pool");
     const N: usize = 100_000;
@@ -248,6 +286,7 @@ criterion_group!(
     bench_arena_get,
     bench_arena_range,
     bench_interner,
+    bench_blob_heap,
     bench_chunk_pool
 );
 criterion_main!(benches);

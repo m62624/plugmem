@@ -41,7 +41,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use plugmem_arena::{Arena, ArenaCfg, ShardMode, Slot, key};
+use plugmem_arena::{
+    Arena, ArenaCfg, BlobHeap, BlobHeapCfg, BlobId, ChunkPool, ChunkPoolCfg, Interner, ListHandle,
+    ShardMode, Slot, TermId, key,
+};
 
 // --- counting allocator ---------------------------------------------------
 
@@ -81,6 +84,21 @@ struct AllocStat {
     calls: usize,
     peak: usize,
     retained: usize,
+}
+
+impl AllocStat {
+    /// Rescales the byte counters so the per-N report reads per stored
+    /// item instead (used when stored items != stream length, e.g. the
+    /// interner keeps only distinct terms). Call counts stay as measured.
+    fn scaled(self, items: usize, n: usize) -> Self {
+        // u128: `bytes * n` overflows a 32-bit usize on wasm32.
+        let per = |v: usize| (v as u128 * n as u128 / items.max(1) as u128) as usize;
+        Self {
+            calls: self.calls,
+            peak: per(self.peak),
+            retained: per(self.retained),
+        }
+    }
 }
 
 /// Runs `f` with the allocator counters scoped to it.
@@ -446,6 +464,209 @@ fn main() {
             scan_ns: None,
             tail: Some(tail),
             alloc: None,
+        });
+    }
+
+    // === companion structures vs their std-class baselines =================
+    // Metrics reuse the same keys: insert_ns = push/intern (per stream
+    // element), get_ns = get/resolve (per lookup), scan_ns = full iteration
+    // (per element), mem/allocs = build stats. Memory is per *stored* item
+    // (blobs / values / distinct terms).
+
+    // --- BlobHeap vs Vec<Vec<u8>>: append-only blob storage ---------------
+    {
+        // Variable-length blobs, 16..=200 bytes (avg ~108), deterministic.
+        let mut rng = xorshift(0x0B10_B0B5_0000_0001);
+        let blobs: Vec<Vec<u8>> = (0..n)
+            .map(|_| {
+                let len = 16 + (rng() % 185) as usize;
+                (0..len).map(|i| i as u8).collect()
+            })
+            .collect();
+        let ids: Vec<u32> = (0..LOOKUPS).map(|_| (rng() % n as u64) as u32).collect();
+
+        let build = || {
+            let mut h = BlobHeap::new(BlobHeapCfg::new());
+            for b in &blobs {
+                h.push(b).unwrap();
+            }
+            h
+        };
+        let insert_ns = best_ns(build);
+        let (heap, alloc) = with_alloc_stats(build);
+        let get_ns = best_ns(|| {
+            let mut acc = 0usize;
+            for &id in &ids {
+                acc += heap.get(BlobId(id)).len();
+            }
+            acc
+        });
+        rows.push(Row {
+            name: "plugmem BlobHeap",
+            insert_ns: Some(insert_ns),
+            get_ns: Some(get_ns),
+            scan_ns: None,
+            tail: None,
+            alloc: Some(alloc),
+        });
+
+        let build_std = || {
+            let mut v: Vec<Vec<u8>> = Vec::new();
+            for b in &blobs {
+                v.push(b.clone()); // one heap allocation per blob
+            }
+            v
+        };
+        let insert_ns = best_ns(build_std);
+        let (vecs, alloc) = with_alloc_stats(build_std);
+        let get_ns = best_ns(|| {
+            let mut acc = 0usize;
+            for &id in &ids {
+                acc += vecs[id as usize].len();
+            }
+            acc
+        });
+        rows.push(Row {
+            name: "Vec<Vec<u8>> (blob baseline)",
+            insert_ns: Some(insert_ns),
+            get_ns: Some(get_ns),
+            scan_ns: None,
+            tail: None,
+            alloc: Some(alloc),
+        });
+    }
+
+    // --- ChunkPool vs one Vec<u8> per list: many small lists --------------
+    {
+        const LISTS: usize = 1024;
+        let values: Vec<[u8; 8]> = keys.iter().map(|k| k.to_be_bytes()).collect();
+
+        let build = || {
+            let mut pool = ChunkPool::new(ChunkPoolCfg::new());
+            let mut lists = vec![ListHandle::EMPTY; LISTS];
+            for (i, v) in values.iter().enumerate() {
+                pool.push(&mut lists[i % LISTS], v).unwrap();
+            }
+            (pool, lists)
+        };
+        let insert_ns = best_ns(build);
+        let ((pool, lists), alloc) = with_alloc_stats(build);
+        // Iteration sums every byte on both sides, so the chain-hop cost
+        // of the pool is compared against a contiguous slice doing the
+        // same work; the total is normalized to read per *value* after
+        // emit's division by SCAN.
+        let scan_total = best_ns(|| {
+            let mut acc = 0usize;
+            for list in &lists {
+                for chunk in pool.iter(list) {
+                    for &b in chunk {
+                        acc += b as usize;
+                    }
+                }
+            }
+            acc
+        });
+        rows.push(Row {
+            name: "plugmem ChunkPool",
+            insert_ns: Some(insert_ns),
+            get_ns: None,
+            scan_ns: Some(scan_total * SCAN as u64 / n as u64),
+            tail: None,
+            alloc: Some(alloc),
+        });
+
+        let build_std = || {
+            let mut lists: Vec<Vec<u8>> = vec![Vec::new(); LISTS];
+            for (i, v) in values.iter().enumerate() {
+                lists[i % LISTS].extend_from_slice(v);
+            }
+            lists
+        };
+        let insert_ns = best_ns(build_std);
+        let (std_lists, alloc) = with_alloc_stats(build_std);
+        let scan_total = best_ns(|| {
+            let mut acc = 0usize;
+            for list in &std_lists {
+                for &b in list {
+                    acc += b as usize;
+                }
+            }
+            acc
+        });
+        rows.push(Row {
+            name: "Vec<u8> per list (chunk baseline)",
+            insert_ns: Some(insert_ns),
+            get_ns: None,
+            scan_ns: Some(scan_total * SCAN as u64 / n as u64),
+            tail: None,
+            alloc: Some(alloc),
+        });
+    }
+
+    // --- Interner vs HashMap<String,u32> + Vec<String> --------------------
+    {
+        // Vocabulary of n/10 distinct terms; the stream draws uniformly, so
+        // ~90% of intern calls are hits after warm-up (the realistic mix).
+        let vocab = (n / 10).max(1);
+        let mut rng = xorshift(0x1234_5678_9ABC_DEF0);
+        let words: Vec<String> = (0..n)
+            .map(|_| format!("term-{}", rng() % vocab as u64))
+            .collect();
+
+        let build = || {
+            let mut it = Interner::new(BlobHeapCfg::new());
+            for w in &words {
+                it.intern(w).unwrap();
+            }
+            it
+        };
+        let insert_ns = best_ns(build);
+        let (interner, alloc) = with_alloc_stats(build);
+        let distinct = interner.len();
+        let resolve_ids: Vec<u32> = (0..LOOKUPS).map(|i| (i % distinct) as u32).collect();
+        let get_ns = best_ns(|| {
+            let mut acc = 0usize;
+            for &id in &resolve_ids {
+                acc += interner.resolve(TermId(id)).len();
+            }
+            acc
+        });
+        rows.push(Row {
+            name: "plugmem Interner",
+            insert_ns: Some(insert_ns),
+            get_ns: Some(get_ns),
+            scan_ns: None,
+            tail: None,
+            alloc: Some(alloc.scaled(distinct, n)),
+        });
+
+        let build_std = || {
+            let mut map: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+            let mut names: Vec<String> = Vec::new();
+            for w in &words {
+                if !map.contains_key(w.as_str()) {
+                    map.insert(w.clone(), names.len() as u32);
+                    names.push(w.clone());
+                }
+            }
+            (map, names)
+        };
+        let insert_ns = best_ns(build_std);
+        let ((_, names), alloc) = with_alloc_stats(build_std);
+        let get_ns = best_ns(|| {
+            let mut acc = 0usize;
+            for &id in &resolve_ids {
+                acc += names[id as usize].len();
+            }
+            acc
+        });
+        rows.push(Row {
+            name: "HashMap+Vec (intern baseline)",
+            insert_ns: Some(insert_ns),
+            get_ns: Some(get_ns),
+            scan_ns: None,
+            tail: None,
+            alloc: Some(alloc.scaled(distinct, n)),
         });
     }
 

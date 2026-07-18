@@ -194,6 +194,69 @@ during its final rehash (1.5x its retained 35.7).
   are actually needed.
 - Single-threaded by design; no concurrent access.
 
+### Companion structures
+
+The other three structures measured against the std idiom of their class
+(same stand, same runtimes, same sizes). Memory is per *stored* item;
+allocator calls are identical on every runtime.
+
+![companion structures](assets/bench-companions.svg)
+
+**BlobHeap vs `Vec<Vec<u8>>`** (100k/1M variable-length blobs, 16–200 B):
+
+| metric, @1M | BlobHeap | Vec\<Vec\<u8>> |
+|---|---|---|
+| push ns (native / wasmtime / wasmer) | 35.4 / 20.8 / 14.0 | 55.2 / 22.3 / 16.7 |
+| get ns | 1.5 / 2.7 / 2.7 | 1.6 / 1.2 / 1.2 |
+| memory B/blob | 133.2 | 133.1 native, 120.6 wasm |
+| allocator calls | **40** | **1,000,019** |
+
+Wins: 25,000x fewer allocator calls; push faster at 1M everywhere. Loses:
+at 100k under wasm the per-blob baseline pushes slightly faster (25.8 vs
+22.8 ns on wasmtime — small dlmalloc allocations are cheap, pool-doubling
+copies are not) and holds less memory (166.5 vs 123.9 B/blob at 100k:
+doubling slack; parity at 1M). The heap's case is allocator pressure plus
+the flat two-section snapshot, not raw push speed at every point.
+
+**ChunkPool vs one `Vec<u8>` per list** (1024 lists, 8-byte values,
+round-robin):
+
+| metric, @1M | ChunkPool | Vec per list |
+|---|---|---|
+| push ns (native / wasmtime / wasmer) | 4.7 / 14.5 / 6.4 | 3.9 / 3.0 / 2.3 |
+| iterate ns/value | 1.7 / 3.7 / 3.2 | 1.0 / 2.0 / 2.0 |
+| memory B/value | 17.1 | 8.4 |
+| allocator calls | **36** | **11,265** |
+
+Wins: ~300x fewer allocator calls, O(1) whole-chain free with in-pool
+recycling (no per-list `Vec` churn), snapshot as two flat sections. Loses:
+raw push is slower under wasm (14.5 vs 3.0 ns on wasmtime — chain-link
+bookkeeping vs plain `extend_from_slice`), iteration pays ~1.7x for chain
+hops, and at 1M the pool-doubling slack holds 2x the baseline's bytes
+(at 100k they are equal — the slack depends on where N lands between
+powers of two). With 1024 lists the baseline is still cheap; the pool's
+class advantage grows with the list count (a real inverted index has
+hundreds of thousands).
+
+**Interner vs `HashMap<String, u32>` + `Vec<String>`** (vocabulary = N/10
+distinct terms, uniform stream, ~90% hits):
+
+| metric, @1M | Interner | HashMap+Vec |
+|---|---|---|
+| intern ns (native / wasmtime / wasmer) | 29.3 / 47.6 / 48.0 | 44.2 / 52.9 / 50.5 |
+| resolve ns | 9.3 / 8.6 / 9.9 | 0.4 / 0.7 / 0.7 |
+| memory B/term | 34.1 | 94.5 native, 57.8 wasm |
+| allocator calls | **49** | **200,024** |
+
+Wins: intern is faster everywhere (the gap grows with N: one flat probe
+table vs per-`String` allocations), ~3x less memory per term on native,
+4,000x fewer allocator calls, both sections snapshot as-is. Loses:
+`resolve` is ~20x slower (0.4 vs 9.3 ns) — it re-validates UTF-8 on every
+call, where the baseline just indexes a `Vec<String>`. That validation is
+a deliberate safe-code choice; replacing it with `from_utf8_unchecked` is
+a candidate for a future measured-unsafe commit under the crate's policy
+(functional first, unsafe only with numbers).
+
 ## Reproduction stand
 
 Every number above is reproducible with the in-repo stand — no

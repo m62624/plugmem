@@ -71,23 +71,29 @@ fn parse(output: &str) -> Run {
 }
 
 /// Structures in display order (matches `bench_repro`).
-const STRUCTURES: [&str; 6] = [
+const STRUCTURES: [&str; 12] = [
     "plugmem Arena (Ordered)",
     "plugmem Arena (Uniform)",
     "std BTreeMap",
     "std HashMap",
     "sorted Vec (bulk)",
     "sorted Vec (incremental)",
+    "plugmem BlobHeap",
+    "Vec<Vec<u8>> (blob baseline)",
+    "plugmem ChunkPool",
+    "Vec<u8> per list (chunk baseline)",
+    "plugmem Interner",
+    "HashMap+Vec (intern baseline)",
 ];
 
 /// (metric key, display name) in display order.
 const METRICS: [(&str, &str); 9] = [
-    ("insert_ns", "insert ns/elem"),
+    ("insert_ns", "insert/push/intern ns/elem"),
     ("ins_p50", "insert latency p50 ns"),
     ("ins_p99", "insert latency p99 ns"),
     ("ins_max", "insert latency max ns"),
-    ("get_ns", "point lookup ns/op"),
-    ("scan_ns", "ordered scan ns/elem"),
+    ("get_ns", "lookup/get/resolve ns/op"),
+    ("scan_ns", "scan/iterate ns/elem"),
     ("mem_b", "retained memory B/elem"),
     ("mem_peak_b", "peak memory B/elem"),
     ("allocs", "allocator calls per build"),
