@@ -20,7 +20,9 @@ extern crate std;
 pub mod config;
 pub mod error;
 pub mod id;
+pub mod journal;
 pub mod model;
+pub mod storage;
 pub mod tokenizer;
 
 pub use config::Config;
@@ -30,6 +32,7 @@ pub use model::{
     EdgeSlot, EntityByName, EntityRecord, FactAux, FactRecord, TemporalSlot, VALID_TO_OPEN,
     fact_flags,
 };
+pub use storage::{MemStorage, Storage};
 // The arena-layer ids that appear in model records are part of this
 // crate's public surface too.
 pub use plugmem_arena::{BlobId, TermId};
