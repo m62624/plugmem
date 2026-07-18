@@ -13,6 +13,8 @@ plugmem-arena = { workspace = true }
 thiserror = { workspace = true }
 xxhash-rust = { workspace = true }
 hashbrown = { workspace = true }
+unicode-segmentation = { workspace = true }
+unicode-normalization = { workspace = true }
 
 # Gated off wasm targets: proptest's harness (via wait-timeout) does not
 # compile there, and `cargo build --examples/--benches` for wasm would pull

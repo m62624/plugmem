@@ -6,7 +6,7 @@ use core::hint::black_box;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use plugmem_arena::Slot;
-use plugmem_core::tokenizer::tokenize;
+use plugmem_core::tokenizer::Tokenizer;
 use plugmem_core::{BlobId, EntityId, FactId, FactRecord, VALID_TO_OPEN};
 
 /// A realistic mixed-language fact corpus line, ~150 bytes (the testgen
@@ -14,29 +14,38 @@ use plugmem_core::{BlobId, EntityId, FactId, FactRecord, VALID_TO_OPEN};
 const SAMPLE: &str = "User предпочитает tokio 1.47 строгим версиям — записано \
 2026-07-18; см. проект plugmem, тэги #pref #rust-42 и немного 東京 текста.";
 
+/// One tokenizer benchmark case over a reused instance.
+fn tok_case(
+    g: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    name: &str,
+    text: &str,
+) {
+    g.throughput(Throughput::Bytes(text.len() as u64));
+    g.bench_function(name, |b| {
+        let mut tk = Tokenizer::new();
+        b.iter(|| {
+            let mut n = 0usize;
+            tk.tokenize(black_box(text), &mut |t| n += t.len());
+            n
+        });
+    });
+}
+
 fn bench_tokenizer(c: &mut Criterion) {
     let mut g = c.benchmark_group("tokenizer");
-    let bytes = SAMPLE.len() as u64;
-    g.throughput(Throughput::Bytes(bytes));
-    g.bench_function("mixed_150b", |b| {
-        let mut buf = String::new();
-        b.iter(|| {
-            let mut n = 0usize;
-            tokenize(black_box(SAMPLE), &mut buf, |t| n += t.len());
-            n
-        });
-    });
-    // Pure-ASCII path (the common English case, no lowercase expansion).
-    let ascii = "the quick brown fox jumps over the lazy dog 0123456789 again and again";
-    g.throughput(Throughput::Bytes(ascii.len() as u64));
-    g.bench_function("ascii_72b", |b| {
-        let mut buf = String::new();
-        b.iter(|| {
-            let mut n = 0usize;
-            tokenize(black_box(ascii), &mut buf, |t| n += t.len());
-            n
-        });
-    });
+    tok_case(&mut g, "mixed_190b", SAMPLE);
+    // Pure-ASCII path (the common English case, no folding work).
+    tok_case(
+        &mut g,
+        "ascii_72b",
+        "the quick brown fox jumps over the lazy dog 0123456789 again and again",
+    );
+    // CJK path: bigram machine + per-char segments.
+    tok_case(
+        &mut g,
+        "cjk_60b",
+        "彼は寿司が好きだ。東京都に住んでいる。トーキョー",
+    );
     g.finish();
 }
 

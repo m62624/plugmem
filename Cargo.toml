@@ -29,6 +29,10 @@ plugmem-host = { path = "crates/plugmem-host", version = "0.1.0" }
 thiserror = { version = "2.0.18", default-features = false }
 xxhash-rust = { version = "0.8.17", default-features = false, features = ["xxh3"] }
 hashbrown = { version = "0.17.1", default-features = false }
+# Tokenizer tables (unicode-rs, pure `core`): UAX#29 word boundaries and
+# NFKC/decomposition — the same segmentation standard Lucene/ICU use.
+unicode-segmentation = { version = "1.13.3", default-features = false }
+unicode-normalization = { version = "0.1.25", default-features = false }
 
 # Wrapper dependencies (std)
 clap = { version = "4.6.2", features = ["derive"] }
