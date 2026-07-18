@@ -1,0 +1,30 @@
+{
+  "date": "2026-07-18",
+  "commit_parent": "1d84ee3",
+  "target": "native x86-64 (dev desktop)",
+  "bench": "plugmem-arena/benches/storage.rs",
+  "slot": "16B (12B key [u64|u32] + 4B payload), 1024 shards",
+  "results_ns_per_element": {
+    "arena_insert/seq/1000": 15.4,
+    "arena_insert/random/1000": 19.5,
+    "arena_insert/seq/100000": 21.1,
+    "arena_insert/random/100000": 63.3,
+    "arena_insert/seq/1000000": 58.4,
+    "arena_insert/random/1000000": 132.8,
+    "arena_get/hit/100000": 57.9,
+    "arena_get/miss/100000": 62.9,
+    "arena_get/hit/1000000": 123.9,
+    "arena_get/miss/1000000": 126.6,
+    "arena_range/scan_1k_of_100k": 4.27,
+    "interner/intern_hit_10k": 16.6,
+    "interner/intern_miss_10k": 34.8,
+    "interner/resolve_10k": 6.6,
+    "chunk_pool/push_8b_round_robin": 4.9,
+    "chunk_pool/iter_all_lists": 0.47
+  },
+  "spec_targets": {
+    "insert_ns_at_100k": 300,
+    "get_ns_at_100k": 150
+  },
+  "notes": "First baseline. All spec targets met with margin. @1M is ~2x @100k (cache + chain length), not algorithmic."
+}

@@ -40,6 +40,10 @@ const INITIAL_SLOTS: usize = 16;
 /// assert_eq!(terms.resolve(apple), "apple");
 /// assert_eq!(terms.len(), 2);
 /// ```
+///
+/// `Clone` is cheap-ish (two flat memcpys) and safe: unlike the arena, every
+/// stored byte is initialized.
+#[derive(Clone)]
 pub struct Interner {
     /// String bytes; `BlobId` values equal `TermId` values.
     heap: BlobHeap,
