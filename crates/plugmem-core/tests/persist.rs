@@ -196,3 +196,37 @@ fn empty_engine_snapshot_roundtrips() {
         .unwrap();
     assert_eq!(loaded.facts_len(), 1);
 }
+
+#[test]
+fn db_uuid_is_minted_once_and_gates_opens() {
+    let uuid = 0xDEAD_BEEF_0123_4567_89AB_CDEF_0000_0001u128;
+    let mut named = cfg();
+    named.db_uuid = uuid;
+    let (mut mem, mut store) = (Memory::new(named.clone()).unwrap(), MemStorage::new());
+    workload(&mut mem, &mut store);
+    assert_eq!(mem.stats().db_uuid, uuid);
+    mem.snapshot(&mut store, 200 * DAY).unwrap();
+    let snap = mem.snapshot_bytes(0);
+
+    // A caller passing 0 adopts the stored identity — and stays canonical.
+    let (adopted, _) = Memory::open(&mut store, cfg()).unwrap();
+    assert_eq!(adopted.stats().db_uuid, uuid);
+    assert_eq!(adopted.snapshot_bytes(0), snap);
+
+    // A matching nonzero assertion opens fine.
+    let (matched, _) = Memory::open(&mut store, named).unwrap();
+    assert_eq!(matched.stats().db_uuid, uuid);
+
+    // A different nonzero assertion is a typed refusal: wrong database.
+    let mut other = cfg();
+    other.db_uuid = uuid + 1;
+    assert_eq!(
+        Memory::open(&mut store, other).unwrap_err(),
+        Error::ConfigMismatch("stored db_uuid differs")
+    );
+
+    // The identity survives maintain and re-saves (lineage, not state).
+    let (mut kept, _) = Memory::open(&mut store, cfg()).unwrap();
+    kept.maintain(&mut store, 300 * DAY).unwrap();
+    assert_eq!(kept.stats().db_uuid, uuid);
+}

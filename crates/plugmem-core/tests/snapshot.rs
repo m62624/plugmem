@@ -3,7 +3,7 @@
 //! always a typed error, never a panic, never a silent wrong read), the
 //! truncation sweep, fast_load semantics, and the Config codec.
 
-use plugmem_core::config::ENCODED_LEN;
+use plugmem_core::config::{ENCODED_LEN, FAST_LOAD_AT, RESERVED_AT};
 use plugmem_core::snapshot::{FLAG_VECTORS, Snapshot, SnapshotWriter};
 use plugmem_core::{Config, Error};
 
@@ -215,6 +215,7 @@ fn config_codec_roundtrip() {
     cfg.bm25_b = 0.5;
     cfg.fast_load = true;
     cfg.flat_to_hnsw = 30_000;
+    cfg.db_uuid = 0x0123_4567_89AB_CDEF_0011_2233_4455_6677;
     let mut bytes = Vec::new();
     cfg.encode(&mut bytes);
     assert_eq!(bytes.len(), ENCODED_LEN);
@@ -230,13 +231,13 @@ fn config_codec_rejects_bad_input() {
         Error::Corrupt("config block length mismatch")
     );
     let mut b = bytes.clone();
-    b[164] = 2;
+    b[FAST_LOAD_AT] = 2;
     assert_eq!(
         Config::decode(&b).unwrap_err(),
         Error::Corrupt("config fast_load byte must be 0 or 1")
     );
     let mut b = bytes.clone();
-    b[171] = 1;
+    b[RESERVED_AT] = 1;
     assert_eq!(
         Config::decode(&b).unwrap_err(),
         Error::Corrupt("reserved config bytes must be zero")

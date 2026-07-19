@@ -9,8 +9,26 @@ use alloc::vec::Vec;
 
 use crate::error::Error;
 
+/// Number of `usize` fields in the encoded block (stored as `u64`).
+const USIZE_FIELDS: usize = 14;
+/// Number of `f32` fields in the encoded block.
+const F32_FIELDS: usize = 10;
+/// Number of `u32` fields in the encoded block.
+const U32_FIELDS: usize = 3;
+/// Byte offset of the `f32` field group.
+const F32S_AT: usize = USIZE_FIELDS * 8;
+/// Byte offset of the `u32` field group.
+const U32S_AT: usize = F32S_AT + F32_FIELDS * 4;
+/// Byte offset of the `db_uuid` field.
+const DB_UUID_AT: usize = U32S_AT + U32_FIELDS * 4;
+/// Byte offset of the `fast_load` flag.
+pub const FAST_LOAD_AT: usize = DB_UUID_AT + 16;
+/// Byte offset of the reserved zero tail.
+pub const RESERVED_AT: usize = FAST_LOAD_AT + 1;
+/// Length of the reserved zero tail.
+const RESERVED_LEN: usize = 7;
 /// Exact byte length of the encoded config block (see [`Config::encode`]).
-pub const ENCODED_LEN: usize = 172;
+pub const ENCODED_LEN: usize = RESERVED_AT + RESERVED_LEN;
 
 /// Full engine configuration with the specs/05 defaults.
 ///
@@ -76,6 +94,14 @@ pub struct Config {
     pub flat_to_hnsw: usize,
     /// Skip per-section xxh3 checks when loading a trusted snapshot.
     pub fast_load: bool,
+    /// Database lineage identity (specs/12 §6). Minted **once** by the
+    /// host at creation (the `no_std` core has no RNG) and persisted in
+    /// every snapshot; it survives `maintain` and re-saves, so external
+    /// holders of ids can tell "same database" from "a different one".
+    /// `0` means an unnamed (ephemeral/test) database. On open, `0` here
+    /// adopts whatever the snapshot stores; a nonzero value must match
+    /// the stored one or the open fails with `ConfigMismatch`.
+    pub db_uuid: u128,
 }
 
 impl Default for Config {
@@ -110,6 +136,7 @@ impl Default for Config {
             hnsw_ef_search: 64,
             flat_to_hnsw: 24_000,
             fast_load: false,
+            db_uuid: 0,
         }
     }
 }
@@ -215,9 +242,9 @@ impl Config {
     /// block of the snapshot (specs/03). Layout, all little-endian, in
     /// field-declaration order: `usize` fields as `u64`, `f32` fields as
     /// their IEEE 754 bits, then `rrf_k`/`half_life_days`/`graph_depth` as
-    /// `u32`, `fast_load` as one byte, 7 reserved zero bytes; exactly
-    /// [`ENCODED_LEN`] bytes. Encoding is lossless and canonical (float
-    /// bits round-trip exactly).
+    /// `u32`, `db_uuid` as a `u128`, `fast_load` as one byte, 7 reserved
+    /// zero bytes; exactly [`ENCODED_LEN`] bytes. Encoding is lossless and
+    /// canonical (float bits round-trip exactly).
     pub fn encode(&self, out: &mut Vec<u8>) {
         out.reserve(ENCODED_LEN);
         for v in [
@@ -255,8 +282,9 @@ impl Config {
         for v in [self.rrf_k, self.half_life_days, self.graph_depth] {
             out.extend_from_slice(&v.to_le_bytes());
         }
+        out.extend_from_slice(&self.db_uuid.to_le_bytes());
         out.push(u8::from(self.fast_load));
-        out.extend_from_slice(&[0u8; 7]);
+        out.extend_from_slice(&[0u8; RESERVED_LEN]);
     }
 
     /// Decodes a config block written by [`Config::encode`] and runs
@@ -291,7 +319,7 @@ impl Config {
         let hnsw_ef_construction = take_usize()?;
         let hnsw_ef_search = take_usize()?;
         let flat_to_hnsw = take_usize()?;
-        let mut at = 112usize;
+        let mut at = F32S_AT;
         let mut take_f32 = || {
             let v = f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
             at += 4;
@@ -307,7 +335,7 @@ impl Config {
         let graph_decay = take_f32();
         let similar_cos = take_f32();
         let similar_jaccard = take_f32();
-        let mut at = 152usize;
+        let mut at = U32S_AT;
         let mut take_u32 = || {
             let v = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
             at += 4;
@@ -316,12 +344,13 @@ impl Config {
         let rrf_k = take_u32();
         let half_life_days = take_u32();
         let graph_depth = take_u32();
-        let fast_load = match bytes[164] {
+        let db_uuid = u128::from_le_bytes(bytes[DB_UUID_AT..FAST_LOAD_AT].try_into().unwrap());
+        let fast_load = match bytes[FAST_LOAD_AT] {
             0 => false,
             1 => true,
             _ => return Err(Error::Corrupt("config fast_load byte must be 0 or 1")),
         };
-        if bytes[165..172] != [0u8; 7] {
+        if bytes[RESERVED_AT..ENCODED_LEN] != [0u8; RESERVED_LEN] {
             return Err(Error::Corrupt("reserved config bytes must be zero"));
         }
         let cfg = Self {
@@ -353,6 +382,7 @@ impl Config {
             hnsw_ef_search,
             flat_to_hnsw,
             fast_load,
+            db_uuid,
         };
         cfg.validate()?;
         Ok(cfg)

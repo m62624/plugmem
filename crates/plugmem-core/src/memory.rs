@@ -166,6 +166,9 @@ pub struct Stats {
     pub next_fact: u32,
     /// The next entity id to be assigned.
     pub next_entity: u32,
+    /// The database lineage identity ([`Config::db_uuid`]); `0` for an
+    /// unnamed database.
+    pub db_uuid: u128,
     /// Total bytes held by the engine's pools (arenas, blob heaps, chunk
     /// pools, the term dictionary and the vector pool).
     pub pool_bytes: usize,
@@ -647,6 +650,7 @@ impl Memory {
             vectors: self.vecs.len(),
             next_fact: self.next_fact,
             next_entity: self.next_entity,
+            db_uuid: self.cfg.db_uuid,
             pool_bytes: self.facts.pool_bytes()
                 + self.fact_aux.pool_bytes()
                 + self.entities.pool_bytes()

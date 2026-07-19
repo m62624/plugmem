@@ -327,8 +327,15 @@ impl Memory {
         {
             return Err(Error::ConfigMismatch("stored size limits differ"));
         }
+        // The lineage identity is the snapshot's, not the caller's: a
+        // caller passing 0 adopts the stored uuid; a nonzero caller value
+        // is an assertion "this must be that database" and must match.
+        if cfg.db_uuid != 0 && stored.db_uuid != cfg.db_uuid {
+            return Err(Error::ConfigMismatch("stored db_uuid differs"));
+        }
 
         let mut mem = Self::new(cfg)?;
+        mem.cfg.db_uuid = stored.db_uuid;
         let cfg = &mem.cfg;
         let uni =
             |shards: usize| ArenaCfg::new(shards, ShardMode::Uniform).with_max_bytes(cfg.max_bytes);
