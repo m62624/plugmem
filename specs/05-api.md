@@ -38,9 +38,13 @@ impl Memory {
     /// Образ в байты (wasm-путь; журнал чистит хост).
     pub fn snapshot_bytes(&self, now: u64) -> Vec<u8>;
 
+    /// Реализовано 2026-07-19: Stats { facts, entities, terms, edges,
+    /// vectors, next_fact, next_entity, pool_bytes }, #[non_exhaustive]
+    /// (db_uuid и HNSW-поля доклеятся без слома).
     pub fn stats(&self) -> Stats;
     pub fn get(&self, id: FactId) -> Option<FactView<'_>>;
-    pub fn entity(&self, name: &str) -> Option<EntityId>;
+    /// &mut self — нормализация имени использует скретч токенизатора.
+    pub fn entity(&mut self, name: &str) -> Option<EntityId>;
 }
 ```
 
@@ -71,7 +75,7 @@ pub struct RememberOutcome {
 pub struct Similar {
     pub id: FactId,
     pub score: f32,
-    pub reason: SimilarReason,               // SameEntity | LexicalOverlap | VectorClose
+    pub reason: SimilarReason,               // LexicalOverlap | VectorCosine (реализация)
 }
 ```
 
@@ -111,14 +115,15 @@ pub struct RecallResult {
 
 ```
 ## memory
-- [f42] user: предпочитает tokio (2025-11; активен) #pref
-- [f17] user: жил в Москве (2023-01 → 2025-06; закрыт: f58) #location
+- [f42] user: предпочитает tokio (2025-11; active) #pref
+- [f17] user: жил в Москве (2023-01 → 2025-06; closed) #location
 - links: user —works_on→ plugmem
 ```
 
 Однострочные записи, стабильный порядок (по score), ISO-даты по месяцу,
-маркер закрытых интервалов, id для последующих revise/forget агентом. Пустой
-результат → пустая строка (не «ничего не найдено» — не тратим токены).
+маркеры `active`/`closed` (вывод — English, как весь машинный текст), id
+для последующих revise/forget агентом. Пустой результат → пустая строка
+(не «ничего не найдено» — не тратим токены).
 
 ## Config (полный, с дефолтами)
 
@@ -179,7 +184,7 @@ pub enum Error {
 | forget | да | tombstone немедленно (recall не видит), физика — в maintain |
 | link | да | ребро (upsert по (src,rel,dst)) |
 | recall | нет | чистый запрос |
-| maintain | да (маркер) | purge tombstones, компакция BlobHeap/ChunkPool, вливание vector-хвоста в HNSW / пересборки, пересчёт статистик |
+| maintain | да (маркер) | **v2**: физическое удаление tombstone-записей (id сжигаются, см. specs/12 §7-bis), пересборка сателлитов, пересчёт статистик; вливание vector-хвоста в HNSW — этап 6 |
 | snapshot | сброс | полный образ + clear_journal |
 
 `maintain` — единственное место, где стоимость O(база); все остальные глаголы —
