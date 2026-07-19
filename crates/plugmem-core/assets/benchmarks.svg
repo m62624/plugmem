@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 372" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <style>
+    .ink      { fill: #24292f; }
+    .muted    { fill: #57606a; }
+    .grid     { stroke: #d0d7de; stroke-width: 1; }
+    .bar      { fill: #316dca; }
+    @media (prefers-color-scheme: dark) {
+      .ink   { fill: #e6edf3; }
+      .muted { fill: #9198a1; }
+      .grid  { stroke: #30363d; }
+      .bar   { fill: #4c8dde; }
+    }
+  </style>
+
+  <text x="16" y="26" class="ink" font-size="15" font-weight="600">Query latency, single thread</text>
+  <text x="16" y="44" class="muted" font-size="12">Criterion, deterministic testgen corpus, 100k facts unless noted &#183; every query under the 1 ms budget</text>
+
+  <!-- grid -->
+  <g>
+    <line class="grid" x1="210" y1="62" x2="210" y2="330"/>
+    <line class="grid" x1="304" y1="62" x2="304" y2="330"/>
+    <line class="grid" x1="398" y1="62" x2="398" y2="330"/>
+    <line class="grid" x1="492" y1="62" x2="492" y2="330"/>
+    <line class="grid" x1="586" y1="62" x2="586" y2="330"/>
+    <line class="grid" x1="680" y1="62" x2="680" y2="330"/>
+  </g>
+  <g class="muted" font-size="11" text-anchor="middle">
+    <text x="210" y="348">0</text>
+    <text x="304" y="348">100</text>
+    <text x="398" y="348">200</text>
+    <text x="492" y="348">300</text>
+    <text x="586" y="348">400</text>
+    <text x="680" y="348">500 &#181;s</text>
+  </g>
+
+  <!-- bars: 4px rounded data end, anchored to the x=210 baseline -->
+  <g font-size="12">
+    <text x="200" y="80" class="ink" text-anchor="end">tag intersection, 3 tags</text>
+    <path class="bar" d="M210 66 h44 a4 4 0 0 1 4 4 v20 a4 4 0 0 1 -4 4 h-44 z"/>
+    <text x="266" y="80" class="muted">51 &#181;s</text>
+
+    <text x="200" y="126" class="ink" text-anchor="end">BM25, 3 terms &#183; 10k docs</text>
+    <path class="bar" d="M210 112 h56 a4 4 0 0 1 4 4 v20 a4 4 0 0 1 -4 4 h-56 z"/>
+    <text x="278" y="126" class="muted">64 &#181;s</text>
+
+    <text x="200" y="172" class="ink" text-anchor="end">HNSW, 30k &#215; d384, k=8</text>
+    <path class="bar" d="M210 158 h170 a4 4 0 0 1 4 4 v20 a4 4 0 0 1 -4 4 h-170 z"/>
+    <text x="392" y="172" class="muted">185 &#181;s</text>
+
+    <text x="200" y="218" class="ink" text-anchor="end">tags + time range</text>
+    <path class="bar" d="M210 204 h208 a4 4 0 0 1 4 4 v20 a4 4 0 0 1 -4 4 h-208 z"/>
+    <text x="430" y="218" class="muted">226 &#181;s</text>
+
+    <text x="200" y="264" class="ink" text-anchor="end">flat vectors, 24k &#215; d384, k=8</text>
+    <path class="bar" d="M210 250 h308 a4 4 0 0 1 4 4 v20 a4 4 0 0 1 -4 4 h-308 z"/>
+    <text x="530" y="264" class="muted">332 &#181;s</text>
+
+    <text x="200" y="310" class="ink" text-anchor="end">hybrid recall, text + hub entity</text>
+    <path class="bar" d="M210 296 h439 a4 4 0 0 1 4 4 v20 a4 4 0 0 1 -4 4 h-439 z"/>
+    <text x="216" y="310" fill="#ffffff" font-size="11">471 &#181;s</text>
+  </g>
+</svg>
