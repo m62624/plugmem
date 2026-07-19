@@ -252,12 +252,26 @@ fn bench_recall(c: &mut Criterion) {
             out.facts.len()
         });
     });
-    // Tag filter plus a recorded_at window over the dense (late) part of
-    // the time axis (range cost is proportional to the window by design).
+    // Tag filter plus a recorded_at window spanning the last ~5k
+    // operations (range cost is proportional to the window by design;
+    // the time axis thickens toward the end, so a fixed *time* share
+    // would cover most of the corpus).
+    let mut nows: Vec<u64> = ops
+        .iter()
+        .map(|op| match op {
+            GenOp::Remember { now, .. }
+            | GenOp::Revise { now, .. }
+            | GenOp::Forget { now, .. }
+            | GenOp::Link { now, .. }
+            | GenOp::Maintain { now } => *now,
+        })
+        .collect();
+    nows.sort_unstable();
+    let from = nows[nows.len().saturating_sub(5_000)];
     let tags = [tag.as_str()];
     let tagged = RecallQuery {
         tags: &tags,
-        range: Some((now * 9 / 10, now)),
+        range: Some((from, now)),
         ..RecallQuery::text(now, &text)
     };
     g.bench_function("tags_and_range_100k", |b| {
@@ -323,6 +337,65 @@ fn bench_vec(c: &mut Criterion) {
     g.finish();
 }
 
+fn bench_hnsw(c: &mut Criterion) {
+    use plugmem_core::{Config, MemStorage, Memory, RecallQuery, RecallResult};
+    use plugmem_testgen::{Gen, GenOp, Profile, apply};
+
+    // Above the default flat_to_hnsw threshold (24k): `maintain` builds
+    // the graph, search goes through it. The one-time build cost is
+    // printed to stderr (it is a maintain cost, not a query cost).
+    let mut g = c.benchmark_group("hnsw");
+    g.sample_size(50);
+    const DIM: usize = 384;
+    const VECTORS: usize = 30_000;
+    let profile = Profile {
+        dim: DIM,
+        w_revise: 0,
+        w_forget: 0,
+        w_link: 0,
+        ..Profile::default()
+    };
+    let ops = Gen::new(0x4A5A_0000_0000_0001, profile).ops(VECTORS);
+    let mut cfg = Config::default();
+    cfg.dim = DIM;
+    let mut mem = Memory::new(cfg).unwrap();
+    let mut store = MemStorage::new();
+    for op in &ops {
+        apply(&mut mem, &mut store, op).unwrap();
+    }
+    let now = last_now(&ops) + 1;
+    let t0 = std::time::Instant::now();
+    mem.maintain(&mut store, now).unwrap();
+    eprintln!(
+        "hnsw: maintain graph build over {VECTORS} vectors (dim {DIM}) took {:?}",
+        t0.elapsed()
+    );
+    let query = ops
+        .iter()
+        .find_map(|op| match op {
+            GenOp::Remember {
+                vector: Some(v), ..
+            } => Some(v.clone()),
+            _ => None,
+        })
+        .expect("every remember carries a vector");
+    let mut out = RecallResult::default();
+    let q = RecallQuery {
+        vector: Some(&query),
+        k: 8,
+        text: None,
+        ..RecallQuery::text(now, "")
+    };
+    g.throughput(Throughput::Elements(1));
+    g.bench_function("search_30k_d384_k8_ef64", |b| {
+        b.iter(|| {
+            mem.recall_into(black_box(q), &mut out).unwrap();
+            out.facts.len()
+        });
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_tokenizer,
@@ -330,6 +403,7 @@ criterion_group!(
     bench_bm25,
     bench_idlist,
     bench_recall,
-    bench_vec
+    bench_vec,
+    bench_hnsw
 );
 criterion_main!(benches);

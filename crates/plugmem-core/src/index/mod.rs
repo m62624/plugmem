@@ -8,6 +8,7 @@
 //! and lives directly in the engine.
 
 pub mod bm25;
+pub mod hnsw;
 pub mod postings;
 pub mod varint;
 pub mod vecpool;

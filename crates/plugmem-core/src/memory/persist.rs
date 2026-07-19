@@ -72,6 +72,12 @@ mod kind {
     pub const ENTFACTS_CHUNKS_POOL: u16 = 35;
     pub const ENGINE_STATE: u16 = 36;
     pub const VEC_POOL: u16 = 37;
+    pub const HNSW_META: u16 = 38;
+    pub const HNSW_LEVEL0: u16 = 39;
+    pub const HNSW_UPPER_META: u16 = 40;
+    pub const HNSW_UPPER_POOL: u16 = 41;
+    pub const HNSW_LISTS_META: u16 = 42;
+    pub const HNSW_LISTS_POOL: u16 = 43;
 }
 
 /// Byte length of the engine-state section.
@@ -272,6 +278,15 @@ impl Memory {
         // The vector pool is one flat section (empty when dim is 0); dim
         // and stride are derived from the stored config on load.
         push(kind::VEC_POOL, self.vecs.bytes().to_vec());
+        // The HNSW graph: header, flat level-0 blocks, and the
+        // upper-level arena + list pool (all empty in the flat regime).
+        push(kind::HNSW_META, self.hnsw.dump_meta());
+        push(kind::HNSW_LEVEL0, self.hnsw.dump_level0());
+        let [um, up, lm, lp] = self.hnsw.dump_upper();
+        push(kind::HNSW_UPPER_META, um);
+        push(kind::HNSW_UPPER_POOL, up);
+        push(kind::HNSW_LISTS_META, lm);
+        push(kind::HNSW_LISTS_POOL, lp);
 
         let mut cfg_bytes = Vec::new();
         self.cfg.encode(&mut cfg_bytes);
@@ -418,6 +433,17 @@ impl Memory {
             section(&snap, kind::ENTFACTS_CHUNKS_POOL)?,
         )?;
         mem.vecs = VecPool::from_parts(cfg.dim, cfg.max_bytes, section(&snap, kind::VEC_POOL)?)?;
+        mem.hnsw = crate::index::hnsw::HnswGraph::from_parts(
+            cfg.hnsw_m,
+            cfg.hnsw_m0,
+            cfg.max_bytes,
+            section(&snap, kind::HNSW_META)?,
+            section(&snap, kind::HNSW_LEVEL0)?,
+            section(&snap, kind::HNSW_UPPER_META)?,
+            section(&snap, kind::HNSW_UPPER_POOL)?,
+            section(&snap, kind::HNSW_LISTS_META)?,
+            section(&snap, kind::HNSW_LISTS_POOL)?,
+        )?;
         let state = section(&snap, kind::ENGINE_STATE)?;
         if state.len() != STATE_LEN {
             return Err(Error::Corrupt("engine state section has a wrong length"));
@@ -441,8 +467,10 @@ impl Memory {
         let terms = self.terms.len() as u32;
         // Vectors: structural self-check, then a bijection between facts
         // flagged HAS_VECTOR and pool slots (each fact points at a slot
-        // that names it back; no slot is orphaned).
+        // that names it back; no slot is orphaned). The graph is checked
+        // against the pool it indexes.
         self.vecs.validate()?;
+        self.hnsw.validate(&self.vecs)?;
         let vslots = self.vecs.len() as u32;
         let mut with_vec = 0u32;
         for fact in self.facts.iter() {

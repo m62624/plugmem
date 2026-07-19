@@ -43,6 +43,7 @@ use crate::error::Error;
 use crate::id::{FactId, NONE_U32};
 use crate::index::IdListIndex;
 use crate::index::bm25::Bm25Index;
+use crate::index::hnsw::{HnswGraph, HnswScratch};
 use crate::index::vecpool::VecPool;
 use crate::journal::Op;
 use crate::model::{EntityRecord, FactAux, FactRecord, TemporalSlot};
@@ -76,6 +77,7 @@ struct Rebuilt {
     entity_facts: IdListIndex,
     temporal: Arena<TemporalSlot>,
     vecs: VecPool,
+    hnsw: HnswGraph,
 }
 
 impl Memory {
@@ -127,6 +129,7 @@ impl Memory {
         self.facts.pool_bytes()
             + self.fact_aux.pool_bytes()
             + self.entities.pool_bytes()
+            + self.hnsw.pool_bytes()
             + self.texts.pool_bytes()
             + self.tag_lists.pool_bytes()
             + self.bm25.pool_bytes()
@@ -183,6 +186,10 @@ impl Memory {
         // from BM25) — a reindex migration has to intern, not look up.
         let mut tokenizer = Tokenizer::new();
         let mut tf: Vec<(u32, u8)> = Vec::new();
+
+        // old vector-slot id → new slot id (NONE for purged vectors);
+        // carries the HNSW graph across the compaction.
+        let mut vec_map = alloc::vec![NONE_U32; self.vecs.len()];
 
         let mut purged = 0usize;
         for fid in 0..self.next_fact {
@@ -248,7 +255,9 @@ impl Memory {
 
             // Vector: copy the already-quantized slot verbatim.
             let vector = if rec.has_vector() {
-                vecs.copy_slot(&self.vecs, rec.vector)
+                let new_slot = vecs.copy_slot(&self.vecs, rec.vector);
+                vec_map[rec.vector as usize] = new_slot;
+                new_slot
             } else {
                 NONE_U32
             };
@@ -258,6 +267,8 @@ impl Memory {
                 ..rec
             })?;
         }
+
+        let hnsw = self.rebuild_graph(&vec_map, &vecs)?;
 
         Ok((
             Rebuilt {
@@ -271,9 +282,40 @@ impl Memory {
                 entity_facts,
                 temporal,
                 vecs,
+                hnsw,
             },
             purged,
         ))
+    }
+
+    /// The vector index's maintenance policy (specs/04 §5 phase 2), all
+    /// deterministic:
+    ///
+    /// - below `flat_to_hnsw` the graph is empty (flat regime);
+    /// - the first crossing (or > 10% of the graph's nodes dead) builds
+    ///   the graph from scratch over the compacted pool;
+    /// - otherwise the existing graph is *carried over*: neighbor lists
+    ///   are remapped through the compaction map (dead nodes drop out)
+    ///   and the flat tail is bulk-inserted — the cheap steady-state
+    ///   path that keeps `maintain` inside its budget.
+    fn rebuild_graph(&self, vec_map: &[u32], pool: &VecPool) -> Result<HnswGraph, Error> {
+        let cfg = &self.cfg;
+        let mut graph = HnswGraph::new(cfg.hnsw_m, cfg.hnsw_m0, cfg.max_bytes)?;
+        let total = pool.len() as u32;
+        if cfg.dim == 0 || (total as usize) < cfg.flat_to_hnsw {
+            return Ok(graph);
+        }
+        let old_indexed = self.hnsw.indexed() as usize;
+        let dead = vec_map[..old_indexed]
+            .iter()
+            .filter(|&&m| m == NONE_U32)
+            .count();
+        let mut scratch = HnswScratch::default();
+        if old_indexed > 0 && dead * 10 <= old_indexed {
+            graph = self.hnsw.remapped(vec_map, pool, cfg.max_bytes)?;
+        }
+        graph.insert_bulk(pool, total, cfg.hnsw_ef_construction, &mut scratch)?;
+        Ok(graph)
     }
 
     /// Swaps the rebuilt structures in (infallible). The interner, by-name
@@ -289,5 +331,6 @@ impl Memory {
         self.entity_facts = r.entity_facts;
         self.temporal = r.temporal;
         self.vecs = r.vecs;
+        self.hnsw = r.hnsw;
     }
 }

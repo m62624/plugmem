@@ -6,10 +6,19 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 use plugmem_core::{Config, MemStorage, Memory, RecallQuery, RecallResult, RememberInput};
 
 static ALLOCS: AtomicU64 = AtomicU64::new(0);
+
+/// The counter is process-global, so the gates must not run
+/// concurrently: each test holds this lock for its whole body.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+fn serial() -> MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 struct Counting;
 
@@ -38,6 +47,7 @@ fn allocs<R>(f: impl FnOnce() -> R) -> (u64, R) {
 
 #[test]
 fn recall_and_get_allocate_nothing_after_warmup() {
+    let _serial = serial();
     let dim = 32usize;
     let mut cfg = Config::default();
     cfg.dim = dim;
@@ -113,4 +123,71 @@ fn recall_and_get_allocate_nothing_after_warmup() {
     let (n, view) = allocs(|| mem.get(plugmem_core::FactId(42)));
     assert_eq!(n, 0, "get allocated {n} times");
     assert!(view.is_some());
+}
+
+#[test]
+fn graph_regime_recall_allocates_nothing_after_warmup() {
+    let _serial = serial();
+    // The same invariant above the HNSW threshold: graph search + the
+    // flat-tail scan run entirely on the engine scratches.
+    let dim = 16usize;
+    let mut cfg = Config::default();
+    cfg.dim = dim;
+    cfg.flat_to_hnsw = 64;
+    cfg.shards_facts = 16;
+    cfg.shards_entities = 8;
+    cfg.shards_edges = 8;
+    cfg.shards_temporal = 8;
+    cfg.shards_postings = 32;
+    let mut mem = Memory::new(cfg).unwrap();
+    let mut store = MemStorage::new();
+    let embed = |seed: u64| -> Vec<f32> {
+        (0..dim)
+            .map(|j| {
+                let h = seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(j as u64 + 1);
+                ((h >> 33) as f32 / (1u64 << 31) as f32) - 1.0
+            })
+            .collect()
+    };
+    for i in 0..200u64 {
+        let v = embed(i);
+        mem.remember(
+            &mut store,
+            RememberInput {
+                vector: Some(&v),
+                ..RememberInput::text(i * 1000, "graph regime fact")
+            },
+        )
+        .unwrap();
+    }
+    // Build the graph, then leave a few vectors in the flat tail so the
+    // gate covers the merge path too.
+    mem.maintain(&mut store, 1_000_000).unwrap();
+    for i in 200..210u64 {
+        let v = embed(i);
+        mem.remember(
+            &mut store,
+            RememberInput {
+                vector: Some(&v),
+                ..RememberInput::text(i * 1000, "tail fact")
+            },
+        )
+        .unwrap();
+    }
+
+    let qvec = embed(7);
+    let q = RecallQuery {
+        vector: Some(&qvec),
+        k: 8,
+        ..RecallQuery::text(2_000_000, "")
+    };
+    let mut out = RecallResult::default();
+    mem.recall_into(q, &mut out).unwrap();
+    mem.recall_into(q, &mut out).unwrap();
+
+    let (n, _) = allocs(|| mem.recall_into(q, &mut out).unwrap());
+    assert_eq!(n, 0, "graph-regime recall allocated {n} times");
+    assert!(!out.facts.is_empty());
 }

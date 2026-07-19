@@ -129,6 +129,25 @@ impl VecPool {
         f32::from_le_bytes(self.bytes[base + 4..base + 8].try_into().unwrap())
     }
 
+    /// The `(scale, q)` pair of slot `i` — the quantized payload a
+    /// distance evaluation needs. Shared with the HNSW graph, which
+    /// stores only neighbor ids and reads vectors from here.
+    #[inline]
+    pub(crate) fn quant(&self, i: usize) -> (f32, &[u8]) {
+        let stride = self.stride();
+        let q_off = HEAD + Self::words(self.dim) * 8;
+        let base = i * stride;
+        (self.slot_scale(i), &self.bytes[base + q_off..base + stride])
+    }
+
+    /// Quantized cosine of two slots by index — the graph's edge metric.
+    /// Both indices must be in range (graph neighbors are validated on
+    /// load).
+    #[inline]
+    pub(crate) fn sim(&self, a: u32, b: u32) -> f32 {
+        self.cosine_at(a as usize, b as usize)
+    }
+
     /// Quantizes `v` into `out` (which is sized to `stride`), writing the
     /// full slot for `fact`. A pure, deterministic function of `v`.
     ///
@@ -217,6 +236,19 @@ impl VecPool {
                 Err(e)
             }
         }
+    }
+
+    /// The `(scale, q)` view of a query previously quantized into
+    /// `scratch` by [`VecPool::quantize_query`] — what the graph search
+    /// and the tail scan consume.
+    pub(crate) fn quantized<'a>(&self, scratch: &'a VecScratch) -> (f32, &'a [u8]) {
+        let stride = self.stride();
+        let q_off = HEAD + Self::words(self.dim) * 8;
+        debug_assert_eq!(scratch.query.len(), stride);
+        (
+            f32::from_le_bytes(scratch.query[4..8].try_into().unwrap()),
+            &scratch.query[q_off..stride],
+        )
     }
 
     /// Quantizes a query vector into `scratch.query` (sized to `stride`,
@@ -435,7 +467,7 @@ impl VecPool {
 /// `dim ≤ 4096` and `|q| ≤ 127`, so the sum fits `i32`
 /// (`4096 · 127² < 2³¹`).
 #[inline]
-fn dot_i8(a: &[u8], b: &[u8]) -> i32 {
+pub(crate) fn dot_i8(a: &[u8], b: &[u8]) -> i32 {
     let mut acc = 0i32;
     for (&x, &y) in a.iter().zip(b.iter()) {
         acc += i32::from(x as i8) * i32::from(y as i8);

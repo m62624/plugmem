@@ -100,3 +100,46 @@ fn vector_rescore_work_is_bounded() {
         "rescored dots must equal the candidate budget"
     );
 }
+
+#[test]
+fn hnsw_search_work_is_bounded() {
+    // Graph search must stay sublinear in the corpus: the deterministic
+    // corpus fixes the exact distance-evaluation count, and the ceiling
+    // (measured x1.2) guards complexity — a linear scan of the 2000
+    // nodes would already cost 2000 evaluations before any neighbor
+    // work.
+    use plugmem_core::index::hnsw::{HnswGraph, HnswScratch};
+
+    let dim = 64;
+    let n = 2000u32;
+    let mut s = 0xC0DE_0000_0000_0001u64;
+    let mut rng = move || {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        ((s >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
+    };
+    let mut pool = VecPool::new(dim, usize::MAX);
+    for i in 0..n {
+        let v: Vec<f32> = (0..dim).map(|_| rng()).collect();
+        pool.push(FactId(i), &v).unwrap();
+    }
+    let mut scratch = HnswScratch::default();
+    let mut graph = HnswGraph::new(16, 32, usize::MAX).unwrap();
+    graph.insert_bulk(&pool, n, 200, &mut scratch).unwrap();
+
+    let query: Vec<f32> = (0..dim).map(|_| rng()).collect();
+    let mut vec_scratch = VecScratch::new();
+    let mut out = Vec::new();
+    graph.reset_dist_evals();
+    graph
+        .search(&pool, &query, 64, &mut vec_scratch, &mut scratch, &mut out)
+        .unwrap();
+    assert!(!out.is_empty());
+    // Measured 1197 on the fixed corpus (ef 64, m 16/32); ceiling x1.2.
+    let evals = graph.dist_evals();
+    assert!(
+        evals <= 1_450,
+        "graph search cost regressed: {evals} distance evaluations"
+    );
+}

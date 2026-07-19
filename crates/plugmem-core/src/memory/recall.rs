@@ -35,7 +35,8 @@ use plugmem_arena::TermId;
 use crate::error::Error;
 use crate::id::{EntityId, FactId};
 use crate::index::bm25::Bm25Scratch;
-use crate::index::vecpool::VecScratch;
+use crate::index::hnsw::HnswScratch;
+use crate::index::vecpool::{VecScratch, dot_i8};
 use crate::index::{IntersectScratch, intersect};
 use crate::model::{FactRecord, VALID_TO_OPEN};
 
@@ -101,6 +102,10 @@ pub struct RecallQuery<'a> {
     pub token_budget: Option<usize>,
     /// Show closed revisions too (whole chains, marked by intervals).
     pub include_closed: bool,
+    /// HNSW beam-width override for the vector source; defaults to
+    /// `Config::hnsw_ef_search`. Ignored while the engine is in the flat
+    /// regime (below `Config::flat_to_hnsw`).
+    pub ef: Option<usize>,
 }
 
 impl<'a> RecallQuery<'a> {
@@ -117,6 +122,7 @@ impl<'a> RecallQuery<'a> {
             k: 0,
             token_budget: None,
             include_closed: false,
+            ef: None,
         }
     }
 }
@@ -180,6 +186,8 @@ pub(super) struct RecallScratch {
     bm25_out: Vec<(FactId, f32)>,
     vec: VecScratch,
     vec_out: Vec<(FactId, f32)>,
+    hnsw: HnswScratch,
+    hnsw_out: Vec<(u32, f32)>,
     graph_out: Vec<(FactId, f32)>,
     time_out: Vec<(FactId, f32)>,
     visited: Vec<(EntityId, f32)>,
@@ -269,20 +277,26 @@ impl Memory {
             );
         }
 
-        // Vector source (flat quantized search) when an embedding is given.
+        // Vector source: flat quantized search below the HNSW threshold,
+        // graph search plus a flat-tail scan above it.
         s.vec_out.clear();
         if let Some(v) = q.vector
             && self.cfg.dim > 0
         {
-            let facts = &self.facts;
-            let allow = &s.allow;
-            if let Err(e) = self.vecs.search(
-                v,
-                SOURCE_CAP,
-                &mut |id| admit(facts, allow, filtered, as_of, q.include_closed, id).is_some(),
-                &mut s.vec,
-                &mut s.vec_out,
-            ) {
+            let res = if self.hnsw.indexed() == 0 {
+                let facts = &self.facts;
+                let allow = &s.allow;
+                self.vecs.search(
+                    v,
+                    SOURCE_CAP,
+                    &mut |id| admit(facts, allow, filtered, as_of, q.include_closed, id).is_some(),
+                    &mut s.vec,
+                    &mut s.vec_out,
+                )
+            } else {
+                self.vec_graph_source(v, &q, as_of, filtered, &mut s)
+            };
+            if let Err(e) = res {
                 self.recall_scratch = s;
                 return Err(e);
             }
@@ -364,6 +378,47 @@ impl Memory {
         // 7. Render.
         self.render(out, &mut s.tags_tmp);
         self.recall_scratch = s;
+        Ok(())
+    }
+
+    /// The above-threshold vector source (specs/04 §5 phase 2): an HNSW
+    /// beam search over the graph plus an exact scan of the flat tail
+    /// (vectors appended since the last `maintain` build), merged,
+    /// admission-filtered and capped like every other source.
+    fn vec_graph_source(
+        &self,
+        v: &[f32],
+        q: &RecallQuery<'_>,
+        as_of: u64,
+        filtered: bool,
+        s: &mut RecallScratch,
+    ) -> Result<(), Error> {
+        let RecallScratch {
+            vec,
+            hnsw,
+            hnsw_out,
+            vec_out,
+            allow,
+            ..
+        } = s;
+        self.vecs.quantize_query(v, vec)?;
+        let (q_scale, q_q) = self.vecs.quantized(vec);
+        let ef = q.ef.unwrap_or(self.cfg.hnsw_ef_search).max(1);
+        self.hnsw
+            .search_quantized(&self.vecs, (q_scale, q_q), ef, hnsw, hnsw_out);
+        for slot in self.hnsw.indexed()..self.vecs.len() as u32 {
+            let (s_scale, s_q) = self.vecs.quant(slot as usize);
+            hnsw_out.push((slot, q_scale * s_scale * dot_i8(q_q, s_q) as f32));
+        }
+        vec_out.clear();
+        for &(slot, sim) in hnsw_out.iter() {
+            let fact = FactId(self.vecs.slot_fact(slot as usize));
+            if admit(&self.facts, allow, filtered, as_of, q.include_closed, fact).is_some() {
+                vec_out.push((fact, sim));
+            }
+        }
+        vec_out.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        vec_out.truncate(SOURCE_CAP);
         Ok(())
     }
 

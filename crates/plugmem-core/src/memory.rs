@@ -27,6 +27,7 @@ use crate::error::Error;
 use crate::id::{EntityId, FactId, NONE_U32};
 use crate::index::IdListIndex;
 use crate::index::bm25::Bm25Index;
+use crate::index::hnsw::HnswGraph;
 use crate::index::vecpool::VecPool;
 use crate::journal::{JournalScan, Op, scan};
 use crate::model::{
@@ -209,6 +210,10 @@ pub struct Memory {
     entity_facts: IdListIndex,
     /// Quantized vectors (empty and inert when `cfg.dim == 0`).
     vecs: VecPool,
+    /// HNSW graph over the pool; empty until `maintain` crosses
+    /// `Config::flat_to_hnsw`. Slots past its `indexed` mark are the flat
+    /// tail searched by scan.
+    hnsw: HnswGraph,
     // -- id allocation (derived from the arenas on load) --
     next_fact: u32,
     next_entity: u32,
@@ -250,6 +255,7 @@ impl Memory {
             tags_idx: IdListIndex::new(cfg.shards_postings, cfg.max_bytes)?,
             entity_facts: IdListIndex::new(cfg.shards_entities, cfg.max_bytes)?,
             vecs: VecPool::new(cfg.dim, cfg.max_bytes),
+            hnsw: HnswGraph::new(cfg.hnsw_m, cfg.hnsw_m0, cfg.max_bytes)?,
             next_fact: 0,
             next_entity: 0,
             tokenizer: Tokenizer::new(),
@@ -664,7 +670,8 @@ impl Memory {
                 + self.bm25.pool_bytes()
                 + self.tags_idx.pool_bytes()
                 + self.entity_facts.pool_bytes()
-                + self.vecs.pool_bytes(),
+                + self.vecs.pool_bytes()
+                + self.hnsw.pool_bytes(),
         }
     }
 
