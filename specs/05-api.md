@@ -143,6 +143,7 @@ pub struct RecallResult {
 | `hnsw_m / m0 / ef_construction / ef_search` | 16 / 32 / 200 / 64 | |
 | `flat_to_hnsw` | 24_000 | порог, уточняется бенчем |
 | `fast_load` | false | пропуск xxh3 секций |
+| `db_uuid` | 0 | u128, идентичность лайнеджа базы: минтует хост при создании, 0 = безымянная; при open 0 принимает сохранённый, ненулевой обязан совпасть (`ConfigMismatch`); печатается в `stats()` |
 
 Config сохраняется в снапшоте; при `open` заданный конфиг сверяется:
 несовместимые поля (dim, shards) при непустой базе → `Error::ConfigMismatch`

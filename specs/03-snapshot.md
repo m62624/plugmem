@@ -90,8 +90,9 @@ Header (64 Б):
   engine_ver  [u8; 24] // semver-строка, информационно
 
 Config-блок: бинарная фиксированная структура (см. 05-api.md: dim,
-  quantization, shards каждой арены, max_*, hnsw-параметры, rrf/recency).
-  Всё, что влияет на интерпретацию байтов, живёт здесь.
+  quantization, shards каждой арены, max_*, hnsw-параметры, rrf/recency,
+  db_uuid — идентичность лайнеджа базы, добавлена 2026-07-19,
+  ENCODED_LEN = 188). Всё, что влияет на интерпретацию байтов, живёт здесь.
 
 Таблица секций: section_cnt × 24 Б:
   kind   u16   // enum: ArenaFactsPool=1, ArenaFactsMeta=2, ... Blobs, Interner,
