@@ -57,7 +57,7 @@ flat-хвоста; отсутствие годного стороннего кр
 | `proptest` | 1.11.0 | dev | property-тесты |
 | `criterion` | 0.8.2 | dev | бенчи (информационные) |
 | `insta` | 1.48.0 | dev | golden/snapshot-тесты (`rendered`, JSON-схемы) |
-| `rand_xoshiro` | 0.8.1 | testgen | детерминированный PRNG корпусов |
+| ~~`rand_xoshiro`~~ | — | testgen | **снята 2026-07-19**: PRNG (xorshift64*) реализован в testgen на месте (specs/11 §3) — воспроизводимость корпусов не зависит от стабильности чужих потоков |
 
 `plugmem-wasm` собирается под `wasm32-unknown-unknown` (мосту нужен
 wasm-bindgen); гейт `wasm32v1-none` относится к arena/core как библиотекам.
