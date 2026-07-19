@@ -22,6 +22,16 @@ fn empty_interner() {
     let terms = Interner::new(BlobHeapCfg::new());
     assert_eq!(terms.len(), 0);
     assert!(terms.is_empty());
+    assert_eq!(terms.pool_bytes(), 0);
+}
+
+#[test]
+fn pool_bytes_tracks_content() {
+    let mut terms = Interner::new(BlobHeapCfg::new());
+    terms.intern("alpha").unwrap();
+    terms.intern("beta").unwrap();
+    terms.intern("alpha").unwrap(); // duplicate: no new bytes
+    assert_eq!(terms.pool_bytes(), "alpha".len() + "beta".len());
 }
 
 #[test]

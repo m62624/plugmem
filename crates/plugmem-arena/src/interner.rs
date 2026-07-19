@@ -153,6 +153,12 @@ impl Interner {
         self.len == 0
     }
 
+    /// Total bytes of interned string content (the underlying heap's pool
+    /// size; the hash table's few bytes per slot are not counted).
+    pub fn pool_bytes(&self) -> usize {
+        self.heap.pool_bytes()
+    }
+
     /// Doubles the table and reinserts all entries. Amortized: one table
     /// allocation, no per-string work beyond rehashing their bytes.
     fn rehash(&mut self) {

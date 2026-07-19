@@ -585,3 +585,35 @@ fn remember_batch_imports_and_skips_similar() {
     let (reopened, _) = Memory::open(&mut store, cfg()).unwrap();
     assert_eq!(reopened.facts_len(), 3);
 }
+
+#[test]
+fn stats_report_engine_counters() {
+    let (mut mem, mut store) = engine();
+    let empty = mem.stats();
+    assert_eq!(
+        (empty.facts, empty.entities, empty.terms, empty.edges),
+        (0, 0, 0, 0)
+    );
+    assert_eq!((empty.next_fact, empty.next_entity), (0, 0));
+    assert_eq!(empty.vectors, 0);
+    assert_eq!(empty.pool_bytes, 0);
+
+    mem.remember(
+        &mut store,
+        RememberInput {
+            entity: Some("user"),
+            tags: &["pref"],
+            links: &[("works_on", "plugmem")],
+            ..RememberInput::text(1, "likes strongly typed engines")
+        },
+    )
+    .unwrap();
+    mem.remember(&mut store, RememberInput::text(2, "second fact"))
+        .unwrap();
+
+    let s = mem.stats();
+    assert_eq!((s.facts, s.entities, s.edges), (2, 2, 1));
+    assert_eq!((s.next_fact, s.next_entity), (2, 2));
+    assert!(s.terms > 0, "tokens, tags and names were interned");
+    assert!(s.pool_bytes > 0, "pools hold the records and texts");
+}

@@ -143,6 +143,34 @@ pub struct FactView<'a> {
     pub text: &'a str,
 }
 
+/// Engine size counters (specs/05). Every field is an O(1) read; the
+/// struct is `#[non_exhaustive]` so later stages (database identity
+/// markers, HNSW state) can extend it without a breaking change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Stats {
+    /// Fact records currently stored (live, closed, and tombstoned facts
+    /// awaiting `maintain`).
+    pub facts: usize,
+    /// Entities.
+    pub entities: usize,
+    /// Interned terms (tokens, tags, relations, normalized names).
+    pub terms: usize,
+    /// Directed edges (each `(src, rel, dst)` counted once; the mirrored
+    /// in-arena is an internal detail).
+    pub edges: usize,
+    /// Quantized vector slots.
+    pub vectors: usize,
+    /// The next fact id to be assigned. Ids below it are in use or burned
+    /// (forgotten and purged) — never reissued.
+    pub next_fact: u32,
+    /// The next entity id to be assigned.
+    pub next_entity: u32,
+    /// Total bytes held by the engine's pools (arenas, blob heaps, chunk
+    /// pools, the term dictionary and the vector pool).
+    pub pool_bytes: usize,
+}
+
 /// Report of an `open`: what the journal replay found.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OpenReport {
@@ -592,8 +620,9 @@ impl Memory {
         self.terms.resolve(id)
     }
 
-    /// Number of facts ever recorded (including tombstoned, until
-    /// `maintain` purges them).
+    /// Number of fact records currently stored (tombstoned facts count
+    /// until `maintain` removes them). Purged ids stay burned, so this can
+    /// be below [`Stats::next_fact`].
     pub fn facts_len(&self) -> usize {
         self.facts.len()
     }
@@ -606,6 +635,33 @@ impl Memory {
     /// The engine configuration.
     pub fn cfg(&self) -> &Config {
         &self.cfg
+    }
+
+    /// Size counters of the engine (specs/05). O(1).
+    pub fn stats(&self) -> Stats {
+        Stats {
+            facts: self.facts.len(),
+            entities: self.entities.len(),
+            terms: self.terms.len(),
+            edges: self.edges_out.len(),
+            vectors: self.vecs.len(),
+            next_fact: self.next_fact,
+            next_entity: self.next_entity,
+            pool_bytes: self.facts.pool_bytes()
+                + self.fact_aux.pool_bytes()
+                + self.entities.pool_bytes()
+                + self.by_name.pool_bytes()
+                + self.edges_out.pool_bytes()
+                + self.edges_in.pool_bytes()
+                + self.temporal.pool_bytes()
+                + self.texts.pool_bytes()
+                + self.terms.pool_bytes()
+                + self.tag_lists.pool_bytes()
+                + self.bm25.pool_bytes()
+                + self.tags_idx.pool_bytes()
+                + self.entity_facts.pool_bytes()
+                + self.vecs.pool_bytes(),
+        }
     }
 
     // ---- internals ----
