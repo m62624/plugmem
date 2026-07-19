@@ -14,12 +14,14 @@ CLI/MCP/WASM — транспорт для не-Rust потребителей, �
 1. ~~`db_uuid` в формат снапшота~~ — **реализовано 2026-07-19**;
 2. ~~этап C — `plugmem-testgen`~~ — **реализовано 2026-07-19**;
 3. ~~этап 6 — HNSW~~ — **реализовано 2026-07-20** (specs/10);
-4. этап D — README core + прогон стенда, финальные цифры;
-5. `plugmem-host` — `FileStorage` (flock, tmp+rename) + `Embedder`:
-   именно host делает «указал файл» возможным (ядро no_std и файлов не
-   знает). Host — часть Rust-опыта, не обёртка.
+4. ~~этап D — README core + прогон стенда~~ — **реализовано 2026-07-20**
+   (README + assets/benchmarks.svg + фактические цифры в specs/07);
+5. ~~`plugmem-host`~~ — **реализовано 2026-07-20** (specs/13: FileStorage
+   + Database + OpenAiCompatEmbedder + README). Host — часть Rust-опыта,
+   не обёртка.
 
-Затем — этап 5 (CLI, MCP, wasm, SKILL.md).
+**Ядро (и host) завершены.** Дальше — этап 5 (CLI, MCP, wasm, SKILL.md)
+и перевод спек на английский перед публикацией.
 
 ## 0. Порядок работ и почему именно такой
 

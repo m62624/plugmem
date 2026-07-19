@@ -202,9 +202,11 @@ pub trait Embedder {
 }
 ```
 
-Реализации v1: `OllamaEmbedder` (HTTP `/api/embed`), `OpenAiCompatEmbedder`
-(`/v1/embeddings`, любой совместимый), `NullEmbedder` (dim 0). HTTP-клиент —
-`ureq` (блокирующий, маленький: ядро синхронно, async в цепочке не нужен).
+Реализации v1 (**реализовано 2026-07-20**, specs/13): `OpenAiCompatEmbedder`
+(`/v1/embeddings` — покрывает и Ollama через его совместимый эндпоинт;
+отдельный `OllamaEmbedder` снят с плана как дубликат того же JSON) и
+`NullEmbedder` (dim 0). HTTP-клиент — `ureq`; сигнатура ошибок — единый
+`HostError` слоя (вместо отдельного `EmbedError`).
 
 **Встроенный локальный эмбеддер — v1.1 (решено).** Ориентир: feature-флаг
 `local-embed`, модель — квантованный `multilingual-e5-small`, backend —
