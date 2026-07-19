@@ -59,7 +59,10 @@ pub struct FactRecord {
     /// Slot index in the vector arena, or [`NONE_U32`]; meaningful only
     /// with [`fact_flags::HAS_VECTOR`].
     pub vector: u32,
-    /// Predecessor in the revision chain, or [`FactId::NONE`].
+    /// Predecessor in the revision chain, or [`FactId::NONE`]. May name a
+    /// *burned* id — a predecessor that was forgotten and physically
+    /// purged by `maintain`; resolving it then yields `None`, the same
+    /// answer a tombstoned record gives.
     pub revises: FactId,
     /// Knowledge axis: when the memory learned this. Immutable.
     pub recorded_at: u64,
@@ -248,7 +251,9 @@ pub struct EdgeSlot {
     pub rel: TermId,
     /// Second key component (out-arena: destination; in-arena: source).
     pub b: EntityId,
-    /// Provenance fact, or [`FactId::NONE`].
+    /// Provenance fact, or [`FactId::NONE`]. Like
+    /// [`FactRecord::revises`], it may name a burned id once the
+    /// provenance fact has been forgotten and purged.
     pub fact: FactId,
 }
 

@@ -60,9 +60,10 @@ fn content(mem: &Memory, id: FactId) -> Option<Content> {
     ))
 }
 
-/// Every fact's content, in id order.
+/// Every fact id's content, in id order over the full id space (burned
+/// and tombstoned ids read as `None` alike — that equality is the point).
 fn all_content(mem: &Memory) -> Vec<Option<Content>> {
-    (0..mem.facts_len() as u32)
+    (0..mem.stats().next_fact)
         .map(|id| content(mem, FactId(id)))
         .collect()
 }
@@ -169,11 +170,13 @@ fn maintain_preserves_observable_state() {
 
     assert_eq!(all_content(&mem), before_content, "fact content changed");
     assert_eq!(battery(&mut mem), before_battery, "recall behavior changed");
-    // Ids stayed put: the engine keeps allocating from where it was.
+    // Ids stayed put: allocation continues from the persisted counter,
+    // never reusing the purged ids.
+    let next = mem.stats().next_fact;
     let out = mem
         .remember(&mut store, RememberInput::text(90 * DAY, "fresh"))
         .unwrap();
-    assert_eq!(out.id.0 as usize, mem.facts_len() - 1);
+    assert_eq!(out.id.0, next);
 }
 
 #[test]
@@ -191,6 +194,7 @@ fn maintain_reclaims_space() {
     }
     let report = mem.maintain(&mut store, 101 * DAY).unwrap();
     assert_eq!(report.purged, 20);
+    assert_eq!(mem.facts_len(), 20, "purged records are physically gone");
     assert!(
         report.bytes_after < report.bytes_before,
         "no reclaim: {} -> {}",
@@ -330,8 +334,8 @@ fn maintain_on_empty_engine_and_idempotent() {
     // A second maintain with nothing new to purge is a canonical no-op.
     let report = mem.maintain(&mut store, 81 * DAY).unwrap();
     assert_eq!(
-        report.purged, 2,
-        "tombstones remain as records, still counted"
+        report.purged, 0,
+        "the first pass removed the records; burned ids purge nothing"
     );
     assert_eq!(
         report.bytes_before, report.bytes_after,
@@ -431,4 +435,99 @@ proptest! {
         let (reopened, _) = Memory::open(&mut store, cfg(dim)).unwrap();
         prop_assert_eq!(reopened.snapshot_bytes(0), snap);
     }
+}
+
+#[test]
+fn purge_is_physical_and_ids_stay_burned() {
+    use plugmem_core::Error;
+    let (mut mem, mut store) = (Memory::new(cfg(0)).unwrap(), MemStorage::new());
+    // A revision chain (a -> b), a provenance-carrying edge, and a plain
+    // fact to forget.
+    let a = mem
+        .remember(
+            &mut store,
+            RememberInput {
+                entity: Some("user"),
+                ..RememberInput::text(DAY, "old statement")
+            },
+        )
+        .unwrap()
+        .id;
+    let b = mem
+        .revise(
+            &mut store,
+            a,
+            RememberInput {
+                entity: Some("user"),
+                ..RememberInput::text(2 * DAY, "new statement")
+            },
+        )
+        .unwrap()
+        .id;
+    let c = mem
+        .remember(&mut store, RememberInput::text(3 * DAY, "edge basis"))
+        .unwrap()
+        .id;
+    mem.link(
+        &mut store,
+        LinkInput {
+            now: 4 * DAY,
+            src: "user",
+            rel: "works_on",
+            dst: "plugmem",
+            provenance: Some(c),
+        },
+    )
+    .unwrap();
+
+    // Forget the closed predecessor and the provenance fact, then purge.
+    mem.forget(&mut store, 5 * DAY, a).unwrap();
+    mem.forget(&mut store, 5 * DAY, c).unwrap();
+    let before = mem.stats();
+    let report = mem.maintain(&mut store, 6 * DAY).unwrap();
+    assert_eq!(report.purged, 2);
+
+    // Physically gone; the id space is untouched.
+    let after = mem.stats();
+    assert_eq!(after.facts, before.facts - 2);
+    assert_eq!(after.next_fact, before.next_fact);
+    assert!(mem.get(a).is_none() && mem.get(c).is_none());
+
+    // Burned ids answer like tombstoned ones: NotFound, never reuse.
+    assert_eq!(
+        mem.forget(&mut store, 7 * DAY, a).unwrap_err(),
+        Error::NotFound(a)
+    );
+    assert_eq!(
+        mem.revise(&mut store, a, RememberInput::text(7 * DAY, "x"))
+            .unwrap_err(),
+        Error::NotFound(a)
+    );
+    let fresh = mem
+        .remember(&mut store, RememberInput::text(8 * DAY, "fresh"))
+        .unwrap()
+        .id;
+    assert_eq!(fresh, FactId(before.next_fact));
+
+    // Dangling references keep the burned id and read as None.
+    assert_eq!(mem.get(b).unwrap().record.revises, a);
+    let out = mem
+        .recall(RecallQuery {
+            entities: &["user"],
+            ..RecallQuery::text(8 * DAY, "")
+        })
+        .unwrap();
+    let edge = out
+        .edges
+        .iter()
+        .find(|e| e.provenance == c)
+        .expect("edge survives with its burned provenance id");
+    assert!(mem.get(edge.provenance).is_none());
+
+    // The image with holes and dangling ids roundtrips through the
+    // untrusted loader.
+    let bytes = mem.snapshot_bytes(0);
+    let (loaded, _) = Memory::from_bytes(Some(&bytes), &[], cfg(0)).unwrap();
+    assert_eq!(loaded.snapshot_bytes(0), bytes);
+    assert_eq!(loaded.facts_len(), mem.facts_len());
 }

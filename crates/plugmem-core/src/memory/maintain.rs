@@ -6,15 +6,23 @@
 //! ids: `FactId`/`EntityId`/`TermId` are stable forever, so external
 //! references, revision chains and edges stay valid across a compaction.
 //!
-//! The design keeps the tombstoned fact *records* in the facts arena (48
-//! bytes each, ids must stay occupied) but strips their payload — text
-//! collapses to one shared empty blob, the vector slot is dropped, the tag
-//! list is emptied — and rebuilds every satellite structure (the blob
-//! heap, the tag pool, the three posting stores, the temporal arena, the
-//! vector pool) from the live facts alone. The interner is not rebuilt
-//! (term ids are stable; leaked terms are a documented v2 concern), and
-//! edges and the by-name index carry only stable ids, so they ride through
-//! untouched.
+//! Tombstoned facts are purged **physically**: their `FactRecord` and
+//! `FactAux` are simply not carried into the rebuilt arenas. The id itself
+//! is *burned*, never reissued — id allocation runs on the persisted
+//! `next_fact` counter, not on record presence, so replay determinism and
+//! the "ids are never reused" invariant survive removal (specs/12 §7-bis;
+//! specs/02 allows numbering holes explicitly). A burned id behaves
+//! exactly like a tombstoned one did: `get` returns `None`, verbs return
+//! `NotFound`. References *to* a purged fact (a successor's `revises`, an
+//! edge's provenance) keep the burned id rather than being rewritten:
+//! resolving it yields `None` either way, which is what makes a maintained
+//! and an unmaintained run observation-equivalent.
+//!
+//! Every satellite structure (the blob heap, the tag pool, the three
+//! posting stores, the temporal arena, the vector pool) is rebuilt from
+//! the live facts alone. The interner is not rebuilt (term ids are
+//! stable; leaked terms are a documented v2 concern), and edges and the
+//! by-name index carry only stable ids, so they ride through untouched.
 //!
 //! Determinism is the load-bearing property: the rebuild walks entities
 //! and facts in id order and re-derives each index the same way every
@@ -37,7 +45,7 @@ use crate::index::IdListIndex;
 use crate::index::bm25::Bm25Index;
 use crate::index::vecpool::VecPool;
 use crate::journal::Op;
-use crate::model::{EntityRecord, FactAux, FactRecord, TemporalSlot, fact_flags};
+use crate::model::{EntityRecord, FactAux, FactRecord, TemporalSlot};
 use crate::storage::Storage;
 use crate::tokenizer::Tokenizer;
 
@@ -46,11 +54,12 @@ use super::Memory;
 /// Report of a `maintain` pass (specs/05).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MaintainReport {
-    /// Tombstoned facts whose payload was reclaimed.
+    /// Tombstoned facts physically removed by this pass (their ids stay
+    /// burned; a second pass over the same state purges nothing).
     pub purged: usize,
-    /// Reclaimable satellite bytes before the pass.
+    /// Bytes across the rebuilt pools before the pass.
     pub bytes_before: usize,
-    /// Reclaimable satellite bytes after the pass.
+    /// Bytes across the rebuilt pools after the pass.
     pub bytes_after: usize,
 }
 
@@ -70,10 +79,11 @@ struct Rebuilt {
 }
 
 impl Memory {
-    /// Purges tombstoned facts and compacts every satellite structure
-    /// (specs/05). Ids are preserved; observable state is unchanged; only
-    /// reclaimable bytes shrink. Journaled as a `Maintain` marker so
-    /// replay reproduces the compaction exactly.
+    /// Physically purges tombstoned facts and compacts every satellite
+    /// structure (specs/05). Ids of living facts are preserved; purged ids
+    /// are burned (never reissued); observable state is unchanged; only
+    /// bytes shrink. Journaled as a `Maintain` marker so replay reproduces
+    /// the compaction exactly.
     ///
     /// # Errors
     ///
@@ -111,10 +121,13 @@ impl Memory {
         Ok(())
     }
 
-    /// Reclaimable bytes across the satellite pools (the facts/entities
-    /// arenas are not reclaimed — their tombstone records stay).
+    /// Bytes across the pools the rebuild replaces (everything except the
+    /// interner, the by-name index and the edges — those ride through).
     fn satellite_bytes(&self) -> usize {
-        self.texts.pool_bytes()
+        self.facts.pool_bytes()
+            + self.fact_aux.pool_bytes()
+            + self.entities.pool_bytes()
+            + self.texts.pool_bytes()
             + self.tag_lists.pool_bytes()
             + self.bm25.pool_bytes()
             + self.tags_idx.pool_bytes()
@@ -148,7 +161,7 @@ impl Memory {
         let mut vecs = VecPool::new(cfg.dim, cfg.max_bytes);
 
         // Entities first (id order), each with its name copied into the new
-        // heap. Entities are never purged.
+        // heap. Entities are never purged, so a gap is corruption.
         for eid in 0..self.next_entity {
             let rec = self
                 .entities
@@ -160,35 +173,30 @@ impl Memory {
                 ..rec
             })?;
         }
-        // One shared empty blob backs every tombstone's text.
-        let empty = texts.push(b"")?;
 
         // Re-tokenization reuses the (unchanged) interner via read-only
         // lookup — every live token was interned at creation, so it
         // resolves; the tokenizer is a scratch, taken to satisfy borrows.
+        // Constraint: this only holds while the tokenizer matches the one
+        // the texts were indexed with. A future tokenizer change must not
+        // ship through this lookup path (new tokens would silently drop
+        // from BM25) — a reindex migration has to intern, not look up.
         let mut tokenizer = Tokenizer::new();
         let mut tf: Vec<(u32, u8)> = Vec::new();
 
         let mut purged = 0usize;
         for fid in 0..self.next_fact {
             let id = FactId(fid);
-            let rec = self
-                .facts
-                .get(&fid.to_be_bytes())
-                .ok_or(Error::Corrupt("maintain: fact id gap"))?;
+            // A missing record is an id burned by an earlier pass — legal
+            // (specs/02: numbering holes after a purge are the norm).
+            let Some(rec) = self.facts.get(&fid.to_be_bytes()) else {
+                continue;
+            };
 
             if rec.is_tombstone() {
+                // Physical purge: neither the record nor its aux is carried
+                // over. The id stays burned via the untouched `next_fact`.
                 purged += 1;
-                facts.insert(&FactRecord {
-                    text: empty,
-                    vector: NONE_U32,
-                    flags: rec.flags & !fact_flags::HAS_VECTOR,
-                    ..rec
-                })?;
-                fact_aux.insert(&FactAux {
-                    id,
-                    tags: ListHandle::EMPTY,
-                })?;
                 continue;
             }
 
@@ -212,15 +220,19 @@ impl Memory {
             bm25.index_doc(id, &tf)?;
 
             // Tags: re-read the old list, rebuild the fact's handle and the
-            // inverted index.
+            // inverted index. Every fact gets an aux record at creation, so
+            // a gap here is corruption — same strictness as the fact gap
+            // above, not a silent "no tags".
+            let aux = self
+                .fact_aux
+                .get(&fid.to_be_bytes())
+                .ok_or(Error::Corrupt("maintain: fact aux gap"))?;
             let mut tags = ListHandle::EMPTY;
-            if let Some(aux) = self.fact_aux.get(&fid.to_be_bytes()) {
-                for chunk in self.tag_lists.iter(&aux.tags) {
-                    for raw in chunk.chunks_exact(4) {
-                        let term = u32::from_be_bytes(raw.try_into().unwrap());
-                        tag_lists.push(&mut tags, &term.to_be_bytes())?;
-                        tags_idx.push(term, id, 0)?;
-                    }
+            for chunk in self.tag_lists.iter(&aux.tags) {
+                for raw in chunk.chunks_exact(4) {
+                    let term = u32::from_be_bytes(raw.try_into().unwrap());
+                    tag_lists.push(&mut tags, &term.to_be_bytes())?;
+                    tags_idx.push(term, id, 0)?;
                 }
             }
             fact_aux.insert(&FactAux { id, tags })?;
