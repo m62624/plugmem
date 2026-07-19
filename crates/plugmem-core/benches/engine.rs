@@ -185,8 +185,24 @@ fn bench_idlist(c: &mut Criterion) {
     g.finish();
 }
 
+/// The last timestamp of a generated stream (queries run "after" it).
+fn last_now(ops: &[plugmem_testgen::GenOp]) -> u64 {
+    use plugmem_testgen::GenOp;
+    ops.iter()
+        .map(|op| match op {
+            GenOp::Remember { now, .. }
+            | GenOp::Revise { now, .. }
+            | GenOp::Forget { now, .. }
+            | GenOp::Link { now, .. }
+            | GenOp::Maintain { now } => *now,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 fn bench_recall(c: &mut Criterion) {
-    use plugmem_core::{Config, MemStorage, Memory, RecallQuery, RecallResult, RememberInput};
+    use plugmem_core::{Config, MemStorage, Memory, RecallQuery, RecallResult};
+    use plugmem_testgen::{Gen, GenOp, Profile, apply, word_for};
 
     let mut g = c.benchmark_group("recall");
     g.sample_size(50);
@@ -194,40 +210,40 @@ fn bench_recall(c: &mut Criterion) {
     cfg.shards_postings = 2048;
     let mut mem = Memory::new(cfg).unwrap();
     let mut store = MemStorage::new();
-    let entities = ["user", "plugmem", "tokio", "work", "home", "team", "city"];
-    // Realistic text: 10 words per fact from a 3000-word Zipf-ish
-    // vocabulary (the testgen profile) — query-term document frequencies
-    // in the low thousands, like real prose, not like a looped template.
-    let mut rng = xorshift(0x5EED_0000_0000_0007);
-    let word = |skew: &mut dyn FnMut() -> u64| -> String {
-        let r = (skew() % 10_000) as f32 / 10_000.0;
-        format!("w{}", ((r * r * r) * 3000.0) as u32)
-    };
-    for i in 0..100_000u64 {
-        let text: String = (0..10)
-            .map(|_| word(&mut rng))
-            .collect::<Vec<_>>()
-            .join(" ");
-        mem.remember(
-            &mut store,
-            RememberInput {
-                entity: Some(entities[(i % 7) as usize]),
-                tags: if i % 3 == 0 { &["pref"] } else { &[] },
-                links: if i % 50 == 0 {
-                    &[("works_on", "plugmem")]
-                } else {
-                    &[]
-                },
-                ..RememberInput::text(i * 1_000, &text)
-            },
-        )
-        .unwrap();
+    // The specs/07 §6 corpus passport via testgen: Zipf vocabulary,
+    // normal text lengths, hub entities, tags, links, revisions and
+    // forgets in the default mix.
+    let ops = Gen::new(0x5EED_0000_0000_0007, Profile::default()).ops(100_000);
+    for op in &ops {
+        apply(&mut mem, &mut store, op).unwrap();
     }
+    // Query pieces come from the stream itself: the head entity and tag
+    // of the corpus, and dictionary words of known frequency classes
+    // (rank 1 = common, 400 = mid, 2500 = rare).
+    let entity = ops
+        .iter()
+        .find_map(|op| match op {
+            GenOp::Remember {
+                entity: Some(e), ..
+            } => Some(e.clone()),
+            _ => None,
+        })
+        .expect("the stream contains entity-bearing remembers");
+    let tag = ops
+        .iter()
+        .find_map(|op| match op {
+            GenOp::Remember { tags, .. } if !tags.is_empty() => Some(tags[0].clone()),
+            _ => None,
+        })
+        .expect("the stream contains tagged remembers");
+    let now = last_now(&ops) + 1;
+    let text = format!("{} {} {}", word_for(1), word_for(400), word_for(2500));
+
     let mut out = RecallResult::default();
-    // One common, one mid, one rare query term.
+    let anchors = [entity.as_str()];
     let q = RecallQuery {
-        entities: &["user"],
-        ..RecallQuery::text(200_000_000, "w1 w400 w2500")
+        entities: &anchors,
+        ..RecallQuery::text(now, &text)
     };
     g.throughput(Throughput::Elements(1));
     g.bench_function("structural_100k", |b| {
@@ -236,16 +252,71 @@ fn bench_recall(c: &mut Criterion) {
             out.facts.len()
         });
     });
-    // Tag filter plus a ~5k-fact recorded_at window (range cost is
-    // proportional to the window by design).
+    // Tag filter plus a recorded_at window over the dense (late) part of
+    // the time axis (range cost is proportional to the window by design).
+    let tags = [tag.as_str()];
     let tagged = RecallQuery {
-        tags: &["pref"],
-        range: Some((95_000_000, 100_000_000)),
-        ..RecallQuery::text(200_000_000, "w1 w400")
+        tags: &tags,
+        range: Some((now * 9 / 10, now)),
+        ..RecallQuery::text(now, &text)
     };
     g.bench_function("tags_and_range_100k", |b| {
         b.iter(|| {
             mem.recall_into(black_box(tagged), &mut out).unwrap();
+            out.facts.len()
+        });
+    });
+    g.finish();
+}
+
+fn bench_vec(c: &mut Criterion) {
+    use plugmem_core::{Config, MemStorage, Memory, RecallQuery, RecallResult};
+    use plugmem_testgen::{Gen, GenOp, Profile, apply};
+
+    // The specs/11 A.5(9) gate corpus: 24k vectors of dim 384 — the
+    // flat-to-HNSW threshold — searched at k = 8.
+    let mut g = c.benchmark_group("vec");
+    g.sample_size(50);
+    const DIM: usize = 384;
+    const VECTORS: usize = 24_000;
+    let profile = Profile {
+        dim: DIM,
+        w_revise: 0,
+        w_forget: 0,
+        w_link: 0,
+        ..Profile::default()
+    };
+    let ops = Gen::new(0x5EC0_0000_0000_0384, profile).ops(VECTORS);
+    let mut cfg = Config::default();
+    cfg.dim = DIM;
+    let mut mem = Memory::new(cfg).unwrap();
+    let mut store = MemStorage::new();
+    for op in &ops {
+        apply(&mut mem, &mut store, op).unwrap();
+    }
+    // The query is a real corpus member: a cluster inhabitant, so the
+    // search has genuine near neighbors to rank.
+    let query = ops
+        .iter()
+        .find_map(|op| match op {
+            GenOp::Remember {
+                vector: Some(v), ..
+            } => Some(v.clone()),
+            _ => None,
+        })
+        .expect("every remember carries a vector at dim > 0");
+    let now = last_now(&ops) + 1;
+    let mut out = RecallResult::default();
+    let q = RecallQuery {
+        vector: Some(&query),
+        k: 8,
+        text: None,
+        ..RecallQuery::text(now, "")
+    };
+    g.throughput(Throughput::Elements(1));
+    g.bench_function("flat_24k_d384_k8", |b| {
+        b.iter(|| {
+            mem.recall_into(black_box(q), &mut out).unwrap();
             out.facts.len()
         });
     });
@@ -258,6 +329,7 @@ criterion_group!(
     bench_record_codec,
     bench_bm25,
     bench_idlist,
-    bench_recall
+    bench_recall,
+    bench_vec
 );
 criterion_main!(benches);
