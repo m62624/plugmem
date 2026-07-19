@@ -139,7 +139,7 @@ pub struct Counters {
 /// sorted by key prefix within each shard.
 ///
 /// See the [crate-level documentation](crate) for the philosophy and the
-/// [module documentation](self) for the chain/split mechanics. Highlights:
+/// module documentation for the chain/split mechanics. Highlights:
 ///
 /// - all state is `pool` + three small arrays — persisting the arena is a
 ///   `memcpy` of defined bytes (`specs/03`);

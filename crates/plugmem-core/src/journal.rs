@@ -103,7 +103,7 @@ pub enum Op<'a> {
         /// pre-quantization so replay re-quantizes with the same pure
         /// function and reproduces every slot byte for byte.
         vector: Vec<f32>,
-        /// Predecessor being revised ([`FactId::NONE`] for op 1).
+        /// Predecessor being revised ([`crate::id::FactId::NONE`] for op 1).
         revises: crate::id::FactId,
         /// The fact id assigned at execution time — authoritative on
         /// replay.
@@ -126,7 +126,7 @@ pub enum Op<'a> {
         rel: &'a str,
         /// Destination entity name.
         dst: &'a str,
-        /// Provenance fact, or [`FactId::NONE`].
+        /// Provenance fact, or [`crate::id::FactId::NONE`].
         provenance: crate::id::FactId,
     },
     /// Op 5: marker that a maintenance pass ran at this point.

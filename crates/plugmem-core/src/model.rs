@@ -26,7 +26,8 @@ pub mod fact_flags {
     /// The validity interval is closed (`valid_to < u64::MAX`) — the fact
     /// was revised.
     pub const CLOSED: u16 = 1 << 1;
-    /// A vector slot is attached ([`FactRecord::vector`] is meaningful).
+    /// A vector slot is attached ([`crate::model::FactRecord::vector`]
+    /// is meaningful).
     pub const HAS_VECTOR: u16 = 1 << 2;
 }
 

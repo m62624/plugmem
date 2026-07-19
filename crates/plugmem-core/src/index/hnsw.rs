@@ -465,7 +465,7 @@ impl HnswGraph {
     }
 
     /// k-NN query over a raw embedding: quantizes it through the pool
-    /// (into `vec_scratch`) and runs [`HnswGraph::search_quantized`].
+    /// (into `vec_scratch`) and runs the level-descending beam search.
     /// Results land in `out` as `(slot, cosine)`, best first — the
     /// caller filters and merges with the flat tail.
     ///

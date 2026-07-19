@@ -3,7 +3,7 @@
 //!
 //! All state lives in the flat structures of `plugmem-arena`; every
 //! mutating verb journals itself through the caller's
-//! [`Storage`](crate::storage::Storage) and is replayed through the same
+//! [`Storage`] and is replayed through the same
 //! internal `apply_*` path on open — the journal's ids are authoritative,
 //! so replay is deterministic and idempotent over a reapplied tail.
 //!

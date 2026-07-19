@@ -89,7 +89,7 @@
 //!
 //! - `std` *(default)* — nothing yet beyond linking `std` for consumers'
 //!   convenience; the crate is fully functional as `no_std + alloc`.
-//! - `counters` — deterministic work counters ([`Counters`]) on every
+//! - `counters` — deterministic work counters (`Counters`) on every
 //!   container: key comparisons, bytes shifted, pages allocated. Zero cost
 //!   when disabled (the increments compile away).
 #![no_std]
