@@ -1094,6 +1094,7 @@ dependencies = [
  "plugmem-core",
  "plugmem-host",
  "serde_json",
+ "toml",
 ]
 
 [[package]]

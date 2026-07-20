@@ -49,6 +49,15 @@ engine keeps no clock, so `now` comes from the system clock at each call.
 | `show <ID>` | one fact's full card — text, both time axes, state |
 | `stats` | engine size counters |
 | `maintain` | purge tombstones, compact, build HNSW past the threshold |
+| `export` | dump the currently-open facts as JSONL (one per line) to stdout |
+| `import <FILE>` | load facts from a JSONL file (as written by `export`) |
+
+Read-only commands (`recall`, `show`, `stats`, `export`) open the snapshot
+**zero-copy over an mmap** (a shared lock, so several may run at once and
+the whole file is not loaded) — falling back to a normal open if the
+journal is un-checkpointed. `recall` uses that fast path only when no
+embedder is configured, because embedding the query needs the read-write
+handle.
 
 ### Examples
 
@@ -71,7 +80,41 @@ plugmem-cli --json stats
 # Reclaim space held by forgotten facts:
 plugmem-cli forget 3
 plugmem-cli maintain
+
+# Human-readable backup and restore:
+plugmem-cli export > backup.jsonl
+plugmem-cli --db other.plugmem import backup.jsonl
 ```
+
+## Configuration
+
+Optional `config.toml`, found by `--config PATH`, then `$PLUGMEM_CONFIG`,
+then `$XDG_CONFIG_HOME/plugmem/config.toml` (all optional — the CLI works
+with none). Precedence overall is **flag > environment > config file >
+default**.
+
+```toml
+[engine]
+dim = 768              # embedding size (0 = vectors off); other Config
+                       # size fields: max_bytes, max_text, shards_* …
+
+[embedder]             # default: none — lexical/tags/graph/time still work
+kind = "ollama"        # ollama | openai | lmstudio | vllm | llamacpp | none
+url = "http://localhost:11434/v1"
+model = "nomic-embed-text"
+api_key_env = "OPENAI_API_KEY"   # env var holding the bearer token (openai)
+
+[maintenance]
+snapshot_every_ops = 1024
+snapshot_journal_bytes = 4194304
+maintain_every_forgets = 100     # optional auto-purge
+```
+
+The embedder is what unlocks the **vector** recall source: with `kind =
+"none"` (the default) `remember`/`recall` still answer from lexical, tag,
+graph and temporal evidence, but no embeddings are computed. One
+OpenAI-compatible client covers Ollama, OpenAI, LM Studio, vLLM and
+llama.cpp-server. `$PLUGMEM_EMBEDDER` overrides `[embedder].kind`.
 
 ## Exit codes
 

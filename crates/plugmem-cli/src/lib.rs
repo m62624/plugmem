@@ -12,135 +12,41 @@
 //! [`run`] wires argv and the database, and `execute` runs one command
 //! against an open [`Database`] into any writer.
 
+mod cli;
+mod config;
+
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use plugmem_core::FactId;
 use plugmem_host::{
-    Config, Database, HostError, LinkInput, RecallQuery, RememberInput, RememberOutcome,
-    VALID_TO_OPEN,
+    Database, ExportedFact, HostError, LinkInput, ReadOnlyDatabase, RecallQuery, RecallResult,
+    RememberInput, RememberOutcome, Stats, VALID_TO_OPEN,
 };
 use serde_json::json;
 
-/// `plugmem` — a temporal memory for LLM agents in a single file.
-#[derive(Parser)]
-#[command(
-    name = "plugmem-cli",
-    version,
-    about = "Temporal memory for LLM agents — remember, recall, revise, forget over one file.",
-    long_about = "A local memory an agent talks to in four verbs — remember / recall / \
-revise / forget — plus link / show / stats / maintain. Recall fuses lexical (BM25), \
-vector, entity-graph and temporal evidence into one ranked, token-budgeted block. One \
-database is a single snapshot file plus a journal; point --db at it (default ./plugmem.db, \
-or $PLUGMEM_DB). Human output by default, --json for tooling. Exit code: 0 ok, 1 not found \
-/ database locked, 2 usage or runtime error.",
-    after_help = "FOR AI AGENTS: you'll get markedly better results with the matching \
-`plugmem` skill loaded — it carries the workflow, the remember/recall loop and the examples \
-this binary expects. Check that its version matches `plugmem-cli --version`; the skill is \
-attached to every release at https://github.com/m62624/plugmem/releases"
-)]
-pub struct Cli {
-    /// Database file (default: ./plugmem.db, or $PLUGMEM_DB).
-    #[arg(long, global = true, value_name = "PATH")]
-    db: Option<PathBuf>,
+use crate::cli::{Cli, Command};
+use crate::config::load_settings;
 
-    /// Machine-readable JSON output instead of the human report.
-    #[arg(long, global = true)]
-    json: bool,
-
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Subcommand)]
-enum Command {
-    /// Store a new fact; prints its id and any similar/conflicting facts.
-    Remember {
-        /// The fact text.
-        text: String,
-        /// Subject entity (created on first mention).
-        #[arg(long)]
-        entity: Option<String>,
-        /// A tag; repeatable.
-        #[arg(long = "tag", value_name = "TAG")]
-        tags: Vec<String>,
-        /// A typed edge `REL:ENTITY` from the subject; repeatable.
-        #[arg(long = "link", value_name = "REL:ENTITY")]
-        links: Vec<String>,
-        /// Validity start (unix millis); defaults to now.
-        #[arg(long = "valid-from", value_name = "TS")]
-        valid_from: Option<u64>,
-    },
-    /// Retrieve a ranked, token-budgeted block; sources compose.
-    Recall {
-        /// Free-text query for the lexical/vector sources.
-        query: Option<String>,
-        /// Require this tag; repeatable (a fact must carry all).
-        #[arg(long = "tag", value_name = "TAG")]
-        tags: Vec<String>,
-        /// Entity anchor for the graph source; repeatable.
-        #[arg(long = "entity", value_name = "E")]
-        entities: Vec<String>,
-        /// "What was true then": validity instant (unix millis).
-        #[arg(long = "as-of", value_name = "TS")]
-        as_of: Option<u64>,
-        /// recorded_at window `FROM TO` (unix millis) for the temporal source.
-        #[arg(long, num_args = 2, value_names = ["FROM", "TO"])]
-        range: Option<Vec<u64>>,
-        /// Max facts (0 = engine default 8, ceiling 64).
-        #[arg(short = 'k', long, default_value_t = 0)]
-        k: usize,
-        /// Include closed revisions (whole chains).
-        #[arg(long)]
-        closed: bool,
-    },
-    /// Supersede a fact: close the old one, record the successor.
-    Revise {
-        /// The fact id to revise.
-        id: u32,
-        /// The new fact text.
-        text: String,
-        #[arg(long)]
-        entity: Option<String>,
-        #[arg(long = "tag", value_name = "TAG")]
-        tags: Vec<String>,
-        #[arg(long = "link", value_name = "REL:ENTITY")]
-        links: Vec<String>,
-        #[arg(long = "valid-from", value_name = "TS")]
-        valid_from: Option<u64>,
-    },
-    /// Tombstone a fact (physically purged at the next `maintain`).
-    Forget {
-        /// The fact id to forget.
-        id: u32,
-    },
-    /// Upsert a typed edge between two entities.
-    Link {
-        /// Source entity.
-        src: String,
-        /// Relation.
-        rel: String,
-        /// Destination entity.
-        dst: String,
-    },
-    /// Print one fact's full card (text, both time axes, state).
-    Show {
-        /// The fact id.
-        id: u32,
-    },
-    /// Print engine size counters and identity.
-    Stats,
-    /// Run a maintenance pass now (purge tombstones, compact, build HNSW).
-    Maintain,
-}
+/// Environment variable naming the database file (below the `--db` flag).
+pub(crate) const ENV_DB: &str = "PLUGMEM_DB";
+/// Environment variable naming the config file (below the `--config` flag).
+pub(crate) const ENV_CONFIG: &str = "PLUGMEM_CONFIG";
+/// Environment variable selecting the embedder kind (above the config file).
+pub(crate) const ENV_EMBEDDER: &str = "PLUGMEM_EMBEDDER";
+/// Default database file when neither flag nor env is given.
+pub(crate) const DEFAULT_DB: &str = "plugmem.db";
+/// The app's config subdirectory and file, under `$XDG_CONFIG_HOME`.
+pub(crate) const CONFIG_DIR: &str = "plugmem";
+pub(crate) const CONFIG_FILE: &str = "config.toml";
 
 /// A failure before or during a command: a runtime engine/host error, or a
 /// usage error (a malformed argument the parser could not catch).
 #[derive(Debug)]
-enum CliError {
+pub(crate) enum CliError {
     Host(HostError),
     Usage(String),
 }
@@ -152,7 +58,7 @@ impl From<HostError> for CliError {
 }
 
 /// Wall-clock now in unix milliseconds (the engine keeps no clock).
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -167,47 +73,100 @@ pub fn run() -> ExitCode {
     ExitCode::from(run_parsed(Cli::parse(), &mut stdout.lock()))
 }
 
-/// The testable core of [`run`]: resolve the database path, open it, run the
-/// command into `out`, and return the exit code (`0` ok, `1` soft miss /
-/// locked, `2` error). Errors go to stderr.
+/// The testable core of [`run`]: resolve settings and the database path,
+/// open the right handle, run the command into `out`, return the exit code
+/// (`0` ok, `1` soft miss / locked, `2` error). Errors go to stderr.
 fn run_parsed(cli: Cli, out: &mut impl Write) -> u8 {
     let path = resolve_db_path(cli.db.as_deref());
-    let (db, _report) = match Database::open(&path, Config::default()) {
-        Ok(v) => v,
-        Err(HostError::Locked { path }) => {
-            eprintln!(
-                "plugmem: database is locked by another process: {}",
-                path.display()
-            );
-            return 1;
-        }
-        Err(e) => {
-            eprintln!("plugmem: {e}");
-            return 2;
-        }
+    let settings = match load_settings(&cli) {
+        Ok(s) => s,
+        Err(e) => return report_err(&e),
     };
 
-    match execute(&db, &cli.command, cli.json, now_ms(), out) {
-        Ok(code) => code,
-        Err(CliError::Usage(msg)) => {
-            let _ = out.flush();
-            eprintln!("plugmem: {msg}");
-            2
-        }
-        Err(CliError::Host(e)) => {
-            let _ = out.flush();
-            eprintln!("plugmem: {e}");
-            2
+    // Read-only commands can open the snapshot zero-copy (mmap, shared lock):
+    // many readers at once, no whole-file load. `recall` needs the embedder
+    // to embed its query, so it takes the read-only path only when none is
+    // configured. A dirty (un-checkpointed) journal forbids a read-only open,
+    // so those fall through to the read-write path.
+    let readonly_ok = match &cli.command {
+        Command::Show { .. } | Command::Stats | Command::Export => true,
+        Command::Recall { .. } => settings.embedder.is_none(),
+        _ => false,
+    };
+    if readonly_ok {
+        match Database::open_readonly(&path, settings.config.clone()) {
+            Ok(ro) => return execute_ro(&ro, &cli.command, cli.json, out),
+            Err(HostError::Locked { path }) => return report_locked(&path),
+            // Any other failure — a missing snapshot (fresh db), a dirty
+            // journal (NeedsCheckpoint), or a corrupt image — is handled by
+            // the read-write path: it creates/checkpoints, or surfaces the
+            // same corruption as a typed error.
+            Err(_) => {}
         }
     }
+
+    let db = match settings.open(&path) {
+        Ok(db) => db,
+        Err(HostError::Locked { path }) => return report_locked(&path),
+        Err(e) => return report_err(&CliError::Host(e)),
+    };
+    match execute(&db, &cli.command, cli.json, now_ms(), out) {
+        Ok(code) => code,
+        Err(e) => {
+            let _ = out.flush();
+            report_err(&e)
+        }
+    }
+}
+
+/// Prints an error to stderr and returns its exit code (`2`).
+fn report_err(e: &CliError) -> u8 {
+    match e {
+        CliError::Usage(msg) => eprintln!("plugmem: {msg}"),
+        CliError::Host(err) => eprintln!("plugmem: {err}"),
+    }
+    2
+}
+
+/// Prints the locked message and returns its exit code (`1`).
+fn report_locked(path: &std::path::Path) -> u8 {
+    eprintln!(
+        "plugmem: database is locked by another process: {}",
+        path.display()
+    );
+    1
 }
 
 /// Database path precedence (specs/06): `--db` flag > `$PLUGMEM_DB` >
 /// `./plugmem.db`.
 fn resolve_db_path(flag: Option<&std::path::Path>) -> PathBuf {
     flag.map(PathBuf::from)
-        .or_else(|| std::env::var_os("PLUGMEM_DB").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("plugmem.db"))
+        .or_else(|| std::env::var_os(ENV_DB).map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_DB))
+}
+
+/// Runs a read-only command over a zero-copy [`ReadOnlyDatabase`] (mmap,
+/// shared lock). Only the commands `run_parsed` routes here appear.
+fn execute_ro(ro: &ReadOnlyDatabase, cmd: &Command, json: bool, out: &mut impl Write) -> u8 {
+    match cmd {
+        Command::Recall { .. } => match with_recall_query(cmd, now_ms(), |q| ro.recall(q)) {
+            Ok(res) => {
+                render_recall(&res, json, out);
+                0
+            }
+            Err(e) => report_err(&CliError::Host(e)),
+        },
+        Command::Show { id } => render_show(ro.get(FactId(*id)), *id, json, out),
+        Command::Stats => {
+            render_stats(&ro.stats(), json, out);
+            0
+        }
+        Command::Export => {
+            render_export(&ro.export(), json, out);
+            0
+        }
+        _ => unreachable!("execute_ro only receives read-only commands"),
+    }
 }
 
 /// Runs one command against an open database, writing the result to `out`.
@@ -253,62 +212,9 @@ fn execute(
             render_remember(&outcome, json, out);
             Ok(0)
         }
-        Command::Recall {
-            query,
-            tags,
-            entities,
-            as_of,
-            range,
-            k,
-            closed,
-        } => {
-            let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
-            let ent_refs: Vec<&str> = entities.iter().map(String::as_str).collect();
-            let range_pair = range.as_ref().map(|v| (v[0], v[1]));
-            let q = RecallQuery {
-                now,
-                text: query.as_deref(),
-                vector: None,
-                tags: &tag_refs,
-                entities: &ent_refs,
-                as_of: *as_of,
-                range: range_pair,
-                k: *k,
-                token_budget: None,
-                include_closed: *closed,
-                ef: None,
-            };
-            let res = db.recall(q)?;
-            if json {
-                let facts: Vec<_> = res
-                    .facts
-                    .iter()
-                    .map(|f| {
-                        json!({
-                            "id": f.id.0,
-                            "score": f.score,
-                            "sources": f.sources,
-                            "recorded_at": f.recorded_at,
-                            "valid_from": f.valid_from,
-                            "valid_to": open_or(f.valid_to),
-                        })
-                    })
-                    .collect();
-                writeln!(
-                    out,
-                    "{}",
-                    json!({
-                        "facts": facts,
-                        "rendered": res.rendered,
-                        "truncated": res.truncated,
-                    })
-                )
-                .ok();
-            } else if res.rendered.is_empty() {
-                writeln!(out, "(nothing recalled)").ok();
-            } else {
-                writeln!(out, "{}", res.rendered).ok();
-            }
+        Command::Recall { .. } => {
+            let res = with_recall_query(cmd, now, |q| db.recall(q))?;
+            render_recall(&res, json, out);
             Ok(0)
         }
         Command::Forget { id } => {
@@ -337,76 +243,21 @@ fn execute(
             }
             Ok(0)
         }
-        Command::Show { id } => {
-            let Some(fact) = db.get(FactId(*id)) else {
-                if json {
-                    writeln!(out, "{}", json!({ "id": id, "found": false })).ok();
-                } else {
-                    writeln!(out, "fact {id} not found").ok();
-                }
-                return Ok(1);
-            };
-            let r = &fact.record;
-            if json {
-                writeln!(
-                    out,
-                    "{}",
-                    json!({
-                        "id": r.id.0,
-                        "text": fact.text,
-                        "recorded_at": r.recorded_at,
-                        "valid_from": r.valid_from,
-                        "valid_to": open_or(r.valid_to),
-                        "closed": r.is_closed(),
-                        "tombstone": r.is_tombstone(),
-                        "revises": (r.revises != FactId::NONE).then_some(r.revises.0),
-                    })
-                )
-                .ok();
-            } else {
-                writeln!(out, "fact {}", r.id.0).ok();
-                writeln!(out, "  text        {}", fact.text).ok();
-                writeln!(out, "  recorded_at {}", r.recorded_at).ok();
-                write!(out, "  valid       [{}, ", r.valid_from).ok();
-                match r.valid_to {
-                    VALID_TO_OPEN => writeln!(out, "open)").ok(),
-                    to => writeln!(out, "{to})").ok(),
-                };
-                if r.revises != FactId::NONE {
-                    writeln!(out, "  revises     fact {}", r.revises.0).ok();
-                }
-                if r.is_tombstone() {
-                    writeln!(out, "  state       tombstoned").ok();
-                }
-            }
+        Command::Show { id } => Ok(render_show(db.get(FactId(*id)), *id, json, out)),
+        Command::Stats => {
+            render_stats(&db.stats(), json, out);
             Ok(0)
         }
-        Command::Stats => {
-            let s = db.stats();
+        Command::Export => {
+            render_export(&db.export(), json, out);
+            Ok(0)
+        }
+        Command::Import { file } => {
+            let n = do_import(db, now, file, out)?;
             if json {
-                writeln!(
-                    out,
-                    "{}",
-                    json!({
-                        "facts": s.facts,
-                        "entities": s.entities,
-                        "terms": s.terms,
-                        "edges": s.edges,
-                        "vectors": s.vectors,
-                        "next_fact": s.next_fact,
-                        "next_entity": s.next_entity,
-                        "pool_bytes": s.pool_bytes,
-                    })
-                )
-                .ok();
+                writeln!(out, "{}", json!({ "imported": n })).ok();
             } else {
-                writeln!(out, "facts       {}", s.facts).ok();
-                writeln!(out, "entities    {}", s.entities).ok();
-                writeln!(out, "terms       {}", s.terms).ok();
-                writeln!(out, "edges       {}", s.edges).ok();
-                writeln!(out, "vectors     {}", s.vectors).ok();
-                writeln!(out, "next_fact   {}", s.next_fact).ok();
-                writeln!(out, "pool_bytes  {}", s.pool_bytes).ok();
+                writeln!(out, "imported {n} facts").ok();
             }
             Ok(0)
         }
@@ -434,6 +285,215 @@ fn execute(
             Ok(0)
         }
     }
+}
+
+/// Builds the [`RecallQuery`] for a `recall` command and passes it to `f`.
+/// A closure (not a return) because the query borrows temporary tag/entity
+/// slices that must outlive the call. Used by both the read-write and
+/// read-only paths.
+fn with_recall_query<R>(cmd: &Command, now: u64, f: impl FnOnce(RecallQuery<'_>) -> R) -> R {
+    let Command::Recall {
+        query,
+        tags,
+        entities,
+        as_of,
+        range,
+        k,
+        closed,
+    } = cmd
+    else {
+        unreachable!("with_recall_query called on a non-recall command");
+    };
+    let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
+    let ent_refs: Vec<&str> = entities.iter().map(String::as_str).collect();
+    let range_pair = range.as_ref().map(|v| (v[0], v[1]));
+    let q = RecallQuery {
+        now,
+        text: query.as_deref(),
+        vector: None,
+        tags: &tag_refs,
+        entities: &ent_refs,
+        as_of: *as_of,
+        range: range_pair,
+        k: *k,
+        token_budget: None,
+        include_closed: *closed,
+        ef: None,
+    };
+    f(q)
+}
+
+/// Renders a recall result — the engine's block (human) or facts + block
+/// (JSON).
+fn render_recall(res: &RecallResult, json: bool, out: &mut impl Write) {
+    if json {
+        let facts: Vec<_> = res
+            .facts
+            .iter()
+            .map(|f| {
+                json!({
+                    "id": f.id.0,
+                    "score": f.score,
+                    "sources": f.sources,
+                    "recorded_at": f.recorded_at,
+                    "valid_from": f.valid_from,
+                    "valid_to": open_or(f.valid_to),
+                })
+            })
+            .collect();
+        writeln!(
+            out,
+            "{}",
+            json!({ "facts": facts, "rendered": res.rendered, "truncated": res.truncated })
+        )
+        .ok();
+    } else if res.rendered.is_empty() {
+        writeln!(out, "(nothing recalled)").ok();
+    } else {
+        writeln!(out, "{}", res.rendered).ok();
+    }
+}
+
+/// Renders one fact's card. Returns the exit code (`0` found, `1` missing).
+fn render_show(
+    fact: Option<plugmem_host::FactSnapshot>,
+    id: u32,
+    json: bool,
+    out: &mut impl Write,
+) -> u8 {
+    let Some(fact) = fact else {
+        if json {
+            writeln!(out, "{}", json!({ "id": id, "found": false })).ok();
+        } else {
+            writeln!(out, "fact {id} not found").ok();
+        }
+        return 1;
+    };
+    let r = &fact.record;
+    if json {
+        writeln!(
+            out,
+            "{}",
+            json!({
+                "id": r.id.0,
+                "text": fact.text,
+                "recorded_at": r.recorded_at,
+                "valid_from": r.valid_from,
+                "valid_to": open_or(r.valid_to),
+                "closed": r.is_closed(),
+                "tombstone": r.is_tombstone(),
+                "revises": (r.revises != FactId::NONE).then_some(r.revises.0),
+            })
+        )
+        .ok();
+    } else {
+        writeln!(out, "fact {}", r.id.0).ok();
+        writeln!(out, "  text        {}", fact.text).ok();
+        writeln!(out, "  recorded_at {}", r.recorded_at).ok();
+        write!(out, "  valid       [{}, ", r.valid_from).ok();
+        match r.valid_to {
+            VALID_TO_OPEN => writeln!(out, "open)").ok(),
+            to => writeln!(out, "{to})").ok(),
+        };
+        if r.revises != FactId::NONE {
+            writeln!(out, "  revises     fact {}", r.revises.0).ok();
+        }
+        if r.is_tombstone() {
+            writeln!(out, "  state       tombstoned").ok();
+        }
+    }
+    0
+}
+
+/// Renders engine size counters.
+fn render_stats(s: &Stats, json: bool, out: &mut impl Write) {
+    if json {
+        writeln!(
+            out,
+            "{}",
+            json!({
+                "facts": s.facts,
+                "entities": s.entities,
+                "terms": s.terms,
+                "edges": s.edges,
+                "vectors": s.vectors,
+                "next_fact": s.next_fact,
+                "next_entity": s.next_entity,
+                "pool_bytes": s.pool_bytes,
+            })
+        )
+        .ok();
+    } else {
+        writeln!(out, "facts       {}", s.facts).ok();
+        writeln!(out, "entities    {}", s.entities).ok();
+        writeln!(out, "terms       {}", s.terms).ok();
+        writeln!(out, "edges       {}", s.edges).ok();
+        writeln!(out, "vectors     {}", s.vectors).ok();
+        writeln!(out, "next_fact   {}", s.next_fact).ok();
+        writeln!(out, "pool_bytes  {}", s.pool_bytes).ok();
+    }
+}
+
+/// Renders exported facts as JSONL (one object per line) — the same shape
+/// with or without `--json` (JSONL is already machine-readable).
+fn render_export(facts: &[ExportedFact], _json: bool, out: &mut impl Write) {
+    for f in facts {
+        writeln!(
+            out,
+            "{}",
+            json!({
+                "text": f.text,
+                "entity": f.entity,
+                "tags": f.tags,
+                "recorded_at": f.recorded_at,
+                "valid_from": f.valid_from,
+            })
+        )
+        .ok();
+    }
+}
+
+/// Loads facts from a JSONL file (as written by `export`), re-`remember`ing
+/// each. Returns the count imported. A malformed line is a usage error.
+fn do_import(
+    db: &Database,
+    now: u64,
+    file: &std::path::Path,
+    _out: &mut impl Write,
+) -> Result<usize, CliError> {
+    let text = std::fs::read_to_string(file)
+        .map_err(|e| CliError::Usage(format!("reading {}: {e}", file.display())))?;
+    let mut count = 0usize;
+    for (i, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = serde_json::from_str(line)
+            .map_err(|e| CliError::Usage(format!("line {}: {e}", i + 1)))?;
+        let fact_text = v["text"]
+            .as_str()
+            .ok_or_else(|| CliError::Usage(format!("line {}: missing string \"text\"", i + 1)))?;
+        let entity = v["entity"].as_str();
+        let tags: Vec<String> = v["tags"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|t| t.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
+        let valid_from = v["valid_from"].as_u64();
+        db.remember(RememberInput {
+            entity,
+            tags: &tag_refs,
+            valid_from,
+            ..RememberInput::text(now, fact_text)
+        })?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 /// Shared `remember`/`revise` body: build the input and dispatch.
@@ -518,6 +578,8 @@ fn open_or(valid_to: u64) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use plugmem_host::Config;
+
     use super::*;
 
     /// A throwaway database on a unique temp path; removed on drop.
@@ -869,6 +931,7 @@ mod tests {
         let path = dir.join("m.plugmem");
         let cli = Cli {
             db: Some(path.clone()),
+            config: None,
             json: false,
             command: Command::Stats,
         };
@@ -893,6 +956,7 @@ mod tests {
         };
         let cli = Cli {
             db: Some(dir.join("m.plugmem")),
+            config: None,
             json: false,
             command: Command::Stats,
         };
@@ -911,6 +975,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let cli = Cli {
             db: Some(dir.join("m.plugmem")),
+            config: None,
             json: false,
             command: Command::Remember {
                 text: "x".into(),
@@ -923,5 +988,215 @@ mod tests {
         let mut buf = Vec::new();
         assert_eq!(run_parsed(cli, &mut buf), 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A scratch directory (no db) for config/checkpoint tests; removed on drop.
+    struct Scratch(PathBuf);
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "plugmem-cli-{tag}-{}-{}",
+                std::process::id(),
+                now_ms_unique()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn export_import_roundtrip_preserves_open_facts() {
+        // A deliberately nested scenario: entities, multi-tag facts, a
+        // revision (closes its predecessor), a forget (tombstone), and an
+        // explicit valid_from — export must dump exactly the open facts, and
+        // import must reconstruct that set faithfully.
+        let (a, _ta) = TempDb::open();
+        run_cmd(
+            &a,
+            &Command::Remember {
+                text: "prefers tokio".into(),
+                entity: Some("user".into()),
+                tags: vec!["pref".into(), "lang".into()],
+                links: Vec::new(),
+                valid_from: Some(500),
+            },
+            false,
+            1_000,
+        );
+        run_cmd(
+            &a,
+            &remember("lives in Moscow", Some("user"), &[]),
+            false,
+            1_100,
+        ); // id 1
+        run_cmd(
+            &a,
+            &Command::Revise {
+                id: 1,
+                text: "lives in Berlin".into(),
+                entity: Some("user".into()),
+                tags: vec!["geo".into()],
+                links: Vec::new(),
+                valid_from: None,
+            },
+            false,
+            1_200,
+        ); // id 2 open, id 1 closed
+        run_cmd(&a, &remember("junk", None, &[]), false, 1_300); // id 3
+        run_cmd(&a, &Command::Forget { id: 3 }, false, 1_400); // tombstone id 3
+        run_cmd(
+            &a,
+            &remember("uses rust", Some("plugmem"), &["lang"]),
+            false,
+            1_500,
+        ); // id 4
+
+        // Export A into a JSONL file.
+        let mut dump = Vec::new();
+        render_export(&a.export(), false, &mut dump);
+        let scratch = Scratch::new("roundtrip");
+        let file = scratch.0.join("dump.jsonl");
+        std::fs::write(&file, &dump).unwrap();
+
+        // Import into a fresh B.
+        let (b, _tb) = TempDb::open();
+        let n = do_import(&b, 9_000, &file, &mut Vec::new()).unwrap();
+
+        // Both sides, compared as sets keyed by the preserved fields.
+        let key = |f: &ExportedFact| {
+            let mut tags = f.tags.clone();
+            tags.sort();
+            (f.text.clone(), f.entity.clone(), tags, f.valid_from)
+        };
+        let mut ak: Vec<_> = a.export().iter().map(key).collect();
+        let mut bk: Vec<_> = b.export().iter().map(key).collect();
+        ak.sort();
+        bk.sort();
+        assert_eq!(n, ak.len());
+        assert_eq!(
+            ak, bk,
+            "roundtrip must preserve text/entity/tags/valid_from"
+        );
+
+        // Spot-checks: the open facts survive with their metadata; the closed
+        // revision and the tombstone do not.
+        let b_open = b.export();
+        assert!(b_open.iter().any(|f| f.text == "prefers tokio"
+            && f.valid_from == 500
+            && f.entity.as_deref() == Some("user")
+            && f.tags == vec!["pref".to_string(), "lang".to_string()]));
+        assert!(b_open.iter().any(|f| f.text == "lives in Berlin"));
+        assert!(b_open.iter().any(|f| f.text == "uses rust"));
+        assert!(!b_open.iter().any(|f| f.text.contains("Moscow")));
+        assert!(!b_open.iter().any(|f| f.text == "junk"));
+    }
+
+    #[test]
+    fn export_command_emits_jsonl_regardless_of_json_flag() {
+        let (db, _t) = TempDb::open();
+        run_cmd(&db, &remember("a fact", Some("e"), &["t"]), false, 1_000);
+        for json in [false, true] {
+            let (code, out) = run_cmd(&db, &Command::Export, json, 2_000);
+            assert_eq!(code, 0);
+            let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+            assert_eq!(v["text"], "a fact");
+            assert_eq!(v["entity"], "e");
+            assert_eq!(v["tags"][0], "t");
+        }
+    }
+
+    #[test]
+    fn import_command_counts_and_rejects_bad_lines() {
+        let (db, _t) = TempDb::open();
+        let scratch = Scratch::new("import");
+        let good = scratch.0.join("in.jsonl");
+        std::fs::write(
+            &good,
+            "{\"text\":\"from jsonl\",\"entity\":\"user\",\"tags\":[\"x\"],\"valid_from\":42}\n\n{\"text\":\"second\"}\n",
+        )
+        .unwrap();
+        let (code, out) = run_cmd(&db, &Command::Import { file: good }, false, 9_000);
+        assert_eq!(code, 0);
+        assert!(out.contains("imported 2 facts"), "{out}");
+
+        let bad = scratch.0.join("bad.jsonl");
+        std::fs::write(&bad, "not json at all\n").unwrap();
+        let mut buf = Vec::new();
+        let err = execute(&db, &Command::Import { file: bad }, false, 9_000, &mut buf).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn load_settings_reads_the_config_file() {
+        let scratch = Scratch::new("settings");
+        let cfgfile = scratch.0.join("config.toml");
+        std::fs::write(
+            &cfgfile,
+            "[engine]\ndim = 512\n[embedder]\nkind = \"none\"\n",
+        )
+        .unwrap();
+        let cli = Cli {
+            db: None,
+            config: Some(cfgfile),
+            json: false,
+            command: Command::Stats,
+        };
+        let s = load_settings(&cli).unwrap();
+        assert_eq!(s.config.dim, 512);
+        assert!(s.embedder.is_none());
+        // an explicit --config that does not exist is a usage error
+        let cli = Cli {
+            db: None,
+            config: Some(scratch.0.join("nope.toml")),
+            json: false,
+            command: Command::Stats,
+        };
+        assert!(load_settings(&cli).is_err());
+    }
+
+    #[test]
+    fn run_parsed_uses_the_readonly_path_after_a_checkpoint() {
+        let scratch = Scratch::new("ro-route");
+        let path = scratch.0.join("m.plugmem");
+        {
+            let (db, _) = Database::open(&path, Config::default()).unwrap();
+            db.remember(RememberInput::text(1_000, "hello tokio"))
+                .unwrap();
+            db.checkpoint(2_000).unwrap(); // empty journal → open_readonly succeeds
+        }
+        // stats routes through open_readonly (mmap, shared)
+        let cli = Cli {
+            db: Some(path.clone()),
+            config: None,
+            json: false,
+            command: Command::Stats,
+        };
+        let mut buf = Vec::new();
+        assert_eq!(run_parsed(cli, &mut buf), 0);
+        assert!(String::from_utf8(buf).unwrap().contains("facts"));
+
+        // recall with no embedder also uses the read-only path
+        let cli = Cli {
+            db: Some(path),
+            config: None,
+            json: false,
+            command: Command::Recall {
+                query: Some("tokio".into()),
+                tags: Vec::new(),
+                entities: Vec::new(),
+                as_of: None,
+                range: None,
+                k: 0,
+                closed: false,
+            },
+        };
+        let mut buf = Vec::new();
+        assert_eq!(run_parsed(cli, &mut buf), 0);
+        assert!(String::from_utf8(buf).unwrap().contains("tokio"));
     }
 }

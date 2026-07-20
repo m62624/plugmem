@@ -1,0 +1,4 @@
+{"text":"prefers tokio with pinned versions","entity":"user","tags":["pref","lang"],"valid_from":500}
+{"text":"plugmem uses rust","entity":"plugmem","tags":["lang"],"valid_from":600}
+
+{"text":"a note with no entity or tags"}

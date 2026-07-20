@@ -30,6 +30,9 @@ plugmem-core = { workspace = true }
 plugmem-host = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }
+# The config file (config.toml). `toml::Table` parses via FromStr — no
+# serde derive needed.
+toml = "0.8"
 
 [lints]
 workspace = true

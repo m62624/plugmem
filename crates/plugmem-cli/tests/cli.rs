@@ -49,6 +49,14 @@ fn stdout(out: &Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+/// A checked-in fixture file under `tests/fixtures/`.
+fn fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(name)
+}
+
 #[test]
 fn help_and_version_succeed() {
     for flag in ["--help", "--version"] {
@@ -147,4 +155,59 @@ fn a_locked_database_exits_one() {
     assert_eq!(r.status.code(), Some(1), "locked database → exit 1");
     let msg = String::from_utf8_lossy(&r.stderr);
     assert!(msg.contains("locked"), "stderr = {msg}");
+}
+
+#[test]
+fn config_file_is_accepted_and_missing_one_is_a_usage_error() {
+    let tmp = TempDir::new("config");
+    let with_config = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_plugmem-cli"))
+            .arg("--db")
+            .arg(tmp.db())
+            .arg("--config")
+            .arg(fixture("config.toml"))
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    assert_eq!(
+        with_config(&["remember", "hello from config", "--entity", "user"])
+            .status
+            .code(),
+        Some(0)
+    );
+    let r = with_config(&["recall", "config"]);
+    assert_eq!(r.status.code(), Some(0));
+    assert!(stdout(&r).contains("config"), "{}", stdout(&r));
+
+    // An explicit --config that does not exist is a usage error (exit 2).
+    let bad = Command::new(env!("CARGO_BIN_EXE_plugmem-cli"))
+        .arg("--db")
+        .arg(tmp.db())
+        .args(["--config", "/no/such/plugmem-config.toml", "stats"])
+        .output()
+        .unwrap();
+    assert_eq!(bad.status.code(), Some(2));
+}
+
+#[test]
+fn import_from_a_fixture_jsonl() {
+    let tmp = TempDir::new("import-fix");
+    let out = Command::new(env!("CARGO_BIN_EXE_plugmem-cli"))
+        .arg("--db")
+        .arg(tmp.db())
+        .arg("import")
+        .arg(fixture("facts.jsonl"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(stdout(&out).contains("imported 3 facts"), "{}", stdout(&out));
+
+    // The imported facts are recallable, entity and tags preserved.
+    let r = plugmem(&tmp.db(), &["recall", "tokio"]);
+    assert!(
+        stdout(&r).contains("tokio") && stdout(&r).contains("#pref"),
+        "{}",
+        stdout(&r)
+    );
 }
