@@ -54,12 +54,18 @@
    разрядности). Отдельный **информационный** шаг пробует wasmer+wasm64:
    когда wasmer научится memory64, шаг сам подскажет обновить specs/14 и
    повысить его до обязательного.
-5. **wasm-npm**: сборка npm-пакета как в релизе + smoke через Node.
-   **Самовзводящийся**: пока нет `crates/plugmem-wasm/scripts/build-npm.mjs`
-   (этап 5) — зелёный с notice; появится файл — джоб начнёт собирать
-   без правки CI.
-6. **dist-plan**: `dist plan` на закреплённой версии.
-7. **ci-pass** — агрегатор. В branch protection required-чеком ставится
+5. **skill-lint** («проверка скилла в начале», на каждом PR): `skill/SKILL.md`
+   существует, несёт корректный маркер `<!-- skill-version -->` и оба маркера
+   `<!-- wasm-strip:begin/end -->`, frontmatter в лимитах Agent Skills
+   (name ≤ 64, description ≤ 1024). **Равенство** маркера с версией
+   проверяется дважды в других местах: юнит-тестом plugmem-wasm на каждом
+   `cargo test` (скилл встроен `include_str!`) и релизным гейтом
+   `skill-check` против версии, которую режет релиз.
+6. **wasm-npm** (боевой, 2026-07-20): wasm-pack сборка + сборка пакета
+   `scripts/build-npm.mjs` + smoke `node --test` — ровно то, что публикует
+   релиз.
+7. **dist-plan**: `dist plan` на закреплённой версии.
+8. **ci-pass** — агрегатор. В branch protection required-чеком ставится
    **только он** («CI passed»): состав джобов меняется без правки
    настроек репо, и чек репортится на каждый PR (у PR нет paths-фильтра
    сознательно — required-чек не должен «висеть» на docs-only PR).
@@ -89,9 +95,12 @@ git tag pin/v0.1.0 && git push origin pin/v0.1.0
 
 `prepare` (bump версии workspace → ветка rc/v0.1.0, триггер-тег
 удаляется) → `tests` (**этот же ci.yml** через workflow_call на RC) +
-`skill-check` → `tag` (настоящий v0.1.0) → `dist` (bin-release.yml,
-draft-релиз с бинарями) → `release-notes` (наш ченджлог по лейблам PR
-поверх тела dist, идемпотентно) + `skill-asset` → `publish-crates`
+`skill-check` (маркер `<!-- skill-version -->` в skill/SKILL.md ==
+режущаяся версия; **бампает человек** — это чекпоинт перечитать скилл) →
+`tag` (настоящий v0.1.0) → `dist` (bin-release.yml, draft-релиз с
+бинарями) → `release-notes` (наш ченджлог по лейблам PR поверх тела
+dist, идемпотентно) + `skill-asset` (SKILL.md ассетом к релизу) →
+`publish-crates`
 (`cargo publish --workspace --locked`; publish=false-крейты — wasm,
 testgen, tools — пропускаются сами; **порядок и ожидание индекса cargo
 делает сам**) + `publish-npm` (OIDC trusted publishing, БЕЗ npm-токена) →
@@ -133,17 +142,23 @@ testgen, README core/host, wasm-классы ёмкости (specs/14), CI/CD (�
    зеркалят ядро), `plugmem_skill` отдаёт встроенный `include_str!`
    SKILL.md; авто-maintain по политике между запросами (без фоновых
    потоков). Сценарные тесты JSON-RPC сессий.
-3. **plugmem-wasm + npm**: cdylib-мост (Storage/Embedder через
-   JS-callbacks, контракт в specs/06), `scripts/build-npm.mjs` —
-   **скопировать паттерн из `~/Projects/main/elenchus/crates/elenchus-wasm`**
-   (wasm-pack + ручная обвязка npm/index.js + index.d.ts, версия из
-   Cargo.toml); smoke `node --test`. Как только build-npm.mjs появится,
-   джобы `wasm-npm` (CI) и `publish-npm` (релиз) взведутся сами. Учесть
-   specs/14 §4: второй артефакт wasm64 + опция `open({ memory64 })` —
-   можно v1.1.
-4. **skill/SKILL.md** с маркером `<!-- skill-version: X.Y.Z -->` и
-   frontmatter (name ≤64, description ≤1024) — release-гейт `skill-check`
-   взведётся сам. Контент — план в specs/06.
+3. **plugmem-wasm — движковый контракт** (обвязка уже готова,
+   2026-07-20): пакетирование (`scripts/build-npm.mjs`), Node-вход
+   `npm/index.js` + `index.d.ts`, smoke-тест и публикация — боевые;
+   сейчас пакет честно экспортирует только `version/about/skill/
+   skillFull/skillVersion` (стаб задокументирован в README крейта).
+   Осталось: класс `Plugmem` (Storage/Embedder через JS-callbacks,
+   контракт specs/06) — добавляется в `src/lib.rs` + `npm/index.*`, тесты
+   в `test/smoke.test.mjs`; конвейер не трогать. Учесть specs/14 §4:
+   второй артефакт wasm64 + опция `open({ memory64 })` — можно v1.1.
+4. **skill/SKILL.md — осмысленный текст** (шаблон уже стоит,
+   2026-07-20): каркас, frontmatter и оба маркера финальны
+   (`<!-- skill-version: X.Y.Z -->` — сверка с версией движка;
+   `<!-- wasm-strip:begin/end -->` — блок «Run it», вырезаемый из
+   npm-дистрибуции скилла и Rust-аксессором `skill()`). Секции,
+   помеченные «(stub)», расписать по плану specs/06; маркеры и
+   структуру не менять — на них стоят три гейта (skill-lint в CI,
+   юнит-тест wasm-крейта, релизный skill-check).
 5. **Перевод всех specs на английский** — финальный шаг перед
    публикацией (языковая политика specs/00).
 6. Первый релиз: заморозка формата снапшота (specs/03), затем

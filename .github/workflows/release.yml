@@ -72,9 +72,6 @@ jobs:
   # silently drift. The marker is bumped by a HUMAN on purpose (an auto-bump
   # would satisfy the gate while leaving the docs stale).
   #
-  # plugmem's SKILL.md arrives with stage 5 (specs/06); until skill/SKILL.md
-  # exists this job passes with a notice, and the day the file lands the gate
-  # arms itself — no workflow edit needed.
   skill-check:
     name: Skill version matches release
     needs: prepare
@@ -85,10 +82,6 @@ jobs:
           ref: ${{ needs.prepare.outputs.rc_branch }}
       - name: SKILL.md skill-version must equal the workspace version
         run: |
-          if [ ! -f skill/SKILL.md ]; then
-            echo "::notice::skill/SKILL.md not present yet (stage 5) — skill gate skipped"
-            exit 0
-          fi
           CARGO_VER="$(grep -m1 '^version' Cargo.toml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
           MARKER="$(grep -oE 'skill-version:[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+' skill/SKILL.md \
                     | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"
@@ -108,10 +101,6 @@ jobs:
         # is the only part loaded for skill *selection*, so a host will reject
         # an over-long one. Ruby is preinstalled on the runner.
         run: |
-          if [ ! -f skill/SKILL.md ]; then
-            echo "skill/SKILL.md not present yet — nothing to lint"
-            exit 0
-          fi
           ruby -ryaml <<'RUBY'
           content = File.read("skill/SKILL.md")
           fm = content.split(/^---\s*$/, 3)[1] or abort "::error file=skill/SKILL.md::missing YAML frontmatter"
@@ -208,7 +197,6 @@ jobs:
   # skill matching its installed engine version from a stable URL:
   #   https://github.com/<repo>/releases/download/vX.Y.Z/SKILL.md   (pinned)
   #   https://github.com/<repo>/releases/latest/download/SKILL.md   (latest)
-  # No-op with a notice until stage 5 adds skill/SKILL.md.
   skill-asset:
     name: Attach SKILL.md to the release
     needs: [prepare, dist]
@@ -223,10 +211,6 @@ jobs:
           ref: ${{ needs.prepare.outputs.tag }}
       - name: Upload SKILL.md as a release asset
         run: |
-          if [ ! -f skill/SKILL.md ]; then
-            echo "::notice::skill/SKILL.md not present yet (stage 5) — nothing to attach"
-            exit 0
-          fi
           TAG="${{ needs.prepare.outputs.tag }}"
           # --clobber keeps this idempotent if the release job is re-run.
           gh release upload "$TAG" skill/SKILL.md --clobber
@@ -260,7 +244,6 @@ jobs:
   # trusted publishing; this job handles every release after that.
   # `prepare`'s `cargo set-version --workspace` already bumped the wasm crate
   # to the release version, so the published npm version tracks the workspace.
-  # No-op with a notice until stage 5 adds the npm packaging.
   publish-npm:
     name: Publish npm package
     needs: [prepare, tag, dist]
@@ -272,38 +255,22 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
-      - name: Check whether the npm packaging exists yet
-        id: npm
-        run: |
-          if [ -f crates/plugmem-wasm/scripts/build-npm.mjs ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::crates/plugmem-wasm/scripts/build-npm.mjs not present yet (stage 5) — npm publish skipped"
-          fi
       - uses: dtolnay/rust-toolchain@stable
-        if: steps.npm.outputs.present == 'true'
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-        if: steps.npm.outputs.present == 'true'
       - uses: actions/setup-node@v7
-        if: steps.npm.outputs.present == 'true'
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
       - name: Use latest npm (trusted publishing needs a recent CLI)
-        if: steps.npm.outputs.present == 'true'
         run: npm install -g npm@latest
       - name: Install wasm-pack
-        if: steps.npm.outputs.present == 'true'
         run: npm install -g wasm-pack
       - name: Build and assemble the npm package
-        if: steps.npm.outputs.present == 'true'
         working-directory: crates/plugmem-wasm
         run: node scripts/build-npm.mjs
       - name: Publish (skip if this version already exists)
-        if: steps.npm.outputs.present == 'true'
         working-directory: crates/plugmem-wasm/pkg
         run: |
           NAME="$(node -p "require('./package.json').name")"
