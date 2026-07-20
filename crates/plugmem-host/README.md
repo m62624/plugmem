@@ -12,13 +12,15 @@ range scans, all fused by rank) lives in the engine; this crate adds:
 - **File-backed storage** — atomic snapshots (tmp + fsync + rename),
   an append-only journal with a configurable fsync policy, crash
   recovery (a torn journal tail is detected and dropped on open);
-- **OS locking** — one exclusive advisory lock per database file, so a
-  second opener is refused with a typed `HostError::Locked` rather than
-  corrupting silently;
+- **OS locking** — an advisory lock per database file: read-write opens
+  take it exclusively, read-only opens take it *shared*, so a conflicting
+  opener is refused with a typed `HostError::Locked` rather than corrupting
+  silently (the model is SQLite-like: N readers **or** one writer);
 - **A read-only mmap open** — `Database::open_readonly` maps the snapshot
   and lets the engine borrow the mapped pages, so a large read-mostly
   database residents only the pages a query touches instead of loading
-  the whole file;
+  the whole file. It holds a shared lock, so **many readers map the same
+  file at once** — across threads or processes — sharing the OS page cache;
 - **Maintenance policy** — auto-snapshot and optional auto-`maintain`,
   run inline (no background threads);
 - **Embedding providers** — one HTTP client for the `/v1/embeddings`
@@ -91,23 +93,46 @@ detected, dropped and reported.
 ## Concurrency model
 
 The engine is single-writer by design, and the host orchestrates that
-honestly instead of hiding it:
+honestly instead of hiding it — the SQLite model: **N concurrent readers,
+or one writer, never both at once.**
 
-- **One file, one process.** `Database::open` takes an exclusive OS
-  advisory lock; a second process (or a second `Database` on the same
-  path) gets `HostError::Locked` immediately — a typed refusal instead
-  of silent corruption. The lock dies with the process, even on a
-  crash.
-- **One process, many threads or agents.** `Database` is a
+- **One writer.** `Database::open` takes an *exclusive* OS advisory lock;
+  a second writer (or a live reader) gets `HostError::Locked` immediately
+  — a typed refusal instead of silent corruption. The lock dies with the
+  process, even on a crash.
+- **Many readers.** `Database::open_readonly` takes a *shared* lock, so
+  any number of read-only handles map the same snapshot at once — across
+  threads or processes. Shared excludes exclusive, so no writer can change
+  the file under a live reader (which is exactly what makes the mmap
+  safe). With the zero-copy mmap, the readers also share one copy of the
+  file in the OS page cache — a read-mostly database serves a fan-out of
+  agents cheaply. When you need to write, drop the readers and open
+  read-write.
+- **One process, many threads or agents.** A `Database` is a
   `Clone + Send + Sync` handle; clone it freely. Every verb serializes
   on an internal mutex — at microsecond engine calls that is a queue,
-  not a bottleneck.
+  not a bottleneck. `ReadOnlyDatabase` is `Send + Sync` too.
 - **Many files.** Fully independent databases: separate locks, separate
   mutexes, natural parallelism. Two models each with their own memory
   file never contend; two models sharing one memory clone one handle.
 - **Network stays outside the lock.** Embedding calls (the slow,
   external part) run before the mutex is taken, so an agent waiting on
   its embedding provider does not stall the others.
+
+The typical shape is **build occasionally, read a lot**: one writer
+snapshots the memory (on a schedule or in a maintenance window), then many
+read-only consumers query it in parallel.
+
+```rust,no_run
+use plugmem_host::{Config, Database, RecallQuery};
+
+// Many readers over one checkpointed file — zero-copy, shared page cache.
+// (A read-only open requires an empty journal: snapshot/checkpoint first.)
+let ro = Database::open_readonly("agent.plugmem", Config::default())?;
+let out = ro.recall(RecallQuery::text(1_784_000_100_000, "which runtime?"))?;
+println!("{}", out.rendered);
+# Ok::<(), plugmem_host::HostError>(())
+```
 
 ## Maintenance policy
 

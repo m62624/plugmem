@@ -81,6 +81,122 @@ println!("{}", res.rendered); // a compact, ranked block for the prompt
 mem.snapshot(&mut store, 1_784_000_200_000).unwrap(); // full image + journal reset
 ```
 
+## Usage — the four verbs, time travel, filters
+
+Everything runs against a `Storage`; `MemStorage` is the in-memory one
+(the file-backed storage with locking and durability lives in
+[`plugmem-host`](../plugmem-host)). Timestamps are unix-millis you pass in
+— the engine keeps no clock.
+
+**Revise, then ask "what was true then" (bitemporal).** `revise` closes
+the old fact's validity interval and records the successor; the old
+version stays answerable through an `as_of` query.
+
+```rust
+use plugmem_core::{Config, MemStorage, Memory, RecallQuery, RememberInput};
+
+let mut store = MemStorage::new();
+let mut mem = Memory::new(Config::default()).unwrap();
+
+let first = mem.remember(&mut store, RememberInput {
+    entity: Some("user"),
+    ..RememberInput::text(1_000, "lives in Moscow")
+}).unwrap();
+mem.revise(&mut store, first.id, RememberInput {
+    entity: Some("user"),
+    ..RememberInput::text(2_000, "lives in Berlin")
+}).unwrap();
+
+// As of time 1_500 the earlier fact was still valid; now, Berlin wins.
+// (The entity anchor pulls the user's facts; there is no stemming, so a
+// bare text query would need a word the fact actually contains.)
+let then = mem.recall(RecallQuery {
+    entities: &["user"],
+    as_of: Some(1_500),
+    ..RecallQuery::text(3_000, "where does the user live")
+}).unwrap();
+assert!(then.rendered.contains("Moscow"));
+
+let now = mem.recall(RecallQuery {
+    entities: &["user"],
+    ..RecallQuery::text(3_000, "where does the user live")
+}).unwrap();
+assert!(now.rendered.contains("Berlin"));
+```
+
+**Forget, then reclaim the space.** `forget` tombstones a fact
+immediately; `maintain` physically purges the tombstones and compacts the
+structures. The id stays burned — never reissued.
+
+```rust
+use plugmem_core::{Config, MemStorage, Memory, RememberInput};
+
+let mut store = MemStorage::new();
+let mut mem = Memory::new(Config::default()).unwrap();
+
+let f = mem.remember(&mut store, RememberInput::text(1_000, "temporary note")).unwrap();
+mem.forget(&mut store, 2_000, f.id).unwrap();
+assert!(mem.get(f.id).is_none()); // gone from every query at once
+
+let report = mem.maintain(&mut store, 3_000).unwrap();
+assert_eq!(report.purged, 1); // the bytes are reclaimed
+```
+
+**Conflict surfacing on remember.** A new `remember` returns the live
+facts it may duplicate or contradict; the engine never merges on its own.
+
+```rust
+use plugmem_core::{Config, MemStorage, Memory, RememberInput};
+
+let mut store = MemStorage::new();
+let mut mem = Memory::new(Config::default()).unwrap();
+
+mem.remember(&mut store, RememberInput {
+    entity: Some("user"),
+    ..RememberInput::text(1_000, "prefers tokio")
+}).unwrap();
+
+let out = mem.remember(&mut store, RememberInput {
+    entity: Some("user"),
+    ..RememberInput::text(2_000, "prefers the tokio runtime")
+}).unwrap();
+for hit in &out.similar {
+    // decide yourself: revise the old one, drop this one, or keep both
+    println!("possible conflict with fact {:?}", hit.id);
+}
+```
+
+**Filtered recall — tags, entity, time range.** Sources compose: text
+ranking, a tag filter, an entity anchor and a `recorded_at` window in one
+query.
+
+```rust
+use plugmem_core::{Config, MemStorage, Memory, RecallQuery, RememberInput};
+
+let mut store = MemStorage::new();
+let mut mem = Memory::new(Config::default()).unwrap();
+mem.remember(&mut store, RememberInput {
+    entity: Some("plugmem"),
+    tags: &["pref"],
+    ..RememberInput::text(1_000, "uses tokio")
+}).unwrap();
+
+let res = mem.recall(RecallQuery {
+    tags: &["pref"],
+    entities: &["plugmem"],
+    range: Some((0, 10_000)),
+    k: 5,
+    ..RecallQuery::text(2_000, "runtime")
+}).unwrap();
+println!("{}", res.rendered);
+```
+
+To add vector recall, set `Config { dim: N, .. }` and pass
+`RememberInput { vector: Some(&embedding), .. }` (and a query `vector`);
+the engine quantizes to int8 and, past a threshold, builds the HNSW graph
+in `maintain`. Computing the embedding is the caller's job — which is what
+[`plugmem-host`](../plugmem-host) automates over an HTTP embedding server.
+
 ## Data model
 
 A **fact** is one short statement with an optional subject **entity**,
