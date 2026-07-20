@@ -10,6 +10,12 @@ description = "plugmem command-line interface."
 keywords = ["plugmem", "cli", "memory", "llm", "search"]
 categories = ["command-line-utilities", "database", "text-processing"]
 
+[package.metadata.wix]
+upgrade-guid = "DF472F7C-900B-4F62-B17A-511E179E34B7"
+path-guid = "92A2C8D8-7FDB-4EF6-AC7C-12EF52DF5783"
+license = false
+eula = false
+
 [[bin]]
 name = "plugmem"
 path = "src/main.rs"

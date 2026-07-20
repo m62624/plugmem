@@ -10,6 +10,12 @@ description = "plugmem MCP server (stdio JSON-RPC)."
 keywords = ["plugmem", "mcp", "memory", "llm", "ai"]
 categories = ["command-line-utilities", "api-bindings", "database"]
 
+[package.metadata.wix]
+upgrade-guid = "058236C9-2C1D-4EC0-BF60-EEF4A5223E31"
+path-guid = "154F9E0B-8C1E-4E0F-813A-15BB8FD4D290"
+license = false
+eula = false
+
 [dependencies]
 plugmem-core = { workspace = true, features = ["std"] }
 plugmem-host = { workspace = true }

@@ -17,3 +17,7 @@ plugmem-core = { workspace = true, features = ["std"] }
 
 [lints]
 workspace = true
+
+# A library / internal tool, not a shipped binary — excluded from cargo-dist releases.
+[package.metadata.dist]
+dist = false
