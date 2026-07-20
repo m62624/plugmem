@@ -1,14 +1,38 @@
 # plugmem-host
 
-The native host layer for the [plugmem](../plugmem-core) memory engine:
-point it at a file and go — the SQLite-style experience. It supplies the
-three things the `no_std` core deliberately does not own — files,
-locking, and network access to embedding providers.
+**plugmem** is an embedded long-term memory database for LLM agents —
+the SQLite model applied to agent memory. It lives as a library inside
+your process (no server, no cloud), keeps a whole database in one
+snapshot file plus an append-only journal, and answers with a ranked,
+token-budgeted context block ready to paste into a prompt. An agent
+talks to it in four verbs — `remember / recall / revise / forget` — and
+gets, in one engine: **BM25** full-text search over a Unicode
+([UAX #29](https://unicode.org/reports/tr29/)) tokenizer, **int8
+quantized vector search** (flat scan below a threshold,
+[HNSW](https://arxiv.org/abs/1603.09320) above it), an **entity graph**
+with typed edges, **bitemporal facts** ("what was true then"), and
+[reciprocal-rank fusion](https://dl.acm.org/doi/10.1145/1571941.1572114)
+of all four evidence sources with a recency boost. Retrieval is
+microseconds at a 100k-fact corpus and allocation-free after warm-up;
+the numbers and gates live in the
+[engine README](../plugmem-core/README.md#performance).
 
-If you need the engine itself (your own storage, wasm, tighter control),
-depend on [`plugmem-core`](../plugmem-core) directly; this crate is a
-convenience shell around it. Non-Rust surfaces (CLI, MCP server,
-npm/wasm package) are the next roadmap stage.
+**This crate, `plugmem-host`, is the batteries**: point it at a file
+path and go — the SQLite-style experience. It supplies the three things
+the `no_std` engine deliberately does not own — files (atomic snapshots,
+journal, crash recovery), OS-level locking and maintenance policy, and
+network access to embedding providers (one client speaks the
+`/v1/embeddings` shape of OpenAI, Ollama, LM Studio, vLLM and
+llama.cpp-server).
+
+## Which crate do you need?
+
+| You want | Depend on |
+|---|---|
+| the SQLite-style experience above: open a path, get durability, locking and auto-embedding | **this crate** (it re-exports the engine's types) |
+| the engine alone: your own storage (browser, wasm host, custom persistence), `no_std`, full control — BM25/HNSW/graph/time included, no files or network | [`plugmem-core`](../plugmem-core) |
+| the flat byte structures underneath | [`plugmem-arena`](../plugmem-arena) |
+| no Rust at all: a CLI, an MCP server for agents, an npm package | `plugmem-cli` / `plugmem-mcp` / `plugmem-wasm` — next roadmap stage, not published yet |
 
 ```rust,no_run
 use plugmem_host::{Config, Database, OpenAiCompatEmbedder, RecallQuery, RememberInput};

@@ -1,15 +1,36 @@
 # plugmem-core
 
-An embedded long-term memory engine for LLM agents: a `no_std + alloc`
-Rust library that stores an agent's facts and serves them back as a
-ranked, token-budgeted context block. It follows the SQLite model — the
-engine is a library inside your process, there is no server, and a whole
-database is one snapshot file plus an append-only journal.
+**plugmem** is an embedded long-term memory database for LLM agents —
+the SQLite model applied to agent memory. It lives as a library inside
+your process (no server, no cloud), keeps a whole database in one
+snapshot file plus an append-only journal, and answers with a ranked,
+token-budgeted context block ready to paste into a prompt. An agent
+talks to it in four verbs — `remember / recall / revise / forget` — and
+gets, in one engine: **BM25** full-text search over a Unicode
+([UAX #29](https://unicode.org/reports/tr29/)) tokenizer, **int8
+quantized vector search** (flat scan below a threshold,
+[HNSW](https://arxiv.org/abs/1603.09320) above it), an **entity graph**
+with typed edges, **bitemporal facts** ("what was true then"), and
+[reciprocal-rank fusion](https://dl.acm.org/doi/10.1145/1571941.1572114)
+of all four evidence sources with a recency boost. Storage is flat byte
+arenas, so the memory image *is* the file format: loading is a
+bounds-check plus adopt, replay is deterministic to the byte, and the
+same file opens on native, wasm32 and wasm64 builds unchanged.
 
-The core owns no I/O, no clock and no threads. Bytes enter and leave
-through a five-method `Storage` trait, timestamps arrive as parameters,
-and embeddings are computed by the caller — which is what lets the same
+**This crate, `plugmem-core`, is the engine itself**: `no_std + alloc`,
+zero I/O, no clock, no threads. Bytes enter and leave through a
+five-method `Storage` trait, timestamps arrive as parameters, and
+embeddings are computed by the caller — which is what lets the same
 engine run natively, in `wasm32v1-none`, or anywhere else Rust compiles.
+
+## Which crate do you need?
+
+| You want | Depend on |
+|---|---|
+| the SQLite-style experience: point at a file path and go — OS locking, fsync policy, auto-snapshot, automatic embeddings over HTTP (OpenAI/Ollama/LM Studio/vLLM/llama.cpp) | [`plugmem-host`](../plugmem-host) (it re-exports this engine) |
+| the engine alone: your own storage (browser, wasm host, custom persistence), no std, full control | **this crate** |
+| the flat byte structures underneath (sorted page arenas, blob heap, interner) for your own storage project | [`plugmem-arena`](../plugmem-arena) |
+| no Rust at all: a CLI, an MCP server for agents, an npm package | `plugmem-cli` / `plugmem-mcp` / `plugmem-wasm` — next roadmap stage, not published yet |
 
 ## Who this is for
 
@@ -24,13 +45,6 @@ ceiling 1M). On 64-bit hosts — native or WebAssembly 3.0
 [memory64](https://github.com/WebAssembly/memory64) — the same code and
 the same file format carry larger limits; see
 [Targets and WebAssembly](#features-and-targets).
-
-**This crate is the engine, not the ergonomics.** If you want the
-SQLite-style experience — point at a file path and go, with locking,
-fsync policy and automatic embedding — use
-[`plugmem-host`](../plugmem-host) on top of this core. Non-Rust
-surfaces (CLI, MCP server, npm/wasm package) are the next stage of the
-roadmap and will wrap the same engine.
 
 ## Quick start
 
@@ -214,14 +228,6 @@ limits fit the host's address space; "migrating" from a 32-bit to a
 purpose: the engine stays inside the Wasm 3.0 *deterministic profile*
 (integer distances, total-order float comparisons, no relaxed SIMD in
 any state-affecting path).
-
-## Related crates
-
-| Crate | What it adds | When to use it |
-|---|---|---|
-| [`plugmem-host`](../plugmem-host) | files, OS locking, fsync policy, auto-snapshot, HTTP embedders | you are in Rust and want "open a path and go", like SQLite |
-| [`plugmem-arena`](../plugmem-arena) | the flat byte structures underneath | you are building your own storage on the same principles |
-| `plugmem-cli`, `plugmem-mcp`, `plugmem-wasm` | command line, MCP server, npm package | non-Rust consumers; next roadmap stage, not published yet |
 
 Crates are published to crates.io under these names once the format
 freezes; until then, use the git repository.
