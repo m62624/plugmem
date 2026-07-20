@@ -11,7 +11,7 @@ keywords = ["plugmem", "storage", "embedder", "memory", "llm"]
 categories = ["filesystem", "api-bindings", "database"]
 
 [dependencies]
-plugmem-core = { workspace = true, features = ["std"] }
+plugmem-core = { workspace = true }
 thiserror = { workspace = true }
 memmap2 = { workspace = true }
 self_cell = { workspace = true }

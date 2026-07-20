@@ -46,9 +46,10 @@ jobs:
   # a glance (fail-fast off keeps the others going).
   #
   # Features change which code compiles (specs/07 §8: clippy on one combo does
-  # not cover the others), so clippy runs the full 4-combo matrix and tests run
-  # both configurations that execute distinct code (`default` and `counters`;
-  # the perf gates only exist under `counters`).
+  # not cover the others). The one feature axis that alters the code surface is
+  # `counters` (the deterministic perf gates), so clippy and tests each run with
+  # it off and on. (There is no `std` feature: the core and arena are `no_std`
+  # unconditionally; the real no_std gate is the wasm32v1-none build job below.)
 
   check:
     name: lint + test (${{ matrix.name }})
@@ -70,14 +71,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Formatting
         run: cargo fmt --all --check
-      - name: Clippy (default = std)
+      - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Clippy (no_std)
-        run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
-      - name: Clippy (std + counters)
+      - name: Clippy (counters — a different code surface)
         run: cargo clippy --workspace --all-targets --features counters -- -D warnings
-      - name: Clippy (no_std + counters)
-        run: cargo clippy --workspace --all-targets --no-default-features --features counters -- -D warnings
       - name: Tests (default)
         run: cargo test --workspace
       - name: Tests (counters — includes the deterministic perf gates)
@@ -99,11 +96,11 @@ jobs:
       - name: Build libraries for a real no_std target
         run: >-
           cargo build -p plugmem-arena -p plugmem-core
-          --no-default-features --target wasm32v1-none
+          --target wasm32v1-none
       - name: Build again with counters (a different code surface)
         run: >-
           cargo build -p plugmem-arena -p plugmem-core
-          --no-default-features --features counters --target wasm32v1-none
+          --features counters --target wasm32v1-none
 
   # The whole contract test suite of the core, executed on a REAL 32-bit
   # target under both independent wasm runtimes, in both feature

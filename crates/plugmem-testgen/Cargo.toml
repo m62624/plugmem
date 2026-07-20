@@ -13,7 +13,7 @@ publish = false
 [dependencies]
 # The PRNG is implemented in place (specs/11 §3): reproducibility of the
 # corpora must not depend on any external crate's stream stability.
-plugmem-core = { workspace = true, features = ["std"] }
+plugmem-core = { workspace = true }
 
 [lints]
 workspace = true

@@ -26,8 +26,6 @@ name = "storage"
 harness = false
 
 [features]
-default = ["std"]
-std = []
 # Deterministic work counters (perf gates); zero cost when disabled.
 counters = []
 

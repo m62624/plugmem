@@ -33,8 +33,6 @@ name = "engine"
 harness = false
 
 [features]
-default = ["std"]
-std = ["plugmem-arena/std"]
 counters = ["plugmem-arena/counters"]
 
 [lints]

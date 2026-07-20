@@ -15,7 +15,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-plugmem-core = { workspace = true, features = ["std"] }
+plugmem-core = { workspace = true }
 wasm-bindgen = { workspace = true }
 js-sys = { workspace = true }
 
