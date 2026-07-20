@@ -1,2 +1,9 @@
-//! `plugmem` CLI. Commands: specs/06-wrappers.md. Implementation lands in stage 5.
-fn main() {}
+//! `plugmem` — the CLI binary. A one-liner over [`plugmem_cli::run`]; all
+//! logic (and its tests) live in the library so this file needs no
+//! coverage (specs/06).
+
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    plugmem_cli::run()
+}

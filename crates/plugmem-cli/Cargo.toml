@@ -6,7 +6,8 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "plugmem command-line interface."
+description = "plugmem command-line interface — temporal memory for LLM agents over one file."
+readme = "README.md"
 keywords = ["plugmem", "cli", "memory", "llm", "search"]
 categories = ["command-line-utilities", "database", "text-processing"]
 
@@ -16,8 +17,12 @@ path-guid = "92A2C8D8-7FDB-4EF6-AC7C-12EF52DF5783"
 license = false
 eula = false
 
+[lib]
+name = "plugmem_cli"
+path = "src/lib.rs"
+
 [[bin]]
-name = "plugmem"
+name = "plugmem-cli"
 path = "src/main.rs"
 
 [dependencies]
