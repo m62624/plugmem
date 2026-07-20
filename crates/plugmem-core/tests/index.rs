@@ -90,7 +90,7 @@ fn intersection_table() {
 /// The specs/04 golden corpus: term ids 1..=5, fact ids 0..=5. Scores
 /// below were computed by an independent Python implementation of the
 /// same formula (k1 = 1.2, b = 0.75); only the numbers are checked in.
-fn golden_index() -> Bm25Index {
+fn golden_index() -> Bm25Index<'static> {
     let mut idx = Bm25Index::new(16, usize::MAX).unwrap();
     let docs: [&[(u32, u8)]; 6] = [
         &[(1, 2), (2, 1)],
@@ -106,7 +106,7 @@ fn golden_index() -> Bm25Index {
     idx
 }
 
-fn search(idx: &Bm25Index, terms: &[u32], k: usize) -> Vec<(u32, f32)> {
+fn search(idx: &Bm25Index<'_>, terms: &[u32], k: usize) -> Vec<(u32, f32)> {
     let mut scratch = Bm25Scratch::new();
     let mut out = Vec::new();
     idx.search((1.2, 0.75), terms, k, &mut |_| true, &mut scratch, &mut out);

@@ -70,7 +70,7 @@ fn random_keys(n: usize, seed: u64) -> Vec<u64> {
     (0..n).map(|_| rng()).collect()
 }
 
-fn build_arena(keys: &[u64], mode: ShardMode) -> Arena<Rec16> {
+fn build_arena(keys: &[u64], mode: ShardMode) -> Arena<'_, Rec16> {
     let mut a = Arena::<Rec16>::new(ArenaCfg::new(1024, mode)).unwrap();
     for &k in keys {
         a.insert(&Rec16::new(k, 1)).unwrap();

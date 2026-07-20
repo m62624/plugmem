@@ -197,7 +197,7 @@ pub(super) struct RecallScratch {
     tags_tmp: Vec<TermId>,
 }
 
-impl Memory {
+impl Memory<'_> {
     /// Runs a recall, allocating a fresh [`RecallResult`]. Convenience
     /// wrapper over [`Memory::recall_into`].
     pub fn recall(&mut self, q: RecallQuery<'_>) -> Result<RecallResult, Error> {
@@ -624,7 +624,7 @@ impl Memory {
 /// The shared admission rule of every source. Returns the record so
 /// callers can reuse it.
 fn admit(
-    facts: &plugmem_arena::Arena<FactRecord>,
+    facts: &plugmem_arena::Arena<'_, FactRecord>,
     allow: &[FactId],
     filtered: bool,
     as_of: u64,

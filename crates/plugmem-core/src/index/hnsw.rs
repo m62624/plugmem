@@ -111,7 +111,12 @@ fn better(a: (f32, u32), b: (f32, u32)) -> core::cmp::Ordering {
 }
 
 /// The navigable small-world graph. See the module docs.
-pub struct HnswGraph {
+///
+/// The upper-level pools carry a lifetime so a read-only open can borrow
+/// them from an mmap (specs/16); `level0` stays owned (it is rebuilt into
+/// a `Vec<u32>` on load — small metadata, not content-scaled). The owned
+/// build/load paths are `'static`.
+pub struct HnswGraph<'a> {
     /// Upper-level degree cap.
     m: usize,
     /// Level-0 degree cap.
@@ -119,9 +124,9 @@ pub struct HnswGraph {
     /// `indexed × m0` neighbor slots, `NONE_U32`-padded.
     level0: Vec<u32>,
     /// Upper-level handles.
-    upper: Arena<UpperSlot>,
+    upper: Arena<'a, UpperSlot>,
     /// Upper-level neighbor lists (4-byte LE slot ids).
-    lists: ChunkPool,
+    lists: ChunkPool<'a>,
     /// Entry point (highest-level node), or `NONE_U32` when empty.
     entry: u32,
     /// Slots `[0, indexed)` are in the graph; the rest are the flat tail.
@@ -135,7 +140,7 @@ pub struct HnswGraph {
     dist_evals: Cell<u64>,
 }
 
-impl HnswGraph {
+impl<'a> HnswGraph<'a> {
     /// An empty graph for the given degree caps (`m >= 2`, `m0 >= m` —
     /// enforced by `Config::validate`).
     pub fn new(m: usize, m0: usize, max_bytes: usize) -> Result<Self, Error> {
@@ -175,7 +180,7 @@ impl HnswGraph {
 
     /// Quantized cosine between an external query and a slot.
     #[inline]
-    fn sim_q(&self, pool: &VecPool, q: (f32, &[u8]), slot: u32) -> f32 {
+    fn sim_q(&self, pool: &VecPool<'_>, q: (f32, &[u8]), slot: u32) -> f32 {
         #[cfg(feature = "counters")]
         self.dist_evals.set(self.dist_evals.get() + 1);
         let (s, qb) = pool.quant(slot as usize);
@@ -230,7 +235,7 @@ impl HnswGraph {
     /// deterministic order — best last.
     fn search_layer(
         &self,
-        pool: &VecPool,
+        pool: &VecPool<'_>,
         q: (f32, &[u8]),
         level: usize,
         ep: u32,
@@ -287,7 +292,7 @@ impl HnswGraph {
     /// walks `scratch.found` best-first, keeps a candidate only if it is
     /// closer to the query than to any already-kept neighbor (spread over
     /// clusters), then tops up from the rejects. Result in `scratch.sel`.
-    fn select_neighbors(&self, pool: &VecPool, cap: usize, scratch: &mut HnswScratch) {
+    fn select_neighbors(&self, pool: &VecPool<'_>, cap: usize, scratch: &mut HnswScratch) {
         scratch.sel.clear();
         scratch.pruned.clear();
         for i in (0..scratch.found.len()).rev() {
@@ -358,7 +363,7 @@ impl HnswGraph {
     /// when the degree cap overflows (the hnswlib backlink rule).
     fn add_link(
         &mut self,
-        pool: &VecPool,
+        pool: &VecPool<'_>,
         v: u32,
         new: u32,
         level: usize,
@@ -401,7 +406,7 @@ impl HnswGraph {
     /// `remember`.
     pub fn insert_bulk(
         &mut self,
-        pool: &VecPool,
+        pool: &VecPool<'_>,
         upto: u32,
         ef_construction: usize,
         scratch: &mut HnswScratch,
@@ -419,7 +424,7 @@ impl HnswGraph {
 
     fn insert_one(
         &mut self,
-        pool: &VecPool,
+        pool: &VecPool<'_>,
         slot: u32,
         ef_construction: usize,
         scratch: &mut HnswScratch,
@@ -475,7 +480,7 @@ impl HnswGraph {
     /// [`crate::Error::Invalid`] for non-finite or zero vectors).
     pub fn search(
         &self,
-        pool: &VecPool,
+        pool: &VecPool<'_>,
         query: &[f32],
         ef: usize,
         vec_scratch: &mut crate::index::vecpool::VecScratch,
@@ -493,7 +498,7 @@ impl HnswGraph {
     /// `(slot, cosine)`, best first.
     pub(crate) fn search_quantized(
         &self,
-        pool: &VecPool,
+        pool: &VecPool<'_>,
         q: (f32, &[u8]),
         ef: usize,
         scratch: &mut HnswScratch,
@@ -528,10 +533,12 @@ impl HnswGraph {
     pub(crate) fn remapped(
         &self,
         map: &[u32],
-        new_pool: &VecPool,
+        new_pool: &VecPool<'_>,
         max_bytes: usize,
-    ) -> Result<Self, Error> {
-        let mut g = Self::new(self.m, self.m0, max_bytes)?;
+    ) -> Result<HnswGraph<'static>, Error> {
+        // The remapped graph is freshly built (owned), so it is `'static`
+        // and swaps into a `Memory<'a>` field by covariance (specs/16).
+        let mut g: HnswGraph<'static> = HnswGraph::new(self.m, self.m0, max_bytes)?;
         let old_indexed = self.indexed as usize;
         let new_indexed = map[..old_indexed]
             .iter()
@@ -657,13 +664,56 @@ impl HnswGraph {
         Ok(g)
     }
 
+    /// Zero-copy sibling of [`HnswGraph::from_parts`]: the upper-level
+    /// arena pool and the list pool borrow their mmap'd sections instead
+    /// of copying (specs/16). `level0` and the small arena/chunk metadata
+    /// are still rebuilt owned. Same framing checks as `from_parts`; the
+    /// lifetime ties the graph to `upper_pool`/`lists_pool`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_parts_borrowed(
+        m: usize,
+        m0: usize,
+        max_bytes: usize,
+        meta: &[u8],
+        level0: &[u8],
+        upper_meta: &[u8],
+        upper_pool: &'a [u8],
+        lists_meta: &[u8],
+        lists_pool: &'a [u8],
+    ) -> Result<Self, Error> {
+        let mut g = Self::new(m, m0, max_bytes)?;
+        if meta.len() != 8 {
+            return Err(Error::Corrupt("hnsw meta section has a wrong length"));
+        }
+        g.entry = u32::from_le_bytes(meta[0..4].try_into().unwrap());
+        g.indexed = u32::from_le_bytes(meta[4..8].try_into().unwrap());
+        if level0.len() as u64 != u64::from(g.indexed) * m0 as u64 * 4 {
+            return Err(Error::Corrupt("hnsw level0 length mismatch"));
+        }
+        g.level0 = level0
+            .chunks_exact(4)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+            .collect();
+        g.upper = Arena::load_borrowed(
+            ArenaCfg::new(UPPER_SHARDS, ShardMode::Uniform).with_max_bytes(max_bytes),
+            upper_meta,
+            upper_pool,
+        )?;
+        g.lists = ChunkPool::load_borrowed(
+            ChunkPoolCfg::new().with_max_bytes(max_bytes),
+            lists_meta,
+            lists_pool,
+        )?;
+        Ok(g)
+    }
+
     /// Full reference validation against the pool (the load-time
     /// panic-free contract, O(edges)): the entry and every neighbor in
     /// range, no self-links, canonical `NONE` padding of level-0 blocks,
     /// upper handles keyed inside the graph with levels their fact's hash
     /// admits, list chains exclusive and cycle-free, no orphan chunks,
     /// degrees within the caps.
-    pub(crate) fn validate(&self, pool: &VecPool) -> Result<(), Error> {
+    pub(crate) fn validate(&self, pool: &VecPool<'_>) -> Result<(), Error> {
         if self.indexed as usize > pool.len() {
             return Err(Error::Corrupt("hnsw indexes more slots than the pool"));
         }
@@ -760,7 +810,7 @@ mod tests {
     }
 
     /// A pool of `n` vectors in `clusters` clusters on the sphere.
-    fn cluster_pool(n: usize, dim: usize, clusters: usize, seed: u64) -> VecPool {
+    fn cluster_pool(n: usize, dim: usize, clusters: usize, seed: u64) -> VecPool<'static> {
         let mut rng = Lcg(seed);
         let centers: Vec<Vec<f32>> = (0..clusters)
             .map(|_| (0..dim).map(|_| rng.next()).collect())
@@ -775,7 +825,7 @@ mod tests {
     }
 
     /// Builds a graph over the whole pool.
-    fn build(pool: &VecPool, m: usize, m0: usize) -> HnswGraph {
+    fn build(pool: &VecPool<'_>, m: usize, m0: usize) -> HnswGraph<'static> {
         let mut g = HnswGraph::new(m, m0, usize::MAX).unwrap();
         let mut scratch = HnswScratch::default();
         g.insert_bulk(pool, pool.len() as u32, 200, &mut scratch)
@@ -784,7 +834,7 @@ mod tests {
     }
 
     /// Brute-force top-k by exact quantized cosine.
-    fn brute_force(pool: &VecPool, q: u32, k: usize) -> Vec<u32> {
+    fn brute_force(pool: &VecPool<'_>, q: u32, k: usize) -> Vec<u32> {
         let mut all: Vec<(f32, u32)> = (0..pool.len() as u32)
             .map(|i| (pool.sim(q, i), i))
             .collect();

@@ -20,7 +20,7 @@ const DAY: u64 = 86_400_000;
 
 /// A workload touching every structure: entities, tags, links, revisions,
 /// tombstones.
-fn workload(mem: &mut Memory, store: &mut MemStorage) {
+fn workload(mem: &mut Memory<'_>, store: &mut MemStorage) {
     for i in 0..50u64 {
         mem.remember(
             store,
@@ -60,7 +60,7 @@ fn workload(mem: &mut Memory, store: &mut MemStorage) {
     .unwrap();
 }
 
-fn assert_equal(a: &mut Memory, b: &mut Memory) {
+fn assert_equal(a: &mut Memory<'_>, b: &mut Memory<'_>) {
     assert_eq!(a.facts_len(), b.facts_len());
     assert_eq!(a.entities_len(), b.entities_len());
     for id in 0..a.facts_len() as u32 {
@@ -135,6 +135,36 @@ fn snapshot_plus_journal_tail_replays_and_skips() {
     let (reopened, report) = Memory::open(&mut overlap, cfg()).unwrap();
     assert_eq!(report.skipped, 1);
     assert_eq!(reopened.facts_len(), mem.facts_len());
+}
+
+/// A read-only borrowed open (specs/16 §8) over the same snapshot bytes is
+/// observably identical to an owned open: same facts, same recall across
+/// every source. The borrowed engine copies nothing — it reads straight
+/// out of `bytes`.
+#[test]
+fn readonly_borrowed_open_matches_owned() {
+    let (mut mem, mut store) = (Memory::new(cfg()).unwrap(), MemStorage::new());
+    workload(&mut mem, &mut store);
+    // A checkpointed database has an empty journal after a snapshot; the
+    // read-only path requires exactly that.
+    mem.snapshot(&mut store, 70 * DAY).unwrap();
+    let bytes = mem.snapshot_bytes(0);
+
+    let (mut owned, _) = Memory::from_bytes(Some(&bytes), &[], cfg()).unwrap();
+    let mut borrowed = Memory::from_bytes_borrowed(&bytes, &[], cfg()).unwrap();
+    assert_equal(&mut owned, &mut borrowed);
+
+    // A non-empty journal is refused: replay would copy whole arenas up.
+    let mut probe_store = MemStorage::new();
+    let mut probe = Memory::new(cfg()).unwrap();
+    probe
+        .remember(&mut probe_store, RememberInput::text(1, "journal record"))
+        .unwrap();
+    let journal = probe_store.read_journal().unwrap();
+    assert_eq!(
+        Memory::from_bytes_borrowed(&bytes, &journal, cfg()).unwrap_err(),
+        Error::Invalid("read-only open requires a checkpointed (empty) journal")
+    );
 }
 
 #[test]

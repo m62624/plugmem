@@ -131,7 +131,7 @@ struct Inner {
 }
 
 struct State {
-    mem: Memory,
+    mem: Memory<'static>,
     store: FileStorage,
     /// Mutations since the last snapshot.
     ops: u64,

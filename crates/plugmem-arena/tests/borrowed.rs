@@ -77,16 +77,19 @@ fn arena_borrowed_mutation_copies_up_and_spares_the_source() {
     a.dump_pool(&mut pool);
     let snapshot = pool.clone();
 
-    let mut borrowed = Arena::<Rec>::load_borrowed(ArenaCfg::new(2, ShardMode::Ordered), &meta, &pool)
-        .unwrap();
+    let mut borrowed =
+        Arena::<Rec>::load_borrowed(ArenaCfg::new(2, ShardMode::Ordered), &meta, &pool).unwrap();
     // A mutation triggers Cow::to_mut — the source buffer must stay intact.
     borrowed.insert(&Rec { k: 999, v: 999 }).unwrap();
     assert_eq!(pool, snapshot, "the borrowed source pool was not mutated");
-    assert_eq!(borrowed.get(&{
-        let mut k = [0u8; 8];
-        key::write_u64(&mut k, 999);
-        k
-    }), Some(Rec { k: 999, v: 999 }));
+    assert_eq!(
+        borrowed.get(&{
+            let mut k = [0u8; 8];
+            key::write_u64(&mut k, 999);
+            k
+        }),
+        Some(Rec { k: 999, v: 999 })
+    );
 }
 
 #[test]
@@ -129,9 +132,8 @@ fn chunk_pool_borrowed_load_equals_owned() {
 
     // Chunk indices are preserved by load, so a handle built before the dump
     // iterates the reloaded pools identically.
-    let collect = |p: &ChunkPool<'_>, h: &ListHandle| -> Vec<u8> {
-        p.iter(h).flatten().copied().collect()
-    };
+    let collect =
+        |p: &ChunkPool<'_>, h: &ListHandle| -> Vec<u8> { p.iter(h).flatten().copied().collect() };
     assert_eq!(collect(&owned, &evens), collect(&c, &evens));
     assert_eq!(collect(&borrowed, &evens), collect(&c, &evens));
     assert_eq!(collect(&borrowed, &odds), collect(&c, &odds));

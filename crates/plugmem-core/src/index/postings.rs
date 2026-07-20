@@ -59,12 +59,12 @@ impl Slot for IdListSlot {
 /// Key → sorted id list storage; `TF` adds a one-byte term frequency to
 /// every entry (the BM25 flavor).
 #[derive(Debug)]
-pub struct PostingStore<const TF: bool> {
-    handles: Arena<IdListSlot>,
-    pool: ChunkPool,
+pub struct PostingStore<'a, const TF: bool> {
+    handles: Arena<'a, IdListSlot>,
+    pool: ChunkPool<'a>,
 }
 
-impl<const TF: bool> PostingStore<TF> {
+impl<'a, const TF: bool> PostingStore<'a, TF> {
     /// Creates an empty store. `shards` follows the owning index's config
     /// (power of two); `max_bytes` bounds the chunk pool.
     pub fn new(shards: usize, max_bytes: usize) -> Result<Self, Error> {
@@ -190,7 +190,7 @@ impl<const TF: bool> PostingStore<TF> {
     }
 
     /// Assembles a store from already-validated parts (the load path).
-    pub(crate) fn from_parts(handles: Arena<IdListSlot>, pool: ChunkPool) -> Self {
+    pub(crate) fn from_parts(handles: Arena<'a, IdListSlot>, pool: ChunkPool<'a>) -> Self {
         Self { handles, pool }
     }
 }

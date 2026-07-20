@@ -19,7 +19,7 @@ fn cfg() -> Config {
     cfg
 }
 
-fn engine() -> (Memory, MemStorage) {
+fn engine() -> (Memory<'static>, MemStorage) {
     (Memory::new(cfg()).unwrap(), MemStorage::new())
 }
 
@@ -360,7 +360,7 @@ fn journal_replay_reproduces_direct_execution() {
 }
 
 /// Compares every fact view, tag set and entity count of two engines.
-fn assert_observably_equal(a: &Memory, b: &Memory) {
+fn assert_observably_equal(a: &Memory<'_>, b: &Memory<'_>) {
     assert_eq!(a.facts_len(), b.facts_len());
     assert_eq!(a.entities_len(), b.entities_len());
     for id in 0..a.facts_len() as u32 {

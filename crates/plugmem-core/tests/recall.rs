@@ -21,7 +21,7 @@ fn cfg() -> Config {
 /// an unrelated fact. Timestamps are days for readability.
 const DAY: u64 = 86_400_000;
 
-fn fixture() -> (Memory, MemStorage) {
+fn fixture() -> (Memory<'static>, MemStorage) {
     let mut mem = Memory::new(cfg()).unwrap();
     let mut store = MemStorage::new();
     // f0: user pref, tagged.

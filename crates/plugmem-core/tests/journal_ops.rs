@@ -133,7 +133,7 @@ fn decode_rejects_op_revises_disagreement() {
 }
 
 /// Builds a journal from raw ops and opens an engine over it.
-fn open_with(ops: &[Op<'_>]) -> Result<Memory, Error> {
+fn open_with(ops: &[Op<'_>]) -> Result<Memory<'static>, Error> {
     let mut journal = Vec::new();
     for op in ops {
         op.encode(&mut journal);

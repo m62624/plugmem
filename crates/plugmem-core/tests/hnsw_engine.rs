@@ -39,7 +39,7 @@ impl Lcg {
 
 /// Remembers `n` clustered vectors into an engine and returns the raw
 /// embeddings (16 clusters — the graph has real structure to navigate).
-fn fill(mem: &mut Memory, store: &mut MemStorage, n: usize, seed: u64) -> Vec<Vec<f32>> {
+fn fill(mem: &mut Memory<'_>, store: &mut MemStorage, n: usize, seed: u64) -> Vec<Vec<f32>> {
     let mut rng = Lcg(seed);
     let centers: Vec<Vec<f32>> = (0..16).map(|_| rng.vector()).collect();
     let mut out = Vec::with_capacity(n);

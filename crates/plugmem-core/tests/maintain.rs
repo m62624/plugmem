@@ -43,7 +43,7 @@ impl Lcg {
 /// and `vector` slot index (both legitimately change under compaction).
 type Content = (String, EntityId, u16, u16, FactId, u64, u64, u64, Vec<u32>);
 
-fn content(mem: &Memory, id: FactId) -> Option<Content> {
+fn content(mem: &Memory<'_>, id: FactId) -> Option<Content> {
     let v = mem.get(id)?;
     let r = v.record;
     let mut tags = Vec::new();
@@ -63,7 +63,7 @@ fn content(mem: &Memory, id: FactId) -> Option<Content> {
 
 /// Every fact id's content, in id order over the full id space (burned
 /// and tombstoned ids read as `None` alike — that equality is the point).
-fn all_content(mem: &Memory) -> Vec<Option<Content>> {
+fn all_content(mem: &Memory<'_>) -> Vec<Option<Content>> {
     (0..mem.stats().next_fact)
         .map(|id| content(mem, FactId(id)))
         .collect()
@@ -79,7 +79,7 @@ fn embed(seed: usize, dim: usize) -> Vec<f32> {
 /// A fixed battery of recall queries whose rendered blocks capture the
 /// observable behavior of every source (the vector source is queried only
 /// when the engine has a vector layer).
-fn battery(mem: &mut Memory) -> Vec<String> {
+fn battery(mem: &mut Memory<'_>) -> Vec<String> {
     let dim = mem.cfg().dim;
     let mut out: Vec<String> = [
         RecallQuery::text(100 * DAY, "memory tokio work fact"),
@@ -114,7 +114,7 @@ fn battery(mem: &mut Memory) -> Vec<String> {
 
 /// A workload touching every structure: entities, tags, links, a revision
 /// and a tombstone.
-fn workload(mem: &mut Memory, store: &mut MemStorage) {
+fn workload(mem: &mut Memory<'_>, store: &mut MemStorage) {
     let entities = ["user", "plugmem", "кот Барсик", "tokio"];
     for i in 0..60u64 {
         mem.remember(
@@ -353,7 +353,7 @@ fn maintain_on_empty_engine_and_idempotent() {
 /// indices trigger a compaction; `now` advances identically whether or not
 /// a maintain fires there, so two paths over the same steps stay aligned.
 #[cfg(not(target_family = "wasm"))]
-fn drive(steps: &[u8], dim: usize, maintain: bool) -> (Memory, MemStorage) {
+fn drive(steps: &[u8], dim: usize, maintain: bool) -> (Memory<'static>, MemStorage) {
     let (mut mem, mut store) = (Memory::new(cfg(dim)).unwrap(), MemStorage::new());
     let names = ["user", "plugmem", "кот Барсик", "tokio", "работа"];
     let tags = ["pref", "health", "a", "b"];

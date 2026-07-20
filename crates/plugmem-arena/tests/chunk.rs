@@ -6,7 +6,7 @@ use proptest::prelude::*;
 
 /// Concatenated bytes of one list, as the consumers (varint decoders) see
 /// them.
-fn bytes_of(pool: &ChunkPool, list: &ListHandle) -> Vec<u8> {
+fn bytes_of(pool: &ChunkPool<'_>, list: &ListHandle) -> Vec<u8> {
     pool.iter(list).flatten().copied().collect()
 }
 

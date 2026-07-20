@@ -187,33 +187,38 @@ pub struct OpenReport {
 }
 
 /// The memory engine (specs/05). See the module docs for staging.
-pub struct Memory {
+///
+/// The lifetime `'a` is the provenance of the engine's byte pools. Every
+/// owned constructor (`new`/`open`/`from_bytes`) yields a `Memory<'static>`
+/// that owns its bytes; the read-only [`Memory::from_bytes_borrowed`] path
+/// borrows them from an mmap'd snapshot instead of copying (specs/16).
+pub struct Memory<'a> {
     cfg: Config,
     // -- data model --
-    facts: Arena<FactRecord>,
-    fact_aux: Arena<FactAux>,
-    entities: Arena<EntityRecord>,
-    by_name: Arena<EntityByName>,
-    edges_out: Arena<EdgeSlot>,
-    edges_in: Arena<EdgeSlot>,
-    temporal: Arena<TemporalSlot>,
+    facts: Arena<'a, FactRecord>,
+    fact_aux: Arena<'a, FactAux>,
+    entities: Arena<'a, EntityRecord>,
+    by_name: Arena<'a, EntityByName>,
+    edges_out: Arena<'a, EdgeSlot>,
+    edges_in: Arena<'a, EdgeSlot>,
+    temporal: Arena<'a, TemporalSlot>,
     /// Fact texts and canonical entity names.
-    texts: BlobHeap,
+    texts: BlobHeap<'a>,
     /// Terms: tokens, tags (verbatim), relation names, normalized entity
     /// names.
-    terms: Interner,
+    terms: Interner<'a>,
     /// Per-fact tag lists (`TermId` values), handles in [`FactAux`].
-    tag_lists: ChunkPool,
+    tag_lists: ChunkPool<'a>,
     // -- indexes --
-    bm25: Bm25Index,
-    tags_idx: IdListIndex,
-    entity_facts: IdListIndex,
+    bm25: Bm25Index<'a>,
+    tags_idx: IdListIndex<'a>,
+    entity_facts: IdListIndex<'a>,
     /// Quantized vectors (empty and inert when `cfg.dim == 0`).
-    vecs: VecPool,
+    vecs: VecPool<'a>,
     /// HNSW graph over the pool; empty until `maintain` crosses
     /// `Config::flat_to_hnsw`. Slots past its `indexed` mark are the flat
     /// tail searched by scan.
-    hnsw: HnswGraph,
+    hnsw: HnswGraph<'a>,
     // -- id allocation (derived from the arenas on load) --
     next_fact: u32,
     next_entity: u32,
@@ -224,7 +229,7 @@ pub struct Memory {
     recall_scratch: recall::RecallScratch,
 }
 
-impl Memory {
+impl<'a> Memory<'a> {
     /// Creates an empty database.
     ///
     /// # Errors
@@ -291,6 +296,29 @@ impl Memory {
         };
         let report = mem.replay(journal)?;
         Ok((mem, report))
+    }
+
+    /// Opens a database read-only over a borrowed snapshot (specs/16): the
+    /// engine's byte pools borrow `snapshot` (typically an mmap'd file)
+    /// instead of copying it, so a large database residents only the pages
+    /// actually read. The returned engine is tied to `snapshot`'s lifetime
+    /// and must not be mutated — journal replay would copy whole arenas up
+    /// (copy-on-write), defeating the zero-copy intent, so a **non-empty
+    /// journal is rejected**: checkpoint the database read-write once
+    /// first. The caller (the host) owns the map and the exclusive lock.
+    pub fn from_bytes_borrowed(
+        snapshot: &'a [u8],
+        journal: &[u8],
+        cfg: Config,
+    ) -> Result<Self, Error> {
+        let mem = Self::load_snapshot_borrowed(snapshot, cfg)?;
+        let JournalScan { entries, .. } = scan(journal)?;
+        if !entries.is_empty() {
+            return Err(Error::Invalid(
+                "read-only open requires a checkpointed (empty) journal",
+            ));
+        }
+        Ok(mem)
     }
 
     /// Applies every journal record on top of the current state (specs/03
@@ -975,7 +1003,7 @@ impl Memory {
     }
 }
 
-impl core::fmt::Debug for Memory {
+impl core::fmt::Debug for Memory<'_> {
     /// Summary only — the contents are the user's memory, not ours to
     /// print.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

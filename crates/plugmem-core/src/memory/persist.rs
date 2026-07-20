@@ -84,7 +84,7 @@ mod kind {
 const STATE_LEN: usize = 24;
 
 /// Dumps an arena as its `(meta, pool)` section pair.
-fn arena_sections<T: Slot>(a: &Arena<T>) -> (Vec<u8>, Vec<u8>) {
+fn arena_sections<T: Slot>(a: &Arena<'_, T>) -> (Vec<u8>, Vec<u8>) {
     let (mut meta, mut pool) = (Vec::new(), Vec::new());
     a.dump_meta(&mut meta);
     a.dump_pool(&mut pool);
@@ -97,7 +97,7 @@ fn section<'a>(snap: &Snapshot<'a>, kind: u16) -> Result<&'a [u8], Error> {
         .ok_or(Error::Corrupt("snapshot is missing a required section"))
 }
 
-impl<const TF: bool> PostingStore<TF> {
+impl<'a, const TF: bool> PostingStore<'a, TF> {
     /// Dumps the store's four sections.
     pub(crate) fn dump_sections(&self) -> [Vec<u8>; 4] {
         let (hm, hp) = (self.handles_meta(), self.handles_pool());
@@ -108,7 +108,9 @@ impl<const TF: bool> PostingStore<TF> {
     /// Rebuilds a store from its sections and validates every list: chain
     /// walks over a shared visited map, full entry decode (well-formed
     /// varints, strictly ascending ids without overflow), `count`/`last`
-    /// agreement, and no orphan chunks.
+    /// agreement, and no orphan chunks. Owned path — the parts are copied
+    /// (`'static`); see [`PostingStore::load_sections_borrowed`] for the
+    /// zero-copy sibling.
     pub(crate) fn load_sections(
         shards: usize,
         max_bytes: usize,
@@ -123,6 +125,40 @@ impl<const TF: bool> PostingStore<TF> {
             hp,
         )?;
         let pool = ChunkPool::load(ChunkPoolCfg::new().with_max_bytes(max_bytes), cm, cp)?;
+        Self::validate_lists(&handles, &pool)?;
+        Ok(Self::from_parts(handles, pool))
+    }
+
+    /// Zero-copy sibling of [`PostingStore::load_sections`]: the handle
+    /// arena pool and the chunk pool borrow their mmap'd sections
+    /// (specs/16). Same validation; the lifetime ties the store to `hp`
+    /// and `cp`.
+    pub(crate) fn load_sections_borrowed(
+        shards: usize,
+        max_bytes: usize,
+        hm: &[u8],
+        hp: &'a [u8],
+        cm: &[u8],
+        cp: &'a [u8],
+    ) -> Result<Self, Error> {
+        let handles = Arena::<crate::index::postings::IdListSlot>::load_borrowed(
+            ArenaCfg::new(shards, ShardMode::Uniform).with_max_bytes(max_bytes),
+            hm,
+            hp,
+        )?;
+        let pool = ChunkPool::load_borrowed(ChunkPoolCfg::new().with_max_bytes(max_bytes), cm, cp)?;
+        Self::validate_lists(&handles, &pool)?;
+        Ok(Self::from_parts(handles, pool))
+    }
+
+    /// The shared list validation, over already-built parts: chain walks,
+    /// full entry decode, `count`/`last` agreement, no orphan chunks. The
+    /// only difference between the owned and borrowed load paths is how
+    /// `handles`/`pool` were constructed, so both funnel through here.
+    fn validate_lists(
+        handles: &Arena<'_, crate::index::postings::IdListSlot>,
+        pool: &ChunkPool<'_>,
+    ) -> Result<(), Error> {
         let mut visited = alloc::vec![false; pool.chunks()];
         for slot in handles.iter() {
             pool.validate_chain(&slot.handle, &mut visited)?;
@@ -164,11 +200,11 @@ impl<const TF: bool> PostingStore<TF> {
         if pool.orphan_count(&visited) != 0 {
             return Err(Error::Corrupt("posting pool has orphan chunks"));
         }
-        Ok(Self::from_parts(handles, pool))
+        Ok(())
     }
 }
 
-impl Bm25Index {
+impl<'a> Bm25Index<'a> {
     fn dump_into(&self, w: &mut SnapshotWriter) -> Result<(), Error> {
         let [hm, hp, cm, cp] = self.postings().dump_sections();
         w.section(kind::BM25_HANDLES_META, hm)?;
@@ -181,6 +217,8 @@ impl Bm25Index {
         Ok(())
     }
 
+    /// Owned load: postings and per-document lengths are copied
+    /// (`'static`).
     fn load_from(snap: &Snapshot<'_>, cfg: &Config) -> Result<Self, Error> {
         let postings = PostingStore::<true>::load_sections(
             cfg.shards_postings,
@@ -195,6 +233,36 @@ impl Bm25Index {
             section(snap, kind::BM25_DOCLEN_META)?,
             section(snap, kind::BM25_DOCLEN_POOL)?,
         )?;
+        Self::assemble(postings, doc_len, snap)
+    }
+
+    /// Zero-copy sibling of [`Bm25Index::load_from`]: the postings and
+    /// doc-length pools borrow their mmap'd sections (specs/16).
+    fn load_from_borrowed(snap: &Snapshot<'a>, cfg: &Config) -> Result<Self, Error> {
+        let postings = PostingStore::<true>::load_sections_borrowed(
+            cfg.shards_postings,
+            cfg.max_bytes,
+            section(snap, kind::BM25_HANDLES_META)?,
+            section(snap, kind::BM25_HANDLES_POOL)?,
+            section(snap, kind::BM25_CHUNKS_META)?,
+            section(snap, kind::BM25_CHUNKS_POOL)?,
+        )?;
+        let doc_len = Arena::load_borrowed(
+            ArenaCfg::new(cfg.shards_postings, ShardMode::Uniform).with_max_bytes(cfg.max_bytes),
+            section(snap, kind::BM25_DOCLEN_META)?,
+            section(snap, kind::BM25_DOCLEN_POOL)?,
+        )?;
+        Self::assemble(postings, doc_len, snap)
+    }
+
+    /// Reconciles the corpus totals from the engine-state section and
+    /// assembles the index. Shared by both load paths (reads only the tiny
+    /// state section, so it ties nothing).
+    fn assemble(
+        postings: PostingStore<'a, true>,
+        doc_len: Arena<'a, crate::index::bm25::DocLenSlot>,
+        snap: &Snapshot<'_>,
+    ) -> Result<Self, Error> {
         let state = section(snap, kind::ENGINE_STATE)?;
         if state.len() != STATE_LEN {
             return Err(Error::Corrupt("engine state section has a wrong length"));
@@ -208,7 +276,7 @@ impl Bm25Index {
     }
 }
 
-impl Memory {
+impl<'a> Memory<'a> {
     /// Serializes the whole engine into snapshot-container bytes.
     /// Deterministic and canonical: save → load → save is byte-identical.
     pub fn snapshot_bytes(&self, created_at: u64) -> Vec<u8> {
@@ -315,42 +383,14 @@ impl Memory {
     }
 
     /// Loads an engine from snapshot bytes (the untrusted path — see the
-    /// module docs for the validation inventory).
+    /// module docs for the validation inventory). Owned path: every
+    /// section is copied into the arenas, so the returned engine borrows
+    /// nothing from `bytes` and is a `Memory<'static>`.
     pub(super) fn load_snapshot(bytes: &[u8], cfg: Config) -> Result<Self, Error> {
         cfg.validate()?;
         let snap = Snapshot::parse(bytes, cfg.fast_load)?;
-        let stored = Config::decode(snap.config())?;
-        // Structural fields must match; tuning fields follow the caller.
-        if stored.dim != cfg.dim {
-            return Err(Error::ConfigMismatch("stored dim differs"));
-        }
-        if [
-            (stored.shards_facts, cfg.shards_facts),
-            (stored.shards_entities, cfg.shards_entities),
-            (stored.shards_edges, cfg.shards_edges),
-            (stored.shards_temporal, cfg.shards_temporal),
-            (stored.shards_postings, cfg.shards_postings),
-        ]
-        .iter()
-        .any(|&(a, b)| a != b)
-        {
-            return Err(Error::ConfigMismatch("stored shard counts differ"));
-        }
-        if stored.max_bytes != cfg.max_bytes
-            || stored.max_text != cfg.max_text
-            || stored.max_blob != cfg.max_blob
-        {
-            return Err(Error::ConfigMismatch("stored size limits differ"));
-        }
-        // The lineage identity is the snapshot's, not the caller's: a
-        // caller passing 0 adopts the stored uuid; a nonzero caller value
-        // is an assertion "this must be that database" and must match.
-        if cfg.db_uuid != 0 && stored.db_uuid != cfg.db_uuid {
-            return Err(Error::ConfigMismatch("stored db_uuid differs"));
-        }
-
+        let cfg = Self::reconcile_config(&snap, cfg)?;
         let mut mem = Self::new(cfg)?;
-        mem.cfg.db_uuid = stored.db_uuid;
         let cfg = &mem.cfg;
         let uni =
             |shards: usize| ArenaCfg::new(shards, ShardMode::Uniform).with_max_bytes(cfg.max_bytes);
@@ -399,11 +439,6 @@ impl Memory {
             section(&snap, kind::TEXTS_INDEX)?,
             section(&snap, kind::TEXTS_POOL)?,
         )?;
-        for (_, bytes) in mem.texts.iter() {
-            if core::str::from_utf8(bytes).is_err() {
-                return Err(Error::Corrupt("stored text is not valid UTF-8"));
-            }
-        }
         mem.terms = Interner::load(
             blob,
             section(&snap, kind::TERMS_INDEX)?,
@@ -444,7 +479,161 @@ impl Memory {
             section(&snap, kind::HNSW_LISTS_META)?,
             section(&snap, kind::HNSW_LISTS_POOL)?,
         )?;
-        let state = section(&snap, kind::ENGINE_STATE)?;
+        Self::finish_load(mem, &snap)
+    }
+
+    /// Zero-copy sibling of [`Memory::load_snapshot`]: the large byte
+    /// pools (arenas, blob heaps, chunk pools, term dictionary, vectors,
+    /// upper HNSW lists) *borrow* their sections straight out of `bytes`
+    /// (an mmap'd snapshot), so opening an 8 GiB database residents only
+    /// the pages actually touched (specs/16). Small metadata is still
+    /// rebuilt owned. The lifetime ties the engine to `bytes`; the handle
+    /// is read-only, so copy-on-write never fires.
+    pub(super) fn load_snapshot_borrowed(bytes: &'a [u8], cfg: Config) -> Result<Self, Error> {
+        cfg.validate()?;
+        let snap = Snapshot::parse(bytes, cfg.fast_load)?;
+        let cfg = Self::reconcile_config(&snap, cfg)?;
+        let mut mem = Self::new(cfg)?;
+        let cfg = &mem.cfg;
+        let uni =
+            |shards: usize| ArenaCfg::new(shards, ShardMode::Uniform).with_max_bytes(cfg.max_bytes);
+        let ord =
+            |shards: usize| ArenaCfg::new(shards, ShardMode::Ordered).with_max_bytes(cfg.max_bytes);
+        let blob = BlobHeapCfg::new()
+            .with_max_bytes(cfg.max_bytes)
+            .with_max_blob(cfg.max_blob);
+        mem.facts = Arena::load_borrowed(
+            uni(cfg.shards_facts),
+            section(&snap, kind::FACTS_META)?,
+            section(&snap, kind::FACTS_POOL)?,
+        )?;
+        mem.fact_aux = Arena::load_borrowed(
+            uni(cfg.shards_facts),
+            section(&snap, kind::AUX_META)?,
+            section(&snap, kind::AUX_POOL)?,
+        )?;
+        mem.entities = Arena::load_borrowed(
+            uni(cfg.shards_entities),
+            section(&snap, kind::ENTITIES_META)?,
+            section(&snap, kind::ENTITIES_POOL)?,
+        )?;
+        mem.by_name = Arena::load_borrowed(
+            ord(cfg.shards_entities),
+            section(&snap, kind::BY_NAME_META)?,
+            section(&snap, kind::BY_NAME_POOL)?,
+        )?;
+        mem.edges_out = Arena::load_borrowed(
+            ord(cfg.shards_edges),
+            section(&snap, kind::EDGES_OUT_META)?,
+            section(&snap, kind::EDGES_OUT_POOL)?,
+        )?;
+        mem.edges_in = Arena::load_borrowed(
+            ord(cfg.shards_edges),
+            section(&snap, kind::EDGES_IN_META)?,
+            section(&snap, kind::EDGES_IN_POOL)?,
+        )?;
+        mem.temporal = Arena::load_borrowed(
+            ord(cfg.shards_temporal),
+            section(&snap, kind::TEMPORAL_META)?,
+            section(&snap, kind::TEMPORAL_POOL)?,
+        )?;
+        mem.texts = BlobHeap::load_borrowed(
+            blob,
+            section(&snap, kind::TEXTS_INDEX)?,
+            section(&snap, kind::TEXTS_POOL)?,
+        )?;
+        mem.terms = Interner::load_borrowed(
+            blob,
+            section(&snap, kind::TERMS_INDEX)?,
+            section(&snap, kind::TERMS_POOL)?,
+            section(&snap, kind::TERMS_TABLE)?,
+        )?;
+        mem.tag_lists = ChunkPool::load_borrowed(
+            ChunkPoolCfg::new().with_max_bytes(cfg.max_bytes),
+            section(&snap, kind::TAG_LISTS_META)?,
+            section(&snap, kind::TAG_LISTS_POOL)?,
+        )?;
+        mem.bm25 = Bm25Index::load_from_borrowed(&snap, cfg)?;
+        mem.tags_idx = IdListIndex::load_sections_borrowed(
+            cfg.shards_postings,
+            cfg.max_bytes,
+            section(&snap, kind::TAGS_HANDLES_META)?,
+            section(&snap, kind::TAGS_HANDLES_POOL)?,
+            section(&snap, kind::TAGS_CHUNKS_META)?,
+            section(&snap, kind::TAGS_CHUNKS_POOL)?,
+        )?;
+        mem.entity_facts = IdListIndex::load_sections_borrowed(
+            cfg.shards_entities,
+            cfg.max_bytes,
+            section(&snap, kind::ENTFACTS_HANDLES_META)?,
+            section(&snap, kind::ENTFACTS_HANDLES_POOL)?,
+            section(&snap, kind::ENTFACTS_CHUNKS_META)?,
+            section(&snap, kind::ENTFACTS_CHUNKS_POOL)?,
+        )?;
+        mem.vecs =
+            VecPool::from_parts_borrowed(cfg.dim, cfg.max_bytes, section(&snap, kind::VEC_POOL)?)?;
+        mem.hnsw = crate::index::hnsw::HnswGraph::from_parts_borrowed(
+            cfg.hnsw_m,
+            cfg.hnsw_m0,
+            cfg.max_bytes,
+            section(&snap, kind::HNSW_META)?,
+            section(&snap, kind::HNSW_LEVEL0)?,
+            section(&snap, kind::HNSW_UPPER_META)?,
+            section(&snap, kind::HNSW_UPPER_POOL)?,
+            section(&snap, kind::HNSW_LISTS_META)?,
+            section(&snap, kind::HNSW_LISTS_POOL)?,
+        )?;
+        Self::finish_load(mem, &snap)
+    }
+
+    /// Checks the stored config against the caller's (structural fields
+    /// must match; tuning fields follow the caller) and adopts the
+    /// snapshot's lineage identity. Shared by both load paths.
+    fn reconcile_config(snap: &Snapshot<'_>, mut cfg: Config) -> Result<Config, Error> {
+        let stored = Config::decode(snap.config())?;
+        if stored.dim != cfg.dim {
+            return Err(Error::ConfigMismatch("stored dim differs"));
+        }
+        if [
+            (stored.shards_facts, cfg.shards_facts),
+            (stored.shards_entities, cfg.shards_entities),
+            (stored.shards_edges, cfg.shards_edges),
+            (stored.shards_temporal, cfg.shards_temporal),
+            (stored.shards_postings, cfg.shards_postings),
+        ]
+        .iter()
+        .any(|&(a, b)| a != b)
+        {
+            return Err(Error::ConfigMismatch("stored shard counts differ"));
+        }
+        if stored.max_bytes != cfg.max_bytes
+            || stored.max_text != cfg.max_text
+            || stored.max_blob != cfg.max_blob
+        {
+            return Err(Error::ConfigMismatch("stored size limits differ"));
+        }
+        // The lineage identity is the snapshot's, not the caller's: a
+        // caller passing 0 adopts the stored uuid; a nonzero caller value
+        // is an assertion "this must be that database" and must match.
+        if cfg.db_uuid != 0 && stored.db_uuid != cfg.db_uuid {
+            return Err(Error::ConfigMismatch("stored db_uuid differs"));
+        }
+        cfg.db_uuid = stored.db_uuid;
+        Ok(cfg)
+    }
+
+    /// Finishes a load once every section is in place: verifies stored
+    /// text is UTF-8, reads the id counters, checks they cover the record
+    /// counts, and runs the full reference validation. Reads only the tiny
+    /// state section, so it ties the engine to nothing. Shared by both
+    /// load paths.
+    fn finish_load(mut mem: Self, snap: &Snapshot<'_>) -> Result<Self, Error> {
+        for (_, text) in mem.texts.iter() {
+            if core::str::from_utf8(text).is_err() {
+                return Err(Error::Corrupt("stored text is not valid UTF-8"));
+            }
+        }
+        let state = section(snap, kind::ENGINE_STATE)?;
         if state.len() != STATE_LEN {
             return Err(Error::Corrupt("engine state section has a wrong length"));
         }

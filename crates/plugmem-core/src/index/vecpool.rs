@@ -29,6 +29,7 @@
 //! `counters` feature counts those exact dot products — the deterministic
 //! cost metric the perf gate holds to `min(candidates, live)`.
 
+use alloc::borrow::Cow;
 use alloc::vec::Vec;
 
 #[cfg(feature = "counters")]
@@ -60,9 +61,16 @@ impl VecScratch {
 }
 
 /// Flat store of quantized vectors (specs/04 §5).
+///
+/// The slot bytes are held as a [`Cow`]: the owned path (`new`/`push`/
+/// `from_parts`) is `Cow::Owned` and byte-for-byte unchanged; the
+/// read-only path (`from_parts_borrowed`) borrows an mmap'd section
+/// without copying (specs/16). Mutations go through `to_mut()`, which
+/// copies-on-write a borrowed pool up to owned — never observed on the
+/// v1 read-only handle, which exposes no writers.
 #[derive(Debug)]
-pub struct VecPool {
-    bytes: Vec<u8>,
+pub struct VecPool<'a> {
+    bytes: Cow<'a, [u8]>,
     dim: usize,
     max_bytes: usize,
     /// Exact dot products computed by searches (feature `counters`).
@@ -70,7 +78,7 @@ pub struct VecPool {
     dots: Cell<u64>,
 }
 
-impl VecPool {
+impl<'a> VecPool<'a> {
     /// Signature words for a dimension.
     #[inline]
     fn words(dim: usize) -> usize {
@@ -81,7 +89,7 @@ impl VecPool {
     /// leaves the layer inert — the pool stays empty).
     pub fn new(dim: usize, max_bytes: usize) -> Self {
         Self {
-            bytes: Vec::new(),
+            bytes: Cow::Owned(Vec::new()),
             dim,
             max_bytes,
             #[cfg(feature = "counters")]
@@ -224,24 +232,25 @@ impl VecPool {
         let index = u32::try_from(base / stride).map_err(|_| Error::CapacityExceeded {
             what: "vector slots",
         })?;
-        self.bytes.resize(base + stride, 0);
-        let mut slot = core::mem::take(&mut self.bytes);
+        let mut slot = core::mem::take(self.bytes.to_mut());
+        slot.resize(base + stride, 0);
         let res = self.encode_slot(fact.0, v, &mut slot[base..]);
-        self.bytes = slot;
-        match res {
+        let res = match res {
             Ok(()) => Ok(index),
             Err(e) => {
                 // Roll the failed append back so the pool stays canonical.
-                self.bytes.truncate(base);
+                slot.truncate(base);
                 Err(e)
             }
-        }
+        };
+        self.bytes = Cow::Owned(slot);
+        res
     }
 
     /// The `(scale, q)` view of a query previously quantized into
     /// `scratch` by [`VecPool::quantize_query`] — what the graph search
     /// and the tail scan consume.
-    pub(crate) fn quantized<'a>(&self, scratch: &'a VecScratch) -> (f32, &'a [u8]) {
+    pub(crate) fn quantized<'s>(&self, scratch: &'s VecScratch) -> (f32, &'s [u8]) {
         let stride = self.stride();
         let q_off = HEAD + Self::words(self.dim) * 8;
         debug_assert_eq!(scratch.query.len(), stride);
@@ -267,12 +276,13 @@ impl VecPool {
     /// returning its new index. Used by `maintain` compaction — the
     /// quantized bytes are reproduced exactly, so a compacted snapshot is
     /// byte-identical to a replayed one. `src` must share this pool's `dim`.
-    pub(crate) fn copy_slot(&mut self, src: &VecPool, i: u32) -> u32 {
+    pub(crate) fn copy_slot(&mut self, src: &VecPool<'_>, i: u32) -> u32 {
         debug_assert_eq!(self.dim, src.dim, "copy_slot across differing dims");
         let stride = self.stride();
         let base = i as usize * stride;
         let index = (self.bytes.len() / stride) as u32;
         self.bytes
+            .to_mut()
             .extend_from_slice(&src.bytes[base..base + stride]);
         index
     }
@@ -387,21 +397,44 @@ impl VecPool {
     /// — scales, signatures, the fact bijection — is validated by the
     /// engine's `validate_references` (it needs the fact records too).
     pub(crate) fn from_parts(dim: usize, max_bytes: usize, bytes: &[u8]) -> Result<Self, Error> {
+        Self::frame_check(dim, max_bytes, bytes.len())?;
         let mut pool = Self::new(dim, max_bytes);
-        if bytes.len() > max_bytes {
+        pool.bytes = Cow::Owned(bytes.to_vec());
+        Ok(pool)
+    }
+
+    /// Zero-copy sibling of [`VecPool::from_parts`]: the pool borrows the
+    /// dumped section (an mmap'd byte range) instead of copying it. Same
+    /// framing checks; the lifetime ties the pool to `bytes` (specs/16).
+    pub(crate) fn from_parts_borrowed(
+        dim: usize,
+        max_bytes: usize,
+        bytes: &'a [u8],
+    ) -> Result<Self, Error> {
+        Self::frame_check(dim, max_bytes, bytes.len())?;
+        let mut pool = Self::new(dim, max_bytes);
+        pool.bytes = Cow::Borrowed(bytes);
+        Ok(pool)
+    }
+
+    /// Frames the dumped section: a length within the ceiling and, for a
+    /// live layer, a whole number of slots. Shared by both `from_parts`
+    /// constructors so the owned and borrowed paths validate identically.
+    fn frame_check(dim: usize, max_bytes: usize, len: usize) -> Result<(), Error> {
+        if len > max_bytes {
             return Err(Error::Corrupt("vector pool exceeds the configured ceiling"));
         }
         if dim == 0 {
-            if !bytes.is_empty() {
+            if len != 0 {
                 return Err(Error::Corrupt("vector pool present with dim 0"));
             }
-            return Ok(pool);
+            return Ok(());
         }
-        if !bytes.len().is_multiple_of(pool.stride()) {
+        let stride = HEAD + Self::words(dim) * 8 + dim;
+        if !len.is_multiple_of(stride) {
             return Err(Error::Corrupt("vector pool is not a whole number of slots"));
         }
-        pool.bytes = bytes.to_vec();
-        Ok(pool)
+        Ok(())
     }
 
     /// Structural self-check of every slot (specs/11 A.4): each scale is

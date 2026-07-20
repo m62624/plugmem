@@ -80,9 +80,9 @@ impl Bm25Scratch {
 /// The BM25 index: postings with term frequencies plus per-document
 /// lengths and corpus statistics.
 #[derive(Debug)]
-pub struct Bm25Index {
-    postings: PostingStore<true>,
-    doc_len: Arena<DocLenSlot>,
+pub struct Bm25Index<'a> {
+    postings: PostingStore<'a, true>,
+    doc_len: Arena<'a, DocLenSlot>,
     total_docs: u64,
     total_len: u64,
     /// Posting entries decoded by queries (feature `counters`) — the
@@ -91,7 +91,7 @@ pub struct Bm25Index {
     decoded: Cell<u64>,
 }
 
-impl Bm25Index {
+impl<'a> Bm25Index<'a> {
     /// Creates an empty index; `shards` per the engine config
     /// (`shards_postings`), `max_bytes` bounds each underlying pool.
     pub fn new(shards: usize, max_bytes: usize) -> Result<Self, Error> {
@@ -224,19 +224,19 @@ impl Bm25Index {
     }
 
     /// The underlying posting store (the persistence composer dumps it).
-    pub(crate) fn postings(&self) -> &PostingStore<true> {
+    pub(crate) fn postings(&self) -> &PostingStore<'a, true> {
         &self.postings
     }
 
     /// The per-document length arena (the persistence composer dumps it).
-    pub(crate) fn doc_len_arena(&self) -> &Arena<DocLenSlot> {
+    pub(crate) fn doc_len_arena(&self) -> &Arena<'a, DocLenSlot> {
         &self.doc_len
     }
 
     /// Assembles an index from already-validated parts (the load path).
     pub(crate) fn from_parts(
-        postings: PostingStore<true>,
-        doc_len: Arena<DocLenSlot>,
+        postings: PostingStore<'a, true>,
+        doc_len: Arena<'a, DocLenSlot>,
         total_docs: u64,
         total_len: u64,
     ) -> Self {

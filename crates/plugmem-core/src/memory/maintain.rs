@@ -67,20 +67,20 @@ pub struct MaintainReport {
 /// The freshly rebuilt structures, swapped in atomically once the journal
 /// marker is durable.
 struct Rebuilt {
-    facts: Arena<FactRecord>,
-    entities: Arena<EntityRecord>,
-    fact_aux: Arena<FactAux>,
-    texts: BlobHeap,
-    tag_lists: ChunkPool,
-    bm25: Bm25Index,
-    tags_idx: IdListIndex,
-    entity_facts: IdListIndex,
-    temporal: Arena<TemporalSlot>,
-    vecs: VecPool,
-    hnsw: HnswGraph,
+    facts: Arena<'static, FactRecord>,
+    entities: Arena<'static, EntityRecord>,
+    fact_aux: Arena<'static, FactAux>,
+    texts: BlobHeap<'static>,
+    tag_lists: ChunkPool<'static>,
+    bm25: Bm25Index<'static>,
+    tags_idx: IdListIndex<'static>,
+    entity_facts: IdListIndex<'static>,
+    temporal: Arena<'static, TemporalSlot>,
+    vecs: VecPool<'static>,
+    hnsw: HnswGraph<'static>,
 }
 
-impl Memory {
+impl Memory<'_> {
     /// Physically purges tombstoned facts and compacts every satellite
     /// structure (specs/05). Ids of living facts are preserved; purged ids
     /// are burned (never reissued); observable state is unchanged; only
@@ -298,9 +298,13 @@ impl Memory {
     ///   are remapped through the compaction map (dead nodes drop out)
     ///   and the flat tail is bulk-inserted — the cheap steady-state
     ///   path that keeps `maintain` inside its budget.
-    fn rebuild_graph(&self, vec_map: &[u32], pool: &VecPool) -> Result<HnswGraph, Error> {
+    fn rebuild_graph(
+        &self,
+        vec_map: &[u32],
+        pool: &VecPool<'_>,
+    ) -> Result<HnswGraph<'static>, Error> {
         let cfg = &self.cfg;
-        let mut graph = HnswGraph::new(cfg.hnsw_m, cfg.hnsw_m0, cfg.max_bytes)?;
+        let mut graph: HnswGraph<'static> = HnswGraph::new(cfg.hnsw_m, cfg.hnsw_m0, cfg.max_bytes)?;
         let total = pool.len() as u32;
         if cfg.dim == 0 || (total as usize) < cfg.flat_to_hnsw {
             return Ok(graph);

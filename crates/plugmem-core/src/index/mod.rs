@@ -20,7 +20,7 @@ use postings::PostingStore;
 
 /// Key → sorted fact-id lists without term frequencies: the tag and
 /// entity indexes.
-pub type IdListIndex = PostingStore<false>;
+pub type IdListIndex<'a> = PostingStore<'a, false>;
 
 /// Reusable scratch for [`intersect`] (two ping-pong buffers; after
 /// warm-up an intersection allocates nothing).
@@ -45,7 +45,7 @@ impl IntersectScratch {
 /// empty `keys` slice yields an empty result (the caller treats "no tag
 /// filter" as "no allow-set", not as "allow everything").
 pub fn intersect(
-    index: &IdListIndex,
+    index: &IdListIndex<'_>,
     keys: &[u32],
     scratch: &mut IntersectScratch,
     out: &mut Vec<FactId>,
