@@ -581,7 +581,10 @@ impl Memory<'_> {
                 .expect("fact texts are written from &str");
             let _ = write!(out.rendered, "- [f{}] ", fact.id.0);
             if let Some(entity) = fact.entity.some() {
-                let _ = write!(out.rendered, "{}: ", self.entity_name(entity));
+                let name = self
+                    .entity_name(entity)
+                    .expect("a live fact's subject exists");
+                let _ = write!(out.rendered, "{name}: ");
             }
             out.rendered.push_str(text);
             out.rendered.push_str(" (");
@@ -604,20 +607,13 @@ impl Memory<'_> {
             let _ = writeln!(
                 out.rendered,
                 "- links: {} —{}→ {}",
-                self.entity_name(edge.src),
+                self.entity_name(edge.src)
+                    .expect("edges reference existing entities"),
                 self.terms.resolve(edge.rel),
-                self.entity_name(edge.dst),
+                self.entity_name(edge.dst)
+                    .expect("edges reference existing entities"),
             );
         }
-    }
-
-    /// Canonical display name of an entity.
-    fn entity_name(&self, id: EntityId) -> &str {
-        let record = self
-            .entities
-            .get(&id.0.to_be_bytes())
-            .expect("edges reference existing entities");
-        core::str::from_utf8(self.texts.get(record.name)).expect("names are written from &str")
     }
 }
 

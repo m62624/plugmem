@@ -37,6 +37,59 @@ pub struct FactSnapshot {
     pub text: String,
 }
 
+/// One exported fact — the human-readable, id-free shape [`Database::export`]
+/// dumps and an importer re-`remember`s (specs/06). Internal ids and
+/// `recorded_at` are the engine's bookkeeping and are *not* preserved across
+/// a round-trip; the knowledge itself (text, subject name, tags, validity
+/// start) is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExportedFact {
+    /// The fact text.
+    pub text: String,
+    /// Subject entity name, if the fact had one.
+    pub entity: Option<String>,
+    /// Tag strings.
+    pub tags: Vec<String>,
+    /// When the memory learned it (informational; not restorable on import).
+    pub recorded_at: u64,
+    /// Validity start — preserved on import.
+    pub valid_from: u64,
+}
+
+/// Dumps the currently-open facts (skipping closed revisions and
+/// tombstones), resolving each subject name and tag string. Shared by the
+/// read-write and read-only handles.
+pub(crate) fn export_facts(mem: &Memory) -> Vec<ExportedFact> {
+    use plugmem_core::{EntityId, FactId, VALID_TO_OPEN};
+    let next = mem.stats().next_fact;
+    let mut out = Vec::new();
+    let mut terms = Vec::new();
+    for i in 0..next {
+        let id = FactId(i);
+        let Some(view) = mem.get(id) else {
+            continue; // unknown or tombstoned
+        };
+        if view.record.valid_to != VALID_TO_OPEN {
+            continue; // a closed revision — export the current state only
+        }
+        let entity = (view.record.entity != EntityId::NONE)
+            .then(|| mem.entity_name(view.record.entity))
+            .flatten()
+            .map(str::to_string);
+        terms.clear();
+        mem.tags_of(id, &mut terms);
+        let tags = terms.iter().map(|t| mem.term(*t).to_string()).collect();
+        out.push(ExportedFact {
+            text: view.text.to_string(),
+            entity,
+            tags,
+            recorded_at: view.record.recorded_at,
+            valid_from: view.record.valid_from,
+        });
+    }
+    out
+}
+
 /// Tuning knobs of a [`Database`] (specs/13 §3). Construct through
 /// [`Database::builder`].
 pub struct DatabaseBuilder {
@@ -311,6 +364,12 @@ impl Database {
     /// Engine size counters.
     pub fn stats(&self) -> Stats {
         self.lock().mem.stats()
+    }
+
+    /// Dumps the currently-open facts for a human-readable backup
+    /// (specs/06). See [`ExportedFact`].
+    pub fn export(&self) -> Vec<ExportedFact> {
+        export_facts(&self.lock().mem)
     }
 
     /// Runs a maintenance pass now (purge, compaction, HNSW build past

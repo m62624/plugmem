@@ -489,6 +489,40 @@ fn seed_checkpointed(db: &Database) {
 }
 
 #[test]
+fn export_dumps_open_facts_with_names_and_tags() {
+    let tmp = TempDir::new("export");
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    db.remember(RememberInput {
+        entity: Some("user"),
+        tags: &["pref", "lang"],
+        ..RememberInput::text(1_000, "prefers tokio")
+    })
+    .unwrap();
+    // A closed revision must NOT appear (export is the current state).
+    let old = db
+        .remember(RememberInput::text(2_000, "lived in Moscow"))
+        .unwrap();
+    db.revise(old.id, RememberInput::text(3_000, "lives in Berlin"))
+        .unwrap();
+    // A tombstone must not appear either.
+    let gone = db
+        .remember(RememberInput::text(4_000, "temporary"))
+        .unwrap();
+    db.forget(5_000, gone.id).unwrap();
+
+    let facts = db.export();
+    // tokio (open, with subject + tags) and Berlin (open); Moscow is closed,
+    // temporary is tombstoned → 2 facts.
+    assert_eq!(facts.len(), 2, "{facts:?}");
+    let tokio = facts.iter().find(|f| f.text == "prefers tokio").unwrap();
+    assert_eq!(tokio.entity.as_deref(), Some("user"));
+    assert_eq!(tokio.tags, vec!["pref".to_string(), "lang".to_string()]);
+    assert_eq!(tokio.valid_from, 1_000);
+    assert!(facts.iter().any(|f| f.text == "lives in Berlin"));
+    assert!(!facts.iter().any(|f| f.text.contains("Moscow")));
+}
+
+#[test]
 fn open_readonly_matches_read_write() {
     let tmp = TempDir::new("ro-match");
     let q = RecallQuery {

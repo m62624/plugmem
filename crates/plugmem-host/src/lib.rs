@@ -26,7 +26,7 @@ mod error;
 mod readonly;
 mod storage;
 
-pub use db::{Database, DatabaseBuilder, FactSnapshot};
+pub use db::{Database, DatabaseBuilder, ExportedFact, FactSnapshot};
 pub use embedder::{Embedder, NullEmbedder, OpenAiCompatEmbedder};
 pub use error::HostError;
 pub use readonly::ReadOnlyDatabase;

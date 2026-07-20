@@ -144,6 +144,13 @@ impl ReadOnlyDatabase {
         mapped.borrow_dependent().stats()
     }
 
+    /// Dumps the currently-open facts for a human-readable backup
+    /// (specs/06). See [`ExportedFact`](crate::ExportedFact).
+    pub fn export(&self) -> Vec<crate::db::ExportedFact> {
+        let mapped = self.mapped.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::export_facts(mapped.borrow_dependent())
+    }
+
     /// The database base path.
     pub fn path(&self) -> &Path {
         &self.path

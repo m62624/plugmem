@@ -657,6 +657,18 @@ impl<'a> Memory<'a> {
         self.terms.resolve(id)
     }
 
+    /// The canonical (verbatim) name of an entity, or `None` for an
+    /// unknown id. The read-side inverse of [`Memory::entity`]: it lets a
+    /// host export a fact with its subject *name* instead of the internal
+    /// [`EntityId`] carried by [`FactRecord`].
+    pub fn entity_name(&self, id: EntityId) -> Option<&str> {
+        let record = self.entities.get(&id.0.to_be_bytes())?;
+        Some(
+            core::str::from_utf8(self.texts.get(record.name))
+                .expect("entity names are written from &str"),
+        )
+    }
+
     /// Number of fact records currently stored (tombstoned facts count
     /// until `maintain` removes them). Purged ids stay burned, so this can
     /// be below [`Stats::next_fact`].

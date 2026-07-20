@@ -24,6 +24,24 @@ fn engine() -> (Memory<'static>, MemStorage) {
 }
 
 #[test]
+fn entity_name_resolves_the_subject_and_is_none_for_unknown() {
+    let (mut mem, mut store) = engine();
+    let out = mem
+        .remember(
+            &mut store,
+            RememberInput {
+                entity: Some("User"),
+                ..RememberInput::text(100, "lives in Berlin")
+            },
+        )
+        .unwrap();
+    let eid = out.entity.expect("the fact named an entity");
+    assert_eq!(mem.entity_name(eid), Some("User"));
+    // An unknown id resolves to None rather than panicking.
+    assert_eq!(mem.entity_name(plugmem_core::EntityId::NONE), None);
+}
+
+#[test]
 fn remember_assigns_dense_ids_and_stores_the_record() {
     let (mut mem, mut store) = engine();
     let a = mem
