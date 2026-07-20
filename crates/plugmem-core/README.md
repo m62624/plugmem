@@ -176,7 +176,7 @@ enforced by a counting-allocator test.
 
 Per-source recall latency (single thread, native). The chart is rendered
 by [`plugmem-bench-charts`](../../tools/bench-charts) from the
-`bench_ops` example's output — the same Plotlars pipeline as the arena
+`bench_ops` example's output — the same plotters pipeline as the arena
 charts:
 
 ![recall source latency](assets/recall-latency.svg)

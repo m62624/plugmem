@@ -147,9 +147,11 @@ are actually incremental. Workload: 16-byte records — 12-byte big-endian
 composite key `[u64 | u32]` plus 4-byte payload — seeded xorshift keys,
 identical streams on every runtime. One thread. The charts below are
 rendered from the stand's output by
-[`plugmem-bench-charts`](../../tools/bench-charts) (Plotlars, plotters
-backend — pure Rust), averaged over several runs; regenerating them is one
-command (see [Reproduction stand](#reproduction-stand)).
+[`plugmem-bench-charts`](../../tools/bench-charts) (plotters — pure Rust,
+no browser), averaged over several runs; regenerating them is one command
+(see [Reproduction stand](#reproduction-stand)). Allocator-call charts use
+a logarithmic y-axis — those values span five orders of magnitude, so a
+linear axis would hide the low bars.
 
 ### Throughput — insert and lookup
 
@@ -240,8 +242,8 @@ wasmer run  target/wasm32-wasip1/release/examples/bench_repro.wasm -- 1000000
 ```
 
 The charts above are rendered from that TSV by
-[`plugmem-bench-charts`](../../tools/bench-charts) (Plotlars with the
-`plotters` backend — pure Rust, no browser). Run the stand a few times,
+[`plugmem-bench-charts`](../../tools/bench-charts) (plotters — pure Rust,
+no browser). Run the stand a few times,
 feed the TSV in, and it re-renders only the charts whose values moved past
 the noise threshold in its `config.toml` (so a jittery re-run leaves the
 committed SVGs untouched):

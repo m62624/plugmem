@@ -4,10 +4,15 @@
 //! example. A chart whose rows are absent from the input is left alone, so
 //! either source can be rendered on its own or both piped together.
 //!
-//! Pure Rust: [Plotlars](https://github.com/alceal/plotlars) with the
-//! `plotters` backend, so there is no browser, no WebDriver and nothing
-//! downloaded — the same reproducibility contract as the zero-dependency
-//! bench stand that produces the data.
+//! Pure Rust: [plotters](https://github.com/plotters-rs/plotters) with its
+//! SVG backend, so there is no browser, no WebDriver and nothing downloaded
+//! — the same reproducibility contract as the zero-dependency bench stand
+//! that produces the data. plotters is used directly (not through a
+//! wrapper) so the allocation charts can use a **true logarithmic y-axis**:
+//! their values span five orders of magnitude (≈40 for the arena vs
+//! ≈1,000,000 for a per-element baseline), and on a linear axis the small
+//! bars collapse to nothing — the whole point ("the arena allocates least")
+//! would be invisible.
 //!
 //! ```text
 //! # 1. collect data (run the stand as many times as you want — rows are
@@ -38,19 +43,24 @@ use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-use plotlars::polars::prelude::*;
-use plotlars::{BarPlot, Legend, Plot, Rgb, Text};
+use plotters::coord::combinators::IntoLogRange;
+use plotters::coord::ranged1d::{AsRangedCoord, ValueFormatter};
+use plotters::prelude::*;
+use plotters::style::text_anchor::{HPos, Pos, VPos};
 
 /// The runtimes, in display order, with the colors used across every
-/// chart (kept stable so the legend reads the same everywhere).
-const RUNTIMES: [(&str, Rgb); 3] = [
-    ("native", Rgb(30, 58, 138)),   // navy
-    ("wasmtime", Rgb(202, 138, 4)), // gold
-    ("wasmer", Rgb(190, 24, 93)),   // rose
+/// chart (kept stable so the legend reads the same everywhere). Variant B
+/// palette: navy / gold / rose.
+const RUNTIMES: [(&str, RGBColor); 3] = [
+    ("native", RGBColor(30, 58, 138)),   // navy
+    ("wasmtime", RGBColor(202, 138, 4)), // gold
+    ("wasmer", RGBColor(190, 24, 93)),   // rose
 ];
 
 /// One chart: an output filename, a title, the corpus size and metric it
-/// reads, the structures (bars) to include in order, and the y-axis unit.
+/// reads, the structures (bars) to include in order, the y-axis unit, and
+/// whether the y-axis is logarithmic (for metrics spanning orders of
+/// magnitude, so the small bars stay visible).
 struct Chart {
     file: &'static str,
     title: &'static str,
@@ -58,6 +68,7 @@ struct Chart {
     metric: &'static str,
     structures: &'static [&'static str],
     y_title: &'static str,
+    log: bool,
 }
 
 /// Where each chart set is written (fixed repo paths, not user config).
@@ -79,6 +90,7 @@ const CORE_CHARTS: &[Chart] = &[Chart {
         "HNSW (30k, d384)",
     ],
     y_title: "µs",
+    log: false,
 }];
 
 /// The arena chart set. Every structure name matches a row the bench
@@ -96,6 +108,7 @@ const ARENA_CHARTS: &[Chart] = &[
             "sorted Vec (bulk)",
         ],
         y_title: "ns / element",
+        log: false,
     },
     Chart {
         file: "arena-insert-1m.svg",
@@ -104,6 +117,7 @@ const ARENA_CHARTS: &[Chart] = &[
         metric: "insert_ns",
         structures: &["plugmem Arena (Ordered)", "std BTreeMap", "std HashMap"],
         y_title: "ns / element",
+        log: false,
     },
     Chart {
         file: "arena-lookup-100k.svg",
@@ -112,6 +126,7 @@ const ARENA_CHARTS: &[Chart] = &[
         metric: "get_ns",
         structures: &["plugmem Arena (Uniform)", "std BTreeMap", "std HashMap"],
         y_title: "ns / op",
+        log: false,
     },
     Chart {
         file: "arena-lookup-1m.svg",
@@ -120,6 +135,7 @@ const ARENA_CHARTS: &[Chart] = &[
         metric: "get_ns",
         structures: &["plugmem Arena (Uniform)", "std BTreeMap", "std HashMap"],
         y_title: "ns / op",
+        log: false,
     },
     Chart {
         file: "arena-memory-1m.svg",
@@ -128,14 +144,16 @@ const ARENA_CHARTS: &[Chart] = &[
         metric: "mem_b",
         structures: &["plugmem Arena (Ordered)", "std BTreeMap", "std HashMap"],
         y_title: "bytes / element",
+        log: false,
     },
     Chart {
         file: "arena-allocs-1m.svg",
-        title: "allocator calls to build 1M records (lower is better)",
+        title: "allocator calls to build 1M records — log scale (lower is better)",
         n: "1000000",
         metric: "allocs",
         structures: &["plugmem Arena (Ordered)", "std BTreeMap", "std HashMap"],
-        y_title: "allocator calls",
+        y_title: "allocator calls (log)",
+        log: true,
     },
     Chart {
         file: "arena-tails-1m.svg",
@@ -144,6 +162,7 @@ const ARENA_CHARTS: &[Chart] = &[
         metric: "ins_p99",
         structures: &["plugmem Arena (Ordered)", "std BTreeMap", "std HashMap"],
         y_title: "ns (p99)",
+        log: false,
     },
     Chart {
         file: "arena-companions-insert-1m.svg",
@@ -159,10 +178,11 @@ const ARENA_CHARTS: &[Chart] = &[
             "HashMap+Vec (intern baseline)",
         ],
         y_title: "ns / op",
+        log: false,
     },
     Chart {
         file: "arena-companions-allocs-1m.svg",
-        title: "companion structures — allocator calls at 1M (lower is better)",
+        title: "companion structures — allocator calls at 1M — log scale (lower is better)",
         n: "1000000",
         metric: "allocs",
         structures: &[
@@ -173,7 +193,8 @@ const ARENA_CHARTS: &[Chart] = &[
             "plugmem Interner",
             "HashMap+Vec (intern baseline)",
         ],
-        y_title: "allocator calls",
+        y_title: "allocator calls (log)",
+        log: true,
     },
 ];
 
@@ -328,7 +349,7 @@ fn chart_cells(chart: &Chart, new: &Table) -> Vec<(Key, f64)> {
         for (runtime, _) in RUNTIMES {
             let key = (
                 chart.n.into(),
-                (*runtime).into(),
+                runtime.into(),
                 (*structure).into(),
                 chart.metric.into(),
             );
@@ -377,35 +398,193 @@ fn write_baseline(path: &Path, table: &Table) {
     std::fs::write(path, out).unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
 }
 
-/// Renders one chart to `out_dir/<file>`.
+/// The chart canvas size.
+const CANVAS: (u32, u32) = (920, 520);
+
+/// Assembles one chart's data and dispatches to the renderer with a linear
+/// or logarithmic y-axis. Writes `out_dir/<file>`.
 fn render(chart: &Chart, new: &Table, out_dir: &Path) {
-    let (mut structures, mut runtimes, mut values) = (Vec::new(), Vec::new(), Vec::new());
-    for (key, v) in chart_cells(chart, new) {
-        structures.push(pretty(&key.2));
-        runtimes.push(key.1);
-        values.push(v);
+    let cells = chart_cells(chart, new);
+
+    // Runtimes that actually appear, in the canonical display order.
+    let present: Vec<(&str, RGBColor)> = RUNTIMES
+        .into_iter()
+        .filter(|&(rt, _)| cells.iter().any(|(k, _)| k.1 == rt))
+        .collect();
+
+    // Categories in chart order that carry data, each a row of one optional
+    // value per present runtime. Track the value spread for axis bounds.
+    let mut categories: Vec<String> = Vec::new();
+    let mut bars: Vec<Vec<Option<f64>>> = Vec::new();
+    let (mut min_pos, mut max) = (f64::INFINITY, 0.0f64);
+    for structure in chart.structures {
+        let row: Vec<Option<f64>> = present
+            .iter()
+            .map(|&(rt, _)| {
+                cells
+                    .iter()
+                    .find(|(k, _)| k.1 == rt && k.2 == *structure)
+                    .map(|(_, v)| *v)
+            })
+            .collect();
+        if row.iter().all(Option::is_none) {
+            continue;
+        }
+        for &v in row.iter().flatten() {
+            max = max.max(v);
+            if v > 0.0 {
+                min_pos = min_pos.min(v);
+            }
+        }
+        categories.push(pretty(structure));
+        bars.push(row);
     }
 
-    let df = df!(
-        "structure" => structures,
-        "runtime" => runtimes,
-        "value" => values,
-    )
-    .expect("building the chart dataframe");
-
     let path = out_dir.join(chart.file);
-    BarPlot::builder()
-        .data(&df)
-        .labels("structure")
-        .values("value")
-        .group("runtime")
-        .colors(RUNTIMES.iter().map(|(_, c)| *c).collect())
-        .plot_title(Text::from(chart.title).font("sans-serif").size(15))
-        .x_title(Text::from("").font("sans-serif").size(12))
-        .y_title(Text::from(chart.y_title).font("sans-serif").size(12))
-        .legend(&Legend::new().orientation(plotlars::Orientation::Horizontal))
-        .build()
-        .save(path.to_str().expect("utf-8 output path"));
+    let (lo, hi) = log_bounds(min_pos, max);
+    let data = BarData {
+        path: &path,
+        title: chart.title,
+        y_title: chart.y_title,
+        categories: &categories,
+        series: &present,
+        bars: &bars,
+        y_base: if chart.log { lo } else { 0.0 },
+    };
+    if chart.log {
+        draw_bars(&data, (lo..hi).log_scale());
+    } else {
+        draw_bars(&data, 0.0..(max * 1.15).max(1.0));
+    }
+}
+
+/// Nearest enclosing powers of ten for a logarithmic axis, with at least
+/// one decade of span so a chart of equal values still renders.
+fn log_bounds(min: f64, max: f64) -> (f64, f64) {
+    let lo = 10f64.powf(min.max(1.0).log10().floor());
+    let hi = 10f64.powf(max.max(10.0).log10().ceil());
+    (lo, hi.max(lo * 10.0))
+}
+
+/// Everything a chart draw needs except the (generic) y-axis coordinate.
+struct BarData<'a> {
+    path: &'a Path,
+    title: &'a str,
+    y_title: &'a str,
+    /// Category names, in x order.
+    categories: &'a [String],
+    /// Present runtimes (bar within each group), in legend order.
+    series: &'a [(&'a str, RGBColor)],
+    /// `bars[category][series_slot]` → value, `None` when absent.
+    bars: &'a [Vec<Option<f64>>],
+    /// The bar baseline: `0.0` for a linear axis, the axis floor for log.
+    y_base: f64,
+}
+
+/// Draws a grouped bar chart (one bar per present runtime within each
+/// category group) to `d.path`. Generic over the y-axis coordinate so the
+/// same body serves a linear `Range<f64>` and a logarithmic
+/// `(lo..hi).log_scale()`. Category names are drawn under each group.
+fn draw_bars<YR>(d: &BarData, y_range: YR)
+where
+    YR: AsRangedCoord<Value = f64>,
+    YR::CoordDescType: ValueFormatter<f64>,
+{
+    let root = SVGBackend::new(d.path, CANVAS).into_drawing_area();
+    root.fill(&WHITE).expect("filling the canvas");
+
+    let n = d.categories.len();
+    let mut chart = ChartBuilder::on(&root)
+        .caption(d.title, ("sans-serif", 16))
+        .margin(18)
+        .margin_right(30)
+        .x_label_area_size(60)
+        .y_label_area_size(72)
+        .build_cartesian_2d(-0.5f64..(n as f64 - 0.5), y_range)
+        .expect("building the chart area");
+
+    chart
+        .configure_mesh()
+        .disable_x_mesh()
+        .x_labels(0)
+        .x_label_formatter(&|_| String::new())
+        .y_desc(d.y_title)
+        .y_label_formatter(&fmt_axis)
+        .axis_desc_style(("sans-serif", 13))
+        .label_style(("sans-serif", 12))
+        .draw()
+        .expect("drawing the mesh");
+
+    // Each category spans one x-unit. The group occupies `group_w` of it
+    // (the rest is the gap between categories); within the group each
+    // runtime gets a `slot_w` lane, and the bar fills `BAR_FILL` of its
+    // lane so neighbouring bars are visibly separated rather than fused.
+    let g = d.series.len().max(1);
+    let group_w = 0.62f64;
+    let slot_w = group_w / g as f64;
+    const BAR_FILL: f64 = 0.80;
+    let bar_w = slot_w * BAR_FILL;
+
+    for (slot, (name, color)) in d.series.iter().enumerate() {
+        let color = *color;
+        let rects = (0..n).filter_map(|i| {
+            d.bars[i][slot].map(|v| {
+                let left = i as f64 - group_w / 2.0 + slot as f64 * slot_w + (slot_w - bar_w) / 2.0;
+                Rectangle::new([(left, d.y_base), (left + bar_w, v)], color.filled())
+            })
+        });
+        chart
+            .draw_series(rects)
+            .expect("drawing a runtime's bars")
+            .label(*name)
+            .legend(move |(x, y)| Rectangle::new([(x, y - 5), (x + 12, y + 5)], color.filled()));
+    }
+
+    chart
+        .configure_series_labels()
+        .position(SeriesLabelPosition::UpperRight)
+        .background_style(WHITE.mix(0.85))
+        .border_style(BLACK.mix(0.35))
+        .label_font(("sans-serif", 12))
+        .draw()
+        .expect("drawing the legend");
+
+    // Category names, centered under each group. Drawn on the root in pixel
+    // space (from each group's axis-floor coordinate) so they land in the
+    // x-label area below the axis, independent of the y-scale.
+    let label = TextStyle::from(("sans-serif", 12))
+        .pos(Pos::new(HPos::Center, VPos::Top))
+        .color(&BLACK);
+    for (i, name) in d.categories.iter().enumerate() {
+        let (px, py) = chart.backend_coord(&(i as f64, d.y_base));
+        root.draw(&Text::new(name.clone(), (px, py + 8), &label))
+            .expect("drawing a category label");
+    }
+
+    root.present().expect("writing the SVG");
+}
+
+/// Formats a y-axis tick compactly: thousands as `k`, millions as `M`,
+/// trailing `.0` dropped — so the log ticks read `10 / 100 / 1k / 100k /
+/// 1M` (like the older charts) and linear ns/byte ticks stay clean.
+fn fmt_axis(v: &f64) -> String {
+    let v = *v;
+    if v >= 1_000_000.0 {
+        format!("{}M", trim(v / 1_000_000.0))
+    } else if v >= 1_000.0 {
+        format!("{}k", trim(v / 1_000.0))
+    } else {
+        trim(v)
+    }
+}
+
+/// Renders a float without a redundant `.0`, one decimal otherwise.
+fn trim(x: f64) -> String {
+    if x.fract() == 0.0 {
+        format!("{}", x as i64)
+    } else {
+        format!("{x:.1}")
+    }
 }
 
 /// Shortens the long stand names to fit an x-axis tick.

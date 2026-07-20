@@ -3,12 +3,18 @@ name = "plugmem-bench-charts"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "Renders the benchmark-matrix TSV into the README chart SVGs (Plotlars, plotters backend — pure Rust, no browser)."
+description = "Renders the benchmark-matrix TSV into the README chart SVGs (plotters, pure Rust — no browser; log axis for order-of-magnitude metrics)."
 
 [dependencies]
-# Static SVG rendering, pure Rust (no browser/WebDriver). polars comes
-# re-exported through plotlars — do not depend on it separately.
-plotlars = { version = "0.12.6", features = ["plotters"] }
+# Static SVG rendering, pure Rust (no browser/WebDriver). Used directly
+# rather than through a wrapper so the allocation charts can use a true
+# logarithmic y-axis (`(lo..hi).log_scale()`) — those values span five
+# orders of magnitude and a linear axis collapses the small ones to a
+# zero-height sliver.
+plotters = { version = "0.3.7", default-features = false, features = [
+    "svg_backend",
+    "ttf",
+] }
 # The threshold config (config.toml). `toml::Table` parses via FromStr,
 # so no serde derive is needed.
 toml = "0.8"
