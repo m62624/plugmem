@@ -4,6 +4,7 @@
 
 use plugmem_core::journal::{JournalEntry, JournalScan, encode_entry, scan};
 use plugmem_core::{Error, MemStorage, Storage};
+#[cfg(not(target_family = "wasm"))]
 use proptest::prelude::*;
 
 /// Encodes a sequence of (op, payload) records into one buffer.
@@ -178,6 +179,7 @@ fn mem_storage_default_and_clone() {
     assert_eq!(a, b);
 }
 
+#[cfg(not(target_family = "wasm"))]
 proptest! {
     // Any encoded sequence scans back exactly; any cut of the buffer
     // yields a prefix of the records and never an error.

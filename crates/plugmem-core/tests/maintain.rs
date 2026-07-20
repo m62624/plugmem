@@ -8,6 +8,7 @@
 use plugmem_core::{
     Config, EntityId, FactId, LinkInput, MemStorage, Memory, RecallQuery, RememberInput,
 };
+#[cfg(not(target_family = "wasm"))]
 use proptest::prelude::*;
 
 const DAY: u64 = 86_400_000;
@@ -351,6 +352,7 @@ fn maintain_on_empty_engine_and_idempotent() {
 /// Drives one workload (with vectors). `maintain_at` marks which step
 /// indices trigger a compaction; `now` advances identically whether or not
 /// a maintain fires there, so two paths over the same steps stay aligned.
+#[cfg(not(target_family = "wasm"))]
 fn drive(steps: &[u8], dim: usize, maintain: bool) -> (Memory, MemStorage) {
     let (mut mem, mut store) = (Memory::new(cfg(dim)).unwrap(), MemStorage::new());
     let names = ["user", "plugmem", "кот Барсик", "tokio", "работа"];
@@ -411,6 +413,7 @@ fn drive(steps: &[u8], dim: usize, maintain: bool) -> (Memory, MemStorage) {
     (mem, store)
 }
 
+#[cfg(not(target_family = "wasm"))]
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(48))]
     // The strong property: for any workload, running it with maintains

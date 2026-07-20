@@ -3,6 +3,7 @@
 //! the concatenation property, and canonical-token invariants.
 
 use plugmem_core::tokenizer::{MAX_TOKEN_BYTES, Tokenizer};
+#[cfg(not(target_family = "wasm"))]
 use proptest::prelude::*;
 
 fn tokens(text: &str) -> Vec<String> {
@@ -150,6 +151,7 @@ fn scratch_buffers_are_reused_not_leaked() {
     assert_eq!(third, ["δ", "delta"]);
 }
 
+#[cfg(not(target_family = "wasm"))]
 proptest! {
     // Concatenating two texts with a separating space yields exactly the
     // tokens of both texts, in order: the separator kills any cross-text

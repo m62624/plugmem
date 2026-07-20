@@ -7,7 +7,9 @@ use plugmem_core::FactId;
 use plugmem_core::index::bm25::{Bm25Index, Bm25Scratch};
 use plugmem_core::index::varint::{MAX_VARINT, decode_u32, encode_u32};
 use plugmem_core::index::{IdListIndex, IntersectScratch, intersect};
+#[cfg(not(target_family = "wasm"))]
 use proptest::prelude::*;
+#[cfg(not(target_family = "wasm"))]
 use std::collections::BTreeMap;
 
 #[test]
@@ -195,6 +197,7 @@ fn bm25_live_filter_and_empty_index() {
     assert!(out.is_empty());
 }
 
+#[cfg(not(target_family = "wasm"))]
 proptest! {
     // Varint roundtrip over the whole u32 range.
     #[test]

@@ -8,6 +8,7 @@ use plugmem_core::{
     BlobId, EdgeSlot, EntityByName, EntityId, EntityRecord, FactAux, FactId, FactRecord,
     TemporalSlot, TermId, VALID_TO_OPEN, fact_flags,
 };
+#[cfg(not(target_family = "wasm"))]
 use proptest::prelude::*;
 
 /// Serializes one record into its exact-size buffer.
@@ -261,6 +262,7 @@ fn records_store_and_sort_in_arenas() {
     assert_eq!(hits, [20, 21, 22, 23]);
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn arb_fact() -> impl Strategy<Value = FactRecord> {
     (
         any::<u32>(),
@@ -291,6 +293,7 @@ fn arb_fact() -> impl Strategy<Value = FactRecord> {
         )
 }
 
+#[cfg(not(target_family = "wasm"))]
 proptest! {
     // Roundtrip: read is the exact inverse of write for every field value.
     #[test]

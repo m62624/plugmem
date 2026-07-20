@@ -180,10 +180,16 @@ fn take_u64(bytes: &[u8], at: &mut usize) -> Result<u64, Error> {
 /// Reads a `u32 LE` count followed by that many `f32 LE`; advances `at`.
 fn take_vec_f32(bytes: &[u8], at: &mut usize) -> Result<Vec<f32>, Error> {
     let count = take_u32(bytes, at)? as usize;
-    let end = at
-        .checked_add(count * 4)
-        .filter(|&e| e <= bytes.len())
-        .ok_or(Error::Corrupt("journal vector overruns its record"))?;
+    // Bounds math in u64, like the snapshot container: on 32-bit targets
+    // `count * 4` in usize can wrap and slip a hostile count past the
+    // check, and `with_capacity` on an unchecked count aborts a wasm32
+    // process (caught by the wasm32-wasip1 test run). Only after the
+    // check is the allocation known to be bounded by the input length.
+    let end = *at as u64 + count as u64 * 4;
+    if end > bytes.len() as u64 {
+        return Err(Error::Corrupt("journal vector overruns its record"));
+    }
+    let end = end as usize;
     let mut v = Vec::with_capacity(count);
     let mut p = *at;
     while p < end {

@@ -115,3 +115,33 @@ fn zero_weights_and_boundary_values_are_valid() {
     cfg.graph_depth = 0;
     cfg.validate().unwrap();
 }
+
+#[test]
+fn a_64bit_class_database_is_refused_on_32bit_hosts_with_a_typed_error() {
+    // Field order in the encoded block: `dim` is the first u64, `max_bytes`
+    // the second (see `Config::encode`); every size field is a fixed-width
+    // u64, so the block itself is identical on 32-bit and 64-bit builds.
+    const U64_BYTES: usize = 8;
+    const DIM_AT: usize = 0;
+    const MAX_BYTES_AT: usize = DIM_AT + U64_BYTES;
+    const EIGHT_GIB: u64 = 8 * 1024 * 1024 * 1024;
+
+    let mut bytes = Vec::new();
+    Config::default().encode(&mut bytes);
+    bytes[MAX_BYTES_AT..MAX_BYTES_AT + U64_BYTES].copy_from_slice(&EIGHT_GIB.to_le_bytes());
+
+    let decoded = Config::decode(&bytes);
+    if usize::try_from(EIGHT_GIB).is_ok() {
+        // 64-bit host (native, wasm64): the limit is representable and adopted.
+        assert_eq!(decoded.unwrap().max_bytes as u64, EIGHT_GIB);
+    } else {
+        // 32-bit host (wasm32): a typed refusal, not a "corrupt file" lie —
+        // the database needs more address space than this build can offer.
+        match decoded {
+            Err(Error::ConfigMismatch(msg)) => {
+                assert_eq!(msg, "database requires a 64-bit address space");
+            }
+            other => panic!("expected ConfigMismatch, got {other:?}"),
+        }
+    }
+}

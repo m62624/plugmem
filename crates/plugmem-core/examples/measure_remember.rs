@@ -1,10 +1,14 @@
 //! One-off measurement helper: mean `remember` cost on the testgen
 //! corpus (used to source the README number; not a benchmark target).
+//!
+//! Native-only: `plugmem-testgen` is a dev-dependency gated off wasm
+//! targets, so on wasm this example compiles to an empty stub.
 
-use plugmem_core::{Config, MemStorage, Memory};
-use plugmem_testgen::{Gen, GenOp, Profile, apply};
-
+#[cfg(not(target_family = "wasm"))]
 fn main() {
+    use plugmem_core::{Config, MemStorage, Memory};
+    use plugmem_testgen::{Gen, GenOp, Profile, apply};
+
     let profile = Profile {
         dim: 384,
         w_revise: 0,
@@ -44,3 +48,6 @@ fn main() {
         b.len()
     );
 }
+
+#[cfg(target_family = "wasm")]
+fn main() {}

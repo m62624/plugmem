@@ -5,6 +5,7 @@
 use plugmem_core::{
     Config, Error, FactId, LinkInput, MemStorage, Memory, RememberInput, Storage, VALID_TO_OPEN,
 };
+#[cfg(not(target_family = "wasm"))]
 use proptest::prelude::*;
 
 /// A small-sharded config (tests don't need 1024-shard arenas).
@@ -404,6 +405,7 @@ fn torn_journal_tail_is_recovered_and_reported() {
 }
 
 /// One step of the property workload.
+#[cfg(not(target_family = "wasm"))]
 #[derive(Debug, Clone)]
 enum Step {
     Remember { entity: Option<u8>, tags: Vec<u8> },
@@ -412,6 +414,7 @@ enum Step {
     Link { src: u8, dst: u8 },
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn step_strategy() -> impl Strategy<Value = Step> {
     prop_oneof![
         4 => (proptest::option::of(0u8..5), proptest::collection::vec(0u8..6, 0..3))
@@ -422,6 +425,7 @@ fn step_strategy() -> impl Strategy<Value = Step> {
     ]
 }
 
+#[cfg(not(target_family = "wasm"))]
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
     // Any interleaving of verbs (including failing ones) leaves a journal

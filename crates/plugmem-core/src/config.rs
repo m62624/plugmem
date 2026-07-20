@@ -290,11 +290,17 @@ impl Config {
     /// Decodes a config block written by [`Config::encode`] and runs
     /// [`Config::validate`] on the result.
     ///
-    /// The input is untrusted: a wrong length, nonzero reserved bytes, a
-    /// non-boolean `fast_load` byte or a value that overflows this
-    /// platform's `usize` is [`Error::Corrupt`]; out-of-range field values
-    /// surface as the same [`Error::ConfigMismatch`] a hand-built config
-    /// would get.
+    /// The input is untrusted: a wrong length, nonzero reserved bytes or a
+    /// non-boolean `fast_load` byte is [`Error::Corrupt`]; out-of-range
+    /// field values surface as the same [`Error::ConfigMismatch`] a
+    /// hand-built config would get.
+    ///
+    /// All size fields are stored as fixed-width `u64`, so the block is
+    /// identical on 32-bit and 64-bit builds of the engine. A value that
+    /// overflows this platform's `usize` means the database was created
+    /// with limits only a 64-bit address space can hold (e.g. `max_bytes`
+    /// beyond 4 GiB on a wasm64 or native host) — the file is not corrupt,
+    /// this host is too small for it, hence [`Error::ConfigMismatch`].
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         if bytes.len() != ENCODED_LEN {
             return Err(Error::Corrupt("config block length mismatch"));
@@ -303,7 +309,8 @@ impl Config {
         let mut take_usize = || -> Result<usize, Error> {
             let v = u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
             at += 8;
-            usize::try_from(v).map_err(|_| Error::Corrupt("config value overflows usize"))
+            usize::try_from(v)
+                .map_err(|_| Error::ConfigMismatch("database requires a 64-bit address space"))
         };
         let dim = take_usize()?;
         let max_bytes = take_usize()?;

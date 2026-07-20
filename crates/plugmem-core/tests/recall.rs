@@ -4,6 +4,7 @@
 
 use plugmem_core::memory::source;
 use plugmem_core::{Config, FactId, MemStorage, Memory, RecallQuery, RememberInput};
+#[cfg(not(target_family = "wasm"))]
 use proptest::prelude::*;
 
 fn cfg() -> Config {
@@ -285,6 +286,7 @@ fn reused_result_buffers_are_equivalent_to_fresh_ones() {
     assert_eq!(ids(&fresh), ids(&reused));
 }
 
+#[cfg(not(target_family = "wasm"))]
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(32))]
     // With a tag filter, every recalled fact carries all query tags —
