@@ -465,3 +465,35 @@ fn file_storage_direct_and_io_errors() {
         other => panic!("expected Io, got {other:?}"),
     }
 }
+
+#[test]
+fn journal_survives_repeated_clears() {
+    // Regression guard for the Windows `clear_journal` bug: an append
+    // handle cannot be truncated with `set_len` on Windows (FILE_WRITE_DATA
+    // is masked off append handles), so clearing must go through a fresh
+    // write handle and re-establish the append handle. This exercises many
+    // clear/append cycles and asserts appends after a clear still land and
+    // read back exactly — it fails on the pre-fix code on Windows.
+    use plugmem_core::Storage as _;
+    use plugmem_host::{FileStorage, FsyncPolicy};
+
+    let tmp = TempDir::new("clears");
+    let mut fs = FileStorage::open(tmp.db(), FsyncPolicy::EachOp).unwrap();
+    for round in 0..8u8 {
+        let record = [round; 16];
+        fs.append_journal(&record).unwrap();
+        fs.append_journal(&record).unwrap();
+        assert_eq!(fs.journal_bytes(), 32, "two records landed this round");
+        assert_eq!(fs.read_journal().unwrap(), [record, record].concat());
+
+        fs.clear_journal().unwrap();
+        assert_eq!(fs.journal_bytes(), 0, "the clear emptied the journal");
+        assert!(fs.read_journal().unwrap().is_empty());
+
+        // The re-established append handle must still write to the file.
+        fs.append_journal(&[0xAB]).unwrap();
+        assert_eq!(fs.journal_bytes(), 1, "appends resume after a clear");
+        fs.clear_journal().unwrap();
+    }
+    assert_eq!(fs.journal_bytes(), 0);
+}

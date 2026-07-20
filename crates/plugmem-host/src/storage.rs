@@ -172,9 +172,28 @@ impl Storage for FileStorage {
     }
 
     fn clear_journal(&mut self) -> Result<(), HostError> {
-        self.journal
-            .set_len(0)
-            .and_then(|()| self.journal.sync_data())
-            .map_err(|e| HostError::io(&self.journal_path, e))
+        // Truncate through a dedicated write handle, not `set_len` on the
+        // append handle: Rust opens append handles with FILE_WRITE_DATA
+        // masked off (append can only extend, never overwrite), so on
+        // Windows `SetEndOfFile` is denied with ERROR_ACCESS_DENIED. A
+        // `write + truncate` open empties the file portably; then the
+        // append handle is re-established so later appends target the
+        // fresh, empty journal.
+        let truncated = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&self.journal_path)
+            .map_err(|e| HostError::io(&self.journal_path, e))?;
+        truncated
+            .sync_data()
+            .map_err(|e| HostError::io(&self.journal_path, e))?;
+        drop(truncated);
+        self.journal = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.journal_path)
+            .map_err(|e| HostError::io(&self.journal_path, e))?;
+        Ok(())
     }
 }
