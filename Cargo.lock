@@ -897,6 +897,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "plugmem-wasm-probe"
+version = "0.1.0"
+dependencies = [
+ "plugmem-core",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "potential_utf"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

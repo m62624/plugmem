@@ -1,0 +1,28 @@
+[package]
+name = "plugmem-wasm-probe"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Cross-target equivalence probe: one deterministic engine scenario, hashed; byte-identical snapshots on native, wasm32 and wasm64 prove the format is pointer-width independent."
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "wasm-probe"
+path = "src/main.rs"
+
+[dependencies]
+plugmem-core = { workspace = true }
+xxhash-rust = { workspace = true }
+
+# An internal CI tool, never shipped.
+[package.metadata.dist]
+dist = false
+
+[lints]
+workspace = true
