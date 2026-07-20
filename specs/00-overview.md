@@ -97,6 +97,7 @@ Edition 2024, лицензия MIT, версии всех крейтов син�
 | 13 | `13-host.md` | plugmem-host: FileStorage, Database, оркестрация, эмбеддеры |
 | 14 | `14-wasm-versions.md` | WebAssembly 2.0/3.0: memory64, классы ёмкости, кросс-таргет доказательства |
 | 15 | `15-ci-cd-and-next.md` | CI/CD (зеркало elenchus), релизный конвейер, секреты, handoff этапа 5 |
+| 16 | `16-mmap-readonly.md` | mmap zero-copy read-only open: Cow-backing (arena no_std/0 deps), `open_readonly`, memmap2 в host |
 
 Порядок реализации (каждый шаг заканчивается зелёным CI с гейтами):
 
