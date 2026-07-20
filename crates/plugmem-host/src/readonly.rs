@@ -15,11 +15,13 @@
 //! up (copy-on-write) and defeat the zero-copy intent, so a non-empty
 //! journal is refused with [`HostError::NeedsCheckpoint`].
 //!
-//! Locking is identical to a read-write open (specs/13 §3): the handle
-//! holds the same exclusive advisory lock for its whole life, so no
-//! cooperating process writes or truncates the file while it is mapped —
-//! which is exactly the safety argument for the mmap (see the `unsafe`
-//! block in [`ReadOnlyDatabase::open`]).
+//! Locking is a **shared** advisory lock held for the handle's whole life
+//! (specs/13 §3): many read-only handles — in this process or others — map
+//! the same file at once, so a read-mostly database serves concurrent
+//! readers. A shared lock still excludes every exclusive (read-write)
+//! owner, so no cooperating process writes or truncates the file while it
+//! is mapped — which is exactly the safety argument for the mmap (see the
+//! `unsafe` block in [`ReadOnlyDatabase::open`]).
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -56,9 +58,10 @@ pub struct ReadOnlyDatabase {
     /// `recall` reuses internal scratch buffers (`&mut Memory`), and to
     /// keep the handle `Sync`.
     mapped: Mutex<MappedMemory>,
-    /// Holds the exclusive advisory lock for the handle's whole life
-    /// (never read — the lock is the point). Also what makes the mmap
-    /// safe: no cooperating writer can touch the file under us.
+    /// Holds the shared advisory lock for the handle's whole life (never
+    /// read — the lock is the point). Shared with other readers, but it
+    /// excludes every writer, which is what makes the mmap safe: no
+    /// cooperating writer can touch the file under us.
     _store: FileStorage,
     /// The database base path.
     path: PathBuf,
@@ -75,10 +78,10 @@ impl ReadOnlyDatabase {
     /// the snapshot file is missing or cannot be mapped;
     /// [`HostError::Engine`] for a corrupt image or a config mismatch.
     pub(crate) fn open(path: impl Into<PathBuf>, cfg: Config) -> Result<Self, HostError> {
-        // The same exclusive lock as a read-write open: one file, one
-        // owner (specs/13 §1). The fsync policy is irrelevant — we never
+        // A shared lock: coexists with other readers, excludes every
+        // writer (specs/13 §1). The fsync policy is irrelevant — we never
         // write — but the type needs one.
-        let mut store = FileStorage::open(path, FsyncPolicy::OnSnapshot)?;
+        let mut store = FileStorage::open_shared(path, FsyncPolicy::OnSnapshot)?;
         let base = store.path().to_path_buf();
 
         // A read-only open must not replay: require a checkpointed
@@ -94,12 +97,13 @@ impl ReadOnlyDatabase {
         // SAFETY: mapping a file is inherently unsafe — a concurrent
         // truncate or overwrite of the mapped file would fault the
         // process (SIGBUS/exception) on the next page access. Our
-        // correctness argument (specs/16 §5): this handle holds the
-        // exclusive advisory lock (`_store`) for its whole life, and
-        // plugmem is single-owner, so no cooperating process writes or
-        // truncates the file while the map is live. A foreign `truncate`/
-        // `rm` under a live handle is out of contract — the same caveat
-        // as corrupting any database file under a running engine.
+        // correctness argument (specs/16 §5): this handle holds a shared
+        // advisory lock (`_store`) for its whole life, and a shared lock
+        // excludes every exclusive (read-write) owner, so no cooperating
+        // process writes or truncates the file while the map is live —
+        // other shared readers only read. A foreign `truncate`/`rm` under
+        // a live handle is out of contract — the same caveat as corrupting
+        // any database file under a running engine.
         let map = unsafe { Mmap::map(&file) }.map_err(|e| HostError::io(&base, e))?;
         // The `File` handle is no longer needed: `Mmap` owns the mapping.
         drop(file);

@@ -41,6 +41,9 @@ exclude-files = [
     # tarpaulin's ptrace engine cannot attribute anyway.
     "crates/*/examples/*",
     "tools/bench-matrix/*",
+    # The chart renderer: measurement/reporting tooling with no unit tests
+    # (its output is SVGs, verified by eye), same rationale as bench-matrix.
+    "tools/bench-charts/*",
     # Cross-target equivalence probe (specs/14): CI tooling whose real run
     # happens inside wasm runtimes, outside tarpaulin's reach.
     "tools/wasm-probe/*",

@@ -37,7 +37,21 @@ pub enum FsyncPolicy {
     OnSnapshot,
 }
 
-/// File-backed [`Storage`] holding the exclusive lock on its database.
+/// Which advisory lock a [`FileStorage`] takes on open (specs/13 §2).
+///
+/// `Exclusive` is the writer's lock — one owner, no other handle of either
+/// kind. `Shared` is the reader's lock (used by
+/// [`ReadOnlyDatabase`](crate::ReadOnlyDatabase)): any number of shared
+/// holders coexist, but they mutually exclude every exclusive holder, so a
+/// writer can never modify the file while a reader is live. This is the
+/// safety guarantee the read-only mmap relies on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LockMode {
+    Exclusive,
+    Shared,
+}
+
+/// File-backed [`Storage`] holding an advisory lock on its database.
 #[derive(Debug)]
 pub struct FileStorage {
     base: PathBuf,
@@ -52,13 +66,36 @@ pub struct FileStorage {
 
 impl FileStorage {
     /// Opens (creating as needed) the database files at `base` and takes
-    /// the exclusive lock.
+    /// the **exclusive** lock — the read-write owner. One handle of any
+    /// kind at a time.
     ///
     /// # Errors
     ///
     /// [`HostError::Locked`] when another process (or handle) owns the
     /// lock; [`HostError::Io`] for filesystem failures.
     pub fn open(base: impl Into<PathBuf>, fsync: FsyncPolicy) -> Result<Self, HostError> {
+        Self::open_with(base, fsync, LockMode::Exclusive)
+    }
+
+    /// Opens the database files at `base` and takes a **shared** lock — a
+    /// reader. Any number of shared readers coexist; they exclude every
+    /// exclusive writer, so the file cannot change under a live reader.
+    /// Used by [`ReadOnlyDatabase`](crate::ReadOnlyDatabase); the returned
+    /// storage must not be written through (a reader never mutates).
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::Locked`] when an exclusive writer owns the lock;
+    /// [`HostError::Io`] for filesystem failures.
+    pub fn open_shared(base: impl Into<PathBuf>, fsync: FsyncPolicy) -> Result<Self, HostError> {
+        Self::open_with(base, fsync, LockMode::Shared)
+    }
+
+    fn open_with(
+        base: impl Into<PathBuf>,
+        fsync: FsyncPolicy,
+        mode: LockMode,
+    ) -> Result<Self, HostError> {
         let base = base.into();
         let lock_path = suffixed(&base, "lock");
         let journal_path = suffixed(&base, "journal");
@@ -70,7 +107,11 @@ impl FileStorage {
             .truncate(false)
             .open(&lock_path)
             .map_err(|e| HostError::io(&lock_path, e))?;
-        match lock.try_lock() {
+        let acquired = match mode {
+            LockMode::Exclusive => lock.try_lock(),
+            LockMode::Shared => lock.try_lock_shared(),
+        };
+        match acquired {
             Ok(()) => {}
             Err(std::fs::TryLockError::WouldBlock) => {
                 return Err(HostError::Locked { path: base });
@@ -81,8 +122,11 @@ impl FileStorage {
         }
 
         // A leftover tmp file is a crashed half-write: the rename never
-        // happened, so the snapshot is intact — discard the scrap.
-        if tmp_path.exists() {
+        // happened, so the snapshot is intact — discard the scrap. This is
+        // the writer's crash recovery: only an exclusive owner does it. A
+        // shared reader must not mutate the directory, and concurrent
+        // readers would race on the remove.
+        if mode == LockMode::Exclusive && tmp_path.exists() {
             std::fs::remove_file(&tmp_path).map_err(|e| HostError::io(&tmp_path, e))?;
         }
 

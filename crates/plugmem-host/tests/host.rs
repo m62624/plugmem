@@ -542,28 +542,77 @@ fn open_readonly_refuses_a_dirty_journal() {
 }
 
 #[test]
-fn open_readonly_holds_the_lock_and_frees_it_on_drop() {
+fn open_readonly_holds_a_shared_lock_and_frees_it_on_drop() {
     let tmp = TempDir::new("ro-lock");
     {
         let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
         seed_checkpointed(&db);
     }
     let ro = Database::open_readonly(tmp.db(), cfg()).unwrap();
-    // The read-only handle holds the same exclusive lock: a second owner
-    // is refused, read-write or read-only.
+    // The read-only handle holds a *shared* lock: a writer is still
+    // refused (shared excludes exclusive)...
     match Database::open(tmp.db(), cfg()) {
         Err(HostError::Locked { path }) => assert_eq!(path, tmp.db()),
         other => panic!("expected Locked, got {other:?}"),
     }
-    assert!(matches!(
-        Database::open_readonly(tmp.db(), cfg()),
-        Err(HostError::Locked { .. })
-    ));
     drop(ro);
     // Released on drop: the file opens (and writes) again.
     let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
     db.remember(RememberInput::text(300, "after readonly"))
         .unwrap();
+}
+
+#[test]
+fn many_readers_share_one_snapshot() {
+    let tmp = TempDir::new("ro-multi");
+    let q = RecallQuery {
+        entities: &["plugmem"],
+        ..RecallQuery::text(1_000, "работа tokio")
+    };
+    let (facts, rendered) = {
+        let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+        seed_checkpointed(&db);
+        (db.stats().facts, db.recall(q).unwrap().rendered)
+    };
+
+    // Several read-only handles map the same file at once — shared locks
+    // coexist — and every one answers identically.
+    let readers: Vec<ReadOnlyDatabase> = (0..4)
+        .map(|_| Database::open_readonly(tmp.db(), cfg()).unwrap())
+        .collect();
+    for ro in &readers {
+        assert_eq!(ro.stats().facts, facts);
+        assert_eq!(ro.recall(q).unwrap().rendered, rendered);
+    }
+
+    // While any reader is live, a writer is still refused.
+    assert!(matches!(
+        Database::open(tmp.db(), cfg()),
+        Err(HostError::Locked { .. })
+    ));
+
+    // Dropping all readers frees the shared lock; the writer opens again.
+    drop(readers);
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    db.remember(RememberInput::text(300, "after readers"))
+        .unwrap();
+}
+
+#[test]
+fn a_writer_blocks_a_reader() {
+    let tmp = TempDir::new("ro-vs-rw");
+    // Seed, then keep a read-write (exclusive) handle open.
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    seed_checkpointed(&db);
+    // A read-only open cannot take its shared lock against a live writer.
+    match Database::open_readonly(tmp.db(), cfg()) {
+        Err(HostError::Locked { path }) => assert_eq!(path, tmp.db()),
+        other => panic!("expected Locked, got {other:?}"),
+    }
+    // Once the writer drops, the reader opens.
+    drop(db);
+    let ro = Database::open_readonly(tmp.db(), cfg()).unwrap();
+    assert_eq!(ro.stats().facts, 30);
 }
 
 #[test]
