@@ -1,0 +1,47 @@
+name: coverage
+
+# Line coverage for the library crates, uploaded to Codecov. Kept as its own
+# workflow — deliberately NOT wired into ci.yml's `ci-pass` required gate — so a
+# Codecov hiccup or a small coverage dip never blocks a merge (the Codecov status
+# is informational, see codecov.yml). Scope and exclusions live in tarpaulin.toml,
+# the single source of truth shared with local `cargo tarpaulin` runs.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/coverage.yml"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "tarpaulin.toml"
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coverage:
+    name: coverage (tarpaulin → Codecov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Prebuilt binary — far faster than `cargo install cargo-tarpaulin`.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-tarpaulin
+      # Reads tarpaulin.toml for workspace + exclude-files; we only override the
+      # output to a Cobertura XML at the repo root for the Codecov upload step.
+      - name: Generate coverage (Cobertura XML)
+        run: cargo tarpaulin --timeout 120 --out Xml --output-dir .
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./cobertura.xml
+          # Never red the workflow on a Codecov-side upload error.
+          fail_ci_if_error: false

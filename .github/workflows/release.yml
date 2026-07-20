@@ -1,0 +1,341 @@
+name: Release
+
+# Orchestrator (the elenchus release mechanism, Rust-native). Push a tag like
+# `pin/v0.1.0`:  prepare (bump the workspace version, make an RC branch) → tests
+# (run CI on the RC) → tag (create the real `vX.Y.Z`) → dist (cargo-dist builds
+# the binaries + installers for all targets and publishes the GitHub Release) →
+# crates.io (publish source crates only after binaries succeed) → sync (open a
+# PR bringing the version bump back to main).
+on:
+  push:
+    tags:
+      - "pin/v*"
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Prepare release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.info.outputs.version }}
+      tag: ${{ steps.info.outputs.tag }}
+      rc_branch: ${{ steps.info.outputs.rc_branch }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Extract release info
+        id: info
+        run: |
+          RAW="${GITHUB_REF_NAME#pin/}"   # pin/vX.Y.Z -> vX.Y.Z
+          VERSION="${RAW#v}"              # vX.Y.Z     -> X.Y.Z
+          if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; then
+            echo "::error::invalid version parsed from tag: '$VERSION'"; exit 1
+          fi
+          {
+            echo "version=$VERSION"
+            echo "tag=v$VERSION"
+            echo "rc_branch=rc/v$VERSION"
+          } >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Bump workspace version and push RC branch
+        run: |
+          VERSION="${{ steps.info.outputs.version }}"
+          RC="${{ steps.info.outputs.rc_branch }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$RC"
+          cargo install cargo-edit --locked
+          cargo set-version --workspace "$VERSION"
+          git add -A
+          # On the very first release the workspace is already at $VERSION, so
+          # set-version is a no-op and there is nothing to commit — that's fine.
+          git commit -m "build: update version to v$VERSION" \
+            || echo "version already v$VERSION — no bump commit needed"
+          git push --force origin "$RC"
+          # Drop the trigger tag so it doesn't linger.
+          git push origin ":refs/tags/${GITHUB_REF_NAME}" || true
+
+  tests:
+    name: CI on RC
+    needs: prepare
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.prepare.outputs.rc_branch }}
+
+  # Release-only gate: the SKILL.md `skill-version` marker must equal the
+  # version the release is cutting. This forces SKILL.md to be updated
+  # *together with* every release, so the skill and the shipped binary never
+  # silently drift. The marker is bumped by a HUMAN on purpose (an auto-bump
+  # would satisfy the gate while leaving the docs stale).
+  #
+  # plugmem's SKILL.md arrives with stage 5 (specs/06); until skill/SKILL.md
+  # exists this job passes with a notice, and the day the file lands the gate
+  # arms itself — no workflow edit needed.
+  skill-check:
+    name: Skill version matches release
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.rc_branch }}
+      - name: SKILL.md skill-version must equal the workspace version
+        run: |
+          if [ ! -f skill/SKILL.md ]; then
+            echo "::notice::skill/SKILL.md not present yet (stage 5) — skill gate skipped"
+            exit 0
+          fi
+          CARGO_VER="$(grep -m1 '^version' Cargo.toml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
+          MARKER="$(grep -oE 'skill-version:[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+' skill/SKILL.md \
+                    | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"
+          echo "workspace=$CARGO_VER  skill-marker=${MARKER:-<none>}"
+          if [ -z "$MARKER" ]; then
+            echo "::error file=skill/SKILL.md::missing '<!-- skill-version: X.Y.Z -->' marker"
+            exit 1
+          fi
+          if [ "$MARKER" != "$CARGO_VER" ]; then
+            echo "::error file=skill/SKILL.md::skill-version $MARKER != release $CARGO_VER — bump the SKILL.md marker (and its docs) for this release"
+            exit 1
+          fi
+          echo "OK: SKILL.md documents $MARKER, matching the release."
+      - name: SKILL.md frontmatter must fit Agent Skills limits
+        # Anthropic Agent Skills limits (mirrored by Claude Code and other
+        # hosts): name <= 64 chars, description <= 1024 chars. The description
+        # is the only part loaded for skill *selection*, so a host will reject
+        # an over-long one. Ruby is preinstalled on the runner.
+        run: |
+          if [ ! -f skill/SKILL.md ]; then
+            echo "skill/SKILL.md not present yet — nothing to lint"
+            exit 0
+          fi
+          ruby -ryaml <<'RUBY'
+          content = File.read("skill/SKILL.md")
+          fm = content.split(/^---\s*$/, 3)[1] or abort "::error file=skill/SKILL.md::missing YAML frontmatter"
+          d = YAML.safe_load(fm)
+          name = d["name"].to_s
+          desc = d["description"].to_s
+          errs = []
+          errs << "name is #{name.length} chars (max 64)" if name.length > 64
+          errs << "description is #{desc.length} chars (max 1024)" if desc.length > 1024
+          if errs.any?
+            errs.each { |e| warn "::error file=skill/SKILL.md::#{e}" }
+            exit 1
+          end
+          puts "OK: name #{name.length}/64, description #{desc.length}/1024"
+          RUBY
+
+  tag:
+    name: Create release tag
+    needs: [prepare, tests, skill-check]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.rc_branch }}
+          fetch-depth: 0
+      - name: Tag the RC commit as vX.Y.Z
+        run: |
+          TAG="${{ needs.prepare.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -fa "$TAG" -m "Release $TAG"
+          git push --force origin "$TAG"
+
+  dist:
+    name: Build & publish binaries
+    needs: [prepare, tag]
+    permissions:
+      contents: write
+    uses: ./.github/workflows/bin-release.yml
+    with:
+      tag: ${{ needs.prepare.outputs.tag }}
+    secrets: inherit
+
+  # cargo-dist creates the GitHub Release (a draft) with an auto-generated body:
+  # the install scripts + per-target download tables. We want OUR changelog on
+  # top and that block below it, so after `dist` we prepend the generated notes
+  # (PRs/commits between this tag and the previous v* tag) to the draft body.
+  release-notes:
+    name: Prepend changelog to the release
+    needs: [prepare, dist]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Pin to the freshly-created release tag. `prepare` deletes the
+          # `pin/v*` trigger tag, so a checkout with no `ref:` would default to
+          # that now-missing ref and fail (`couldn't find remote ref`). We only
+          # need history + tags here to compute the previous v* tag.
+          ref: ${{ needs.prepare.outputs.tag }}
+          fetch-depth: 0
+      - name: Generate changelog between tags and prepend to the draft
+        run: |
+          TAG="${{ needs.prepare.outputs.tag }}"
+          # Anchor the auto-notes to the previous v* tag explicitly. GitHub
+          # otherwise anchors to the last *published* release, but every release
+          # is a draft, so each one would re-list every PR since the last
+          # published release.
+          PREV_TAG="$(git tag --list 'v*' --sort=-v:refname | grep -vx "$TAG" | head -n1)"
+          ARGS=(-f tag_name="$TAG")
+          if [ -n "$PREV_TAG" ]; then ARGS+=(-f previous_tag_name="$PREV_TAG"); fi
+          NOTES="$(gh api -X POST "repos/${{ github.repository }}/releases/generate-notes" "${ARGS[@]}" --jq '.body')"
+          # Keep cargo-dist's body (install scripts + download tables) underneath.
+          DIST_BODY="$(gh release view "$TAG" --json body --jq '.body')"
+          # Idempotent: a sentinel guards against double-prepending on re-runs.
+          if printf '%s' "$DIST_BODY" | grep -q '<!-- plugmem-changelog -->'; then
+            echo "changelog already prepended; nothing to do"
+            exit 0
+          fi
+          {
+            echo "<!-- plugmem-changelog -->"
+            echo "$NOTES"
+            echo
+            echo "---"
+            echo
+            echo "$DIST_BODY"
+          } > "$RUNNER_TEMP/combined.md"
+          gh release edit "$TAG" --notes-file "$RUNNER_TEMP/combined.md"
+
+  # Attach the companion Agent Skill to the release so an agent can pull the
+  # skill matching its installed engine version from a stable URL:
+  #   https://github.com/<repo>/releases/download/vX.Y.Z/SKILL.md   (pinned)
+  #   https://github.com/<repo>/releases/latest/download/SKILL.md   (latest)
+  # No-op with a notice until stage 5 adds skill/SKILL.md.
+  skill-asset:
+    name: Attach SKILL.md to the release
+    needs: [prepare, dist]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - name: Upload SKILL.md as a release asset
+        run: |
+          if [ ! -f skill/SKILL.md ]; then
+            echo "::notice::skill/SKILL.md not present yet (stage 5) — nothing to attach"
+            exit 0
+          fi
+          TAG="${{ needs.prepare.outputs.tag }}"
+          # --clobber keeps this idempotent if the release job is re-run.
+          gh release upload "$TAG" skill/SKILL.md --clobber
+
+  # crates.io publish waits for `dist`, so a failed binary/installer release
+  # cannot burn immutable crate versions. This is what makes `cargo install
+  # <crate>` / `cargo binstall <crate>` resolve by name. `cargo publish
+  # --workspace` publishes every member in dependency order (arena -> core ->
+  # host -> cli -> mcp) and waits for the index between crates; members with
+  # `publish = false` (wasm, testgen, tools) are skipped automatically. The
+  # libraries' `dist = false` only affects cargo-dist, not crates.io.
+  publish-crates:
+    name: Publish to crates.io
+    needs: [prepare, tag, dist]
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Publish all workspace crates
+        run: cargo publish --workspace --locked
+
+  # Publish the wasm/npm package over OIDC trusted publishing (no NPM_TOKEN).
+  # NOTE: the *first* publish of a new package name cannot use OIDC (the
+  # trusted publisher is configured on the package page, which does not exist
+  # yet) — do that one manually/locally with an npm token, then configure
+  # trusted publishing; this job handles every release after that.
+  # `prepare`'s `cargo set-version --workspace` already bumped the wasm crate
+  # to the release version, so the published npm version tracks the workspace.
+  # No-op with a notice until stage 5 adds the npm packaging.
+  publish-npm:
+    name: Publish npm package
+    needs: [prepare, tag, dist]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - name: Check whether the npm packaging exists yet
+        id: npm
+        run: |
+          if [ -f crates/plugmem-wasm/scripts/build-npm.mjs ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::crates/plugmem-wasm/scripts/build-npm.mjs not present yet (stage 5) — npm publish skipped"
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.npm.outputs.present == 'true'
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        if: steps.npm.outputs.present == 'true'
+      - uses: actions/setup-node@v7
+        if: steps.npm.outputs.present == 'true'
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Use latest npm (trusted publishing needs a recent CLI)
+        if: steps.npm.outputs.present == 'true'
+        run: npm install -g npm@latest
+      - name: Install wasm-pack
+        if: steps.npm.outputs.present == 'true'
+        run: npm install -g wasm-pack
+      - name: Build and assemble the npm package
+        if: steps.npm.outputs.present == 'true'
+        working-directory: crates/plugmem-wasm
+        run: node scripts/build-npm.mjs
+      - name: Publish (skip if this version already exists)
+        if: steps.npm.outputs.present == 'true'
+        working-directory: crates/plugmem-wasm/pkg
+        run: |
+          NAME="$(node -p "require('./package.json').name")"
+          VERSION="$(node -p "require('./package.json').version")"
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "Skipping $NAME@$VERSION — already published on npm."
+          else
+            npm publish --access public
+          fi
+
+  sync:
+    name: Sync PR to main
+    needs: [prepare, dist, publish-crates]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.rc_branch }}
+          fetch-depth: 0
+      - name: Open sync PR (RC -> default branch)
+        run: |
+          RC="${{ needs.prepare.outputs.rc_branch }}"
+          VERSION="${{ needs.prepare.outputs.version }}"
+          BASE="${{ github.event.repository.default_branch }}"
+          existing="$(gh pr list --head "$RC" --base "$BASE" --state open --json number --jq 'length')"
+          if [ "$existing" = "0" ]; then
+            gh pr create --head "$RC" --base "$BASE" \
+              --title "release: sync plugmem v$VERSION to $BASE" \
+              --body "Created by the release workflow after the v$VERSION binaries were built." || true
+          fi

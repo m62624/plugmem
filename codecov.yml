@@ -1,0 +1,32 @@
+# Codecov configuration.
+#
+# The uploaded Cobertura report already drops the binaries and tools (see
+# tarpaulin.toml `exclude-files`): plugmem-cli / plugmem-mcp are exercised by
+# integration tests that spawn the built executable, and line coverage cannot
+# see a subprocess; the wasm bridge and the cross-target probe run inside wasm
+# runtimes. The `ignore` list below mirrors that so Codecov's file tree matches
+# the metric.
+#
+# Both statuses are `informational: true` — Codecov reports the number and the
+# diff but never fails the check, so coverage guides without gatekeeping merges
+# (the hard coverage mandate of specs/07 is enforced by review, not by a flaky
+# upload). Tighten (drop `informational`, set a `target`) once stage 5 turns
+# the tarpaulin threshold into a local gate.
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+
+ignore:
+  - "crates/plugmem-cli/src/main.rs"
+  - "crates/plugmem-mcp"
+  - "crates/plugmem-wasm"
+  - "tools"
+
+comment:
+  layout: "reach, diff, files"
+  require_changes: true

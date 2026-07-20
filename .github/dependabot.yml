@@ -1,0 +1,54 @@
+# Dependabot version updates for this repo only.
+# https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+#
+# Goal: open automatic bump PRs but never for MAJOR version jumps (those tend to
+# be breaking and we adopt them by hand). Minor + patch updates are collapsed
+# into a single grouped PR per ecosystem to avoid PR noise. Every bump PR still
+# runs the full CI (lint + test on 3 OSes with the feature matrix, the
+# no_std/wasm builds, the wasm-runtime suites, dist plan), so a breaking minor
+# — e.g. a 0.x crate where 0.y is a breaking bump — surfaces as a red required
+# check rather than a silent merge.
+version: 2
+updates:
+  # --- cargo (the Rust workspace at the repo root) --------------------------
+  # The workspace's external deps were pinned by real wasm32v1-none probe
+  # builds (specs/08); routine minor/patch bumps are welcome, CI re-runs the
+  # probe-equivalent no_std build on every PR.
+  #
+  # Note: `cargo-dist-version` lives in [workspace.metadata.dist], not in the
+  # dependency graph, so Dependabot's cargo updater never sees it and can never
+  # bump it — it stays pinned in lockstep with the installer URLs in the
+  # workflows, updated by hand. Same for the wasmtime/wasmer versions pinned in
+  # ci.yml's env. Nothing to exclude here.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    # Hold MAJOR bumps for manual review; minor/patch flow.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    # One PR for all allowed (minor + patch) cargo updates instead of one each.
+    groups:
+      cargo-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # --- GitHub Actions used by the workflows ---------------------------------
+  # No major ignore here on purpose: actions are pinned to a major tag
+  # (e.g. actions/checkout@v7), whose only meaningful update IS the major bump.
+  # These land grouped and are reviewed by hand before merge anyway. (`@stable`
+  # and local `./.github/workflows/*` reuses are not versioned deps — skipped.)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    groups:
+      github-actions:
+        patterns: ["*"]

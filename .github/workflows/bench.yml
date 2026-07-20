@@ -1,0 +1,37 @@
+# Wall-clock benchmarks on demand — informational only, NEVER a merge gate.
+#
+# Shared CI runners have noisy, heterogeneous hardware, so wall-clock numbers
+# from here are a sanity trend at best. The merge-blocking performance evidence
+# is the deterministic work-counter gates in
+# crates/plugmem-core/tests/perf_gates.rs (and the arena's), which run in
+# regular CI under `--features counters` and are bit-identical on any machine.
+#
+# Trigger: a human adds the `benchmark` label to a PR (re-add it to re-run).
+# Nothing runs automatically and no release build carries any of this.
+name: bench
+
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    name: criterion (informational)
+    if: github.event.label.name == 'benchmark'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run benchmarks
+        # Plain text into the job log; no artifacts, no thresholds, no gating.
+        run: |
+          cargo bench -p plugmem-arena
+          cargo bench -p plugmem-core

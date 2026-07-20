@@ -1,0 +1,292 @@
+name: CI
+
+on:
+  # Push CI runs only on the default branch (post-merge validation). Feature
+  # branches are covered by the pull_request event below, so a branch with an
+  # open PR is not built twice (one push run + one PR run racing each other).
+  # rc/v* release branches run through workflow_call, not this trigger.
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/**"
+      - "crates/**"
+      - "tools/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  # No paths filter on PRs on purpose: the branch-protection gate (`ci-pass`
+  # below) is a *required* check, so it must ALWAYS report. With a paths filter
+  # a docs-only PR would never start the workflow and the required check would
+  # hang forever ("Expected — waiting for status"). CI is cached and cheap, so
+  # we just let it run on every PR.
+  pull_request:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref to checkout"
+        required: false
+        type: string
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
+
+# Runtime versions for the wasm execution jobs. Pinned to the versions the
+# cross-target equivalence was validated against (specs/14 §3); bump by hand
+# together with a fresh local validation run.
+env:
+  WASMTIME_VERSION: "v41.0.3"
+  WASMER_VERSION: "v7.2.0"
+
+jobs:
+  # --- linter + tests, fanned out across all three OSes in parallel ----------
+  # One matrix entry per OS, no cross-job `needs`, so Linux/Windows/macOS each
+  # run fmt + clippy + test independently and any single failure is visible at
+  # a glance (fail-fast off keeps the others going).
+  #
+  # Features change which code compiles (specs/07 §8: clippy on one combo does
+  # not cover the others), so clippy runs the full 4-combo matrix and tests run
+  # both configurations that execute distinct code (`default` and `counters`;
+  # the perf gates only exist under `counters`).
+
+  check:
+    name: lint + test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Linux, os: ubuntu-latest }
+          - { name: Windows, os: windows-latest }
+          - { name: macOS, os: macos-latest }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Formatting
+        run: cargo fmt --all --check
+      - name: Clippy (default = std)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy (no_std)
+        run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+      - name: Clippy (std + counters)
+        run: cargo clippy --workspace --all-targets --features counters -- -D warnings
+      - name: Clippy (no_std + counters)
+        run: cargo clippy --workspace --all-targets --no-default-features --features counters -- -D warnings
+      - name: Tests (default)
+        run: cargo test --workspace
+      - name: Tests (counters — includes the deterministic perf gates)
+        run: cargo test --workspace --features counters
+
+  # --- portability checks, in parallel with the lint+test matrix above -------
+
+  no_std:
+    name: no_std build (wasm32v1-none)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+      - uses: Swatinem/rust-cache@v2
+      - name: Build libraries for a real no_std target
+        run: >-
+          cargo build -p plugmem-arena -p plugmem-core
+          --no-default-features --target wasm32v1-none
+      - name: Build again with counters (a different code surface)
+        run: >-
+          cargo build -p plugmem-arena -p plugmem-core
+          --no-default-features --features counters --target wasm32v1-none
+
+  # The whole contract test suite of the core, executed on a REAL 32-bit
+  # target under both independent wasm runtimes, in both feature
+  # configurations. This is what caught the 32-bit journal allocation abort
+  # (specs/14 §5) that native 64-bit CI can never see. proptest sections are
+  # native-only (gated in the test files); everything else runs.
+  wasm-suite:
+    name: core suite on wasm32 (${{ matrix.runtime }}${{ matrix.features && ', counters' || '' }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [wasmtime, wasmer]
+        features: ["", "--features counters"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+      - name: Install wasmtime
+        if: matrix.runtime == 'wasmtime'
+        run: |
+          curl https://wasmtime.dev/install.sh -sSf | bash -s -- --version ${{ env.WASMTIME_VERSION }}
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+          echo "CARGO_TARGET_WASM32_WASIP1_RUNNER=wasmtime run --dir=." >> "$GITHUB_ENV"
+      - name: Install wasmer
+        if: matrix.runtime == 'wasmer'
+        run: |
+          curl https://get.wasmer.io -sSfL | sh -s ${{ env.WASMER_VERSION }}
+          echo "$HOME/.wasmer/bin" >> "$GITHUB_PATH"
+          echo "CARGO_TARGET_WASM32_WASIP1_RUNNER=wasmer run" >> "$GITHUB_ENV"
+      - name: Run the core suite on wasm32
+        # Release: the torn-tail/bitflip matrices are byte-loops that crawl in
+        # a debug interpreter-free JIT but still add minutes; release keeps the
+        # whole suite in seconds.
+        run: cargo test --release -p plugmem-core --target wasm32-wasip1 ${{ matrix.features }}
+
+  # Build the pure-no_std probe for wasm32 AND wasm64 (WebAssembly 3.0
+  # memory64), execute the artifacts in whichever runtime supports them, and
+  # require the printed snapshot hash to equal the native run byte-for-byte.
+  # One green run = the file format is pointer-width independent (specs/14 §3).
+  wasm-equivalence:
+    name: snapshot equivalence (native vs wasm32 vs wasm64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      # wasm64-unknown-unknown is tier 3: no prebuilt std, so core+alloc are
+      # built from source on nightly (build-std needs rust-src).
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+      - name: Install wasmtime and wasmer
+        run: |
+          curl https://wasmtime.dev/install.sh -sSf | bash -s -- --version ${{ env.WASMTIME_VERSION }}
+          curl https://get.wasmer.io -sSfL | sh -s ${{ env.WASMER_VERSION }}
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.wasmer/bin" >> "$GITHUB_PATH"
+      - name: Native reference hash
+        run: |
+          REF="$(cargo +stable run --release -p plugmem-wasm-probe --bin wasm-probe)"
+          echo "reference: $REF"
+          echo "REF=$REF" >> "$GITHUB_ENV"
+      - name: Build the probe for wasm32 and wasm64
+        run: |
+          cargo +stable build --release --lib -p plugmem-wasm-probe --target wasm32-unknown-unknown
+          cargo +nightly build --release --lib -p plugmem-wasm-probe --target wasm64-unknown-unknown -Zbuild-std=core,alloc
+      - name: Execute and compare (wasmtime wasm32 + wasm64, wasmer wasm32)
+        run: |
+          W32=target/wasm32-unknown-unknown/release/plugmem_wasm_probe.wasm
+          W64=target/wasm64-unknown-unknown/release/plugmem_wasm_probe.wasm
+          fail=0
+          for label in "wasmtime-wasm32" "wasmtime-wasm64" "wasmer-wasm32"; do
+            case "$label" in
+              wasmtime-wasm32) OUT="$(wasmtime run --invoke run "$W32" 2>/dev/null | tail -n1)" ;;
+              wasmtime-wasm64) OUT="$(wasmtime run --invoke run "$W64" 2>/dev/null | tail -n1)" ;;
+              wasmer-wasm32)   OUT="$(wasmer run --invoke run "$W32" 2>/dev/null | tail -n1)" ;;
+            esac
+            echo "$label: $OUT"
+            if [ "$OUT" != "$REF" ]; then
+              echo "::error::$label produced '$OUT', native produced '$REF' — the snapshot is NOT target-independent"
+              fail=1
+            fi
+          done
+          exit $fail
+      - name: Probe wasmer on wasm64 (informational — unsupported as of 7.2)
+        # Never fails the build: wasmer cannot execute Rust-built memory64
+        # modules today (specs/14 §3). The day this step starts succeeding,
+        # update specs/14 and consider promoting it into the matrix above.
+        run: |
+          W64=target/wasm64-unknown-unknown/release/plugmem_wasm_probe.wasm
+          if OUT="$(wasmer run --enable-memory64 --invoke run "$W64" 2>&1 | tail -n1)" && [ "$OUT" = "$REF" ]; then
+            echo "::notice::wasmer now runs memory64 and matches ($OUT) — update specs/14 §3 and add it to the required matrix"
+          else
+            echo "wasmer still cannot run the wasm64 artifact (expected): $OUT"
+          fi
+
+  # Build the npm/wasm package the way a release does and smoke-test it through
+  # Node, so the published artifact can never silently rot. Until stage 5 lands
+  # the JS packaging (crates/plugmem-wasm/scripts/build-npm.mjs), the job
+  # detects the absence and passes with a notice — the wiring is ready, the
+  # gate arms itself the moment the script appears.
+  wasm-npm:
+    name: wasm npm build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - name: Check whether the npm packaging exists yet
+        id: npm
+        run: |
+          if [ -f crates/plugmem-wasm/scripts/build-npm.mjs ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::crates/plugmem-wasm/scripts/build-npm.mjs not present yet (stage 5) — npm build skipped"
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.npm.outputs.present == 'true'
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        if: steps.npm.outputs.present == 'true'
+      - uses: actions/setup-node@v7
+        if: steps.npm.outputs.present == 'true'
+        with:
+          node-version: 22
+      - name: Install wasm-pack
+        if: steps.npm.outputs.present == 'true'
+        run: npm install -g wasm-pack
+      - name: Build and assemble the npm package
+        if: steps.npm.outputs.present == 'true'
+        working-directory: crates/plugmem-wasm
+        run: node scripts/build-npm.mjs
+      - name: Test the package through Node
+        if: steps.npm.outputs.present == 'true'
+        working-directory: crates/plugmem-wasm
+        run: node --test test/smoke.test.mjs
+
+  dist-plan:
+    name: cargo-dist plan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - name: Install dist
+        shell: bash
+        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh"
+      - name: Validate the release plan
+        run: dist plan
+
+  # --- single branch-protection gate -----------------------------------------
+  # Make ONLY this check "required" on the protected branch. It aggregates every
+  # real job above, so branch protection never needs editing when jobs are
+  # added/removed, and it reports for every PR (no paths filter) — including the
+  # release sync PR, which reuses this same workflow. `if: always()` lets it run
+  # even when a dependency failed, so it can turn that into a red required check.
+  ci-pass:
+    name: CI passed
+    if: always()
+    needs: [check, no_std, wasm-suite, wasm-equivalence, wasm-npm, dist-plan]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any required job did not succeed
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: |
+          echo "A required CI job failed or was cancelled:"
+          echo "  check            = ${{ needs.check.result }}"
+          echo "  no_std           = ${{ needs.no_std.result }}"
+          echo "  wasm-suite       = ${{ needs.wasm-suite.result }}"
+          echo "  wasm-equivalence = ${{ needs.wasm-equivalence.result }}"
+          echo "  wasm-npm         = ${{ needs.wasm-npm.result }}"
+          echo "  dist-plan        = ${{ needs.dist-plan.result }}"
+          exit 1
+      - name: All required jobs passed
+        run: echo "lint + test (3 OSes × feature matrix), no_std, wasm suite (wasmtime+wasmer), cross-target equivalence, npm and dist-plan are green."
