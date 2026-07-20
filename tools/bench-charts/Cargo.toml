@@ -1,0 +1,17 @@
+[package]
+name = "plugmem-bench-charts"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Renders the benchmark-matrix TSV into the README chart SVGs (Plotlars, plotters backend — pure Rust, no browser)."
+
+[dependencies]
+# Static SVG rendering, pure Rust (no browser/WebDriver). polars comes
+# re-exported through plotlars — do not depend on it separately.
+plotlars = { version = "0.12.6", features = ["plotters"] }
+# The threshold config (config.toml). `toml::Table` parses via FromStr,
+# so no serde derive is needed.
+toml = "0.8"
+
+[lints]
+workspace = true

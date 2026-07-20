@@ -1,0 +1,22 @@
+# plugmem-bench-charts — local rendering config.
+#
+# This gate is a *local* convenience for quick re-runs: it never runs in
+# CI and never decides anything about the repo. It only chooses whether to
+# rewrite the SVG asset files on disk, so that `git status` tells you at a
+# glance whether a re-measurement actually moved a chart or was just
+# run-to-run noise. You always decide what to commit.
+
+# Relative change a chart's values must exceed before its SVG is rewritten.
+# 0.10 = 10%. If every value a chart uses moved less than this versus the
+# committed baseline, the tool leaves that SVG byte-identical (git stays
+# clean); if any value moved more, it rewrites the SVG and updates the
+# baseline. Benchmarks are noisy, so a few percent is expected drift.
+threshold = 0.10
+
+# Where the rendered SVGs live (relative to the workspace root).
+out_dir = "crates/plugmem-arena/assets"
+
+# The committed data snapshot the threshold compares against — the values
+# the current SVGs were rendered from. Updated in lockstep with any SVG the
+# tool rewrites, so the two never drift apart.
+baseline = "tools/bench-charts/baseline.tsv"

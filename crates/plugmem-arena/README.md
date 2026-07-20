@@ -145,172 +145,71 @@ inserts) are included as out-of-class baselines, plus an *incrementally*
 maintained sorted `Vec` to show what the flat baseline costs once inserts
 are actually incremental. Workload: 16-byte records — 12-byte big-endian
 composite key `[u64 | u32]` plus 4-byte payload — seeded xorshift keys,
-identical streams on every runtime. All numbers 2026-07-18, one thread.
+identical streams on every runtime. One thread. The charts below are
+rendered from the stand's output by
+[`plugmem-bench-charts`](../../tools/bench-charts) (Plotlars, plotters
+backend — pure Rust), averaged over several runs; regenerating them is one
+command (see [Reproduction stand](#reproduction-stand)).
 
-![throughput and memory](assets/bench-matrix.svg)
+### Throughput — insert and lookup
 
-### 100k records (design center)
+![insert ns/elem at 100k](assets/arena-insert-100k.svg)
+![insert ns/elem at 1M](assets/arena-insert-1m.svg)
+![lookup ns/op at 100k](assets/arena-lookup-100k.svg)
+![lookup ns/op at 1M](assets/arena-lookup-1m.svg)
 
-| insert ns/elem | native | wasmtime | wasmer |
-|---|---|---|---|
-| plugmem Arena (Ordered) | 66.5 | 93.1 | 83.3 |
-| std BTreeMap | 87.4 | 110.7 | 111.8 |
-| std HashMap | 21.1 | 25.7 | 25.5 |
-| sorted Vec (bulk) | 18.0 | 18.2 | 18.9 |
-| sorted Vec (incremental) | 6101.9 | 5974.8 | 6124.8 |
+Insert and lookup beat `BTreeMap` on every runtime; the gap is widest at
+100k and narrows toward parity on insert at 1M (lookup stays ahead). The
+wasm penalty is structural, not incidental — `BTreeMap`'s pointer descent
+costs more under a runtime while the arena's flat pool keeps its shape.
+`HashMap` (unordered, no range scans) and a bulk-built `Vec` (no
+incremental inserts) are out-of-class baselines: reach for them when you
+do not need ordering, range scans or the snapshot property.
 
-| lookup ns/op | native | wasmtime | wasmer |
-|---|---|---|---|
-| plugmem Arena (Uniform) | 59.3 | 77.6 | 76.7 |
-| std BTreeMap | 86.0 | 84.5 | 83.5 |
-| std HashMap | 10.0 | 12.5 | 11.9 |
-| sorted Vec (bulk) | 30.6 | 35.3 | 35.8 |
+### Memory, allocator traffic, tail latency
 
-| ordered scan ns/elem | native | wasmtime | wasmer |
-|---|---|---|---|
-| plugmem Arena (Ordered) | 4.5 | 6.1 | 5.6 |
-| std BTreeMap | 2.9 | 2.6 | 2.6 |
-| sorted Vec (bulk) | 0.4 | 0.6 | 0.8 |
+![bytes per element at 1M](assets/arena-memory-1m.svg)
+![allocator calls at 1M](assets/arena-allocs-1m.svg)
+![insert tail latency p99 at 1M](assets/arena-tails-1m.svg)
 
-### 1M records (scale ceiling for wasm32)
+Memory is the arena's main cost: split pages average ~70% fill and the
+pool grows by doubling, so bytes/element sit above `BTreeMap`'s (a planned
+compaction rebuild recovers most of it). In return the allocator is barely
+touched — a near-constant ~40 calls to build a million records, versus one
+per node for `BTreeMap` — so build time carries no allocator noise and
+fragmentation does not accumulate. The insert tail (p99) stays bounded: a
+page split is one 4 KiB `memmove`, not a global rehash. The one visible
+worst case is the rare pool-doubling realloc (~9 growths per 1M inserts;
+a whole-pool copy, costly under wasm), mitigated by pre-sizing through
+`ArenaCfg::max_bytes`.
 
-| insert ns/elem | native | wasmtime | wasmer |
-|---|---|---|---|
-| plugmem Arena (Ordered) | 123.5 | 151.6 | 150.4 |
-| std BTreeMap | 125.9 | 162.4 | 163.6 |
-| std HashMap | 37.6 | 40.9 | 40.9 |
+### Where the arena loses
 
-| lookup ns/op | native | wasmtime | wasmer |
-|---|---|---|---|
-| plugmem Arena (Uniform) | 116.1 | 131.7 | 148.5 |
-| std BTreeMap | 141.8 | 154.2 | 154.0 |
-| std HashMap | 15.5 | 18.1 | 20.7 |
-
-### Tail latency and allocator traffic
-
-![tail latency](assets/bench-tails.svg)
-
-![allocator traffic and peak memory](assets/bench-allocs.svg)
-
-Per-insert latency distribution at 1M records (single instrumented pass;
-clock-call overhead is included in p50, so compare within a runtime):
-
-| ns per insert, native @1M | p50 | p99 | max |
-|---|---|---|---|
-| plugmem Arena (Ordered) | 142 | 495 | 80,373 |
-| std BTreeMap | 135 | 344 | 38,180 |
-| std HashMap | 35 | 116 | 13,742,217 |
-| sorted Vec (incremental, @100k) | 4,225 | 23,250 | 32,563 |
-
-Allocator calls per 1M-record build: Arena **40**, `HashMap` 20, bulk
-`Vec` 1, `BTreeMap` **133,419** (one per node). Peak memory equals
-retained for the arena and `BTreeMap`; `HashMap` peaks at 53.5 B/elem
-during its final rehash (1.5x its retained 35.7).
-
-### What these numbers say — both directions
-
-**Where the arena wins (its class, both environments):**
-
-- Insert and lookup are faster than `BTreeMap` on every runtime at 100k
-  (insert −24% native, −16/−25% wasm; lookup −31% native). At 1M the
-  insert gap narrows to parity on native and stays −7/−8% on wasm; lookup
-  remains −18% native.
-- The wasm gap is structural, not incidental: `BTreeMap`'s pointer descent
-  costs more under a wasm runtime, while the arena's flat pool keeps its
-  shape. The arena's own wasm penalty is ×1.2–1.4 over native.
-- Allocator pressure is constant (~40 calls regardless of N), so build
-  time contains no allocator noise and fragmentation does not accumulate.
-- p99 insert latency stays under 500 ns at 1M — page splits are bounded
-  (one 4 KiB `memmove` plus relinking); there is no global rehash (compare
-  `HashMap`'s 13–16 ms worst insert on all runtimes) and no O(n) shift
-  (compare incremental `Vec`: p50 alone is 4 µs at just 100k).
-- Persistence: sections are raw slices. Nothing else in this comparison
-  can serialize without walking its structure.
-
-**Where the arena loses, and by how much:**
-
-- **Memory: the main cost.** 42 B/elem at 100k, 33.6 at 1M, versus ~20 for
-  `BTreeMap` and 16 for raw data. Split pages average ~70% fill and the
-  pool grows by doubling. A compaction rebuild (planned `maintain()`)
-  reaches ~16 B/elem, but the steady-state overhead is real.
-- **Worst single insert is a pool realloc.** Doubling a large pool costs
-  one big copy: max observed 80 µs native (the OS remaps pages), but
-  **4.8 ms under wasm at 1M** — a wasm runtime must physically copy the
-  16 MiB pool. Rare (9 growths per 1M inserts) but visible; pre-sizing via
-  `ArenaCfg::max_bytes`-bounded reservation is the planned mitigation.
-  `BTreeMap` never spikes above 38 µs — small allocations have no global
-  worst case.
-- **Ordered scans are ~2x slower than `BTreeMap`** (4.5 vs 2.9 ns/elem
-  native): scan decodes 16-byte slots through the `Slot` trait, `BTreeMap`
-  iterates dense leaf nodes. A flat `Vec` beats both by an order of
-  magnitude — if data never changes after a bulk build, use a `Vec`.
-- **Pure lookup tables belong to `HashMap`** (6x faster lookups). Reach
-  for the arena only when ordering, range scans or the snapshot property
-  are actually needed.
+- **Ordered scans are ~2x `BTreeMap`** — the scan decodes fixed-size slots
+  through the `Slot` trait where `BTreeMap` iterates dense leaf nodes. A
+  flat `Vec` beats both by an order of magnitude if data never changes
+  after a bulk build.
+- **Pure lookup tables belong to `HashMap`.** Reach for the arena only
+  when ordering, range scans or the snapshot-as-memcpy property matter.
 - Single-threaded by design; no concurrent access.
 
 ### Companion structures
 
-The other three structures measured against the std idiom of their class
-(same stand, same runtimes, same sizes). Memory is per *stored* item;
-allocator calls are identical on every runtime.
+`BlobHeap`, `ChunkPool` and `Interner` against the std idiom of their
+class — `Vec<Vec<u8>>`, one `Vec<u8>` per list, and
+`HashMap<String, u32> + Vec<String>` respectively.
 
-![companion structures](assets/bench-companions.svg)
+![companion insert/push/intern ns at 1M](assets/arena-companions-insert-1m.svg)
+![companion allocator calls at 1M](assets/arena-companions-allocs-1m.svg)
 
-**BlobHeap vs `Vec<Vec<u8>>`** (100k/1M variable-length blobs, 16–200 B):
-
-| metric, @1M | BlobHeap | Vec\<Vec\<u8>> |
-|---|---|---|
-| push ns (native / wasmtime / wasmer) | 35.4 / 20.8 / 14.0 | 55.2 / 22.3 / 16.7 |
-| get ns | 1.5 / 2.7 / 2.7 | 1.6 / 1.2 / 1.2 |
-| memory B/blob | 133.2 | 133.1 native, 120.6 wasm |
-| allocator calls | **40** | **1,000,019** |
-
-Wins: 25,000x fewer allocator calls; push faster at 1M everywhere. Loses:
-at 100k under wasm the per-blob baseline pushes slightly faster (25.8 vs
-22.8 ns on wasmtime — small dlmalloc allocations are cheap, pool-doubling
-copies are not) and holds less memory (166.5 vs 123.9 B/blob at 100k:
-doubling slack; parity at 1M). The heap's case is allocator pressure plus
-the flat two-section snapshot, not raw push speed at every point.
-
-**ChunkPool vs one `Vec<u8>` per list** (1024 lists, 8-byte values,
-round-robin):
-
-| metric, @1M | ChunkPool | Vec per list |
-|---|---|---|
-| push ns (native / wasmtime / wasmer) | 4.7 / 14.5 / 6.4 | 3.9 / 3.0 / 2.3 |
-| iterate ns/value | 1.7 / 3.7 / 3.2 | 1.0 / 2.0 / 2.0 |
-| memory B/value | 17.1 | 8.4 |
-| allocator calls | **36** | **11,265** |
-
-Wins: ~300x fewer allocator calls, O(1) whole-chain free with in-pool
-recycling (no per-list `Vec` churn), snapshot as two flat sections. Loses:
-raw push is slower under wasm (14.5 vs 3.0 ns on wasmtime — chain-link
-bookkeeping vs plain `extend_from_slice`), iteration pays ~1.7x for chain
-hops, and at 1M the pool-doubling slack holds 2x the baseline's bytes
-(at 100k they are equal — the slack depends on where N lands between
-powers of two). With 1024 lists the baseline is still cheap; the pool's
-class advantage grows with the list count (a real inverted index has
-hundreds of thousands).
-
-**Interner vs `HashMap<String, u32>` + `Vec<String>`** (vocabulary = N/10
-distinct terms, uniform stream, ~90% hits):
-
-| metric, @1M | Interner | HashMap+Vec |
-|---|---|---|
-| intern ns (native / wasmtime / wasmer) | 29.3 / 47.6 / 48.0 | 44.2 / 52.9 / 50.5 |
-| resolve ns | 9.3 / 8.6 / 9.9 | 0.4 / 0.7 / 0.7 |
-| memory B/term | 34.1 | 94.5 native, 57.8 wasm |
-| allocator calls | **49** | **200,024** |
-
-Wins: intern is faster everywhere (the gap grows with N: one flat probe
-table vs per-`String` allocations), ~3x less memory per term on native,
-4,000x fewer allocator calls, both sections snapshot as-is. Loses:
-`resolve` is ~20x slower (0.4 vs 9.3 ns) — it re-validates UTF-8 on every
-call, where the baseline just indexes a `Vec<String>`. That validation is
-a deliberate safe-code choice; replacing it with `from_utf8_unchecked` is
-a candidate for a future measured-unsafe commit under the crate's policy
-(functional first, unsafe only with numbers).
+Same trade per class: each plugmem structure gives up a little per-op
+speed (and, at some sizes, some pool-doubling slack in bytes) for
+orders-of-magnitude fewer allocator calls and a flat layout that snapshots
+as a `memcpy`. The one op where a structure trails its baseline is
+`Interner::resolve`, which re-validates UTF-8 on every call — a deliberate
+safe-code choice over `from_utf8_unchecked` (a candidate for a future
+measured-unsafe commit under the crate's "functional first, unsafe only
+with numbers" policy).
 
 ## Reproduction stand
 
@@ -331,13 +230,26 @@ cargo run --release -p plugmem-bench-matrix
 The stand builds `examples/bench_repro.rs` (std-only; a counting global
 allocator measures bytes and calls) for native and `wasm32-wasip1`, runs
 it on every runtime found at N=100k and N=1M, and prints per-metric
-markdown tables plus a TSV block. Historical results live in
-`bench-history/`. A single structure/runtime can be run directly:
+markdown tables plus a machine-readable `#TSV` block. A single
+structure/runtime can be run directly:
 
 ```text
 cargo run --release --example bench_repro -- 1000000
 wasmtime run target/wasm32-wasip1/release/examples/bench_repro.wasm 1000000
 wasmer run  target/wasm32-wasip1/release/examples/bench_repro.wasm -- 1000000
+```
+
+The charts above are rendered from that TSV by
+[`plugmem-bench-charts`](../../tools/bench-charts) (Plotlars with the
+`plotters` backend — pure Rust, no browser). Run the stand a few times,
+feed the TSV in, and it re-renders only the charts whose values moved past
+the noise threshold in its `config.toml` (so a jittery re-run leaves the
+committed SVGs untouched):
+
+```text
+for i in 1 2 3 4; do cargo run -qr -p plugmem-bench-matrix; done \
+    | grep -P '^\d+\t' > bench.tsv
+cargo run -p plugmem-bench-charts -- bench.tsv
 ```
 
 Statistical micro-benchmarks (criterion, native only): `cargo bench -p
@@ -366,8 +278,8 @@ Crates solving neighboring problems, and how the class differs:
   internally; the backing is an allocation strategy, not a serialization
   format — no snapshot-as-memcpy.
 - [`sorted-vec`](https://crates.io/crates/sorted-vec) — flat sorted
-  arrays; O(n) per random insert (the "incremental Vec" row above shows
-  the cost). The arena bounds every shift to one 4 KiB page.
+  arrays; O(n) per random insert (the stand's incremental-`Vec` baseline
+  shows the cost). The arena bounds every shift to one 4 KiB page.
 - [`indexmap`](https://crates.io/crates/indexmap), [`slotmap`](https://crates.io/crates/slotmap) —
   dense-storage maps, but insertion-ordered / unordered: no key-sorted
   iteration or range scans.

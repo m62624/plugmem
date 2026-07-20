@@ -9,6 +9,7 @@ members = [
     "crates/plugmem-wasm",
     "crates/plugmem-testgen",
     "tools/bench-matrix",
+    "tools/bench-charts",
     "tools/wasm-probe",
 ]
 
