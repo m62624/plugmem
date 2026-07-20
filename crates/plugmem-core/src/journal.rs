@@ -377,7 +377,15 @@ pub fn scan(journal: &[u8]) -> Result<JournalScan<'_>, Error> {
         if len == 0 {
             return Err(Error::Corrupt("journal record with zero length"));
         }
-        let Some(body) = rest.get(HEADER..HEADER + len) else {
+        // `HEADER + len` is computed with a checked add: on a 32-bit target
+        // `len` can reach u32::MAX and the bare `HEADER + len` overflows
+        // usize (a debug-build panic — the loader must never panic on any
+        // bytes). An overflow means the record claims more than any buffer
+        // can hold, so it is a torn tail like the `get` miss below.
+        let Some(body) = HEADER
+            .checked_add(len)
+            .and_then(|end| rest.get(HEADER..end))
+        else {
             return Ok(JournalScan {
                 entries,
                 truncated_tail: true,
