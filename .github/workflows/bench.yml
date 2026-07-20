@@ -65,6 +65,10 @@ jobs:
           targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
 
+      # bench-charts (plotters → font-kit) needs system fontconfig on Linux.
+      - name: System deps for the chart tool
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
+
       - name: Install wasmtime
         run: |
           curl https://wasmtime.dev/install.sh -sSf | bash -s -- --version "$WASMTIME_VERSION"

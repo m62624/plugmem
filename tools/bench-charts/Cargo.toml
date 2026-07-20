@@ -11,6 +11,13 @@ description = "Renders the benchmark-matrix TSV into the README chart SVGs (plot
 # logarithmic y-axis (`(lo..hi).log_scale()`) — those values span five
 # orders of magnitude and a linear axis collapses the small ones to a
 # zero-height sliver.
+#
+# Font backend is `ttf` (font-kit). On Linux this needs the system
+# `fontconfig` dev library at build time (the CI jobs that build this tool
+# install `libfontconfig1-dev`; macOS/Windows use system fonts directly).
+# `ab_glyph` would drop that dependency but ships no default font, so it
+# panics with `FontUnavailable` unless a font blob is vendored and
+# registered — not worth a binary in the repo for a dev chart tool.
 plotters = { version = "0.3.7", default-features = false, features = [
     "svg_backend",
     "ttf",

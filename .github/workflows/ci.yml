@@ -69,6 +69,12 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      # The bench-charts dev tool (plotters → font-kit) needs system
+      # fontconfig at build time on Linux; the shipped crates do not.
+      # macOS/Windows resolve system fonts without it.
+      - name: System deps for the chart tool (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
       - name: Formatting
         run: cargo fmt --all --check
       - name: Clippy
