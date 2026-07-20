@@ -30,7 +30,7 @@ impl Slot for Rec {
     }
 }
 
-fn dump_arena(a: &Arena<Rec>) -> (Vec<u8>, Vec<u8>) {
+fn dump_arena(a: &Arena<'_, Rec>) -> (Vec<u8>, Vec<u8>) {
     let (mut meta, mut pool) = (Vec::new(), Vec::new());
     a.dump_meta(&mut meta);
     a.dump_pool(&mut pool);
@@ -38,7 +38,7 @@ fn dump_arena(a: &Arena<Rec>) -> (Vec<u8>, Vec<u8>) {
 }
 
 /// A populated arena with removals, so free pages and short chains exist.
-fn sample_arena(mode: ShardMode) -> Arena<Rec> {
+fn sample_arena(mode: ShardMode) -> Arena<'static, Rec> {
     let mut a = Arena::<Rec>::new(ArenaCfg::new(4, mode)).unwrap();
     for i in 0..3000u64 {
         a.insert(&Rec { k: i * 7, v: i }).unwrap();

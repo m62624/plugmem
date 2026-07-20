@@ -21,6 +21,7 @@
 //! (varints) can therefore decode chunk by chunk without a reassembly
 //! buffer.
 
+use alloc::borrow::Cow;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -157,12 +158,17 @@ impl Default for ListHandle {
 /// assert_eq!(evens_back, [0, 2, 4, 6, 8]);
 /// pool.free(&mut odds); // chunks recycle; `evens` is untouched
 /// ```
-pub struct ChunkPool {
+pub struct ChunkPool<'a> {
     /// Chunk storage; length is always a multiple of [`CHUNK_BYTES`]. The
     /// first 4 bytes of a chunk are its chain link (little-endian `u32`,
     /// internal metadata — not a sort key, so no big-endian mandate), the
     /// remaining [`CHUNK_PAYLOAD`] bytes hold values.
-    pool: Vec<u8>,
+    ///
+    /// `Cow` so the pool can borrow the chunk bytes from a mapped snapshot
+    /// on the read-only path (specs/16), tied to `'a`; `alloc`-only, so
+    /// `no_std` holds. The read-only path never mutates, so `to_mut`'s copy
+    /// never fires.
+    pool: Cow<'a, [u8]>,
     /// Chunk -> payload bytes occupied. Payload bytes beyond `used[chunk]`
     /// are zero-filled, never exposed. (Chunks are grown zeroed on purpose:
     /// the arena's measured uninit-page `unsafe` pays off when zeroing
@@ -175,11 +181,11 @@ pub struct ChunkPool {
     cfg: ChunkPoolCfg,
 }
 
-impl ChunkPool {
+impl<'a> ChunkPool<'a> {
     /// Creates an empty pool. Allocates nothing until the first push.
     pub const fn new(cfg: ChunkPoolCfg) -> Self {
         Self {
-            pool: Vec::new(),
+            pool: Cow::Owned(Vec::new()),
             used: Vec::new(),
             free_head: NONE,
             cfg,
@@ -213,7 +219,7 @@ impl ChunkPool {
             }
             let tail = list.tail as usize;
             let at = tail * CHUNK_BYTES + 4 + self.used[tail] as usize;
-            self.pool[at..at + value.len()].copy_from_slice(value);
+            self.pool.to_mut()[at..at + value.len()].copy_from_slice(value);
             self.used[tail] += value.len() as u8;
         }
         list.len += 1;
@@ -235,7 +241,7 @@ impl ChunkPool {
     /// order. Slices contain exactly the pushed bytes (skipped tail bytes of
     /// earlier chunks are excluded), and no pushed value ever spans two
     /// slices.
-    pub fn iter<'a>(&'a self, list: &ListHandle) -> ChunkIter<'a> {
+    pub fn iter<'s>(&'s self, list: &ListHandle) -> ChunkIter<'s> {
         ChunkIter {
             pool: self,
             chunk: list.head,
@@ -274,7 +280,7 @@ impl ChunkPool {
                 .ok()
                 .filter(|&c| c != NONE)
                 .ok_or(capacity_exceeded)?;
-            self.pool.resize(new_len, 0);
+            self.pool.to_mut().resize(new_len, 0);
             self.used.push(0);
             chunk
         };
@@ -291,7 +297,7 @@ impl ChunkPool {
     /// Writes a chunk's chain link.
     fn set_link(&mut self, chunk: u32, to: u32) {
         let at = chunk as usize * CHUNK_BYTES;
-        self.pool[at..at + 4].copy_from_slice(&to.to_le_bytes());
+        self.pool.to_mut()[at..at + 4].copy_from_slice(&to.to_le_bytes());
     }
 
     /// Number of chunks the pool holds (used and free alike).
@@ -423,54 +429,28 @@ impl ChunkPool {
     ///
     /// [`Error::Corrupt`] for any inconsistency.
     pub fn load(cfg: ChunkPoolCfg, meta: &[u8], pool: &[u8]) -> Result<Self, Error> {
-        if meta.len() < 8 {
-            return Err(Error::Corrupt("chunk meta shorter than its header"));
-        }
-        let chunks = u32::from_le_bytes(meta[0..4].try_into().unwrap());
-        let free_head = u32::from_le_bytes(meta[4..8].try_into().unwrap());
-        if chunks == NONE {
-            return Err(Error::Corrupt("chunk count overflows the index space"));
-        }
-        if meta.len() as u64 != 8 + u64::from(chunks) {
-            return Err(Error::Corrupt("chunk meta length mismatch"));
-        }
-        if pool.len() as u64 != u64::from(chunks) * CHUNK_BYTES as u64 {
-            return Err(Error::Corrupt("chunk pool length mismatch"));
-        }
-        if pool.len() > cfg.max_bytes {
-            return Err(Error::Corrupt("chunk pool exceeds the configured ceiling"));
-        }
-        let used: Vec<u8> = meta[8..].to_vec();
-        if used.iter().any(|&u| u as usize > CHUNK_PAYLOAD) {
-            return Err(Error::Corrupt("chunk used bytes exceed the payload size"));
-        }
-        let link_of = |chunk: usize| {
-            let at = chunk * CHUNK_BYTES;
-            u32::from_le_bytes(pool[at..at + 4].try_into().unwrap())
-        };
-        for chunk in 0..chunks as usize {
-            let link = link_of(chunk);
-            if link != NONE && link >= chunks {
-                return Err(Error::Corrupt("chunk link out of bounds"));
-            }
-        }
-        let mut seen = alloc::vec![false; chunks as usize];
-        let mut chunk = free_head;
-        while chunk != NONE {
-            let c = chunk as usize;
-            if c >= chunks as usize {
-                return Err(Error::Corrupt("chunk free-list head out of bounds"));
-            }
-            if core::mem::replace(&mut seen[c], true) {
-                return Err(Error::Corrupt("chunk free-list contains a cycle"));
-            }
-            if used[c] != 0 {
-                return Err(Error::Corrupt("free chunk has nonzero used bytes"));
-            }
-            chunk = link_of(c);
-        }
+        let (used, free_head) = validate_chunks(cfg, meta, pool)?;
         Ok(Self {
-            pool: pool.to_vec(),
+            pool: Cow::Owned(pool.to_vec()),
+            used,
+            free_head,
+            cfg,
+        })
+    }
+
+    /// Rebuilds a pool that **borrows** its chunk bytes from a longer-lived
+    /// buffer (a memory-mapped snapshot, specs/16) instead of copying them.
+    /// Validation is identical to [`ChunkPool::load`]; the free-list walk
+    /// and per-chunk link check touch the chunk bytes (needed for safety),
+    /// but no byte is copied.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Corrupt`] for any inconsistency (same gates as `load`).
+    pub fn load_borrowed(cfg: ChunkPoolCfg, meta: &[u8], pool: &'a [u8]) -> Result<Self, Error> {
+        let (used, free_head) = validate_chunks(cfg, meta, pool)?;
+        Ok(Self {
+            pool: Cow::Borrowed(pool),
             used,
             free_head,
             cfg,
@@ -478,7 +458,60 @@ impl ChunkPool {
     }
 }
 
-impl fmt::Debug for ChunkPool {
+/// Validates a dumped chunk pool and returns its `used` table and free-list
+/// head. Shared by [`ChunkPool::load`] and [`ChunkPool::load_borrowed`];
+/// input is untrusted (see `load`).
+fn validate_chunks(cfg: ChunkPoolCfg, meta: &[u8], pool: &[u8]) -> Result<(Vec<u8>, u32), Error> {
+    if meta.len() < 8 {
+        return Err(Error::Corrupt("chunk meta shorter than its header"));
+    }
+    let chunks = u32::from_le_bytes(meta[0..4].try_into().unwrap());
+    let free_head = u32::from_le_bytes(meta[4..8].try_into().unwrap());
+    if chunks == NONE {
+        return Err(Error::Corrupt("chunk count overflows the index space"));
+    }
+    if meta.len() as u64 != 8 + u64::from(chunks) {
+        return Err(Error::Corrupt("chunk meta length mismatch"));
+    }
+    if pool.len() as u64 != u64::from(chunks) * CHUNK_BYTES as u64 {
+        return Err(Error::Corrupt("chunk pool length mismatch"));
+    }
+    if pool.len() > cfg.max_bytes {
+        return Err(Error::Corrupt("chunk pool exceeds the configured ceiling"));
+    }
+    let used: Vec<u8> = meta[8..].to_vec();
+    if used.iter().any(|&u| u as usize > CHUNK_PAYLOAD) {
+        return Err(Error::Corrupt("chunk used bytes exceed the payload size"));
+    }
+    let link_of = |chunk: usize| {
+        let at = chunk * CHUNK_BYTES;
+        u32::from_le_bytes(pool[at..at + 4].try_into().unwrap())
+    };
+    for chunk in 0..chunks as usize {
+        let link = link_of(chunk);
+        if link != NONE && link >= chunks {
+            return Err(Error::Corrupt("chunk link out of bounds"));
+        }
+    }
+    let mut seen = alloc::vec![false; chunks as usize];
+    let mut chunk = free_head;
+    while chunk != NONE {
+        let c = chunk as usize;
+        if c >= chunks as usize {
+            return Err(Error::Corrupt("chunk free-list head out of bounds"));
+        }
+        if core::mem::replace(&mut seen[c], true) {
+            return Err(Error::Corrupt("chunk free-list contains a cycle"));
+        }
+        if used[c] != 0 {
+            return Err(Error::Corrupt("free chunk has nonzero used bytes"));
+        }
+        chunk = link_of(c);
+    }
+    Ok((used, free_head))
+}
+
+impl fmt::Debug for ChunkPool<'_> {
     /// Summary only — chunk contents are the owners' data, not ours to dump.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ChunkPool")
@@ -490,7 +523,7 @@ impl fmt::Debug for ChunkPool {
 
 /// Iterator over one list's chunks; see [`ChunkPool::iter`].
 pub struct ChunkIter<'a> {
-    pool: &'a ChunkPool,
+    pool: &'a ChunkPool<'a>,
     chunk: u32,
 }
 

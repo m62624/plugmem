@@ -11,6 +11,7 @@
 //! which keeps `push`/`get` trivially O(1) and the memory image dense in the
 //! common append-mostly workload.
 
+use alloc::borrow::Cow;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -82,21 +83,29 @@ impl Default for BlobHeapCfg {
 /// assert_eq!(heap.len(), 2);
 /// ```
 #[derive(Clone, PartialEq, Eq)]
-pub struct BlobHeap {
+pub struct BlobHeap<'a> {
     /// All blob bytes, back to back in push order. Every byte is written
     /// exactly once by `push` — no uninitialized regions, hence `Clone` and
     /// `PartialEq` are safe to derive (unlike the arena).
-    pool: Vec<u8>,
+    ///
+    /// `Cow` so the heap can either own its pool (`new`/`load` — the
+    /// writable path) or borrow it from a longer-lived buffer such as a
+    /// memory-mapped snapshot (`load_borrowed` — the zero-copy read-only
+    /// path, specs/16). The borrow is `alloc`-only (`Cow`, no `std`/`Arc`),
+    /// so the crate stays `no_std`, and the lifetime `'a` lets the compiler
+    /// prove the heap never outlives its backing buffer. The first mutation,
+    /// if any, copies up to owned via `to_mut`.
+    pool: Cow<'a, [u8]>,
     /// `BlobId` -> `(offset, len)` into `pool`.
     index: Vec<(u32, u32)>,
     cfg: BlobHeapCfg,
 }
 
-impl BlobHeap {
+impl<'a> BlobHeap<'a> {
     /// Creates an empty heap. Allocates nothing until the first push.
     pub const fn new(cfg: BlobHeapCfg) -> Self {
         Self {
-            pool: Vec::new(),
+            pool: Cow::Owned(Vec::new()),
             index: Vec::new(),
             cfg,
         }
@@ -134,7 +143,7 @@ impl BlobHeap {
             .ok()
             .filter(|&i| i != u32::MAX)
             .ok_or(capacity_exceeded)?;
-        self.pool.extend_from_slice(bytes);
+        self.pool.to_mut().extend_from_slice(bytes);
         self.index.push((offset as u32, bytes.len() as u32));
         Ok(BlobId(id))
     }
@@ -212,47 +221,78 @@ impl BlobHeap {
     ///
     /// [`Error::Corrupt`] for any inconsistency.
     pub fn load(cfg: BlobHeapCfg, index: &[u8], pool: &[u8]) -> Result<Self, Error> {
-        if index.len() < 4 {
-            return Err(Error::Corrupt("blob index shorter than its header"));
-        }
-        let blobs = u32::from_le_bytes(index[0..4].try_into().unwrap());
-        if blobs == u32::MAX {
-            return Err(Error::Corrupt("blob count overflows the id space"));
-        }
-        if index.len() as u64 != 4 + u64::from(blobs) * 4 {
-            return Err(Error::Corrupt("blob index length mismatch"));
-        }
-        if pool.len() > cfg.max_bytes || pool.len() > u32::MAX as usize {
-            return Err(Error::Corrupt("blob pool exceeds the configured ceiling"));
-        }
-        let mut rebuilt = Vec::with_capacity(blobs as usize);
-        let mut offset = 0u64;
-        for i in 0..blobs as usize {
-            let at = 4 + i * 4;
-            let len = u32::from_le_bytes(index[at..at + 4].try_into().unwrap());
-            if len as usize > cfg.max_blob {
-                return Err(Error::Corrupt(
-                    "blob length exceeds the configured max_blob",
-                ));
-            }
-            rebuilt.push((offset as u32, len));
-            offset += u64::from(len);
-            if offset > pool.len() as u64 {
-                return Err(Error::Corrupt("blob lengths overrun the pool"));
-            }
-        }
-        if offset != pool.len() as u64 {
-            return Err(Error::Corrupt("blob lengths do not cover the pool"));
-        }
+        let rebuilt = validate_index(cfg, index, pool.len())?;
         Ok(Self {
-            pool: pool.to_vec(),
+            pool: Cow::Owned(pool.to_vec()),
+            index: rebuilt,
+            cfg,
+        })
+    }
+
+    /// Rebuilds a heap that **borrows** its pool from a longer-lived buffer
+    /// (a memory-mapped snapshot, specs/16) instead of copying it. The
+    /// index is validated and rebuilt exactly as in [`BlobHeap::load`]; no
+    /// pool byte is copied, so opening an 8 GiB heap this way touches only
+    /// the pages the reader dereferences. The heap is read-only in practice
+    /// (a mutation would copy the pool up to owned via `Cow::to_mut`).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Corrupt`] for any inconsistency (same gates as `load`).
+    pub fn load_borrowed(cfg: BlobHeapCfg, index: &[u8], pool: &'a [u8]) -> Result<Self, Error> {
+        let rebuilt = validate_index(cfg, index, pool.len())?;
+        Ok(Self {
+            pool: Cow::Borrowed(pool),
             index: rebuilt,
             cfg,
         })
     }
 }
 
-impl fmt::Debug for BlobHeap {
+/// Validates a dumped blob index against the pool length and rebuilds the
+/// `(offset, len)` table. Shared by [`BlobHeap::load`] and
+/// [`BlobHeap::load_borrowed`]; the input is untrusted (see `load`).
+fn validate_index(
+    cfg: BlobHeapCfg,
+    index: &[u8],
+    pool_len: usize,
+) -> Result<Vec<(u32, u32)>, Error> {
+    if index.len() < 4 {
+        return Err(Error::Corrupt("blob index shorter than its header"));
+    }
+    let blobs = u32::from_le_bytes(index[0..4].try_into().unwrap());
+    if blobs == u32::MAX {
+        return Err(Error::Corrupt("blob count overflows the id space"));
+    }
+    if index.len() as u64 != 4 + u64::from(blobs) * 4 {
+        return Err(Error::Corrupt("blob index length mismatch"));
+    }
+    if pool_len > cfg.max_bytes || pool_len > u32::MAX as usize {
+        return Err(Error::Corrupt("blob pool exceeds the configured ceiling"));
+    }
+    let mut rebuilt = Vec::with_capacity(blobs as usize);
+    let mut offset = 0u64;
+    for i in 0..blobs as usize {
+        let at = 4 + i * 4;
+        let len = u32::from_le_bytes(index[at..at + 4].try_into().unwrap());
+        if len as usize > cfg.max_blob {
+            return Err(Error::Corrupt(
+                "blob length exceeds the configured max_blob",
+            ));
+        }
+        rebuilt.push((offset as u32, len));
+        offset += u64::from(len);
+        if offset > pool_len as u64 {
+            return Err(Error::Corrupt("blob lengths overrun the pool"));
+        }
+    }
+    if offset != pool_len as u64 {
+        return Err(Error::Corrupt("blob lengths do not cover the pool"));
+    }
+    Ok(rebuilt)
+}
+
+impl fmt::Debug for BlobHeap<'_> {
     /// Summary only — blob contents are the owner's data, not ours to dump.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BlobHeap")

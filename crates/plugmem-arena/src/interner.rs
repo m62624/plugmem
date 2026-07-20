@@ -44,9 +44,11 @@ const INITIAL_SLOTS: usize = 16;
 /// `Clone` is cheap-ish (two flat memcpys) and safe: unlike the arena, every
 /// stored byte is initialized.
 #[derive(Clone)]
-pub struct Interner {
-    /// String bytes; `BlobId` values equal `TermId` values.
-    heap: BlobHeap,
+pub struct Interner<'a> {
+    /// String bytes; `BlobId` values equal `TermId` values. Borrows from a
+    /// mapped snapshot on the read-only path (specs/16), tied to `'a`; the
+    /// table stays owned (it is small and rebuilt-free).
+    heap: BlobHeap<'a>,
     /// Open-addressing table: `0` = empty slot, otherwise `TermId + 1`.
     /// Length is always a power of two; load factor is kept <= 0.7.
     table: Vec<u32>,
@@ -59,7 +61,7 @@ pub struct Interner {
     probes: u64,
 }
 
-impl Interner {
+impl<'a> Interner<'a> {
     /// Creates an empty interner; `cfg` bounds the underlying string heap
     /// ([`BlobHeapCfg::max_blob`] caps a single term's byte length). The
     /// hash table itself is small (4 bytes per slot) and not counted against
@@ -233,7 +235,31 @@ impl Interner {
     ///
     /// [`Error::Corrupt`] for any inconsistency.
     pub fn load(cfg: BlobHeapCfg, index: &[u8], pool: &[u8], table: &[u8]) -> Result<Self, Error> {
-        let heap = BlobHeap::load(cfg, index, pool)?;
+        Self::from_heap_and_table(BlobHeap::load(cfg, index, pool)?, table)
+    }
+
+    /// Rebuilds an interner that **borrows** its string bytes from a
+    /// longer-lived buffer (a memory-mapped snapshot, specs/16). The table
+    /// stays owned; validation is identical to [`Interner::load`]. The term
+    /// dictionary is small (Zipf vocabulary), so paging it in to check UTF-8
+    /// is cheap and the large pools (texts, vectors) still load lazily.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Corrupt`] for any inconsistency (same gates as `load`).
+    pub fn load_borrowed(
+        cfg: BlobHeapCfg,
+        index: &[u8],
+        pool: &'a [u8],
+        table: &[u8],
+    ) -> Result<Self, Error> {
+        Self::from_heap_and_table(BlobHeap::load_borrowed(cfg, index, pool)?, table)
+    }
+
+    /// Validates the hash table against an already-loaded string heap and
+    /// assembles the interner. Shared by [`Interner::load`] and
+    /// [`Interner::load_borrowed`]; input is untrusted (see `load`).
+    fn from_heap_and_table(heap: BlobHeap<'a>, table: &[u8]) -> Result<Self, Error> {
         for (_, blob) in heap.iter() {
             if core::str::from_utf8(blob).is_err() {
                 return Err(Error::Corrupt("interned term is not valid UTF-8"));
@@ -302,7 +328,7 @@ impl Interner {
     }
 }
 
-impl fmt::Debug for Interner {
+impl fmt::Debug for Interner<'_> {
     /// Summary only — the vocabulary is the owner's data, not ours to dump.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Interner")

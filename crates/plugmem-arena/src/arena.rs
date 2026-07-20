@@ -14,6 +14,7 @@
 //! on the wasm allocation path — see [`Arena::insert`] internals and the
 //! crate-level documentation for the numbers.
 
+use alloc::borrow::Cow;
 use alloc::vec::Vec;
 use core::fmt;
 use core::marker::PhantomData;
@@ -150,11 +151,21 @@ pub struct Counters {
 /// - `Arena` deliberately implements neither `Clone` nor `PartialEq`: pages
 ///   are allocated **uninitialized** (the measured wasm optimization), and a
 ///   byte-wise clone/compare would read the uninitialized tails.
-pub struct Arena<T: Slot> {
+pub struct Arena<'a, T: Slot> {
     /// Page pool; length is always a multiple of [`PAGE_BYTES`]. Bytes of a
     /// page beyond `counts[page] * T::SIZE` are uninitialized and must
     /// never be read.
-    pool: Vec<u8>,
+    ///
+    /// `Cow` so the arena can either own the pool (`new`/`load` — the
+    /// writable path) or borrow it from a longer-lived buffer such as a
+    /// memory-mapped snapshot (`load_borrowed` — the zero-copy read-only
+    /// path, specs/16). Borrowing is `alloc`-only (`Cow`, no `std`/`Arc`),
+    /// so the crate stays `no_std`, and the lifetime `'a` lets the compiler
+    /// prove the arena never outlives its backing buffer. The read-only path
+    /// never mutates, so `to_mut`'s copy-up never fires and the
+    /// uninitialized-tail invariant is untouched (a borrowed pool is a
+    /// fully-initialized dumped image).
+    pool: Cow<'a, [u8]>,
     /// Shard -> first page of its chain (`NONE` = empty shard).
     heads: Vec<u32>,
     /// Page -> successor: the next page in a shard chain, or the next free
@@ -186,7 +197,7 @@ struct Target {
     page: u32,
 }
 
-impl<T: Slot> Arena<T> {
+impl<'a, T: Slot> Arena<'a, T> {
     /// Creates an empty arena.
     ///
     /// # Errors
@@ -205,7 +216,7 @@ impl<T: Slot> Arena<T> {
             return Err(Error::BadShardCount { got: cfg.shards });
         }
         Ok(Self {
-            pool: Vec::new(),
+            pool: Cow::Owned(Vec::new()),
             heads: alloc::vec![NONE; cfg.shards],
             next: Vec::new(),
             counts: Vec::new(),
@@ -307,9 +318,10 @@ impl<T: Slot> Arena<T> {
         if shifted > 0 {
             // Shift the sorted tail right by one slot; stays within the page.
             self.pool
+                .to_mut()
                 .copy_within(slot_start..used_end, slot_start + T::SIZE);
         }
-        self.pool[slot_start..slot_start + T::SIZE].copy_from_slice(slot);
+        self.pool.to_mut()[slot_start..slot_start + T::SIZE].copy_from_slice(slot);
         bump!(self, bytes_shifted, shifted);
 
         self.counts[page as usize] += 1;
@@ -336,7 +348,7 @@ impl<T: Slot> Arena<T> {
             return Ok(if pos == 0 {
                 let src = page as usize * PAGE_BYTES;
                 let dst = fresh as usize * PAGE_BYTES;
-                self.pool.copy_within(src..src + T::SIZE, dst);
+                self.pool.to_mut().copy_within(src..src + T::SIZE, dst);
                 bump!(self, bytes_shifted, T::SIZE);
                 self.counts[page as usize] = 0;
                 self.counts[fresh as usize] = 1;
@@ -351,7 +363,9 @@ impl<T: Slot> Arena<T> {
         let moved = spp - half;
         let src = page as usize * PAGE_BYTES + half * T::SIZE;
         let dst = fresh as usize * PAGE_BYTES;
-        self.pool.copy_within(src..src + moved * T::SIZE, dst);
+        self.pool
+            .to_mut()
+            .copy_within(src..src + moved * T::SIZE, dst);
         bump!(self, bytes_shifted, moved * T::SIZE);
         self.counts[page as usize] = half as u16;
         self.counts[fresh as usize] = moved as u16;
@@ -407,7 +421,7 @@ impl<T: Slot> Arena<T> {
     /// Panics if `key.len() != T::KEY_LEN`.
     pub fn payload_mut(&mut self, key: &[u8]) -> Option<&mut [u8]> {
         let off = self.locate(key)?;
-        Some(&mut self.pool[off + T::KEY_LEN..off + T::SIZE])
+        Some(&mut self.pool.to_mut()[off + T::KEY_LEN..off + T::SIZE])
     }
 
     /// Removes the record with the given key prefix. Returns `true` if it
@@ -441,6 +455,7 @@ impl<T: Slot> Arena<T> {
         if tail > 0 {
             // Shift the tail left over the removed slot; stays within the page.
             self.pool
+                .to_mut()
                 .copy_within(slot_start + T::SIZE..used_end, slot_start);
         }
         bump!(self, bytes_shifted, tail);
@@ -487,7 +502,7 @@ impl<T: Slot> Arena<T> {
     ///
     /// Panics if the arena is in [`ShardMode::Uniform`], or if either bound's
     /// length differs from `T::KEY_LEN`.
-    pub fn range<'a>(&'a self, from: &[u8], to: &'a [u8]) -> Range<'a, T> {
+    pub fn range<'s>(&'s self, from: &[u8], to: &'s [u8]) -> Range<'s, T> {
         assert_eq!(
             self.cfg.mode,
             ShardMode::Ordered,
@@ -618,6 +633,30 @@ impl<T: Slot> Arena<T> {
     /// (same gates as [`Arena::new`]); [`Error::Corrupt`] for any image
     /// inconsistency.
     pub fn load(cfg: ArenaCfg, meta: &[u8], pool: &[u8]) -> Result<Self, Error> {
+        Self::load_impl(cfg, meta, pool, Cow::Owned(pool.to_vec()))
+    }
+
+    /// Rebuilds an arena that **borrows** its page pool from a longer-lived
+    /// buffer (a memory-mapped snapshot, specs/16) instead of copying it.
+    /// Validation is identical to [`Arena::load`] — it reads each page's
+    /// first and last keys, so it touches one OS page per arena page (the
+    /// key-order check needs them), but no pool byte is copied.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Arena::load`].
+    pub fn load_borrowed(cfg: ArenaCfg, meta: &[u8], pool: &'a [u8]) -> Result<Self, Error> {
+        Self::load_impl(cfg, meta, pool, Cow::Borrowed(pool))
+    }
+
+    /// Shared body of [`Arena::load`] / [`Arena::load_borrowed`]: validates
+    /// the untrusted `meta`/`pool` image and adopts `backing` as the pool.
+    fn load_impl(
+        cfg: ArenaCfg,
+        meta: &[u8],
+        pool: &[u8],
+        backing: Cow<'a, [u8]>,
+    ) -> Result<Self, Error> {
         let mut arena = Self::new(cfg)?;
         if meta.len() < IMAGE_HEADER {
             return Err(Error::Corrupt("arena meta shorter than its header"));
@@ -733,7 +772,7 @@ impl<T: Slot> Arena<T> {
             ));
         }
 
-        arena.pool = pool.to_vec();
+        arena.pool = backing;
         arena.heads = heads;
         arena.next = next;
         arena.counts = counts;
@@ -840,7 +879,10 @@ impl<T: Slot> Arena<T> {
             });
         }
         let page = (old_len / PAGE_BYTES) as u32;
-        self.pool.reserve(PAGE_BYTES);
+        // Every mutating path owns the pool (a borrowed pool is read-only),
+        // so `to_mut` returns the owned Vec without cloning.
+        let pool = self.pool.to_mut();
+        pool.reserve(PAGE_BYTES);
         // SAFETY: the new page is left uninitialized on purpose — this is the
         // one measured unsafe of the crate. Zeroing fresh pages was benched
         // at 12x slower on the wasm allocation path (wasmtime, 32k pages:
@@ -855,7 +897,7 @@ impl<T: Slot> Arena<T> {
         // (`specs/03`).
         #[allow(clippy::uninit_vec)]
         unsafe {
-            self.pool.set_len(new_len);
+            pool.set_len(new_len);
         }
         self.next.push(NONE);
         self.counts.push(0);
@@ -887,7 +929,7 @@ fn search<T: Slot>(page: &[u8], count: usize, key: &[u8], cmps: &mut u64) -> Res
     Err(lo)
 }
 
-impl<T: Slot> fmt::Debug for Arena<T> {
+impl<T: Slot> fmt::Debug for Arena<'_, T> {
     /// Summary only — dumping the pool would both flood output and read
     /// uninitialized page tails.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -904,7 +946,7 @@ impl<T: Slot> fmt::Debug for Arena<T> {
 /// Iterator over all records of an [`Arena`]; see [`Arena::iter`] for
 /// ordering guarantees.
 pub struct Iter<'a, T: Slot> {
-    arena: &'a Arena<T>,
+    arena: &'a Arena<'a, T>,
     shard: usize,
     /// Current chain page; `NONE` means "advance to the next shard's head".
     page: u32,
@@ -944,7 +986,7 @@ impl<T: Slot> Iterator for Iter<'_, T> {
 
 impl<T: Slot> ExactSizeIterator for Iter<'_, T> {}
 
-impl<'a, T: Slot> IntoIterator for &'a Arena<T> {
+impl<'a, T: Slot> IntoIterator for &'a Arena<'a, T> {
     type Item = T;
     type IntoIter = Iter<'a, T>;
 
@@ -955,7 +997,7 @@ impl<'a, T: Slot> IntoIterator for &'a Arena<T> {
 
 /// Iterator over a key range of an [`Arena`]; see [`Arena::range`].
 pub struct Range<'a, T: Slot> {
-    arena: &'a Arena<T>,
+    arena: &'a Arena<'a, T>,
     shard: usize,
     /// Current chain page; `NONE` means "advance to the next shard's head".
     page: u32,

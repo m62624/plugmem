@@ -33,7 +33,7 @@ fn rec_key(id: u32) -> [u8; 4] {
     k
 }
 
-fn ordered_arena(shards: usize) -> Arena<Rec> {
+fn ordered_arena(shards: usize) -> Arena<'static, Rec> {
     Arena::new(ArenaCfg::new(shards, ShardMode::Ordered)).unwrap()
 }
 
