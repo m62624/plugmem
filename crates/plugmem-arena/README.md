@@ -1,14 +1,25 @@
 # plugmem-arena
 
-Flat byte-pool storage structures: a sharded sorted arena, an append-only
-blob heap, chunked lists, and a string interner — `no_std + alloc`,
-zero-copy-persistable, designed for 32-bit WebAssembly address spaces
-first and measured on native, wasmtime and wasmer.
+Flat byte-pool data structures: a sharded sorted arena, an append-only
+blob heap, chunked lists, and a string interner. `no_std + alloc`, no
+dependencies, so it runs anywhere Rust compiles — designed for 32-bit
+WebAssembly linear memory first, where allocator traffic is expensive:
+each structure's whole lifetime is a near-constant number of allocator
+calls (≈40 to build a million records), and its in-memory representation
+*is* its serialized form, so persisting is a `memcpy` and loading is a
+bounds-check plus adoption — no per-record parsing, no pointer rebuild.
 
-This crate is the storage foundation of the plugmem engine, but nothing in
-it knows about facts, vectors or LLMs. If you need a compact,
-allocation-frugal sorted container whose in-memory representation *is* its
-serialized form, you can lift it into your own project as-is.
+Nothing here knows about the data it stores. Reach for it when you need a
+compact, allocation-frugal **ordered container that is its own file
+format** — an ordered index, a record store, an inverted index, a string
+dictionary. One user is [`plugmem-core`](../plugmem-core), an agent-memory
+engine built on top of these four structures, but the crate stands on its
+own; lift it into any project as-is.
+
+**Which crate:** this crate is the storage layer. For the memory engine
+built on it, see [`plugmem-core`](../plugmem-core) (`no_std`); for the
+file-backed, locking host with embedders, [`plugmem-host`](../plugmem-host)
+(`std`).
 
 ## Design
 
@@ -365,8 +376,9 @@ Crates solving neighboring problems, and how the class differs:
 
 ## Feature flags
 
-- `std` *(default)* — convenience only; the crate is fully functional as
-  `no_std + alloc` (built and gated on `wasm32v1-none`).
+The crate is `no_std + alloc` unconditionally — there is no `std` feature
+to toggle (it builds and is gated on `wasm32v1-none` in CI).
+
 - `counters` — deterministic work counters on every structure (key
   comparisons, bytes shifted, pages allocated, chain steps, splits,
   interner probes). Zero cost when disabled.
@@ -375,9 +387,8 @@ Crates solving neighboring problems, and how the class differs:
 
 75 boundary tests + 6 proptest reference models (`BTreeMap`,
 `Vec<Vec<u8>>`, per-list model, `HashMap` bijection), ≥90% line coverage
-with hand-audited analyzer artifacts, clippy-clean in all four feature
-combinations, miri on the full suite, and `wasm32v1-none` builds as a hard
-gate.
+with hand-audited analyzer artifacts, clippy-clean with `counters` off and
+on, miri on the full suite, and `wasm32v1-none` builds as a hard gate.
 
 ## License
 

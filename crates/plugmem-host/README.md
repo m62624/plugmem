@@ -1,38 +1,40 @@
 # plugmem-host
 
-**plugmem** is an embedded long-term memory database for LLM agents —
-the SQLite model applied to agent memory. It lives as a library inside
-your process (no server, no cloud), keeps a whole database in one
-snapshot file plus an append-only journal, and answers with a ranked,
-token-budgeted context block ready to paste into a prompt. An agent
-talks to it in four verbs — `remember / recall / revise / forget` — and
-gets, in one engine: **BM25** full-text search over a Unicode
-([UAX #29](https://unicode.org/reports/tr29/)) tokenizer, **int8
-quantized vector search** (flat scan below a threshold,
-[HNSW](https://arxiv.org/abs/1603.09320) above it), an **entity graph**
-with typed edges, **bitemporal facts** ("what was true then"), and
-[reciprocal-rank fusion](https://dl.acm.org/doi/10.1145/1571941.1572114)
-of all four evidence sources with a recency boost. Retrieval is
-microseconds at a 100k-fact corpus and allocation-free after warm-up;
-the numbers and gates live in the
-[engine README](../plugmem-core/README.md#performance).
+`plugmem-host` is the `std` host layer for the plugmem
+[temporal-memory engine](../plugmem-core): point it at a file path and go.
+It supplies the things the `no_std` engine deliberately does not own —
+files, locking, and network — so that from this one crate an agent gets
+`remember / recall / revise / forget` backed by durable storage. The
+retrieval itself (BM25, int8-quantized vectors with
+[HNSW](https://arxiv.org/abs/1603.09320), an entity graph, temporal
+range scans, all fused by rank) lives in the engine; this crate adds:
 
-**This crate, `plugmem-host`, is the batteries**: point it at a file
-path and go — the SQLite-style experience. It supplies the three things
-the `no_std` engine deliberately does not own — files (atomic snapshots,
-journal, crash recovery), OS-level locking and maintenance policy, and
-network access to embedding providers (one client speaks the
-`/v1/embeddings` shape of OpenAI, Ollama, LM Studio, vLLM and
-llama.cpp-server).
+- **File-backed storage** — atomic snapshots (tmp + fsync + rename),
+  an append-only journal with a configurable fsync policy, crash
+  recovery (a torn journal tail is detected and dropped on open);
+- **OS locking** — one exclusive advisory lock per database file, so a
+  second opener is refused with a typed `HostError::Locked` rather than
+  corrupting silently;
+- **A read-only mmap open** — `Database::open_readonly` maps the snapshot
+  and lets the engine borrow the mapped pages, so a large read-mostly
+  database residents only the pages a query touches instead of loading
+  the whole file;
+- **Maintenance policy** — auto-snapshot and optional auto-`maintain`,
+  run inline (no background threads);
+- **Embedding providers** — one HTTP client for the `/v1/embeddings`
+  shape shared by OpenAI, Ollama, LM Studio, vLLM and llama.cpp-server.
+
+Without an embedder it is fully functional — lexical, tags, graph and
+time still answer; vectors are an addition, not a requirement.
 
 ## Which crate do you need?
 
 | You want | Depend on |
 |---|---|
-| the SQLite-style experience above: open a path, get durability, locking and auto-embedding | **this crate** (it re-exports the engine's types) |
-| the engine alone: your own storage (browser, wasm host, custom persistence), `no_std`, full control — BM25/HNSW/graph/time included, no files or network | [`plugmem-core`](../plugmem-core) |
-| the flat byte structures underneath | [`plugmem-arena`](../plugmem-arena) |
-| no Rust at all: a CLI, an MCP server for agents, an npm package | `plugmem-cli` / `plugmem-mcp` / `plugmem-wasm` — next roadmap stage, not published yet |
+| point it at a file path and go — durability, locking, read-only mmap, auto-embedding | **this crate** (`std`; re-exports the engine's types) |
+| the engine alone with your own storage (a browser, a wasm host, custom persistence) — BM25/HNSW/graph/time included, no files or network | [`plugmem-core`](../plugmem-core) (`no_std`) |
+| the flat byte data structures underneath | [`plugmem-arena`](../plugmem-arena) (`no_std`) |
+| no Rust at all: a CLI, an MCP server for agents, an npm package | `plugmem-cli` / `plugmem-mcp` / `plugmem-wasm` — in progress, not published yet |
 
 ```rust,no_run
 use plugmem_host::{Config, Database, OpenAiCompatEmbedder, RecallQuery, RememberInput};
@@ -59,10 +61,6 @@ let out = db.recall(RecallQuery::text(1_784_000_100_000, "which runtime?"))?;
 println!("{}", out.rendered);
 # Ok::<(), plugmem_host::HostError>(())
 ```
-
-Without an embedder the database is fully functional — BM25, tags,
-entity graph and time still answer; vectors are an addition, not a
-requirement.
 
 Native builds are 64-bit, so a host process reads every capacity class
 of the shared file format: databases sized for the 32-bit wasm budget

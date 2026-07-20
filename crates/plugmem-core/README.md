@@ -1,36 +1,49 @@
 # plugmem-core
 
-**plugmem** is an embedded long-term memory database for LLM agents —
-the SQLite model applied to agent memory. It lives as a library inside
-your process (no server, no cloud), keeps a whole database in one
-snapshot file plus an append-only journal, and answers with a ranked,
-token-budgeted context block ready to paste into a prompt. An agent
-talks to it in four verbs — `remember / recall / revise / forget` — and
-gets, in one engine: **BM25** full-text search over a Unicode
-([UAX #29](https://unicode.org/reports/tr29/)) tokenizer, **int8
-quantized vector search** (flat scan below a threshold,
-[HNSW](https://arxiv.org/abs/1603.09320) above it), an **entity graph**
-with typed edges, **bitemporal facts** ("what was true then"), and
-[reciprocal-rank fusion](https://dl.acm.org/doi/10.1145/1571941.1572114)
-of all four evidence sources with a recency boost. Storage is flat byte
-arenas, so the memory image *is* the file format: loading is a
-bounds-check plus adopt, replay is deterministic to the byte, and the
-same file opens on native, wasm32 and wasm64 builds unchanged.
+`plugmem-core` is an embedded **temporal-memory engine for LLM agents**,
+as a library inside your process — no server, no cloud. An agent talks to
+it in four verbs — `remember / recall / revise / forget` — and it answers
+with a ranked, token-budgeted context block ready to paste into a prompt.
+It keeps a whole database in one snapshot file plus an append-only
+journal; storage is flat byte arenas, so the memory image *is* the file
+format (loading is a bounds-check plus adopt, replay is deterministic to
+the byte, and the same file opens on native, wasm32 and wasm64 unchanged).
 
-**This crate, `plugmem-core`, is the engine itself**: `no_std + alloc`,
-zero I/O, no clock, no threads. Bytes enter and leave through a
-five-method `Storage` trait, timestamps arrive as parameters, and
-embeddings are computed by the caller — which is what lets the same
-engine run natively, in `wasm32v1-none`, or anywhere else Rust compiles.
+It is **not** a vector database. A vector is one of four recall sources,
+fused with rank-based scoring:
+
+- **Lexical** — [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) with the
+  Robertson idf over a Unicode
+  ([UAX #29](https://unicode.org/reports/tr29/)) tokenizer;
+- **Vector** — symmetric **int8-quantized** cosine search, a flat
+  two-phase scan below a threshold and an
+  [HNSW](https://arxiv.org/abs/1603.09320) graph above it;
+- **Graph** — an entity graph with typed edges, expanded breadth-first
+  from query anchors;
+- **Temporal** — range scans over a `recorded_at`-ordered index;
+
+the four are merged by [reciprocal-rank
+fusion](https://dl.acm.org/doi/10.1145/1571941.1572114) with a recency
+boost (tags act as filters, not a source). On top of that: **bitemporal
+facts** (`revise`/`forget`, "what was true *then*", revision chains,
+physical erasure), and **conflict surfacing** — a new `remember` returns
+the live facts it may duplicate or contradict, and the engine never merges
+on its own; the caller decides.
+
+**This crate is the engine itself:** `no_std + alloc`, zero I/O, no clock,
+no threads. Bytes enter and leave through a five-method `Storage` trait,
+timestamps arrive as parameters, and embeddings are computed by the caller
+— which is what lets the same engine run natively, in `wasm32v1-none`, or
+anywhere else Rust compiles.
 
 ## Which crate do you need?
 
 | You want | Depend on |
 |---|---|
-| the SQLite-style experience: point at a file path and go — OS locking, fsync policy, auto-snapshot, automatic embeddings over HTTP (OpenAI/Ollama/LM Studio/vLLM/llama.cpp) | [`plugmem-host`](../plugmem-host) (it re-exports this engine) |
-| the engine alone: your own storage (browser, wasm host, custom persistence), no std, full control | **this crate** |
-| the flat byte structures underneath (sorted page arenas, blob heap, interner) for your own storage project | [`plugmem-arena`](../plugmem-arena) |
-| no Rust at all: a CLI, an MCP server for agents, an npm package | `plugmem-cli` / `plugmem-mcp` / `plugmem-wasm` — next roadmap stage, not published yet |
+| point it at a file and go — OS locking, fsync and auto-snapshot policy, a zero-copy read-only mmap open, automatic embeddings over HTTP (OpenAI/Ollama/LM Studio/vLLM/llama.cpp) | [`plugmem-host`](../plugmem-host) (`std`; re-exports this engine) |
+| the engine alone with your own storage (a browser, a wasm host, custom persistence), `no_std`, full control | **this crate** |
+| the flat byte structures underneath (sorted page arenas, blob heap, chunk pool, interner) for your own storage project | [`plugmem-arena`](../plugmem-arena) (`no_std`) |
+| no Rust at all: a CLI, an MCP server for agents, an npm package | `plugmem-cli` / `plugmem-mcp` / `plugmem-wasm` — in progress, not published yet |
 
 ## Who this is for
 
@@ -198,8 +211,9 @@ a separate target and never run under `cargo test`). Corpora come from
 
 ## Features and targets
 
-- `std` *(default)* — convenience only; the crate is fully functional as
-  `no_std + alloc` and builds for `wasm32v1-none` in CI.
+The crate is `no_std + alloc` unconditionally — there is no `std` feature
+(it builds and is gated on `wasm32v1-none` in CI).
+
 - `counters` — the deterministic work counters; zero cost when off.
 
 ### WebAssembly 2.0 and 3.0
