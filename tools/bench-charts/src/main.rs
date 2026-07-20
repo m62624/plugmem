@@ -40,9 +40,9 @@ use plotlars::{BarPlot, Legend, Plot, Rgb, Text};
 /// The runtimes, in display order, with the colors used across every
 /// chart (kept stable so the legend reads the same everywhere).
 const RUNTIMES: [(&str, Rgb); 3] = [
-    ("native", Rgb(37, 99, 235)),   // blue
-    ("wasmtime", Rgb(217, 119, 6)), // amber
-    ("wasmer", Rgb(5, 150, 105)),   // green
+    ("native", Rgb(30, 58, 138)),   // navy
+    ("wasmtime", Rgb(202, 138, 4)), // gold
+    ("wasmer", Rgb(190, 24, 93)),   // rose
 ];
 
 /// One chart: an output filename, a title, the corpus size and metric it
@@ -167,8 +167,23 @@ struct Config {
 fn main() {
     let cfg = load_config();
 
+    // Args: an optional input path and an optional `--force`. `--force`
+    // ignores the noise threshold and rewrites every chart — use it after
+    // a style change (new colors/titles), where the values are unchanged
+    // so the threshold would otherwise skip them. Re-rendering from the
+    // committed baseline is then `-- tools/bench-charts/baseline.tsv --force`.
+    let mut force = false;
+    let mut input_path = None;
+    for arg in std::env::args().skip(1) {
+        if arg == "--force" {
+            force = true;
+        } else {
+            input_path = Some(arg);
+        }
+    }
+
     // Input: the stand's #TSV rows, from a file argument or stdin.
-    let raw = match std::env::args().nth(1) {
+    let raw = match input_path {
         Some(p) => std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("reading {p}: {e}")),
         None => {
             let mut s = String::new();
@@ -193,7 +208,11 @@ fn main() {
     let mut updated = 0usize;
     for chart in CHARTS {
         let cells = chart_cells(chart, &new);
-        let verdict = decide(&cells, &base, cfg.threshold);
+        let verdict = if force {
+            Verdict::Render { max_delta: 0.0 }
+        } else {
+            decide(&cells, &base, cfg.threshold)
+        };
         match verdict {
             Verdict::Render { max_delta } => {
                 render(chart, &new, &cfg.out_dir);
