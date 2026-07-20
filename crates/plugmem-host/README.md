@@ -1,9 +1,14 @@
 # plugmem-host
 
 The native host layer for the [plugmem](../plugmem-core) memory engine:
-point it at a file and go. It supplies the three things the `no_std`
-core deliberately does not own — files, locking, and network access to
-embedding providers.
+point it at a file and go — the SQLite-style experience. It supplies the
+three things the `no_std` core deliberately does not own — files,
+locking, and network access to embedding providers.
+
+If you need the engine itself (your own storage, wasm, tighter control),
+depend on [`plugmem-core`](../plugmem-core) directly; this crate is a
+convenience shell around it. Non-Rust surfaces (CLI, MCP server,
+npm/wasm package) are the next roadmap stage.
 
 ```rust,no_run
 use plugmem_host::{Config, Database, OpenAiCompatEmbedder, RecallQuery, RememberInput};
@@ -34,6 +39,14 @@ println!("{}", out.rendered);
 Without an embedder the database is fully functional — BM25, tags,
 entity graph and time still answer; vectors are an addition, not a
 requirement.
+
+Native builds are 64-bit, so a host process reads every capacity class
+of the shared file format: databases sized for the 32-bit wasm budget
+(≤ 2 GiB, the default) and databases with larger limits alike. The
+snapshot format is pointer-width independent — a file written here opens
+unchanged in a wasm32 or wasm64 build of the core, as long as its
+configured limits fit that host (see the core README, "WebAssembly 2.0
+and 3.0").
 
 ## Files
 

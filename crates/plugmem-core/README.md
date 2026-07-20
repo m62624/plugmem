@@ -20,7 +20,17 @@ relationship graph, and hybrid retrieval, all inside the process and
 inside a single file. It is not a horizontally scalable search cluster
 and does not try to be one; the capacity passport is deliberately sized
 to the 32-bit wasm address space (≤ 2 GiB, design center 100k facts,
-ceiling 1M).
+ceiling 1M). On 64-bit hosts — native or WebAssembly 3.0
+[memory64](https://github.com/WebAssembly/memory64) — the same code and
+the same file format carry larger limits; see
+[Targets and WebAssembly](#features-and-targets).
+
+**This crate is the engine, not the ergonomics.** If you want the
+SQLite-style experience — point at a file path and go, with locking,
+fsync policy and automatic embedding — use
+[`plugmem-host`](../plugmem-host) on top of this core. Non-Rust
+surfaces (CLI, MCP server, npm/wasm package) are the next stage of the
+roadmap and will wrap the same engine.
 
 ## Quick start
 
@@ -157,8 +167,12 @@ a separate target and never run under `cargo test`). Corpora come from
 ## Limits, stated plainly
 
 - Single-threaded, single-writer. Concurrency belongs to the embedding
-  process (the `plugmem-host` crate serializes access to a file).
-- ≤ 2 GiB of state; ids are `u32`; texts ≤ 4 KiB; dimensions ≤ 4096.
+  process (the [`plugmem-host`](../plugmem-host) crate serializes access
+  to a file).
+- ≤ 2 GiB of state by default (the 32-bit wasm budget); ids are `u32`;
+  texts ≤ 4 KiB; dimensions ≤ 4096. On 64-bit builds `max_bytes` may be
+  raised past 4 GiB — such a database then opens only on 64-bit hosts
+  (a typed error, not corruption, on 32-bit ones).
 - Vector search is quantized (int8) — exact f32 scores are never
   computed — and approximate above the HNSW threshold (recall@10 ≥ 0.9
   against brute force is a test gate, not a proof).
@@ -173,6 +187,44 @@ a separate target and never run under `cargo test`). Corpora come from
 - `std` *(default)* — convenience only; the crate is fully functional as
   `no_std + alloc` and builds for `wasm32v1-none` in CI.
 - `counters` — the deterministic work counters; zero cost when off.
+
+### WebAssembly 2.0 and 3.0
+
+One source, one file format, two address-space classes:
+
+- **wasm32** (WebAssembly 2.0 class; `wasm32v1-none`,
+  `wasm32-unknown-unknown`) — the default and the portability baseline:
+  runs in every engine and browser. The full contract test suite runs on
+  a real 32-bit target:
+  `cargo test -p plugmem-core --target wasm32-wasip1` under wasmtime.
+- **wasm64** (WebAssembly 3.0
+  [memory64](https://github.com/WebAssembly/memory64)) — lifts the 4 GiB
+  linear-memory ceiling. The crate builds for `wasm64-unknown-unknown`
+  unchanged (nightly `-Zbuild-std=core,alloc`; the target is tier 3).
+  Engine support today: wasmtime and 3.0-era browsers run it; wasmer
+  does not yet.
+
+Snapshots are pointer-width independent by construction — every codec
+writes fixed-width little-endian fields — and this is verified, not
+assumed: the same scenario produces **byte-identical snapshots** on
+native x86-64, wasm32 and wasm64 (and with `+simd128` enabled). A
+database is portable across all of them as long as its configured
+limits fit the host's address space; "migrating" from a 32-bit to a
+64-bit deployment is opening the same file. Determinism is preserved on
+purpose: the engine stays inside the Wasm 3.0 *deterministic profile*
+(integer distances, total-order float comparisons, no relaxed SIMD in
+any state-affecting path).
+
+## Related crates
+
+| Crate | What it adds | When to use it |
+|---|---|---|
+| [`plugmem-host`](../plugmem-host) | files, OS locking, fsync policy, auto-snapshot, HTTP embedders | you are in Rust and want "open a path and go", like SQLite |
+| [`plugmem-arena`](../plugmem-arena) | the flat byte structures underneath | you are building your own storage on the same principles |
+| `plugmem-cli`, `plugmem-mcp`, `plugmem-wasm` | command line, MCP server, npm package | non-Rust consumers; next roadmap stage, not published yet |
+
+Crates are published to crates.io under these names once the format
+freezes; until then, use the git repository.
 
 ## License
 
