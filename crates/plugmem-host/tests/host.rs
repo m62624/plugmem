@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use plugmem_host::{
     Config, Database, Embedder, FactId, FsyncPolicy, HostError, NullEmbedder, OpenAiCompatEmbedder,
-    RecallQuery, RememberInput,
+    ReadOnlyDatabase, RecallQuery, RememberInput,
 };
 
 /// A unique temp directory per test; removed on drop.
@@ -464,6 +464,106 @@ fn file_storage_direct_and_io_errors() {
         Err(HostError::Io { .. }) => {}
         other => panic!("expected Io, got {other:?}"),
     }
+}
+
+/// A workload touching several sources, then a checkpoint so the journal
+/// is empty (the read-only precondition).
+fn seed_checkpointed(db: &Database) {
+    for i in 0..30u64 {
+        db.remember(RememberInput {
+            entity: Some(["user", "plugmem", "кот"][(i % 3) as usize]),
+            tags: if i % 2 == 0 { &["pref"] } else { &[] },
+            ..RememberInput::text(i + 1, "some fact about работа and tokio")
+        })
+        .unwrap();
+    }
+    db.link(plugmem_host::LinkInput {
+        now: 100,
+        src: "plugmem",
+        rel: "depends_on",
+        dst: "tokio",
+        provenance: None,
+    })
+    .unwrap();
+    db.checkpoint(200).unwrap();
+}
+
+#[test]
+fn open_readonly_matches_read_write() {
+    let tmp = TempDir::new("ro-match");
+    let q = RecallQuery {
+        entities: &["plugmem"],
+        ..RecallQuery::text(1_000, "работа tokio")
+    };
+    // Build and checkpoint, capture the read-write answers, then release
+    // the lock.
+    let (facts, rendered, got1) = {
+        let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+        seed_checkpointed(&db);
+        let stats = db.stats();
+        let rendered = db.recall(q).unwrap().rendered;
+        let got1 = db.get(FactId(1)).unwrap();
+        (stats.facts, rendered, got1)
+    };
+
+    // The read-only open borrows the mmap; its answers are identical.
+    let ro: ReadOnlyDatabase = Database::open_readonly(tmp.db(), cfg()).unwrap();
+    assert_eq!(ro.stats().facts, facts);
+    assert_eq!(ro.recall(q).unwrap().rendered, rendered);
+    assert_eq!(ro.get(FactId(1)), Some(got1));
+    assert_eq!(ro.path(), tmp.db());
+    // Debug is a summary, never the contents.
+    assert!(format!("{ro:?}").contains("ReadOnlyDatabase"));
+}
+
+#[test]
+fn open_readonly_refuses_a_dirty_journal() {
+    let tmp = TempDir::new("ro-dirty");
+    {
+        let (db, _) = Database::builder(cfg())
+            .snapshot_every_ops(0) // never auto-snapshot: keep the journal dirty
+            .open(tmp.db())
+            .unwrap();
+        db.remember(RememberInput::text(1, "uncheckpointed"))
+            .unwrap();
+    }
+    // A non-empty journal is a typed refusal with the base path.
+    match Database::open_readonly(tmp.db(), cfg()) {
+        Err(HostError::NeedsCheckpoint { path }) => assert_eq!(path, tmp.db()),
+        other => panic!("expected NeedsCheckpoint, got {other:?}"),
+    }
+    // Checkpointing read-write once clears the way.
+    {
+        let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+        db.checkpoint(2).unwrap();
+    }
+    let ro = Database::open_readonly(tmp.db(), cfg()).unwrap();
+    assert_eq!(ro.stats().facts, 1);
+}
+
+#[test]
+fn open_readonly_holds_the_lock_and_frees_it_on_drop() {
+    let tmp = TempDir::new("ro-lock");
+    {
+        let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+        seed_checkpointed(&db);
+    }
+    let ro = Database::open_readonly(tmp.db(), cfg()).unwrap();
+    // The read-only handle holds the same exclusive lock: a second owner
+    // is refused, read-write or read-only.
+    match Database::open(tmp.db(), cfg()) {
+        Err(HostError::Locked { path }) => assert_eq!(path, tmp.db()),
+        other => panic!("expected Locked, got {other:?}"),
+    }
+    assert!(matches!(
+        Database::open_readonly(tmp.db(), cfg()),
+        Err(HostError::Locked { .. })
+    ));
+    drop(ro);
+    // Released on drop: the file opens (and writes) again.
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    db.remember(RememberInput::text(300, "after readonly"))
+        .unwrap();
 }
 
 #[test]

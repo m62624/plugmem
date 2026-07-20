@@ -24,6 +24,7 @@ use plugmem_core::{
 
 use crate::embedder::Embedder;
 use crate::error::HostError;
+use crate::readonly::ReadOnlyDatabase;
 use crate::storage::{FileStorage, FsyncPolicy};
 
 /// An owned view of one fact — [`Memory::get`] returns borrows that
@@ -150,6 +151,25 @@ impl Database {
     /// Opens `path` with every knob at its default and no embedder.
     pub fn open(path: impl Into<PathBuf>, cfg: Config) -> Result<(Self, OpenReport), HostError> {
         Self::builder(cfg).open(path)
+    }
+
+    /// Opens `path` read-only over a memory-mapped snapshot (specs/16):
+    /// the engine borrows the mapped pages instead of copying the file
+    /// into RAM, so a large read-mostly database residents only the pages
+    /// `recall`/`get` touch. Requires a checkpointed database (empty
+    /// journal) and takes the same exclusive lock as a read-write open.
+    /// See [`ReadOnlyDatabase`].
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::Locked`], [`HostError::NeedsCheckpoint`],
+    /// [`HostError::Io`], [`HostError::Engine`] — see
+    /// [`ReadOnlyDatabase::open`] semantics.
+    pub fn open_readonly(
+        path: impl Into<PathBuf>,
+        cfg: Config,
+    ) -> Result<ReadOnlyDatabase, HostError> {
+        ReadOnlyDatabase::open(path, cfg)
     }
 
     /// Starts a configured open (specs/13 §3 knobs).

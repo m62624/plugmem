@@ -23,11 +23,13 @@
 mod db;
 mod embedder;
 mod error;
+mod readonly;
 mod storage;
 
 pub use db::{Database, DatabaseBuilder, FactSnapshot};
 pub use embedder::{Embedder, NullEmbedder, OpenAiCompatEmbedder};
 pub use error::HostError;
+pub use readonly::ReadOnlyDatabase;
 pub use storage::{FileStorage, FsyncPolicy};
 
 // The engine types a host caller works with, re-exported so simple

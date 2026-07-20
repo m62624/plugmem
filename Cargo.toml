@@ -42,6 +42,14 @@ libm = { version = "0.2.16", default-features = false }
 
 # Wrapper dependencies (std)
 clap = { version = "4.6.2", features = ["derive"] }
+# Cross-platform mmap for the host's zero-copy read-only open (specs/16).
+# 0.9.11: MSRV 1.65, MIT/Apache-2.0, covers linux/macos/windows ×
+# x86_64/aarch64. (The original `memmap` is unmaintained — RUSTSEC-2020-0077.)
+memmap2 = "0.9.11"
+# Safe self-referential struct: ReadOnlyDatabase owns the `Mmap` and a
+# `Memory<'a>` borrowing it. Keeps the self-reference safe so the only
+# `unsafe` on the read-only path is the (inherent) mmap call itself.
+self_cell = "1.3.0"
 ureq = "3.3.0"
 serde_json = "1.0.150"
 wasm-bindgen = "0.2.126"

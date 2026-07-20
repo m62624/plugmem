@@ -27,6 +27,18 @@ pub enum HostError {
         source: std::io::Error,
     },
 
+    /// A read-only open ([`crate::Database::open_readonly`]) found a
+    /// non-empty journal. Replaying it would mutate the engine — copying
+    /// whole arenas up from the mapped bytes (copy-on-write) — which
+    /// defeats the zero-copy intent. Open the database read-write once to
+    /// checkpoint it (fold the journal into the snapshot), then retry
+    /// (specs/16 §3).
+    #[error("database at {} needs a checkpoint before a read-only open (non-empty journal)", path.display())]
+    NeedsCheckpoint {
+        /// The database base path.
+        path: PathBuf,
+    },
+
     /// The engine returned a typed error.
     #[error(transparent)]
     Engine(#[from] plugmem_core::Error),
