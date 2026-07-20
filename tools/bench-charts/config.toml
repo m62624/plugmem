@@ -13,9 +13,6 @@
 # baseline. Benchmarks are noisy, so a few percent is expected drift.
 threshold = 0.10
 
-# Where the rendered SVGs live (relative to the workspace root).
-out_dir = "crates/plugmem-arena/assets"
-
 # The committed data snapshot the threshold compares against — the values
 # the current SVGs were rendered from. Updated in lockstep with any SVG the
 # tool rewrites, so the two never drift apart.

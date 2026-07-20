@@ -100,3 +100,7 @@
 1000000	wasmtime	std HashMap	ins_p99	205.8
 1000000	wasmtime	std HashMap	insert_ns	53.0
 1000000	wasmtime	std HashMap	mem_b	35.7
+core	native	BM25 (3 terms, 10k)	latency_us	63.6
+core	native	HNSW (30k, d384)	latency_us	194.3
+core	native	flat vector (24k, d384)	latency_us	222.4
+core	native	tags (3 lists, 100k)	latency_us	47.3

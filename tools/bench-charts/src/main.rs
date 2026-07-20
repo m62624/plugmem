@@ -1,9 +1,13 @@
-//! Renders the benchmark-matrix TSV into the README chart SVGs.
+//! Renders the benchmark `#TSV` rows into the README chart SVGs — the
+//! arena charts from the [`plugmem-bench-matrix`](../bench-matrix) stand
+//! and the core recall-latency chart from `plugmem-core`'s `bench_ops`
+//! example. A chart whose rows are absent from the input is left alone, so
+//! either source can be rendered on its own or both piped together.
 //!
 //! Pure Rust: [Plotlars](https://github.com/alceal/plotlars) with the
 //! `plotters` backend, so there is no browser, no WebDriver and nothing
 //! downloaded — the same reproducibility contract as the zero-dependency
-//! [`plugmem-bench-matrix`](../bench-matrix) stand that produces the data.
+//! bench stand that produces the data.
 //!
 //! ```text
 //! # 1. collect data (run the stand as many times as you want — rows are
@@ -56,9 +60,30 @@ struct Chart {
     y_title: &'static str,
 }
 
-/// The chart set the arena README embeds. Every structure name matches a
-/// row the bench stand emits.
-const CHARTS: &[Chart] = &[
+/// Where each chart set is written (fixed repo paths, not user config).
+const ARENA_OUT: &str = "crates/plugmem-arena/assets";
+const CORE_OUT: &str = "crates/plugmem-core/assets";
+
+/// The core (engine) chart: per-source recall latency, native only. Its
+/// rows come from `plugmem-core`'s `bench_ops` example (`n = core`,
+/// `runtime = native`, `metric = latency_us`).
+const CORE_CHARTS: &[Chart] = &[Chart {
+    file: "recall-latency.svg",
+    title: "recall source latency — µs, native (lower is better)",
+    n: "core",
+    metric: "latency_us",
+    structures: &[
+        "BM25 (3 terms, 10k)",
+        "tags (3 lists, 100k)",
+        "flat vector (24k, d384)",
+        "HNSW (30k, d384)",
+    ],
+    y_title: "µs",
+}];
+
+/// The arena chart set. Every structure name matches a row the bench
+/// stand emits.
+const ARENA_CHARTS: &[Chart] = &[
     Chart {
         file: "arena-insert-100k.svg",
         title: "insert — ns/elem at 100k records (lower is better)",
@@ -160,7 +185,6 @@ type Table = BTreeMap<Key, (f64, u32)>;
 /// The rendering config (`config.toml`).
 struct Config {
     threshold: f64,
-    out_dir: PathBuf,
     baseline: PathBuf,
 }
 
@@ -204,49 +228,51 @@ fn main() {
 
     // Per chart: decide, render if it moved, and carry the right values
     // into the rewritten baseline (new for updated charts, old otherwise).
-    let mut next_baseline = Table::new();
+    // Charts absent from the input (e.g. the core chart when only arena
+    // data was piped) are left entirely alone — SVG and baseline both.
+    let mut next_baseline = base.clone();
     let mut updated = 0usize;
-    for chart in CHARTS {
-        let cells = chart_cells(chart, &new);
-        let verdict = if force {
-            Verdict::Render { max_delta: 0.0 }
-        } else {
-            decide(&cells, &base, cfg.threshold)
-        };
-        match verdict {
-            Verdict::Render { max_delta } => {
-                render(chart, &new, &cfg.out_dir);
-                for (key, v) in &cells {
-                    next_baseline.insert(key.clone(), (*v, 1));
-                }
-                updated += 1;
-                println!(
-                    "{:32} rewritten (Δmax {:.0}%)",
-                    chart.file,
-                    max_delta * 100.0
-                );
+    let mut total = 0usize;
+    for (out, charts) in [(ARENA_OUT, ARENA_CHARTS), (CORE_OUT, CORE_CHARTS)] {
+        for chart in charts {
+            let cells = chart_cells(chart, &new);
+            if cells.is_empty() {
+                continue; // no data for this chart in this input
             }
-            Verdict::Skip { max_delta } => {
-                // Keep the committed baseline values for this chart.
-                for (key, v) in &cells {
-                    let kept = avg(&base, key).unwrap_or(*v);
-                    next_baseline.insert(key.clone(), (kept, 1));
+            total += 1;
+            let verdict = if force {
+                Verdict::Render { max_delta: 0.0 }
+            } else {
+                decide(&cells, &base, cfg.threshold)
+            };
+            match verdict {
+                Verdict::Render { max_delta } => {
+                    render(chart, &new, Path::new(out));
+                    for (key, v) in &cells {
+                        next_baseline.insert(key.clone(), (*v, 1));
+                    }
+                    updated += 1;
+                    println!(
+                        "{:32} rewritten (Δmax {:.0}%)",
+                        chart.file,
+                        max_delta * 100.0
+                    );
                 }
-                println!(
-                    "{:32} unchanged (Δmax {:.0}% ≤ {:.0}%)",
-                    chart.file,
-                    max_delta * 100.0,
-                    cfg.threshold * 100.0
-                );
+                Verdict::Skip { max_delta } => {
+                    println!(
+                        "{:32} unchanged (Δmax {:.0}% ≤ {:.0}%)",
+                        chart.file,
+                        max_delta * 100.0,
+                        cfg.threshold * 100.0
+                    );
+                }
             }
         }
     }
 
     write_baseline(&cfg.baseline, &next_baseline);
     println!(
-        "\n{updated}/{} charts rewritten in {} (threshold {:.0}%)",
-        CHARTS.len(),
-        cfg.out_dir.display(),
+        "\n{updated}/{total} charts rewritten (threshold {:.0}%)",
         cfg.threshold * 100.0
     );
 }
@@ -262,11 +288,6 @@ fn load_config() -> Config {
             .get("threshold")
             .and_then(toml::Value::as_float)
             .unwrap_or(0.10),
-        out_dir: PathBuf::from(
-            t.get("out_dir")
-                .and_then(toml::Value::as_str)
-                .unwrap_or("crates/plugmem-arena/assets"),
-        ),
         baseline: PathBuf::from(
             t.get("baseline")
                 .and_then(toml::Value::as_str)

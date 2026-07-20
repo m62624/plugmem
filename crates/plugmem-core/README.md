@@ -174,22 +174,28 @@ CI gates: a complexity regression fails the same way on any machine.
 `recall` and `get` perform **zero allocator calls** after warm-up,
 enforced by a counting-allocator test.
 
-![Query latency](assets/benchmarks.svg)
+Per-source recall latency (single thread, native). The chart is rendered
+by [`plugmem-bench-charts`](../../tools/bench-charts) from the
+`bench_ops` example's output — the same Plotlars pipeline as the arena
+charts:
+
+![recall source latency](assets/recall-latency.svg)
+
+The composite recall paths and the write side, which the chart does not
+break out:
 
 | Operation (single thread, native) | Latency |
 |---|---|
-| tag intersection, 3 tags @ 100k facts | 51 µs |
-| BM25, 3 terms @ 10k docs | 64 µs |
-| HNSW vector search, 30k × dim 384, k=8, ef=64 | 185 µs |
-| tags + time-range recall @ 100k | 226 µs |
-| flat vector search, 24k × dim 384, k=8 | 332 µs |
-| hybrid recall (text + hub entity anchor) @ 100k | 471 µs |
-| `remember` (tokenize, index, quantize d384, similar-detect, journal) | 72 µs mean |
+| tags + time-range recall @ 100k | ~230 µs |
+| hybrid recall (text + hub entity anchor) @ 100k | ~470 µs |
+| `remember` (tokenize, index, quantize d384, similar-detect, journal) | ~72 µs mean |
 | one-time HNSW build inside `maintain` | ~1.6 ms/vector |
 
-Reproduce with `cargo bench -p plugmem-core` (Criterion; benchmarks are
-a separate target and never run under `cargo test`). Corpora come from
-`plugmem-testgen` — seeded, so every run measures the same workload.
+Reproduce: `cargo bench -p plugmem-core` (Criterion; a separate target,
+never run under `cargo test`) for the full statistical suite, or
+`cargo run --release -p plugmem-core --example bench_ops` for the chart's
+`#TSV` rows. Corpora come from `plugmem-testgen` — seeded, so every run
+measures the same workload.
 
 ## Limits, stated plainly
 
