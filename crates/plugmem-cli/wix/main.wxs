@@ -69,7 +69,7 @@
 
         <Package Id='*'
             Keywords='Installer'
-            Description='plugmem command-line interface.'
+            Description='plugmem command-line interface — temporal memory for LLM agents over one file.'
             Manufacturer='Mansur Azatbek'
             InstallerVersion='450'
             Languages='1033'
@@ -123,9 +123,9 @@
                         <Component Id='binary0' Guid='*'>
                             <File
                                 Id='exe0'
-                                Name='plugmem.exe'
+                                Name='plugmem-cli.exe'
                                 DiskId='1'
-                                Source='$(var.CargoTargetBinDir)\plugmem.exe'
+                                Source='$(var.CargoTargetBinDir)\plugmem-cli.exe'
                                 KeyPath='yes'/>
                         </Component>
                     </Directory>
