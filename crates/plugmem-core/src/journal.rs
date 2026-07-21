@@ -31,8 +31,15 @@ use xxhash_rust::xxh3::xxh3_64;
 
 use crate::error::Error;
 
-/// Frame header size: `len` + `check`.
-const HEADER: usize = 8;
+/// Serialized width of a `u32` field.
+const U32_BYTES: usize = core::mem::size_of::<u32>();
+/// Serialized width of a `u64` field.
+const U64_BYTES: usize = core::mem::size_of::<u64>();
+/// Serialized width of an `f32` field.
+const F32_BYTES: usize = core::mem::size_of::<f32>();
+
+/// Frame header size: `len` (u32) + `check` (u32).
+const HEADER: usize = U32_BYTES + U32_BYTES;
 
 /// One decoded journal record, borrowing the scanned buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,11 +76,11 @@ pub fn encode_entry(out: &mut Vec<u8>, op: u8, payload: &[u8]) {
     // The checksum needs the contiguous body; build it in place and hash
     // the slice we just wrote.
     let check_pos = out.len();
-    out.extend_from_slice(&[0u8; 4]);
+    out.extend_from_slice(&[0u8; U32_BYTES]);
     out.push(op);
     out.extend_from_slice(payload);
-    let check = body_checksum(&out[check_pos + 4..]);
-    out[check_pos..check_pos + 4].copy_from_slice(&check.to_le_bytes());
+    let check = body_checksum(&out[check_pos + U32_BYTES..]);
+    out[check_pos..check_pos + U32_BYTES].copy_from_slice(&check.to_le_bytes());
 }
 
 /// One decoded engine operation (specs/03 op table). `Revise` is
@@ -157,7 +164,7 @@ fn take_str<'a>(bytes: &'a [u8], at: &mut usize) -> Result<&'a str, Error> {
 
 /// Reads a `u32 LE`; advances `at`.
 fn take_u32(bytes: &[u8], at: &mut usize) -> Result<u32, Error> {
-    let end = *at + 4;
+    let end = *at + U32_BYTES;
     if end > bytes.len() {
         return Err(Error::Corrupt("journal record truncated inside a field"));
     }
@@ -168,7 +175,7 @@ fn take_u32(bytes: &[u8], at: &mut usize) -> Result<u32, Error> {
 
 /// Reads a `u64 LE`; advances `at`.
 fn take_u64(bytes: &[u8], at: &mut usize) -> Result<u64, Error> {
-    let end = *at + 8;
+    let end = *at + U64_BYTES;
     if end > bytes.len() {
         return Err(Error::Corrupt("journal record truncated inside a field"));
     }
@@ -181,11 +188,11 @@ fn take_u64(bytes: &[u8], at: &mut usize) -> Result<u64, Error> {
 fn take_vec_f32(bytes: &[u8], at: &mut usize) -> Result<Vec<f32>, Error> {
     let count = take_u32(bytes, at)? as usize;
     // Bounds math in u64, like the snapshot container: on 32-bit targets
-    // `count * 4` in usize can wrap and slip a hostile count past the
+    // `count * F32_BYTES` in usize can wrap and slip a hostile count past the
     // check, and `with_capacity` on an unchecked count aborts a wasm32
     // process (caught by the wasm32-wasip1 test run). Only after the
     // check is the allocation known to be bounded by the input length.
-    let end = *at as u64 + count as u64 * 4;
+    let end = *at as u64 + count as u64 * F32_BYTES as u64;
     if end > bytes.len() as u64 {
         return Err(Error::Corrupt("journal vector overruns its record"));
     }
@@ -193,8 +200,10 @@ fn take_vec_f32(bytes: &[u8], at: &mut usize) -> Result<Vec<f32>, Error> {
     let mut v = Vec::with_capacity(count);
     let mut p = *at;
     while p < end {
-        v.push(f32::from_le_bytes(bytes[p..p + 4].try_into().unwrap()));
-        p += 4;
+        v.push(f32::from_le_bytes(
+            bytes[p..p + F32_BYTES].try_into().unwrap(),
+        ));
+        p += F32_BYTES;
     }
     *at = end;
     Ok(v)
@@ -373,7 +382,7 @@ pub fn scan(journal: &[u8]) -> Result<JournalScan<'_>, Error> {
                 truncated_tail: true,
             });
         }
-        let len = u32::from_le_bytes(rest[0..4].try_into().unwrap()) as usize;
+        let len = u32::from_le_bytes(rest[..U32_BYTES].try_into().unwrap()) as usize;
         if len == 0 {
             return Err(Error::Corrupt("journal record with zero length"));
         }
@@ -391,7 +400,7 @@ pub fn scan(journal: &[u8]) -> Result<JournalScan<'_>, Error> {
                 truncated_tail: true,
             });
         };
-        let want = u32::from_le_bytes(rest[4..8].try_into().unwrap());
+        let want = u32::from_le_bytes(rest[U32_BYTES..HEADER].try_into().unwrap());
         if body_checksum(body) != want {
             if pos + HEADER + len == journal.len() {
                 return Ok(JournalScan {

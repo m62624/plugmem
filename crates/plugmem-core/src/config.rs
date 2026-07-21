@@ -9,6 +9,15 @@ use alloc::vec::Vec;
 
 use crate::error::Error;
 
+/// Serialized width of one `u64`-encoded size field.
+const U64_BYTES: usize = core::mem::size_of::<u64>();
+/// Serialized width of one `f32` field.
+const F32_BYTES: usize = core::mem::size_of::<f32>();
+/// Serialized width of one `u32` field.
+const U32_BYTES: usize = core::mem::size_of::<u32>();
+/// Serialized width of the `db_uuid` field (`u128`).
+const UUID_BYTES: usize = core::mem::size_of::<u128>();
+
 /// Number of `usize` fields in the encoded block (stored as `u64`).
 const USIZE_FIELDS: usize = 14;
 /// Number of `f32` fields in the encoded block.
@@ -16,13 +25,13 @@ const F32_FIELDS: usize = 10;
 /// Number of `u32` fields in the encoded block.
 const U32_FIELDS: usize = 3;
 /// Byte offset of the `f32` field group.
-const F32S_AT: usize = USIZE_FIELDS * 8;
+const F32S_AT: usize = USIZE_FIELDS * U64_BYTES;
 /// Byte offset of the `u32` field group.
-const U32S_AT: usize = F32S_AT + F32_FIELDS * 4;
+const U32S_AT: usize = F32S_AT + F32_FIELDS * F32_BYTES;
 /// Byte offset of the `db_uuid` field.
-const DB_UUID_AT: usize = U32S_AT + U32_FIELDS * 4;
+const DB_UUID_AT: usize = U32S_AT + U32_FIELDS * U32_BYTES;
 /// Byte offset of the `fast_load` flag.
-pub const FAST_LOAD_AT: usize = DB_UUID_AT + 16;
+pub const FAST_LOAD_AT: usize = DB_UUID_AT + UUID_BYTES;
 /// Byte offset of the reserved zero tail.
 pub const RESERVED_AT: usize = FAST_LOAD_AT + 1;
 /// Length of the reserved zero tail.
@@ -307,8 +316,8 @@ impl Config {
         }
         let mut at = 0usize;
         let mut take_usize = || -> Result<usize, Error> {
-            let v = u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
-            at += 8;
+            let v = u64::from_le_bytes(bytes[at..at + U64_BYTES].try_into().unwrap());
+            at += U64_BYTES;
             usize::try_from(v)
                 .map_err(|_| Error::ConfigMismatch("database requires a 64-bit address space"))
         };
@@ -328,8 +337,8 @@ impl Config {
         let flat_to_hnsw = take_usize()?;
         let mut at = F32S_AT;
         let mut take_f32 = || {
-            let v = f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
-            at += 4;
+            let v = f32::from_le_bytes(bytes[at..at + F32_BYTES].try_into().unwrap());
+            at += F32_BYTES;
             v
         };
         let bm25_k1 = take_f32();
@@ -344,8 +353,8 @@ impl Config {
         let similar_jaccard = take_f32();
         let mut at = U32S_AT;
         let mut take_u32 = || {
-            let v = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
-            at += 4;
+            let v = u32::from_le_bytes(bytes[at..at + U32_BYTES].try_into().unwrap());
+            at += U32_BYTES;
             v
         };
         let rrf_k = take_u32();

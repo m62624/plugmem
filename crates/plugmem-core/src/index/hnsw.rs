@@ -50,6 +50,12 @@ const MAX_LEVEL: usize = 16;
 /// Shard count of the (small) upper-level handle arena.
 const UPPER_SHARDS: usize = 64;
 
+/// Serialized width of one level-0 neighbor id (a little-endian `u32`).
+const NEIGHBOR_BYTES: usize = core::mem::size_of::<u32>();
+
+/// Serialized size of the graph meta section: `[entry u32][indexed u32]`.
+const META_BYTES: usize = 2 * core::mem::size_of::<u32>();
+
 /// Upper-level adjacency handle: key `[slot BE | level BE]`, payload the
 /// neighbor list's chunk handle. 20-byte slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -522,7 +528,7 @@ impl<'a> HnswGraph<'a> {
 
     /// Bytes held by the graph's pools.
     pub(crate) fn pool_bytes(&self) -> usize {
-        self.level0.len() * 4 + self.upper.pool_bytes() + self.lists.pool_bytes()
+        self.level0.len() * NEIGHBOR_BYTES + self.upper.pool_bytes() + self.lists.pool_bytes()
     }
 
     /// Carries the graph across a `maintain` compaction: `map[old_slot]`
@@ -597,7 +603,7 @@ impl<'a> HnswGraph<'a> {
 
     /// The graph-header section: `[entry u32 LE][indexed u32 LE]`.
     pub(crate) fn dump_meta(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(8);
+        let mut out = Vec::with_capacity(META_BYTES);
         out.extend_from_slice(&self.entry.to_le_bytes());
         out.extend_from_slice(&self.indexed.to_le_bytes());
         out
@@ -605,7 +611,7 @@ impl<'a> HnswGraph<'a> {
 
     /// The level-0 section: the neighbor blocks as `u32 LE` values.
     pub(crate) fn dump_level0(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(self.level0.len() * 4);
+        let mut out = Vec::with_capacity(self.level0.len() * NEIGHBOR_BYTES);
         for &n in &self.level0 {
             out.extend_from_slice(&n.to_le_bytes());
         }
@@ -639,16 +645,16 @@ impl<'a> HnswGraph<'a> {
         lists_pool: &[u8],
     ) -> Result<Self, Error> {
         let mut g = Self::new(m, m0, max_bytes)?;
-        if meta.len() != 8 {
+        if meta.len() != META_BYTES {
             return Err(Error::Corrupt("hnsw meta section has a wrong length"));
         }
         g.entry = u32::from_le_bytes(meta[0..4].try_into().unwrap());
         g.indexed = u32::from_le_bytes(meta[4..8].try_into().unwrap());
-        if level0.len() as u64 != u64::from(g.indexed) * m0 as u64 * 4 {
+        if level0.len() as u64 != u64::from(g.indexed) * m0 as u64 * NEIGHBOR_BYTES as u64 {
             return Err(Error::Corrupt("hnsw level0 length mismatch"));
         }
         g.level0 = level0
-            .chunks_exact(4)
+            .chunks_exact(NEIGHBOR_BYTES)
             .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
             .collect();
         g.upper = Arena::load(
@@ -682,16 +688,16 @@ impl<'a> HnswGraph<'a> {
         lists_pool: &'a [u8],
     ) -> Result<Self, Error> {
         let mut g = Self::new(m, m0, max_bytes)?;
-        if meta.len() != 8 {
+        if meta.len() != META_BYTES {
             return Err(Error::Corrupt("hnsw meta section has a wrong length"));
         }
         g.entry = u32::from_le_bytes(meta[0..4].try_into().unwrap());
         g.indexed = u32::from_le_bytes(meta[4..8].try_into().unwrap());
-        if level0.len() as u64 != u64::from(g.indexed) * m0 as u64 * 4 {
+        if level0.len() as u64 != u64::from(g.indexed) * m0 as u64 * NEIGHBOR_BYTES as u64 {
             return Err(Error::Corrupt("hnsw level0 length mismatch"));
         }
         g.level0 = level0
-            .chunks_exact(4)
+            .chunks_exact(NEIGHBOR_BYTES)
             .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
             .collect();
         g.upper = Arena::load_borrowed(
