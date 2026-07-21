@@ -144,6 +144,20 @@ impl ReadOnlyDatabase {
         mapped.borrow_dependent().stats()
     }
 
+    /// Runs the on-demand integrity check (specs/16 §9) — the equivalent of
+    /// SQLite's `integrity_check`. A read-only open validates only the metadata
+    /// (the mapped text and vector pools stay non-resident); this sweeps them
+    /// and reports any latent corruption. Reads the whole image, so it residents
+    /// the pools it checks.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::Engine`] for the first inconsistency found.
+    pub fn verify(&self) -> Result<(), HostError> {
+        let mapped = self.mapped.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(mapped.borrow_dependent().verify()?)
+    }
+
     /// Dumps the currently-open facts for a human-readable backup
     /// (specs/06). See [`ExportedFact`](crate::ExportedFact).
     pub fn export(&self) -> Vec<crate::db::ExportedFact> {

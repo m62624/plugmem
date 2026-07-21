@@ -538,6 +538,22 @@ impl Database {
         st.ops = 0;
         Ok(())
     }
+
+    /// Runs the on-demand integrity check (specs/16 §9) — the equivalent of
+    /// SQLite's `integrity_check`. An open validates only the metadata, so the
+    /// large byte pools stay non-resident on an mmap'd base; this sweeps them
+    /// (text UTF-8, vector self-consistency and the fact↔slot bijection) and
+    /// reports any latent corruption. Skipping it is safe — the accessors never
+    /// panic on bad bytes; `verify` only turns corruption into an explicit
+    /// error.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::Engine`] wrapping [`Error::Corrupt`](plugmem_core::Error)
+    /// for the first inconsistency found.
+    pub fn verify(&self) -> Result<(), HostError> {
+        Ok(self.lock().engine.read(|mem| mem.verify())?)
+    }
 }
 
 impl std::fmt::Debug for Database {

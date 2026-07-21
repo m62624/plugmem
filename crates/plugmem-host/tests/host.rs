@@ -792,6 +792,18 @@ fn a_re_mapped_snapshot_is_canonical_against_an_owned_replay() {
     );
 }
 
+#[test]
+fn verify_passes_on_a_clean_database() {
+    let tmp = TempDir::new("verify");
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    seed_checkpointed(&db);
+    db.verify().expect("a clean read-write database verifies");
+    drop(db);
+    // The read-only handle exposes the same on-demand integrity check.
+    let ro = Database::open_readonly(tmp.db(), cfg()).unwrap();
+    ro.verify().expect("a clean read-only open verifies");
+}
+
 /// Process resident-set size in bytes (cross-OS: linux/macos/windows).
 fn rss() -> usize {
     memory_stats::memory_stats()
@@ -800,75 +812,65 @@ fn rss() -> usize {
 }
 
 #[test]
-fn an_overlay_open_avoids_the_second_copy_an_owned_open_pays() {
-    use plugmem_core::Memory;
-
+fn an_overlay_open_residents_far_less_than_the_image() {
     let tmp = TempDir::new("overlay-rss");
-    // `fast_load` skips the whole-file xxh3 so an open touches only metadata,
-    // not the (borrowed) pool bytes — the sparse-resident win in the clear.
+    // `fast_load` skips the whole-file xxh3, and lazy validation (specs/16 §9)
+    // skips the text/vector scans — so an open faults in only the metadata and
+    // the large text pool stays non-resident.
     let mut c = cfg();
     c.fast_load = true;
 
-    // A sizable checkpointed database whose byte pools dominate. Varied text
-    // (keyed by the index) keeps term df low so similar-detection stays cheap
-    // while the blob heap grows large.
+    // A sizable checkpointed database whose text pool dominates the image.
     {
         let (db, _) = Database::builder(c.clone())
             .snapshot_every_ops(0) // one checkpoint at the end, no mid-snapshots
             .fsync(FsyncPolicy::OnSnapshot)
             .open(tmp.db())
             .unwrap();
+        // Long texts from a tiny template set: the blob heap (every fact stores
+        // its full text) dominates the image, while the small shared vocabulary
+        // keeps the posting lists compact. Lazy validation (specs/16 §9) means an
+        // open does not scan this text pool, so it stays non-resident.
+        let templates = [
+            "lorem ipsum dolor sit amet consectetur adipiscing elit sed do \
+             eiusmod tempor incididunt ut labore et dolore magna aliqua",
+            "ut enim ad minim veniam quis nostrud exercitation ullamco \
+             laboris nisi ut aliquip ex ea commodo consequat duis aute",
+            "excepteur sint occaecat cupidatat non proident sunt in culpa \
+             qui officia deserunt mollit anim id est laborum sed perspiciatis",
+            "at vero eos et accusamus et iusto odio dignissimos ducimus qui \
+             blanditiis praesentium voluptatum deleniti atque corrupti quos",
+        ];
         for i in 0..20_000u64 {
-            // A long, mostly-shared text so the blob heap dominates the image;
-            // the few shared terms are stop-filtered, keeping postings compact.
-            let text = format!(
-                "lorem ipsum dolor sit amet consectetur adipiscing elit sed do \
-                 eiusmod tempor incididunt ut labore et dolore magna aliqua ut \
-                 enim ad minim veniam quis nostrud exercitation ullamco laboris \
-                 nisi ut aliquip ex ea commodo consequat duis aute irure item {i}",
-            );
+            // Repeat a template so the text is long (the blob heap dominates)
+            // without adding distinct terms (the posting lists stay compact).
+            let t = templates[(i % 4) as usize];
+            let text = format!("{t} {t} {t} {t}");
             db.remember(RememberInput::text(i + 1, &text)).unwrap();
         }
         db.checkpoint(20_000_000).unwrap();
     }
     let file_len = std::fs::metadata(tmp.db()).unwrap().len() as usize;
     assert!(
-        file_len > 3 * 1024 * 1024,
+        file_len > 8 * 1024 * 1024,
         "the test database must be large enough to measure ({file_len} bytes)"
     );
 
-    // Overlay open (the default): mmap + borrow. Residents only metadata.
+    // Overlay open (the default): mmap + borrow, validating only metadata.
     let before = rss();
     let (overlay, _) = Database::open(tmp.db(), c.clone()).unwrap();
     let overlay_rss = rss().saturating_sub(before);
     assert_eq!(overlay.stats().facts, 20_000, "the overlay opened the base");
     drop(overlay);
 
-    // Owned open of the same file: read into a Vec + copy every pool into an
-    // arena. Residents ~the whole image.
-    let before = rss();
-    let bytes = std::fs::read(tmp.db()).unwrap();
-    let (owned, _) = Memory::from_bytes(Some(&bytes), &[], c.clone()).unwrap();
-    let owned_rss = rss().saturating_sub(before);
-    assert_eq!(
-        owned.stats().facts,
-        20_000,
-        "the owned open loaded the base"
-    );
-    drop(owned);
-    drop(bytes);
-
-    // The owned open holds a full second copy of the image on the heap — the
-    // read buffer plus every pool copied into an arena — peaking at ~2x the
-    // file. The overlay open borrows the mapped bytes and never copies, peaking
-    // at ~1x. So the owned open costs about a whole extra image of resident
-    // memory that the overlay avoids. (The loader still faults the base in to
-    // validate it — UTF-8 text, chunk chains — so this proves the *no-copy*
-    // win, not sparse residency; the latter needs deferred validation, tracked
-    // in specs/16 §9.)
+    // The overlay open residents well under half the image: the text pool (the
+    // majority of the file) is never scanned, so it stays out of the resident
+    // set — true sparse residency, not just no-copy (specs/16 §9). An owned
+    // load, by contrast, copies every pool onto the heap; that copy is proven
+    // absent at the allocation level in core's `zero_alloc` gate.
     assert!(
-        owned_rss > overlay_rss + file_len / 2,
-        "owned open pays a second copy the overlay avoids \
-         (overlay {overlay_rss}, owned {owned_rss}, file {file_len})"
+        overlay_rss < file_len / 2,
+        "overlay open should resident far less than the image \
+         (overlay {overlay_rss}, file {file_len})"
     );
 }

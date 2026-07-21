@@ -142,8 +142,13 @@ size) -> impl Iterator<Item = Op>` (операции, не состояние �
   `#[cfg_attr(miri, ignore)]` (UB-пути покрыты малыми тестами тех же ветвей).
   Property-тесты под miri тоже игнорируются: харнесс proptest ходит в ОС
   (getcwd для persistence упавших кейсов), что запрещено изоляцией miri.
-- **Fuzz (cargo-fuzz, nightly job)**: снапшот-загрузчик (произвольные байты →
-  только Err), журнал-реплей, токенизатор, разбор RecallQuery из MCP.
+- **Fuzz (cargo-fuzz, nightly job)**: снапшот-загрузчик, журнал-реплей,
+  токенизатор, разбор RecallQuery из MCP. Оракул загрузчика — **не паниковать
+  ни при load, ни при последующем доступе**: на checksummed-пути (default)
+  произвольные байты → `Err`; на доверенном `fast_load`-пути (ленивая
+  валидация, specs/16 §9) load может пройти, тогда полный access-sweep (`get`
+  всех фактов, `recall`, векторный поиск, `snapshot_bytes`, `verify`) обязан
+  завершиться без паники, а `verify()` — вернуть `Corrupt` на отложенную порчу.
   Любая паника/UB из fuzz = P0-баг.
 - **Кросс-таргет**: весь тест-сьют core — нативно и под wasmtime;
   `cargo build --target wasm32v1-none` для библиотек — гейт.
