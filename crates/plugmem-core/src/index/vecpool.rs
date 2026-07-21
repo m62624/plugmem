@@ -29,7 +29,6 @@
 //! `counters` feature counts those exact dot products — the deterministic
 //! cost metric the perf gate holds to `min(candidates, live)`.
 
-use alloc::borrow::Cow;
 use alloc::vec::Vec;
 
 #[cfg(feature = "counters")]
@@ -62,15 +61,20 @@ impl VecScratch {
 
 /// Flat store of quantized vectors (specs/04 §5).
 ///
-/// The slot bytes are held as a [`Cow`]: the owned path (`new`/`push`/
-/// `from_parts`) is `Cow::Owned` and byte-for-byte unchanged; the
-/// read-only path (`from_parts_borrowed`) borrows an mmap'd section
-/// without copying (specs/16). Mutations go through `to_mut()`, which
-/// copies-on-write a borrowed pool up to owned — never observed on the
-/// v1 read-only handle, which exposes no writers.
+/// The slot bytes are an **overlay** of a borrowed base and an owned tail:
+/// the owned path (`new`/`push`/`from_parts`) keeps `base = &[]` with every
+/// slot in `tail`, byte-for-byte unchanged; the borrowed/overlay path
+/// (`from_parts_borrowed`/`from_parts_overlay`) maps an mmap'd section as
+/// `base` and appends new slots to `tail` (specs/16). Because dead slots are
+/// dropped by `maintain` and never rewritten in place, a slot is wholly in
+/// `base` or wholly in `tail`, so a heap opened over a multi-gigabyte mmap
+/// grows without cloning it — reads dispatch on one comparison per slot.
 #[derive(Debug)]
 pub struct VecPool<'a> {
-    bytes: Cow<'a, [u8]>,
+    /// Borrowed base slots (an mmap'd section) — empty on the owned path.
+    base: &'a [u8],
+    /// Owned append tail; `push`/`copy_slot` extend this, never `base`.
+    tail: Vec<u8>,
     dim: usize,
     max_bytes: usize,
     /// Exact dot products computed by searches (feature `counters`).
@@ -89,7 +93,8 @@ impl<'a> VecPool<'a> {
     /// leaves the layer inert — the pool stays empty).
     pub fn new(dim: usize, max_bytes: usize) -> Self {
         Self {
-            bytes: Cow::Owned(Vec::new()),
+            base: &[],
+            tail: Vec::new(),
             dim,
             max_bytes,
             #[cfg(feature = "counters")]
@@ -103,38 +108,61 @@ impl<'a> VecPool<'a> {
         HEAD + Self::words(self.dim) * 8 + self.dim
     }
 
+    /// Total bytes of the logical pool (`base` + `tail`).
+    #[inline]
+    fn pool_len(&self) -> usize {
+        self.base.len() + self.tail.len()
+    }
+
+    /// The `stride` bytes of slot `i`, dispatched to `base` or `tail`. The
+    /// base is a whole number of slots (framed on load), so slot `i` never
+    /// straddles the boundary.
+    #[inline]
+    fn slot_bytes(&self, i: usize) -> &[u8] {
+        let stride = self.stride();
+        let start = i * stride;
+        let base_len = self.base.len();
+        if start < base_len {
+            &self.base[start..start + stride]
+        } else {
+            let at = start - base_len;
+            &self.tail[at..at + stride]
+        }
+    }
+
     /// Number of stored slots.
     #[inline]
     pub fn len(&self) -> usize {
-        if self.bytes.is_empty() {
+        let pool_len = self.pool_len();
+        if pool_len == 0 {
             0
         } else {
-            self.bytes.len() / self.stride()
+            pool_len / self.stride()
         }
     }
 
     /// `true` when no vector is stored.
     pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
+        self.pool_len() == 0
     }
 
     /// Total bytes held.
     pub fn pool_bytes(&self) -> usize {
-        self.bytes.len()
+        self.pool_len()
     }
 
     /// The owning fact of slot `i`.
     #[inline]
     pub fn slot_fact(&self, i: usize) -> u32 {
-        let base = i * self.stride();
-        u32::from_le_bytes(self.bytes[base..base + 4].try_into().unwrap())
+        let slot = self.slot_bytes(i);
+        u32::from_le_bytes(slot[0..4].try_into().unwrap())
     }
 
     /// The scale of slot `i`.
     #[inline]
     fn slot_scale(&self, i: usize) -> f32 {
-        let base = i * self.stride();
-        f32::from_le_bytes(self.bytes[base + 4..base + 8].try_into().unwrap())
+        let slot = self.slot_bytes(i);
+        f32::from_le_bytes(slot[4..8].try_into().unwrap())
     }
 
     /// The `(scale, q)` pair of slot `i` — the quantized payload a
@@ -144,8 +172,9 @@ impl<'a> VecPool<'a> {
     pub(crate) fn quant(&self, i: usize) -> (f32, &[u8]) {
         let stride = self.stride();
         let q_off = HEAD + Self::words(self.dim) * 8;
-        let base = i * stride;
-        (self.slot_scale(i), &self.bytes[base + q_off..base + stride])
+        let slot = self.slot_bytes(i);
+        let scale = f32::from_le_bytes(slot[4..8].try_into().unwrap());
+        (scale, &slot[q_off..stride])
     }
 
     /// Quantized cosine of two slots by index — the graph's edge metric.
@@ -225,25 +254,28 @@ impl<'a> VecPool<'a> {
     /// [`Error::CapacityExceeded`] at the byte ceiling.
     pub fn push(&mut self, fact: FactId, v: &[f32]) -> Result<u32, Error> {
         let stride = self.stride();
-        let base = self.bytes.len();
-        if base + stride > self.max_bytes {
+        let pool_len = self.pool_len();
+        if pool_len + stride > self.max_bytes {
             return Err(Error::CapacityExceeded { what: "vectors" });
         }
-        let index = u32::try_from(base / stride).map_err(|_| Error::CapacityExceeded {
+        let index = u32::try_from(pool_len / stride).map_err(|_| Error::CapacityExceeded {
             what: "vector slots",
         })?;
-        let mut slot = core::mem::take(self.bytes.to_mut());
-        slot.resize(base + stride, 0);
-        let res = self.encode_slot(fact.0, v, &mut slot[base..]);
-        let res = match res {
+        // Take the tail out so `encode_slot(&self, ...)` can borrow `self`
+        // while we write into the (now-detached) buffer; the new slot always
+        // lands in the tail, never the borrowed base.
+        let mut tail = core::mem::take(&mut self.tail);
+        let at = tail.len();
+        tail.resize(at + stride, 0);
+        let res = match self.encode_slot(fact.0, v, &mut tail[at..]) {
             Ok(()) => Ok(index),
             Err(e) => {
                 // Roll the failed append back so the pool stays canonical.
-                slot.truncate(base);
+                tail.truncate(at);
                 Err(e)
             }
         };
-        self.bytes = Cow::Owned(slot);
+        self.tail = tail;
         res
     }
 
@@ -279,11 +311,8 @@ impl<'a> VecPool<'a> {
     pub(crate) fn copy_slot(&mut self, src: &VecPool<'_>, i: u32) -> u32 {
         debug_assert_eq!(self.dim, src.dim, "copy_slot across differing dims");
         let stride = self.stride();
-        let base = i as usize * stride;
-        let index = (self.bytes.len() / stride) as u32;
-        self.bytes
-            .to_mut()
-            .extend_from_slice(&src.bytes[base..base + stride]);
+        let index = (self.pool_len() / stride) as u32;
+        self.tail.extend_from_slice(src.slot_bytes(i as usize));
         index
     }
 
@@ -292,11 +321,8 @@ impl<'a> VecPool<'a> {
     fn cosine_at(&self, a: usize, b: usize) -> f32 {
         let stride = self.stride();
         let q_off = HEAD + Self::words(self.dim) * 8;
-        let (ab, bb) = (a * stride, b * stride);
-        let dot = dot_i8(
-            &self.bytes[ab + q_off..ab + stride],
-            &self.bytes[bb + q_off..bb + stride],
-        );
+        let (sa, sb) = (self.slot_bytes(a), self.slot_bytes(b));
+        let dot = dot_i8(&sa[q_off..stride], &sb[q_off..stride]);
         self.slot_scale(a) * self.slot_scale(b) * dot as f32
     }
 
@@ -340,8 +366,8 @@ impl<'a> VecPool<'a> {
         cand.clear();
         cand.reserve(n);
         for i in 0..n {
-            let base = i * stride;
-            let s_sig = &self.bytes[base + HEAD..base + HEAD + words * 8];
+            let slot = self.slot_bytes(i);
+            let s_sig = &slot[HEAD..HEAD + words * 8];
             let mut ham = 0u32;
             for w in 0..words {
                 let a = u64::from_le_bytes(q_sig[w * 8..w * 8 + 8].try_into().unwrap());
@@ -362,15 +388,13 @@ impl<'a> VecPool<'a> {
         #[cfg(feature = "counters")]
         let mut dots = 0u64;
         for &(_, slot) in cand[..c].iter() {
-            let base = slot as usize * stride;
-            let fact = FactId(u32::from_le_bytes(
-                self.bytes[base..base + 4].try_into().unwrap(),
-            ));
+            let sb = self.slot_bytes(slot as usize);
+            let fact = FactId(u32::from_le_bytes(sb[0..4].try_into().unwrap()));
             if !admit(fact) {
                 continue;
             }
-            let s_scale = f32::from_le_bytes(self.bytes[base + 4..base + 8].try_into().unwrap());
-            let dot = dot_i8(q_q, &self.bytes[base + q_off..base + stride]);
+            let s_scale = f32::from_le_bytes(sb[4..8].try_into().unwrap());
+            let dot = dot_i8(q_q, &sb[q_off..stride]);
             top.push((q_scale * s_scale * dot as f32, fact.0));
             #[cfg(feature = "counters")]
             {
@@ -386,10 +410,15 @@ impl<'a> VecPool<'a> {
         Ok(())
     }
 
-    /// The raw pool bytes (the persistence composer dumps this one
-    /// section).
-    pub(crate) fn bytes(&self) -> &[u8] {
-        &self.bytes
+    /// The vector section as one contiguous buffer (`base ++ tail`) — the
+    /// persistence composer dumps this one section. Byte-identical to the
+    /// owned pool holding the same slots, so an overlay snapshot is
+    /// canonical.
+    pub(crate) fn dump(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.pool_len());
+        out.extend_from_slice(self.base);
+        out.extend_from_slice(&self.tail);
+        out
     }
 
     /// Rebuilds a pool from its dumped section, checking only the framing
@@ -399,13 +428,15 @@ impl<'a> VecPool<'a> {
     pub(crate) fn from_parts(dim: usize, max_bytes: usize, bytes: &[u8]) -> Result<Self, Error> {
         Self::frame_check(dim, max_bytes, bytes.len())?;
         let mut pool = Self::new(dim, max_bytes);
-        pool.bytes = Cow::Owned(bytes.to_vec());
+        pool.tail = bytes.to_vec();
         Ok(pool)
     }
 
     /// Zero-copy sibling of [`VecPool::from_parts`]: the pool borrows the
-    /// dumped section (an mmap'd byte range) instead of copying it. Same
-    /// framing checks; the lifetime ties the pool to `bytes` (specs/16).
+    /// dumped section (an mmap'd byte range) as its base instead of copying
+    /// it. Same framing checks; the lifetime ties the pool to `bytes`
+    /// (specs/16). Under the overlay write path a later [`VecPool::push`]
+    /// appends to an owned tail without cloning the base.
     pub(crate) fn from_parts_borrowed(
         dim: usize,
         max_bytes: usize,
@@ -413,7 +444,7 @@ impl<'a> VecPool<'a> {
     ) -> Result<Self, Error> {
         Self::frame_check(dim, max_bytes, bytes.len())?;
         let mut pool = Self::new(dim, max_bytes);
-        pool.bytes = Cow::Borrowed(bytes);
+        pool.base = bytes;
         Ok(pool)
     }
 
@@ -446,30 +477,26 @@ impl<'a> VecPool<'a> {
         if self.dim == 0 {
             return Ok(());
         }
-        let stride = self.stride();
         let words = Self::words(self.dim);
         let q_off = HEAD + words * 8;
         for i in 0..self.len() {
-            let base = i * stride;
-            let scale = self.slot_scale(i);
+            let slot = self.slot_bytes(i);
+            let scale = f32::from_le_bytes(slot[4..8].try_into().unwrap());
             if !scale.is_finite() || scale < 0.0 {
                 return Err(Error::Corrupt(
                     "vector slot scale is not finite and non-negative",
                 ));
             }
             for w in 0..words {
-                let stored = u64::from_le_bytes(
-                    self.bytes[base + HEAD + w * 8..base + HEAD + w * 8 + 8]
-                        .try_into()
-                        .unwrap(),
-                );
+                let stored =
+                    u64::from_le_bytes(slot[HEAD + w * 8..HEAD + w * 8 + 8].try_into().unwrap());
                 let mut expect = 0u64;
                 for b in 0..64 {
                     let j = w * 64 + b;
                     if j >= self.dim {
                         break;
                     }
-                    if self.bytes[base + q_off + j] as i8 >= 0 {
+                    if slot[q_off + j] as i8 >= 0 {
                         expect |= 1 << b;
                     }
                 }
@@ -579,7 +606,7 @@ mod tests {
         // Slot 0 signature: components (positive, positive, +0, +0) → all
         // sign bits set for the first four bits.
         let stride = pool.stride();
-        let sig = u64::from_le_bytes(pool.bytes()[HEAD..HEAD + 8].try_into().unwrap());
+        let sig = u64::from_le_bytes(pool.dump()[HEAD..HEAD + 8].try_into().unwrap());
         assert_eq!(sig & 0b1111, 0b1111);
         assert_eq!(pool.len(), 3);
         assert_eq!(stride, HEAD + 8 + 4);
@@ -623,7 +650,7 @@ mod tests {
         ));
         // A failed push leaves the pool canonical (nothing appended).
         assert_eq!(pool.len(), 0);
-        assert!(pool.bytes().is_empty());
+        assert!(pool.is_empty());
     }
 
     /// Accessors and the edge branches: empty pool, `k == 0`, an
@@ -666,7 +693,7 @@ mod tests {
         let mut pool = VecPool::new(dim, usize::MAX);
         pool.push(FactId(0), &vec![0.5; dim]).unwrap();
         pool.push(FactId(1), &vec![-0.5; dim]).unwrap();
-        let bytes = pool.bytes().to_vec();
+        let bytes = pool.dump();
         let rebuilt = VecPool::from_parts(dim, usize::MAX, &bytes).unwrap();
         assert_eq!(rebuilt.len(), 2);
         rebuilt.validate().unwrap();
@@ -685,7 +712,7 @@ mod tests {
         let dim = 8;
         let mut pool = VecPool::new(dim, usize::MAX);
         pool.push(FactId(0), &vec![0.5; dim]).unwrap();
-        let good = pool.bytes().to_vec();
+        let good = pool.dump();
 
         // A non-finite scale (bytes 4..8) is rejected.
         let mut bad = good.clone();
@@ -708,5 +735,57 @@ mod tests {
                 .validate()
                 .is_err()
         );
+    }
+
+    /// Overlay open: a pool over a borrowed base grows through an owned tail
+    /// without touching the base, and every accessor (fact/scale/cosine/
+    /// search) spans the base/tail boundary. The dump is byte-identical to
+    /// the fully-owned pool holding the same slots.
+    #[test]
+    fn overlay_appends_to_tail_and_reads_span_the_boundary() {
+        let dim = 16;
+        let mut rng = Lcg(0x0ace_1a75);
+        let (va, vb, vc) = (rng.vector(dim), rng.vector(dim), rng.vector(dim));
+
+        // Fully-owned reference pool with all three vectors.
+        let mut owned = VecPool::new(dim, usize::MAX);
+        owned.push(FactId(10), &va).unwrap();
+        owned.push(FactId(11), &vb).unwrap();
+        owned.push(FactId(12), &vc).unwrap();
+
+        // Base = first two vectors, serialized as if from an mmap; the third
+        // is appended through the overlay open.
+        let mut seed = VecPool::new(dim, usize::MAX);
+        seed.push(FactId(10), &va).unwrap();
+        seed.push(FactId(11), &vb).unwrap();
+        let base = seed.dump();
+        let base_snapshot = base.clone();
+
+        // For this append-only store, the overlay open is `from_parts_borrowed`
+        // (a borrowed base that a later `push` extends via the owned tail).
+        let mut pool = VecPool::from_parts_borrowed(dim, usize::MAX, &base).unwrap();
+        assert_eq!(pool.len(), 2);
+        let idx = pool.push(FactId(12), &vc).unwrap();
+        assert_eq!(idx, 2);
+        assert_eq!(pool.len(), 3);
+
+        // Accessors read base slots (0,1) and the tail slot (2) alike.
+        assert_eq!(pool.slot_fact(0), 10); // base
+        assert_eq!(pool.slot_fact(2), 12); // tail
+        // A cosine between a base slot and the tail slot matches the owned
+        // pool's — the overlay changes representation, not values.
+        assert!((pool.cosine_slots(0, 2) - owned.cosine_slots(0, 2)).abs() < 1e-6);
+        pool.validate().unwrap();
+
+        // Search finds the appended (tail) vector by querying it exactly.
+        let mut scratch = VecScratch::new();
+        let mut out = Vec::new();
+        pool.search(&vc, 1, &mut |_| true, &mut scratch, &mut out)
+            .unwrap();
+        assert_eq!(out[0].0, FactId(12));
+
+        // The dump is canonical (== owned) and the borrowed base is untouched.
+        assert_eq!(pool.dump(), owned.dump());
+        assert_eq!(base, base_snapshot);
     }
 }

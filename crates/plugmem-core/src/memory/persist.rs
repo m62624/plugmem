@@ -345,7 +345,7 @@ impl<'a> Memory<'a> {
         push(kind::ENGINE_STATE, state);
         // The vector pool is one flat section (empty when dim is 0); dim
         // and stride are derived from the stored config on load.
-        push(kind::VEC_POOL, self.vecs.bytes().to_vec());
+        push(kind::VEC_POOL, self.vecs.dump());
         // The HNSW graph: header, flat level-0 blocks, and the
         // upper-level arena + list pool (all empty in the flat regime).
         push(kind::HNSW_META, self.hnsw.dump_meta());
