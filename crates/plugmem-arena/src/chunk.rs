@@ -20,19 +20,40 @@
 //! stream stays exactly the pushed bytes). Self-delimiting encodings
 //! (varints) can therefore decode chunk by chunk without a reassembly
 //! buffer.
+//!
+//! # Overlay opens
+//!
+//! [`ChunkPool::load_overlay`] opens a pool whose chunks are **borrowed** from
+//! a longer-lived buffer — typically a memory-mapped file — while the pool
+//! stays fully mutable. A chunk carries its chain link (and, when free, its
+//! free-list link) in its own bytes, so a pool mutates chunks in place; the
+//! first write to a borrowed chunk copies just *that* chunk into an owned
+//! overlay, and chunks grown after open live in an owned tail (per-page
+//! copy-on-write). The borrowed base is never mutated or cloned as a whole, so
+//! a large mapped pool can be *written to* while resident only in the chunks it
+//! actually touches. The overlay keeps the crate's flat philosophy — two flat
+//! `Vec`s, no `Box`, no map. See `examples/overlay.rs`.
 
-use alloc::borrow::Cow;
 use alloc::vec::Vec;
 use core::fmt;
 
 use crate::error::Error;
+use crate::paged::Paged;
 
-/// Size of one chunk in bytes: a 4-byte chain link plus the payload.
+/// Size of one chunk in bytes: a chain link ([`LINK_BYTES`]) plus the payload.
 pub const CHUNK_BYTES: usize = 64;
 
-/// Payload bytes per chunk ([`CHUNK_BYTES`] minus the 4-byte chain link).
+/// Bytes of a chunk's chain link — a little-endian `u32` at the chunk's start,
+/// holding either the next chunk in a list chain or the next free chunk.
+const LINK_BYTES: usize = core::mem::size_of::<u32>();
+
+/// Payload bytes per chunk ([`CHUNK_BYTES`] minus the [`LINK_BYTES`] link).
 /// Also the maximum length of a single pushed value.
-pub const CHUNK_PAYLOAD: usize = CHUNK_BYTES - 4;
+pub const CHUNK_PAYLOAD: usize = CHUNK_BYTES - LINK_BYTES;
+
+/// Bytes of the dumped metadata header: `[chunks u32][free_head u32]`
+/// (see [`ChunkPool::dump_meta`]).
+const META_HEADER: usize = 2 * core::mem::size_of::<u32>();
 
 /// Sentinel for "no chunk": an empty list, the end of a chain, or an empty
 /// free-list.
@@ -164,11 +185,13 @@ pub struct ChunkPool<'a> {
     /// internal metadata — not a sort key, so no big-endian mandate), the
     /// remaining [`CHUNK_PAYLOAD`] bytes hold values.
     ///
-    /// `Cow` so the pool can borrow the chunk bytes from a mapped snapshot
-    /// on the read-only path (specs/16), tied to `'a`; `alloc`-only, so
-    /// `no_std` holds. The read-only path never mutates, so `to_mut`'s copy
-    /// never fires.
-    pool: Cow<'a, [u8]>,
+    /// A [`Paged`] backing (chunk-sized pages) so the pool can either own its
+    /// bytes or borrow a base from a mapped snapshot and overlay writes
+    /// (`load_borrowed`/`load_overlay` — specs/16). Both the chain link and the
+    /// free-list link live in a chunk's bytes, so writing either copies just
+    /// that chunk up (per-page copy-on-write); the borrowed base is never
+    /// mutated or cloned. `alloc`-only, so `no_std` holds.
+    pool: Paged<'a, CHUNK_BYTES>,
     /// Chunk -> payload bytes occupied. Payload bytes beyond `used[chunk]`
     /// are zero-filled, never exposed. (Chunks are grown zeroed on purpose:
     /// the arena's measured uninit-page `unsafe` pays off when zeroing
@@ -185,7 +208,7 @@ impl<'a> ChunkPool<'a> {
     /// Creates an empty pool. Allocates nothing until the first push.
     pub const fn new(cfg: ChunkPoolCfg) -> Self {
         Self {
-            pool: Cow::Owned(Vec::new()),
+            pool: Paged::owned_empty(),
             used: Vec::new(),
             free_head: NONE,
             cfg,
@@ -218,9 +241,10 @@ impl<'a> ChunkPool<'a> {
                 list.tail = chunk;
             }
             let tail = list.tail as usize;
-            let at = tail * CHUNK_BYTES + 4 + self.used[tail] as usize;
-            self.pool.to_mut()[at..at + value.len()].copy_from_slice(value);
-            self.used[tail] += value.len() as u8;
+            let rel = LINK_BYTES + self.used[tail] as usize;
+            let len = value.len();
+            self.pool.page_mut(tail as u32)[rel..rel + len].copy_from_slice(value);
+            self.used[tail] += len as u8;
         }
         list.len += 1;
         Ok(())
@@ -280,7 +304,12 @@ impl<'a> ChunkPool<'a> {
                 .ok()
                 .filter(|&c| c != NONE)
                 .ok_or(capacity_exceeded)?;
-            self.pool.to_mut().resize(new_len, 0);
+            // Grow the owned tail by one zeroed chunk (the whole vector when
+            // owned, the overlay tail when borrowing — the base is never
+            // resized). Zeroing a 64-byte chunk is noise, so no unsafe here.
+            let tail = self.pool.grown_tail_mut();
+            let tail_len = tail.len() + CHUNK_BYTES;
+            tail.resize(tail_len, 0);
             self.used.push(0);
             chunk
         };
@@ -290,14 +319,13 @@ impl<'a> ChunkPool<'a> {
 
     /// Reads a chunk's chain link.
     fn link(&self, chunk: u32) -> u32 {
-        let at = chunk as usize * CHUNK_BYTES;
-        u32::from_le_bytes(self.pool[at..at + 4].try_into().unwrap())
+        u32::from_le_bytes(self.pool.page(chunk)[..LINK_BYTES].try_into().unwrap())
     }
 
-    /// Writes a chunk's chain link.
+    /// Writes a chunk's chain link (copying the chunk up first when it is a
+    /// still-borrowed base chunk).
     fn set_link(&mut self, chunk: u32, to: u32) {
-        let at = chunk as usize * CHUNK_BYTES;
-        self.pool.to_mut()[at..at + 4].copy_from_slice(&to.to_le_bytes());
+        self.pool.page_mut(chunk)[..LINK_BYTES].copy_from_slice(&to.to_le_bytes());
     }
 
     /// Number of chunks the pool holds (used and free alike).
@@ -385,7 +413,7 @@ impl<'a> ChunkPool<'a> {
     /// complete pool-side state; the list handles live with their owners.
     pub fn dump_meta(&self, out: &mut Vec<u8>) {
         let free = self.free_map();
-        out.reserve(8 + self.used.len());
+        out.reserve(META_HEADER + self.used.len());
         out.extend_from_slice(&(self.used.len() as u32).to_le_bytes());
         out.extend_from_slice(&self.free_head.to_le_bytes());
         for (chunk, &used) in self.used.iter().enumerate() {
@@ -395,8 +423,8 @@ impl<'a> ChunkPool<'a> {
 
     /// Appends the pool section to `out` (`specs/03`).
     ///
-    /// Each chunk contributes its 4-byte link, its used payload prefix and
-    /// zero padding to [`CHUNK_BYTES`]; free chunks contribute link plus
+    /// Each chunk contributes its [`LINK_BYTES`] link, its used payload prefix
+    /// and zero padding to [`CHUNK_BYTES`]; free chunks contribute link plus
     /// zeros. This canonicalizes the stale bytes recycling leaves behind
     /// (see [`ChunkPool::free`]) — identical logical state, identical
     /// bytes.
@@ -404,9 +432,8 @@ impl<'a> ChunkPool<'a> {
         let free = self.free_map();
         out.reserve(self.pool.len());
         for (chunk, &used) in self.used.iter().enumerate() {
-            let at = chunk * CHUNK_BYTES;
             let used = if free[chunk] { 0 } else { used as usize };
-            out.extend_from_slice(&self.pool[at..at + 4 + used]);
+            out.extend_from_slice(&self.pool.page(chunk as u32)[..LINK_BYTES + used]);
             out.resize(out.len() + (CHUNK_PAYLOAD - used), 0);
         }
     }
@@ -431,7 +458,7 @@ impl<'a> ChunkPool<'a> {
     pub fn load(cfg: ChunkPoolCfg, meta: &[u8], pool: &[u8]) -> Result<Self, Error> {
         let (used, free_head) = validate_chunks(cfg, meta, pool)?;
         Ok(Self {
-            pool: Cow::Owned(pool.to_vec()),
+            pool: Paged::owned_from(pool.to_vec()),
             used,
             free_head,
             cfg,
@@ -450,7 +477,31 @@ impl<'a> ChunkPool<'a> {
     pub fn load_borrowed(cfg: ChunkPoolCfg, meta: &[u8], pool: &'a [u8]) -> Result<Self, Error> {
         let (used, free_head) = validate_chunks(cfg, meta, pool)?;
         Ok(Self {
-            pool: Cow::Borrowed(pool),
+            pool: Paged::borrowed(pool),
+            used,
+            free_head,
+            cfg,
+        })
+    }
+
+    /// Opens a pool over a borrowed base for the **overlay** write path: the
+    /// chunk bytes are mapped read-only, and the first write to any base chunk
+    /// (a value push, or a chain/free-list link update) copies just that chunk
+    /// into owned storage (per-page copy-on-write, see [`Paged`](crate::paged)),
+    /// while chunks grown after open live in an owned tail. Unlike
+    /// [`ChunkPool::load_borrowed`] the returned pool is fully mutable — pushes
+    /// and frees work — yet the borrowed base is never cloned as a whole or
+    /// mutated, so a memory-mapped pool can be written to while resident only in
+    /// the chunks it actually touches. Validation is identical to
+    /// [`ChunkPool::load`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Corrupt`] for any inconsistency (same gates as `load`).
+    pub fn load_overlay(cfg: ChunkPoolCfg, meta: &[u8], pool: &'a [u8]) -> Result<Self, Error> {
+        let (used, free_head) = validate_chunks(cfg, meta, pool)?;
+        Ok(Self {
+            pool: Paged::borrowed(pool),
             used,
             free_head,
             cfg,
@@ -462,15 +513,15 @@ impl<'a> ChunkPool<'a> {
 /// head. Shared by [`ChunkPool::load`] and [`ChunkPool::load_borrowed`];
 /// input is untrusted (see `load`).
 fn validate_chunks(cfg: ChunkPoolCfg, meta: &[u8], pool: &[u8]) -> Result<(Vec<u8>, u32), Error> {
-    if meta.len() < 8 {
+    if meta.len() < META_HEADER {
         return Err(Error::Corrupt("chunk meta shorter than its header"));
     }
     let chunks = u32::from_le_bytes(meta[0..4].try_into().unwrap());
-    let free_head = u32::from_le_bytes(meta[4..8].try_into().unwrap());
+    let free_head = u32::from_le_bytes(meta[4..META_HEADER].try_into().unwrap());
     if chunks == NONE {
         return Err(Error::Corrupt("chunk count overflows the index space"));
     }
-    if meta.len() as u64 != 8 + u64::from(chunks) {
+    if meta.len() as u64 != META_HEADER as u64 + u64::from(chunks) {
         return Err(Error::Corrupt("chunk meta length mismatch"));
     }
     if pool.len() as u64 != u64::from(chunks) * CHUNK_BYTES as u64 {
@@ -479,13 +530,13 @@ fn validate_chunks(cfg: ChunkPoolCfg, meta: &[u8], pool: &[u8]) -> Result<(Vec<u
     if pool.len() > cfg.max_bytes {
         return Err(Error::Corrupt("chunk pool exceeds the configured ceiling"));
     }
-    let used: Vec<u8> = meta[8..].to_vec();
+    let used: Vec<u8> = meta[META_HEADER..].to_vec();
     if used.iter().any(|&u| u as usize > CHUNK_PAYLOAD) {
         return Err(Error::Corrupt("chunk used bytes exceed the payload size"));
     }
     let link_of = |chunk: usize| {
         let at = chunk * CHUNK_BYTES;
-        u32::from_le_bytes(pool[at..at + 4].try_into().unwrap())
+        u32::from_le_bytes(pool[at..at + LINK_BYTES].try_into().unwrap())
     };
     for chunk in 0..chunks as usize {
         let link = link_of(chunk);
@@ -534,9 +585,9 @@ impl<'a> Iterator for ChunkIter<'a> {
         if self.chunk == NONE {
             return None;
         }
-        let chunk = self.chunk as usize;
-        self.chunk = self.pool.link(self.chunk);
-        let at = chunk * CHUNK_BYTES + 4;
-        Some(&self.pool.pool[at..at + self.pool.used[chunk] as usize])
+        let chunk = self.chunk;
+        self.chunk = self.pool.link(chunk);
+        let used = self.pool.used[chunk as usize] as usize;
+        Some(&self.pool.pool.page(chunk)[LINK_BYTES..LINK_BYTES + used])
     }
 }
