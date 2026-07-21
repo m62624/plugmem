@@ -22,9 +22,9 @@ The underlying engine is a `no_std` Rust core (BM25, quantized vectors with
 HNSW, an entity graph, bitemporal facts) whose snapshot format is
 pointer-width independent — the same database file also opens in native
 builds and in wasm64 (memory64) builds. See the
-[core README](https://github.com/m62624/plugmem/tree/main/crates/plugmem-core)
+[core README](https://docs.rs/plugmem-core/latest)
 for the engine itself and the Rust-native
-[host layer](https://github.com/m62624/plugmem/tree/main/crates/plugmem-host)
+[host layer](https://docs.rs/plugmem-host/latest)
 for the "point at a file and go" experience.
 
 ## Building from source

@@ -1,8 +1,8 @@
 # plugmem-cli
 
 `plugmem-cli` is the command-line surface over the plugmem
-[temporal-memory engine](../plugmem-core) — a thin shell around
-[`plugmem-host`](../plugmem-host) that lets an agent (or you) keep a memory
+[temporal-memory engine](https://docs.rs/plugmem-core/latest) — a thin shell around
+[`plugmem-host`](https://docs.rs/plugmem-host/latest) that lets an agent (or you) keep a memory
 in a single file from a terminal or a shell script. It parses arguments,
 calls one engine verb, and prints the result: a human report by default,
 `--json` for tooling. No memory logic lives here; retrieval (BM25,
@@ -25,8 +25,8 @@ cargo build --release -p plugmem-cli
 | You want | Use |
 |---|---|
 | a memory from the shell or a script — one file, no server | **this binary** |
-| the same, but embedded in a Rust program | [`plugmem-host`](../plugmem-host) (`std`) |
-| the engine alone, your own storage, `no_std` (browser/wasm) | [`plugmem-core`](../plugmem-core) |
+| the same, but embedded in a Rust program | [`plugmem-host`](https://docs.rs/plugmem-host/latest) (`std`) |
+| the engine alone, your own storage, `no_std` (browser/wasm) | [`plugmem-core`](https://docs.rs/plugmem-core/latest) |
 | agents over a protocol instead of a shell | `plugmem-mcp` — in progress |
 
 ## Usage
@@ -140,10 +140,15 @@ Opening reads the snapshot into memory and replays the journal, so on a
 large database each command pays that load. For a memory of tens of
 thousands of facts it is milliseconds; if you need many operations against
 a big memory without re-loading each time, that is the **long-lived
-handle** case — embed [`plugmem-host`](../plugmem-host)'s `Database` in
-your process (open once, call many verbs, all in RAM), or run the MCP
-server, which keeps the memory resident. The CLI deliberately does not: it
-trades a per-command load for a stateless, scriptable tool.
+handle** case — embed [`plugmem-host`](https://docs.rs/plugmem-host/latest)'s
+`Database` in your process (open once, call many verbs, all in RAM), or
+run the MCP server, which keeps the memory resident. The CLI deliberately
+does not: it trades a per-command load for a stateless, scriptable tool.
+
+How much a memory weighs — the byte cost of a fact, an edge or a vector,
+and where each structure tops out — is tabulated in
+[`plugmem-core`](https://docs.rs/plugmem-core/latest)'s *Capacity — what weighs
+what*; it applies verbatim to a file the CLI opens.
 
 ## Concurrency
 
@@ -151,7 +156,7 @@ One database file is a single-writer resource: `plugmem-cli` takes an
 exclusive lock for the length of the (short-lived) command, so a second
 `plugmem-cli` — or an MCP server holding the same file — is refused with
 exit `1` rather than corrupting it. See the
-[host concurrency model](../plugmem-host#concurrency-model).
+[host concurrency model](https://docs.rs/plugmem-host/latest).
 
 ## License
 

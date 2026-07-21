@@ -12,13 +12,13 @@ bounds-check plus adoption — no per-record parsing, no pointer rebuild.
 Nothing here knows about the data it stores. Reach for it when you need a
 compact, allocation-frugal **ordered container that is its own file
 format** — an ordered index, a record store, an inverted index, a string
-dictionary. One user is [`plugmem-core`](../plugmem-core), an agent-memory
+dictionary. One user is [`plugmem-core`](https://docs.rs/plugmem-core/latest), an agent-memory
 engine built on top of these four structures, but the crate stands on its
 own; lift it into any project as-is.
 
 **Which crate:** this crate is the storage layer. For the memory engine
-built on it, see [`plugmem-core`](../plugmem-core) (`no_std`); for the
-file-backed, locking host with embedders, [`plugmem-host`](../plugmem-host)
+built on it, see [`plugmem-core`](https://docs.rs/plugmem-core/latest) (`no_std`); for the
+file-backed, locking host with embedders, [`plugmem-host`](https://docs.rs/plugmem-host/latest)
 (`std`).
 
 ## Design
@@ -147,7 +147,7 @@ are actually incremental. Workload: 16-byte records — 12-byte big-endian
 composite key `[u64 | u32]` plus 4-byte payload — seeded xorshift keys,
 identical streams on every runtime. One thread. The charts below are
 rendered from the stand's output by
-[`plugmem-bench-charts`](../../tools/bench-charts) (plotters — pure Rust,
+[`plugmem-bench-charts`](https://github.com/m62624/plugmem/tree/main/tools/bench-charts) (plotters — pure Rust,
 no browser), averaged over several runs; regenerating them is one command
 (see [Reproduction stand](#reproduction-stand)). Allocator-call charts use
 a logarithmic y-axis — those values span five orders of magnitude, so a
@@ -242,7 +242,7 @@ wasmer run  target/wasm32-wasip1/release/examples/bench_repro.wasm -- 1000000
 ```
 
 The charts above are rendered from that TSV by
-[`plugmem-bench-charts`](../../tools/bench-charts) (plotters — pure Rust,
+[`plugmem-bench-charts`](https://github.com/m62624/plugmem/tree/main/tools/bench-charts) (plotters — pure Rust,
 no browser). Run the stand a few times,
 feed the TSV in, and it re-renders only the charts whose values moved past
 the noise threshold in its `config.toml` (so a jittery re-run leaves the

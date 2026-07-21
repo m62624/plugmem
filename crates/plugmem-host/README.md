@@ -1,7 +1,7 @@
 # plugmem-host
 
 `plugmem-host` is the `std` host layer for the plugmem
-[temporal-memory engine](../plugmem-core): point it at a file path and go.
+[temporal-memory engine](https://docs.rs/plugmem-core/latest): point it at a file path and go.
 It supplies the things the `no_std` engine deliberately does not own —
 files, locking, and network — so that from this one crate an agent gets
 `remember / recall / revise / forget` backed by durable storage. The
@@ -34,8 +34,8 @@ time still answer; vectors are an addition, not a requirement.
 | You want | Depend on |
 |---|---|
 | point it at a file path and go — durability, locking, read-only mmap, auto-embedding | **this crate** (`std`; re-exports the engine's types) |
-| the engine alone with your own storage (a browser, a wasm host, custom persistence) — BM25/HNSW/graph/time included, no files or network | [`plugmem-core`](../plugmem-core) (`no_std`) |
-| the flat byte data structures underneath | [`plugmem-arena`](../plugmem-arena) (`no_std`) |
+| the engine alone with your own storage (a browser, a wasm host, custom persistence) — BM25/HNSW/graph/time included, no files or network | [`plugmem-core`](https://docs.rs/plugmem-core/latest) (`no_std`) |
+| the flat byte data structures underneath | [`plugmem-arena`](https://docs.rs/plugmem-arena/latest) (`no_std`) |
 | no Rust at all: a CLI, an MCP server for agents, an npm package | `plugmem-cli` / `plugmem-mcp` / `plugmem-wasm` — in progress, not published yet |
 
 ```rust,no_run
@@ -66,11 +66,14 @@ println!("{}", out.rendered);
 
 Native builds are 64-bit, so a host process reads every capacity class
 of the shared file format: databases sized for the 32-bit wasm budget
-(≤ 2 GiB, the default) and databases with larger limits alike. The
-snapshot format is pointer-width independent — a file written here opens
-unchanged in a wasm32 or wasm64 build of the core, as long as its
-configured limits fit that host (see the core README, "WebAssembly 2.0
-and 3.0").
+(≤ 2 GiB, the default) and databases with larger limits alike. Because a
+read-write open holds the whole image resident, the practical ceiling
+here is host RAM — the per-structure byte costs and pool limits (what a
+fact, an edge or a vector weighs, and where each tops out) are tabulated
+in [`plugmem-core`](https://docs.rs/plugmem-core/latest)'s *Capacity — what
+weighs what*. The snapshot format is pointer-width independent — a file
+written here opens unchanged in a wasm32 or wasm64 build of the core, as
+long as its configured limits fit that host.
 
 ## Files
 

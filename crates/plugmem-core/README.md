@@ -40,9 +40,9 @@ anywhere else Rust compiles.
 
 | You want | Depend on |
 |---|---|
-| point it at a file and go — OS locking, fsync and auto-snapshot policy, a zero-copy read-only mmap open, automatic embeddings over HTTP (OpenAI/Ollama/LM Studio/vLLM/llama.cpp) | [`plugmem-host`](../plugmem-host) (`std`; re-exports this engine) |
+| point it at a file and go — OS locking, fsync and auto-snapshot policy, a zero-copy read-only mmap open, automatic embeddings over HTTP (OpenAI/Ollama/LM Studio/vLLM/llama.cpp) | [`plugmem-host`](https://docs.rs/plugmem-host/latest) (`std`; re-exports this engine) |
 | the engine alone with your own storage (a browser, a wasm host, custom persistence), `no_std`, full control | **this crate** |
-| the flat byte structures underneath (sorted page arenas, blob heap, chunk pool, interner) for your own storage project | [`plugmem-arena`](../plugmem-arena) (`no_std`) |
+| the flat byte structures underneath (sorted page arenas, blob heap, chunk pool, interner) for your own storage project | [`plugmem-arena`](https://docs.rs/plugmem-arena/latest) (`no_std`) |
 | no Rust at all: a CLI, an MCP server for agents, an npm package | `plugmem-cli` / `plugmem-mcp` / `plugmem-wasm` — in progress, not published yet |
 
 ## Who this is for
@@ -85,7 +85,7 @@ mem.snapshot(&mut store, 1_784_000_200_000).unwrap(); // full image + journal re
 
 Everything runs against a `Storage`; `MemStorage` is the in-memory one
 (the file-backed storage with locking and durability lives in
-[`plugmem-host`](../plugmem-host)). Timestamps are unix-millis you pass in
+[`plugmem-host`](https://docs.rs/plugmem-host/latest)). Timestamps are unix-millis you pass in
 — the engine keeps no clock.
 
 **Revise, then ask "what was true then" (bitemporal).** `revise` closes
@@ -195,7 +195,7 @@ To add vector recall, set `Config { dim: N, .. }` and pass
 `RememberInput { vector: Some(&embedding), .. }` (and a query `vector`);
 the engine quantizes to int8 and, past a threshold, builds the HNSW graph
 in `maintain`. Computing the embedding is the caller's job — which is what
-[`plugmem-host`](../plugmem-host) automates over an HTTP embedding server.
+[`plugmem-host`](https://docs.rs/plugmem-host/latest) automates over an HTTP embedding server.
 
 ## Data model
 
@@ -291,7 +291,7 @@ CI gates: a complexity regression fails the same way on any machine.
 enforced by a counting-allocator test.
 
 Per-source recall latency (single thread, native). The chart is rendered
-by [`plugmem-bench-charts`](../../tools/bench-charts) from the
+by [`plugmem-bench-charts`](https://github.com/m62624/plugmem/tree/main/tools/bench-charts) from the
 `bench_ops` example's output — the same plotters pipeline as the arena
 charts:
 
@@ -313,15 +313,78 @@ never run under `cargo test`) for the full statistical suite, or
 `#TSV` rows. Corpora come from `plugmem-testgen` — seeded, so every run
 measures the same workload.
 
+## Capacity — what weighs what
+
+The writer holds the whole database **resident** (flat arenas mutated in
+place, snapshotted on demand), so on a 64-bit host the practical ceiling
+is **RAM**, not addressing. Below that, each structure tops out at the
+width of its own internal index. Every byte cost here is fixed by the
+`Slot` definitions in `model.rs` and the pool strides — not estimates:
+
+| Structure | Holds | Per unit | Indexed by | Ceiling |
+|---|---|---|---|---|
+| `facts` + `fact_aux` | one fact's record | 48 + 16 = **64 B** | u32 page × 4 KiB | 4.29 B facts (`u32` id) |
+| `temporal` | `recorded_at` index entry | **12 B** / fact | u32 page × 4 KiB | 16 TiB pool |
+| `entities` + `by_name` | one entity | 24 + 8 = **32 B** | u32 page × 4 KiB | 4.29 B entities |
+| `edges_out` + `edges_in` | one typed edge (both directions) | 16 + 16 = **32 B** | u32 page × 4 KiB | 16 TiB pool |
+| `texts` (blob heap) | **all** fact texts + entity names, concatenated | its text length | **u32 byte offset** | **4 GiB total** |
+| `terms` (interner) | vocabulary: unique tokens, tags, relation names | deduped term length | **u32 byte offset** | **4 GiB total** |
+| `tag_lists` + postings | tag/term/entity → fact lists | ~varint / entry | u32 chunk × 64 B | 256 GiB each |
+| `vecs` (vector pool) | one int8-quantized embedding | `8 + 8·⌈dim/64⌉ + dim` B | u32 slot | 4.29 B vectors |
+| HNSW graph | neighbor blocks | ≈ `m0 × 4 B` / vector | u32 node id | 4.29 B nodes |
+
+Per-vector stride, concretely: **d384 → 440 B**, **d768 → 872 B**,
+**d1536 → 1736 B** (f32 is never stored — only the int8 components, a
+1-bit sign signature and a scale).
+
+**The binding limit is rarely the id space.** Ids are `u32` (4.29
+billion), but two softer walls arrive first:
+
+- **`texts` 4 GiB** — the sum of every fact's text plus entity names.
+  At ~200 B/fact that is **~21 M facts** of text; at ~120 B, ~36 M.
+  Usually the first hard wall for a text-heavy memory.
+- **RAM**, since the writer is fully resident — and with vectors this
+  binds first: d768 embeddings are 872 B each, so 10 M vectors alone are
+  **~8.7 GiB**.
+
+Worked sizes (native / wasm64; no vectors unless noted):
+
+| Memory | Rough resident size | Fits |
+|---|---|---|
+| 100 k facts, ~120 B text (design center) | ~40 MB | anywhere, incl. wasm32 |
+| 1 M facts + d384 vectors (wasm32 ceiling) | ~0.9 GB — arenas ~90 MB, text ~120 MB, vecs ~440 MB, index | wasm32 ≤ 2 GiB budget |
+| 10 M facts + d768 vectors | ~13 GB — vecs ~8.7 GB dominate; text ~1.2 GB (< 4 GiB) | 64-bit host, comfortably |
+
+So on 64-bit, **vectors and text dominate RAM**: you run out of memory
+(or reach the 4 GiB text pool near ~20 M facts) far sooner than the
+4.29 B id space.
+
+### Address-space classes
+
+| Target | `usize` | Total resident image |
+|---|---|---|
+| **wasm32** (Wasm 2.0; `wasm32v1-none`, `-wasip1`) | 32-bit | **≤ 4 GiB total** — every pool + code + stack share one linear memory. Realistic DB ~1–2 GiB; design center 100 k facts, ceiling 1 M. |
+| **wasm64** (Wasm 3.0 [memory64](https://github.com/WebAssembly/memory64)) | 64-bit | RAM-bound; the per-pool caps above still apply |
+| **native 64-bit** | 64-bit | RAM-bound; `max_bytes` raisable past 4 GiB |
+| **native 32-bit** | 32-bit | like wasm32; a > 4 GiB-class DB is refused with `ConfigMismatch` (a typed error, not corruption) |
+
+The per-pool 4 GiB byte-offset caps are a deliberate **wasm32 fit**, not
+a host addressing limit: on 64-bit they are the *floor* (raise
+`max_bytes`, hold arenas and vectors far past 4 GiB in total), but a
+single text or vocabulary byte-pool still tops out at 4 GiB whatever the
+pointer width — a serialization choice, traded for a compact, portable
+snapshot. See [WebAssembly 2.0 and 3.0](#webassembly-20-and-30).
+
 ## Limits, stated plainly
 
 - Single-threaded, single-writer. Concurrency belongs to the embedding
-  process (the [`plugmem-host`](../plugmem-host) crate serializes access
-  to a file).
-- ≤ 2 GiB of state by default (the 32-bit wasm budget); ids are `u32`;
-  texts ≤ 4 KiB; dimensions ≤ 4096. On 64-bit builds `max_bytes` may be
-  raised past 4 GiB — such a database then opens only on 64-bit hosts
-  (a typed error, not corruption, on 32-bit ones).
+  process (the [`plugmem-host`](https://docs.rs/plugmem-host/latest) crate
+  serializes access to a file).
+- Sizing and per-structure ceilings are laid out in
+  [Capacity — what weighs what](#capacity--what-weighs-what): ≤ 2 GiB of
+  state by default (the 32-bit wasm budget), `u32` ids, texts ≤ 4 KiB,
+  dimensions ≤ 4096. On 64-bit builds `max_bytes` may be raised past
+  4 GiB — such a database then opens only on 64-bit hosts.
 - Vector search is quantized (int8) — exact f32 scores are never
   computed — and approximate above the HNSW threshold (recall@10 ≥ 0.9
   against brute force is a test gate, not a proof).
