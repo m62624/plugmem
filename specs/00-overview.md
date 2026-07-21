@@ -46,7 +46,7 @@ WASM здесь — формат переносимости ядра, **не** �
 | `plugmem-arena` | no_std | Плоские структуры: Arena (шардированная байтовая арена), BlobHeap, ChunkedList, Interner. Фундамент всего. |
 | `plugmem-core` | no_std | Движок: модель данных, индексы (BM25, время, граф, векторы), hybrid recall, снапшот/журнал, API-глаголы, trait `Storage`. |
 | `plugmem-host` | std | Нативный хост-слой: `FileStorage`, trait `Embedder` + реализации (ollama, openai-compat, null; local — за feature). |
-| `plugmem-cli` | std | Бинарник `plugmem`: команды поверх core + host. |
+| `plugmem-cli` | std | Бинарник `plugmem-cli`: команды поверх core + host. |
 | `plugmem-mcp` | std | MCP-сервер (stdio JSON-RPC) поверх core + host; skill встроен `include_str!`. |
 | `plugmem-wasm` | — | cdylib+rlib bridge: Storage/Embedder через JS-callbacks; npm-пакет с TS-типами. |
 | `plugmem-testgen` | std | Внутренний: генератор синтетических корпусов для тестов и бенчей. `publish = false`. |

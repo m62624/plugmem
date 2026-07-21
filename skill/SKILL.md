@@ -78,7 +78,7 @@ confirm the recalled block contains the remembered text.
 ### Step 0c — version check (MANDATORY; on ANY mismatch, STOP)
 
 This skill targets the engine version in the marker below. Read the engine's
-version (`plugmem --version` / `plugmem_version`) and print one explicit
+version (`plugmem-cli --version` / `plugmem_version`) and print one explicit
 comparison line:
 
 ```

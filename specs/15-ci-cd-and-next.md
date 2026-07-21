@@ -73,7 +73,7 @@
 ## 3. cargo-dist (бинарники)
 
 - Конфиг: `[workspace.metadata.dist]` в корневом Cargo.toml. Бинарники —
-  только `plugmem-cli` (bin `plugmem`) и `plugmem-mcp`; все библиотеки и
+  только `plugmem-cli` (bin `plugmem-cli`) и `plugmem-mcp`; все библиотеки и
   tools несут `[package.metadata.dist] dist = false`.
 - Таргеты: linux/windows/macos × x86_64/aarch64 (6).
 - Инсталлеры: shell, powershell, **msi**, homebrew (+ `cargo binstall`

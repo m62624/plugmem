@@ -20,23 +20,23 @@
   один процесс. CLI при базе, занятой (например) MCP-сервером, печатает
   «database is locked by another process (pid …)» и выходит с кодом 1.
 
-## CLI (`plugmem`, крейт plugmem-cli)
+## CLI (`plugmem-cli`, крейт plugmem-cli)
 
 Команды (все поддерживают `--json` для машинного вывода; человеческий вывод —
 default):
 
 | Команда | Суть |
 |---|---|
-| `plugmem remember "text" [--entity E] [--tag T]... [--link REL:ENTITY]... [--valid-from TS]` | remember; печатает id + similar-подсказки |
-| `plugmem recall [QUERY] [--tag]... [--entity]... [--as-of TS] [--range A B] [-k N] [--budget N] [--closed]` | recall; человеческий вывод = `rendered` |
-| `plugmem revise ID "text" [...]` | revise |
-| `plugmem forget ID` | forget |
-| `plugmem link SRC REL DST` | link |
-| `plugmem show ID` | полная карточка факта (цепочка ревизий, рёбра) |
-| `plugmem stats` | размеры, счётчики, конфиг |
-| `plugmem maintain` | явный maintain + snapshot |
-| `plugmem export --format jsonl` / `import` | дамп/загрузка фактов (переносимость, бэкап человекочитаемым) |
-| `plugmem migrate` | миграция формата (feature migrate) |
+| `plugmem-cli remember "text" [--entity E] [--tag T]... [--link REL:ENTITY]... [--valid-from TS]` | remember; печатает id + similar-подсказки |
+| `plugmem-cli recall [QUERY] [--tag]... [--entity]... [--as-of TS] [--range A B] [-k N] [--budget N] [--closed]` | recall; человеческий вывод = `rendered` |
+| `plugmem-cli revise ID "text" [...]` | revise |
+| `plugmem-cli forget ID` | forget |
+| `plugmem-cli link SRC REL DST` | link |
+| `plugmem-cli show ID` | полная карточка факта (цепочка ревизий, рёбра) |
+| `plugmem-cli stats` | размеры, счётчики, конфиг |
+| `plugmem-cli maintain` | явный maintain + snapshot |
+| `plugmem-cli export --format jsonl` / `import` | дамп/загрузка фактов (переносимость, бэкап человекочитаемым) |
+| `plugmem-cli migrate` | миграция формата (feature migrate) |
 
 Exit-коды: 0 ok; 1 ошибка входа/не найдено; 2 повреждение базы. `now` берётся
 из системных часов **здесь** (единственное место времени). Время в аргументах —
