@@ -27,6 +27,21 @@ pub struct TermId(pub u32);
 /// Initial hash-table size (slots); must be a power of two.
 const INITIAL_SLOTS: usize = 16;
 
+/// Maximum load factor as an integer fraction (`LOAD_NUM / LOAD_DEN` = 0.7):
+/// the table grows before `len / slots` would exceed it. Integer form avoids
+/// float math in `no_std` and keeps the same test in `intern` and on load.
+const LOAD_NUM: usize = 7;
+/// Denominator of the [`LOAD_NUM`] load-factor fraction.
+const LOAD_DEN: usize = 10;
+
+/// Serialized width of one table entry (little-endian `u32`: `0` = empty,
+/// else `TermId + 1`).
+const SLOT_BYTES: usize = core::mem::size_of::<u32>();
+
+/// Serialized metadata header of the dumped table: `[slots u32][len u32]`
+/// (see [`Interner::dump_table`]).
+const TABLE_HEADER: usize = 2 * core::mem::size_of::<u32>();
+
 /// A deduplicating string store over a [`BlobHeap`] and a flat hash table.
 ///
 /// ```
@@ -89,7 +104,7 @@ impl<'a> Interner<'a> {
     pub fn intern(&mut self, s: &str) -> Result<TermId, Error> {
         // Grow before probing so the insert below always finds an empty slot
         // within the load-factor bound.
-        if (self.len as usize + 1) * 10 > self.table.len() * 7 {
+        if (self.len as usize + 1) * LOAD_DEN > self.table.len() * LOAD_NUM {
             self.rehash();
         }
         let bytes = s.as_bytes();
@@ -203,7 +218,7 @@ impl<'a> Interner<'a> {
     /// rather than rebuilt on load: rebuilding is O(terms × hash) and the
     /// cold-start budget is tighter than the 4 bytes per slot.
     pub fn dump_table(&self, out: &mut Vec<u8>) {
-        out.reserve(8 + self.table.len() * 4);
+        out.reserve(TABLE_HEADER + self.table.len() * SLOT_BYTES);
         out.extend_from_slice(&(self.table.len() as u32).to_le_bytes());
         out.extend_from_slice(&self.len.to_le_bytes());
         for &entry in &self.table {
@@ -265,29 +280,29 @@ impl<'a> Interner<'a> {
                 return Err(Error::Corrupt("interned term is not valid UTF-8"));
             }
         }
-        if table.len() < 8 {
+        if table.len() < TABLE_HEADER {
             return Err(Error::Corrupt("interner table shorter than its header"));
         }
         let slots = u32::from_le_bytes(table[0..4].try_into().unwrap()) as usize;
-        let len = u32::from_le_bytes(table[4..8].try_into().unwrap());
+        let len = u32::from_le_bytes(table[4..TABLE_HEADER].try_into().unwrap());
         if slots < INITIAL_SLOTS || !slots.is_power_of_two() {
             return Err(Error::Corrupt("interner table size is not a power of two"));
         }
-        if table.len() as u64 != 8 + slots as u64 * 4 {
+        if table.len() as u64 != TABLE_HEADER as u64 + slots as u64 * SLOT_BYTES as u64 {
             return Err(Error::Corrupt("interner table length mismatch"));
         }
         if len as usize != heap.len() {
             return Err(Error::Corrupt("interner length disagrees with its heap"));
         }
-        if len as u64 * 10 > slots as u64 * 7 {
+        if len as u64 * LOAD_DEN as u64 > slots as u64 * LOAD_NUM as u64 {
             return Err(Error::Corrupt("interner table over the load factor"));
         }
         let mut entries = Vec::with_capacity(slots);
         let mut seen = alloc::vec![false; heap.len()];
         let mut filled = 0u64;
         for i in 0..slots {
-            let at = 8 + i * 4;
-            let entry = u32::from_le_bytes(table[at..at + 4].try_into().unwrap());
+            let at = TABLE_HEADER + i * SLOT_BYTES;
+            let entry = u32::from_le_bytes(table[at..at + SLOT_BYTES].try_into().unwrap());
             if entry != 0 {
                 let id = (entry - 1) as usize;
                 if id >= heap.len() {

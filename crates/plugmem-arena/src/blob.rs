@@ -30,6 +30,13 @@ use core::fmt;
 
 use crate::error::Error;
 
+/// Serialized metadata header of the dumped index: `[blobs u32]`
+/// (see [`BlobHeap::dump_index`]).
+const INDEX_HEADER: usize = core::mem::size_of::<u32>();
+
+/// Serialized width of one blob's length entry (little-endian `u32`).
+const LEN_BYTES: usize = core::mem::size_of::<u32>();
+
 /// Handle to one blob in a [`BlobHeap`]: a dense index assigned in push
 /// order, starting at 0.
 ///
@@ -231,7 +238,7 @@ impl<'a> BlobHeap<'a> {
     /// validate). Together with [`BlobHeap::dump_pool`] this is the
     /// complete state; dumps are canonical.
     pub fn dump_index(&self, out: &mut Vec<u8>) {
-        out.reserve(4 + self.index.len() * 4);
+        out.reserve(INDEX_HEADER + self.index.len() * LEN_BYTES);
         out.extend_from_slice(&(self.index.len() as u32).to_le_bytes());
         for &(_, len) in &self.index {
             out.extend_from_slice(&len.to_le_bytes());
@@ -336,14 +343,14 @@ fn validate_index(
     index: &[u8],
     pool_len: usize,
 ) -> Result<Vec<(u32, u32)>, Error> {
-    if index.len() < 4 {
+    if index.len() < INDEX_HEADER {
         return Err(Error::Corrupt("blob index shorter than its header"));
     }
     let blobs = u32::from_le_bytes(index[0..4].try_into().unwrap());
     if blobs == u32::MAX {
         return Err(Error::Corrupt("blob count overflows the id space"));
     }
-    if index.len() as u64 != 4 + u64::from(blobs) * 4 {
+    if index.len() as u64 != INDEX_HEADER as u64 + u64::from(blobs) * LEN_BYTES as u64 {
         return Err(Error::Corrupt("blob index length mismatch"));
     }
     if pool_len > cfg.max_bytes || pool_len > u32::MAX as usize {
@@ -352,8 +359,8 @@ fn validate_index(
     let mut rebuilt = Vec::with_capacity(blobs as usize);
     let mut offset = 0u64;
     for i in 0..blobs as usize {
-        let at = 4 + i * 4;
-        let len = u32::from_le_bytes(index[at..at + 4].try_into().unwrap());
+        let at = INDEX_HEADER + i * LEN_BYTES;
+        let len = u32::from_le_bytes(index[at..at + LEN_BYTES].try_into().unwrap());
         if len as usize > cfg.max_blob {
             return Err(Error::Corrupt(
                 "blob length exceeds the configured max_blob",

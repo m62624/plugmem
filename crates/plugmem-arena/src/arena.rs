@@ -57,6 +57,17 @@ const FIB: u64 = 0x9E37_79B9_7F4A_7C15;
 /// [`Arena::dump_meta`]).
 const IMAGE_HEADER: usize = 24;
 
+/// Serialized width of one page index entry (`heads`, `next` — little-endian
+/// `u32`), used to size and offset those metadata arrays.
+const PAGE_IDX_BYTES: usize = core::mem::size_of::<u32>();
+
+/// Serialized width of one page's slot count (`counts` — little-endian `u16`).
+const COUNT_BYTES: usize = core::mem::size_of::<u16>();
+
+/// Serialized bytes of per-page metadata: one `next` index plus one `counts`
+/// entry.
+const PAGE_META_BYTES: usize = PAGE_IDX_BYTES + COUNT_BYTES;
+
 /// `true` when the `counters` feature is enabled; lets hot loops keep their
 /// counting code in one expression that constant-folds away otherwise.
 const COUNT: bool = cfg!(feature = "counters");
@@ -606,7 +617,7 @@ impl<'a, T: Slot> Arena<'a, T> {
     pub fn dump_meta(&self, out: &mut Vec<u8>) {
         let pages = self.pool.len() / PAGE_BYTES;
         debug_assert!(self.cfg.shards <= u32::MAX as usize && pages < u32::MAX as usize);
-        out.reserve(IMAGE_HEADER + self.heads.len() * 4 + pages * 6);
+        out.reserve(IMAGE_HEADER + self.heads.len() * PAGE_IDX_BYTES + pages * PAGE_META_BYTES);
         out.extend_from_slice(&(self.cfg.shards as u32).to_le_bytes());
         out.extend_from_slice(&(pages as u32).to_le_bytes());
         out.extend_from_slice(&self.free_head.to_le_bytes());
@@ -735,7 +746,9 @@ impl<'a, T: Slot> Arena<'a, T> {
         if pages as u64 >= u64::from(NONE) {
             return Err(Error::Corrupt("arena page count overflows the index space"));
         }
-        let want_meta = IMAGE_HEADER as u64 + shards as u64 * 4 + pages as u64 * 6;
+        let want_meta = IMAGE_HEADER as u64
+            + shards as u64 * PAGE_IDX_BYTES as u64
+            + pages as u64 * PAGE_META_BYTES as u64;
         if meta.len() as u64 != want_meta {
             return Err(Error::Corrupt("arena meta length mismatch"));
         }
@@ -745,20 +758,26 @@ impl<'a, T: Slot> Arena<'a, T> {
 
         let mut heads = Vec::with_capacity(shards);
         for i in 0..shards {
-            let at = IMAGE_HEADER + i * 4;
-            heads.push(u32::from_le_bytes(meta[at..at + 4].try_into().unwrap()));
+            let at = IMAGE_HEADER + i * PAGE_IDX_BYTES;
+            heads.push(u32::from_le_bytes(
+                meta[at..at + PAGE_IDX_BYTES].try_into().unwrap(),
+            ));
         }
-        let next_base = IMAGE_HEADER + shards * 4;
+        let next_base = IMAGE_HEADER + shards * PAGE_IDX_BYTES;
         let mut next = Vec::with_capacity(pages);
         for i in 0..pages {
-            let at = next_base + i * 4;
-            next.push(u32::from_le_bytes(meta[at..at + 4].try_into().unwrap()));
+            let at = next_base + i * PAGE_IDX_BYTES;
+            next.push(u32::from_le_bytes(
+                meta[at..at + PAGE_IDX_BYTES].try_into().unwrap(),
+            ));
         }
-        let counts_base = next_base + pages * 4;
+        let counts_base = next_base + pages * PAGE_IDX_BYTES;
         let mut counts = Vec::with_capacity(pages);
         for i in 0..pages {
-            let at = counts_base + i * 2;
-            counts.push(u16::from_le_bytes(meta[at..at + 2].try_into().unwrap()));
+            let at = counts_base + i * COUNT_BYTES;
+            counts.push(u16::from_le_bytes(
+                meta[at..at + COUNT_BYTES].try_into().unwrap(),
+            ));
         }
 
         let spp = Self::slots_per_page();

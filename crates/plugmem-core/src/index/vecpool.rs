@@ -37,8 +37,18 @@ use core::cell::Cell;
 use crate::error::Error;
 use crate::id::FactId;
 
+/// Serialized width of a slot's owning `fact` id (little-endian `u32`).
+const FACT_BYTES: usize = core::mem::size_of::<u32>();
+
+/// Serialized width of a slot's quantization `scale` (little-endian `f32`).
+const SCALE_BYTES: usize = core::mem::size_of::<f32>();
+
 /// Fixed slot header: `fact u32` + `scale f32`.
-const HEAD: usize = 8;
+const HEAD: usize = FACT_BYTES + SCALE_BYTES;
+
+/// Bytes of one signature word (a little-endian `u64`): the sign signature is
+/// packed into `words(dim)` of these.
+const SIG_WORD_BYTES: usize = core::mem::size_of::<u64>();
 
 /// Reusable vector-search scratch, owned by the engine (the zero-alloc
 /// recall invariant: after warm-up a search allocates nothing).
@@ -105,7 +115,7 @@ impl<'a> VecPool<'a> {
     /// Byte stride of one slot.
     #[inline]
     pub fn stride(&self) -> usize {
-        HEAD + Self::words(self.dim) * 8 + self.dim
+        HEAD + Self::words(self.dim) * SIG_WORD_BYTES + self.dim
     }
 
     /// Total bytes of the logical pool (`base` + `tail`).
@@ -155,14 +165,14 @@ impl<'a> VecPool<'a> {
     #[inline]
     pub fn slot_fact(&self, i: usize) -> u32 {
         let slot = self.slot_bytes(i);
-        u32::from_le_bytes(slot[0..4].try_into().unwrap())
+        u32::from_le_bytes(slot[..FACT_BYTES].try_into().unwrap())
     }
 
     /// The scale of slot `i`.
     #[inline]
     fn slot_scale(&self, i: usize) -> f32 {
         let slot = self.slot_bytes(i);
-        f32::from_le_bytes(slot[4..8].try_into().unwrap())
+        f32::from_le_bytes(slot[FACT_BYTES..HEAD].try_into().unwrap())
     }
 
     /// The `(scale, q)` pair of slot `i` — the quantized payload a
@@ -171,9 +181,9 @@ impl<'a> VecPool<'a> {
     #[inline]
     pub(crate) fn quant(&self, i: usize) -> (f32, &[u8]) {
         let stride = self.stride();
-        let q_off = HEAD + Self::words(self.dim) * 8;
+        let q_off = HEAD + Self::words(self.dim) * SIG_WORD_BYTES;
         let slot = self.slot_bytes(i);
-        let scale = f32::from_le_bytes(slot[4..8].try_into().unwrap());
+        let scale = f32::from_le_bytes(slot[FACT_BYTES..HEAD].try_into().unwrap());
         (scale, &slot[q_off..stride])
     }
 
@@ -219,10 +229,10 @@ impl<'a> VecPool<'a> {
         }
         // Nonzero norm guarantees a nonzero max component, so scale > 0.
         let scale = max_abs / 127.0;
-        out[0..4].copy_from_slice(&fact.to_le_bytes());
-        out[4..8].copy_from_slice(&scale.to_le_bytes());
+        out[..FACT_BYTES].copy_from_slice(&fact.to_le_bytes());
+        out[FACT_BYTES..HEAD].copy_from_slice(&scale.to_le_bytes());
         let words = Self::words(self.dim);
-        let q_off = HEAD + words * 8;
+        let q_off = HEAD + words * SIG_WORD_BYTES;
         for (i, &x) in v.iter().enumerate() {
             let qf = libm::roundf((x * inv_norm) / scale);
             let qi = qf.clamp(-127.0, 127.0) as i32 as i8;
@@ -240,7 +250,8 @@ impl<'a> VecPool<'a> {
                     word |= 1 << b;
                 }
             }
-            out[HEAD + w * 8..HEAD + w * 8 + 8].copy_from_slice(&word.to_le_bytes());
+            out[HEAD + w * SIG_WORD_BYTES..HEAD + w * SIG_WORD_BYTES + SIG_WORD_BYTES]
+                .copy_from_slice(&word.to_le_bytes());
         }
         Ok(())
     }
@@ -284,10 +295,10 @@ impl<'a> VecPool<'a> {
     /// and the tail scan consume.
     pub(crate) fn quantized<'s>(&self, scratch: &'s VecScratch) -> (f32, &'s [u8]) {
         let stride = self.stride();
-        let q_off = HEAD + Self::words(self.dim) * 8;
+        let q_off = HEAD + Self::words(self.dim) * SIG_WORD_BYTES;
         debug_assert_eq!(scratch.query.len(), stride);
         (
-            f32::from_le_bytes(scratch.query[4..8].try_into().unwrap()),
+            f32::from_le_bytes(scratch.query[FACT_BYTES..HEAD].try_into().unwrap()),
             &scratch.query[q_off..stride],
         )
     }
@@ -320,7 +331,7 @@ impl<'a> VecPool<'a> {
     /// components.
     fn cosine_at(&self, a: usize, b: usize) -> f32 {
         let stride = self.stride();
-        let q_off = HEAD + Self::words(self.dim) * 8;
+        let q_off = HEAD + Self::words(self.dim) * SIG_WORD_BYTES;
         let (sa, sb) = (self.slot_bytes(a), self.slot_bytes(b));
         let dot = dot_i8(&sa[q_off..stride], &sb[q_off..stride]);
         self.slot_scale(a) * self.slot_scale(b) * dot as f32
@@ -356,22 +367,30 @@ impl<'a> VecPool<'a> {
         self.quantize_query(query, scratch)?;
         let stride = self.stride();
         let words = Self::words(self.dim);
-        let q_off = HEAD + words * 8;
+        let q_off = HEAD + words * SIG_WORD_BYTES;
 
         // Phase 1: Hamming distance of every slot's signature to the query.
         let VecScratch {
             cand, top, query, ..
         } = scratch;
-        let q_sig = &query[HEAD..HEAD + words * 8];
+        let q_sig = &query[HEAD..HEAD + words * SIG_WORD_BYTES];
         cand.clear();
         cand.reserve(n);
         for i in 0..n {
             let slot = self.slot_bytes(i);
-            let s_sig = &slot[HEAD..HEAD + words * 8];
+            let s_sig = &slot[HEAD..HEAD + words * SIG_WORD_BYTES];
             let mut ham = 0u32;
             for w in 0..words {
-                let a = u64::from_le_bytes(q_sig[w * 8..w * 8 + 8].try_into().unwrap());
-                let b = u64::from_le_bytes(s_sig[w * 8..w * 8 + 8].try_into().unwrap());
+                let a = u64::from_le_bytes(
+                    q_sig[w * SIG_WORD_BYTES..w * SIG_WORD_BYTES + SIG_WORD_BYTES]
+                        .try_into()
+                        .unwrap(),
+                );
+                let b = u64::from_le_bytes(
+                    s_sig[w * SIG_WORD_BYTES..w * SIG_WORD_BYTES + SIG_WORD_BYTES]
+                        .try_into()
+                        .unwrap(),
+                );
                 ham += (a ^ b).count_ones();
             }
             cand.push((ham, i as u32));
@@ -382,18 +401,18 @@ impl<'a> VecPool<'a> {
         }
 
         // Phase 2: exact quantized cosine on the survivors.
-        let q_scale = f32::from_le_bytes(query[4..8].try_into().unwrap());
+        let q_scale = f32::from_le_bytes(query[FACT_BYTES..HEAD].try_into().unwrap());
         let q_q = &query[q_off..q_off + self.dim];
         top.clear();
         #[cfg(feature = "counters")]
         let mut dots = 0u64;
         for &(_, slot) in cand[..c].iter() {
             let sb = self.slot_bytes(slot as usize);
-            let fact = FactId(u32::from_le_bytes(sb[0..4].try_into().unwrap()));
+            let fact = FactId(u32::from_le_bytes(sb[..FACT_BYTES].try_into().unwrap()));
             if !admit(fact) {
                 continue;
             }
-            let s_scale = f32::from_le_bytes(sb[4..8].try_into().unwrap());
+            let s_scale = f32::from_le_bytes(sb[FACT_BYTES..HEAD].try_into().unwrap());
             let dot = dot_i8(q_q, &sb[q_off..stride]);
             top.push((q_scale * s_scale * dot as f32, fact.0));
             #[cfg(feature = "counters")]
@@ -461,7 +480,7 @@ impl<'a> VecPool<'a> {
             }
             return Ok(());
         }
-        let stride = HEAD + Self::words(dim) * 8 + dim;
+        let stride = HEAD + Self::words(dim) * SIG_WORD_BYTES + dim;
         if !len.is_multiple_of(stride) {
             return Err(Error::Corrupt("vector pool is not a whole number of slots"));
         }
@@ -478,18 +497,21 @@ impl<'a> VecPool<'a> {
             return Ok(());
         }
         let words = Self::words(self.dim);
-        let q_off = HEAD + words * 8;
+        let q_off = HEAD + words * SIG_WORD_BYTES;
         for i in 0..self.len() {
             let slot = self.slot_bytes(i);
-            let scale = f32::from_le_bytes(slot[4..8].try_into().unwrap());
+            let scale = f32::from_le_bytes(slot[FACT_BYTES..HEAD].try_into().unwrap());
             if !scale.is_finite() || scale < 0.0 {
                 return Err(Error::Corrupt(
                     "vector slot scale is not finite and non-negative",
                 ));
             }
             for w in 0..words {
-                let stored =
-                    u64::from_le_bytes(slot[HEAD + w * 8..HEAD + w * 8 + 8].try_into().unwrap());
+                let stored = u64::from_le_bytes(
+                    slot[HEAD + w * SIG_WORD_BYTES..HEAD + w * SIG_WORD_BYTES + SIG_WORD_BYTES]
+                        .try_into()
+                        .unwrap(),
+                );
                 let mut expect = 0u64;
                 for b in 0..64 {
                     let j = w * 64 + b;
@@ -606,10 +628,11 @@ mod tests {
         // Slot 0 signature: components (positive, positive, +0, +0) → all
         // sign bits set for the first four bits.
         let stride = pool.stride();
-        let sig = u64::from_le_bytes(pool.dump()[HEAD..HEAD + 8].try_into().unwrap());
+        let sig = u64::from_le_bytes(pool.dump()[HEAD..HEAD + SIG_WORD_BYTES].try_into().unwrap());
         assert_eq!(sig & 0b1111, 0b1111);
         assert_eq!(pool.len(), 3);
-        assert_eq!(stride, HEAD + 8 + 4);
+        // dim 4: one signature word + 4 i8 components.
+        assert_eq!(stride, HEAD + SIG_WORD_BYTES + 4);
     }
 
     /// The two-phase search returns the true nearest neighbor at the top.
@@ -716,7 +739,7 @@ mod tests {
 
         // A non-finite scale (bytes 4..8) is rejected.
         let mut bad = good.clone();
-        bad[4..8].copy_from_slice(&f32::NAN.to_le_bytes());
+        bad[FACT_BYTES..HEAD].copy_from_slice(&f32::NAN.to_le_bytes());
         assert!(
             VecPool::from_parts(dim, usize::MAX, &bad)
                 .unwrap()
@@ -727,7 +750,7 @@ mod tests {
         // A signature bit that disagrees with its component's sign is
         // rejected: flip one i8 component negative without touching sig.
         let mut bad = good.clone();
-        let q_off = HEAD + VecPool::words(dim) * 8;
+        let q_off = HEAD + VecPool::words(dim) * SIG_WORD_BYTES;
         bad[q_off] = (-1i8) as u8; // was positive (sig bit 0 set)
         assert!(
             VecPool::from_parts(dim, usize::MAX, &bad)
