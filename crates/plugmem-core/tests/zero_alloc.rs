@@ -8,9 +8,12 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
-use plugmem_core::{Config, MemStorage, Memory, RecallQuery, RecallResult, RememberInput};
+use plugmem_core::{Config, MemStorage, Memory, RecallQuery, RecallResult, RememberInput, Storage};
 
 static ALLOCS: AtomicU64 = AtomicU64::new(0);
+/// Total bytes requested from the allocator — the measure that tells a whole
+/// pool copy apart from small metadata (the overlay-open gate below).
+static ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
 
 /// The counter is process-global, so the gates must not run
 /// concurrently: each test holds this lock for its whole body.
@@ -25,6 +28,7 @@ struct Counting;
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOCS.fetch_add(1, Ordering::Relaxed);
+        ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -32,6 +36,7 @@ unsafe impl GlobalAlloc for Counting {
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         ALLOCS.fetch_add(1, Ordering::Relaxed);
+        ALLOC_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 }
@@ -43,6 +48,13 @@ fn allocs<R>(f: impl FnOnce() -> R) -> (u64, R) {
     let before = ALLOCS.load(Ordering::Relaxed);
     let result = f();
     (ALLOCS.load(Ordering::Relaxed) - before, result)
+}
+
+/// Bytes requested from the allocator while `f` runs.
+fn alloc_bytes<R>(f: impl FnOnce() -> R) -> (u64, R) {
+    let before = ALLOC_BYTES.load(Ordering::Relaxed);
+    let result = f();
+    (ALLOC_BYTES.load(Ordering::Relaxed) - before, result)
 }
 
 #[test]
@@ -190,4 +202,62 @@ fn graph_regime_recall_allocates_nothing_after_warmup() {
     let (n, _) = allocs(|| mem.recall_into(q, &mut out).unwrap());
     assert_eq!(n, 0, "graph-regime recall allocated {n} times");
     assert!(!out.facts.is_empty());
+}
+
+#[test]
+fn overlay_open_does_not_clone_the_base_pools() {
+    // The RAM-win proof (specs/16 §9): opening a snapshot with
+    // `from_bytes_overlay` borrows its byte pools, so it allocates only the
+    // small owned metadata — nowhere near the whole image the owned open copies.
+    let _serial = serial();
+    let mut cfg = Config::default();
+    cfg.shards_facts = 64;
+    cfg.shards_postings = 128;
+
+    // A snapshot whose byte pools dominate: many facts, each with real text.
+    let mut mem = Memory::new(cfg.clone()).unwrap();
+    let mut store = MemStorage::new();
+    for i in 0..3000u64 {
+        mem.remember(
+            &mut store,
+            RememberInput {
+                entity: Some(["user", "plugmem", "tokio"][(i % 3) as usize]),
+                tags: &["pref", "work"],
+                ..RememberInput::text(
+                    i * 1000,
+                    "a memory fact with enough words to make the text pool the dominant \
+                     cost of the snapshot, exercising the blob heap and the posting lists",
+                )
+            },
+        )
+        .unwrap();
+    }
+    mem.snapshot(&mut store, 3_000_000).unwrap();
+    // Allocated before measuring, so the buffer itself is not counted.
+    let snap = store.read_snapshot().unwrap().unwrap();
+
+    // Owned open copies every pool; overlay open borrows them.
+    let (owned_bytes, owned) = alloc_bytes(|| Memory::from_bytes(Some(&snap), &[], cfg.clone()));
+    owned.unwrap();
+    let (overlay_bytes, overlay) =
+        alloc_bytes(|| Memory::from_bytes_overlay(&snap, &[], cfg.clone()));
+    overlay.unwrap();
+
+    // The owned open allocates at least the whole image; the overlay a small
+    // fraction of it (only metadata — indices, page redirects, the interner
+    // table). A wide margin keeps the gate robust across allocators.
+    assert!(
+        owned_bytes as usize >= snap.len(),
+        "owned open should copy the whole image: {owned_bytes} bytes vs {} snapshot",
+        snap.len()
+    );
+    assert!(
+        overlay_bytes * 4 < owned_bytes,
+        "overlay open must not clone the base: {overlay_bytes} bytes vs owned {owned_bytes}"
+    );
+    assert!(
+        (overlay_bytes as usize) < snap.len() / 2,
+        "overlay metadata {overlay_bytes} should be far below the {}-byte image",
+        snap.len()
+    );
 }

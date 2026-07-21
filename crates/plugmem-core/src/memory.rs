@@ -301,11 +301,13 @@ impl<'a> Memory<'a> {
     /// Opens a database read-only over a borrowed snapshot (specs/16): the
     /// engine's byte pools borrow `snapshot` (typically an mmap'd file)
     /// instead of copying it, so a large database residents only the pages
-    /// actually read. The returned engine is tied to `snapshot`'s lifetime
-    /// and must not be mutated — journal replay would copy whole arenas up
-    /// (copy-on-write), defeating the zero-copy intent, so a **non-empty
-    /// journal is rejected**: checkpoint the database read-write once
-    /// first. The caller (the host) owns the map and the exclusive lock.
+    /// actually read. The returned engine is tied to `snapshot`'s lifetime.
+    ///
+    /// A **non-empty journal is rejected**: the read-only handle exposes no
+    /// write verbs, so a snapshot with un-checkpointed journal tail would open
+    /// stale. Checkpoint the database read-write once first — or use
+    /// [`Memory::from_bytes_overlay`], which replays the journal into the
+    /// overlay. The caller (the host) owns the map and the exclusive lock.
     pub fn from_bytes_borrowed(
         snapshot: &'a [u8],
         journal: &[u8],
@@ -318,6 +320,29 @@ impl<'a> Memory<'a> {
                 "read-only open requires a checkpointed (empty) journal",
             ));
         }
+        Ok(mem)
+    }
+
+    /// Opens a database read-**write** over a borrowed snapshot (the overlay
+    /// write path, specs/16 §9): like [`Memory::from_bytes_borrowed`] the byte
+    /// pools borrow `snapshot` instead of copying it, but the journal is
+    /// **replayed** and the engine stays fully mutable. Mutations do not clone
+    /// the borrowed base: the flat structures land appends in an owned tail and
+    /// copy only the pages they rewrite (per-page copy-on-write), so a
+    /// multi-gigabyte mapped database is opened and written to while resident
+    /// only in the pages it actually touches.
+    ///
+    /// This is the write sibling of [`Memory::from_bytes`] (which owns its
+    /// bytes) — the same `snapshot + journal replay`, over a borrowed base. The
+    /// returned engine is tied to `snapshot`'s lifetime; the caller (the host)
+    /// owns the map and the exclusive lock.
+    pub fn from_bytes_overlay(
+        snapshot: &'a [u8],
+        journal: &[u8],
+        cfg: Config,
+    ) -> Result<Self, Error> {
+        let mut mem = Self::load_snapshot_borrowed(snapshot, cfg)?;
+        mem.replay(journal)?;
         Ok(mem)
     }
 

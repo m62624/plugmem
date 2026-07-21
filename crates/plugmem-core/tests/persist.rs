@@ -154,7 +154,8 @@ fn readonly_borrowed_open_matches_owned() {
     let mut borrowed = Memory::from_bytes_borrowed(&bytes, &[], cfg()).unwrap();
     assert_equal(&mut owned, &mut borrowed);
 
-    // A non-empty journal is refused: replay would copy whole arenas up.
+    // A non-empty journal is refused by the read-only path: the read-only
+    // handle has no write verbs, so it must open a checkpointed snapshot.
     let mut probe_store = MemStorage::new();
     let mut probe = Memory::new(cfg()).unwrap();
     probe
@@ -165,6 +166,73 @@ fn readonly_borrowed_open_matches_owned() {
         Memory::from_bytes_borrowed(&bytes, &journal, cfg()).unwrap_err(),
         Error::Invalid("read-only open requires a checkpointed (empty) journal")
     );
+}
+
+#[test]
+fn overlay_open_replays_journal_and_matches_owned() {
+    // Checkpoint, then a journal tail of writes that the overlay open must
+    // replay into the borrowed base without cloning it.
+    let (mut mem, mut store) = (Memory::new(cfg()).unwrap(), MemStorage::new());
+    workload(&mut mem, &mut store);
+    mem.snapshot(&mut store, 70 * DAY).unwrap();
+    for i in 0..20u64 {
+        mem.remember(
+            &mut store,
+            RememberInput {
+                entity: Some("plugmem"),
+                ..RememberInput::text((80 + i) * DAY, "post-checkpoint fact tokio работа")
+            },
+        )
+        .unwrap();
+    }
+    mem.revise(
+        &mut store,
+        FactId(2),
+        RememberInput::text(101 * DAY, "post-checkpoint revision"),
+    )
+    .unwrap();
+    mem.forget(&mut store, 102 * DAY, FactId(4)).unwrap();
+
+    let snap = store.read_snapshot().unwrap().unwrap();
+    let journal = store.read_journal().unwrap();
+
+    // Owned and overlay both open snapshot + journal; overlay borrows the base.
+    let (mut owned, _) = Memory::from_bytes(Some(&snap), &journal, cfg()).unwrap();
+    let mut overlay = Memory::from_bytes_overlay(&snap, &journal, cfg()).unwrap();
+
+    assert_equal(&mut owned, &mut overlay);
+    // Canonical: overlay dumps byte-identically to owned, and to the live
+    // engine that produced the snapshot + journal.
+    assert_eq!(overlay.snapshot_bytes(0), owned.snapshot_bytes(0));
+    assert_eq!(overlay.snapshot_bytes(0), mem.snapshot_bytes(0));
+}
+
+#[test]
+fn overlay_open_replays_maintain_from_the_journal() {
+    // A journal that contains an Op::Maintain: replay must re-run the compaction
+    // over the overlay (rebuilding the in-place arenas and chunk pools) and land
+    // byte-for-byte where the owned path does.
+    let (mut mem, mut store) = (Memory::new(cfg()).unwrap(), MemStorage::new());
+    workload(&mut mem, &mut store);
+    mem.snapshot(&mut store, 70 * DAY).unwrap();
+    mem.forget(&mut store, 80 * DAY, FactId(5)).unwrap();
+    mem.forget(&mut store, 81 * DAY, FactId(9)).unwrap();
+    mem.maintain(&mut store, 82 * DAY).unwrap();
+    mem.remember(
+        &mut store,
+        RememberInput::text(90 * DAY, "after maintain работа"),
+    )
+    .unwrap();
+
+    let snap = store.read_snapshot().unwrap().unwrap();
+    let journal = store.read_journal().unwrap();
+
+    let (mut owned, _) = Memory::from_bytes(Some(&snap), &journal, cfg()).unwrap();
+    let mut overlay = Memory::from_bytes_overlay(&snap, &journal, cfg()).unwrap();
+
+    assert_equal(&mut owned, &mut overlay);
+    assert_eq!(overlay.snapshot_bytes(0), owned.snapshot_bytes(0));
+    assert_eq!(overlay.snapshot_bytes(0), mem.snapshot_bytes(0));
 }
 
 #[test]
