@@ -16,6 +16,15 @@ fn cfg() -> Config {
     cfg
 }
 
+/// The trusted, sparse-open config: skips the container checksums so an open
+/// faults in only the metadata (specs/16 §9). Content validation is deferred
+/// to [`Memory::verify`], and the accessors tolerate bad bytes on their own.
+fn fast_cfg() -> Config {
+    let mut c = cfg();
+    c.fast_load = true;
+    c
+}
+
 const DAY: u64 = 86_400_000;
 
 /// A workload touching every structure: entities, tags, links, revisions,
@@ -280,6 +289,105 @@ fn corrupt_snapshots_are_typed_errors() {
     for cut in (0..bytes.len()).step_by(513) {
         assert!(Memory::from_bytes(Some(&bytes[..cut]), &[], cfg()).is_err());
     }
+}
+
+// The bitflip sweep relies on `catch_unwind` (unwinding) and is heavy — native
+// only, like the proptest sections (specs/14 §3).
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn a_fast_load_open_never_panics_and_verify_catches_corruption() {
+    // The trusted (`fast_load`) path skips the container checksums for a sparse
+    // open (specs/16 §9), so a corrupt image can reach the engine — content
+    // validation is deferred. The contract stays panic-free: a load either
+    // errors typed (metadata is still checked) or opens, and then every
+    // accessor tolerates the bad bytes. `verify()` turns latent corruption into
+    // an explicit error. (The default, checksummed path rejects any flip at
+    // load — see `corrupt_snapshots_are_typed_errors`.)
+    let (mut mem, mut store) = (Memory::new(fast_cfg()).unwrap(), MemStorage::new());
+    workload(&mut mem, &mut store);
+    let bytes = mem.snapshot_bytes(0);
+
+    for at in (0..bytes.len()).step_by(29) {
+        let mut b = bytes.clone();
+        b[at] ^= 0x40;
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let Ok((mut m, _)) = Memory::from_bytes(Some(&b), &[], fast_cfg()) else {
+                return; // a typed load error is a fine outcome
+            };
+            // Access sweep: nothing may panic on the corrupt image.
+            let stats = m.stats();
+            for i in 0..stats.next_fact {
+                let _ = m.get(FactId(i));
+            }
+            let _ = m.recall(RecallQuery::text(DAY, "работа tokio"));
+            let _ = m.snapshot_bytes(0);
+            let _ = m.verify(); // Ok or Err, never a panic
+        }));
+        assert!(
+            outcome.is_ok(),
+            "a fast_load access panicked after a flip at {at}"
+        );
+    }
+}
+
+#[test]
+fn verify_accepts_a_clean_image_and_reports_deferred_text_corruption() {
+    // `verify()` is the on-demand integrity check (SQLite's `integrity_check`):
+    // a clean image passes; a stored text corrupted past the (skipped) checksums
+    // opens fine and is caught by `verify()`, while `get` hides the fact and
+    // nothing panics.
+    let (mut mem, mut store) = (Memory::new(fast_cfg()).unwrap(), MemStorage::new());
+    mem.remember(
+        &mut store,
+        RememberInput {
+            entity: Some("user"),
+            ..RememberInput::text(DAY, "UNIQUETEXTMARKER here")
+        },
+    )
+    .unwrap();
+    let clean = mem.snapshot_bytes(0);
+    let (loaded, _) = Memory::from_bytes(Some(&clean), &[], fast_cfg()).unwrap();
+    assert!(loaded.verify().is_ok(), "a clean image verifies");
+
+    // Corrupt the stored text: find the marker and make a byte invalid UTF-8.
+    let at = clean
+        .windows(b"UNIQUETEXTMARKER".len())
+        .position(|w| w == b"UNIQUETEXTMARKER")
+        .expect("the marker text is stored verbatim");
+    let mut bad = clean.clone();
+    bad[at] = 0xFF; // not a valid UTF-8 start byte
+
+    let (mut loaded, _) = Memory::from_bytes(Some(&bad), &[], fast_cfg())
+        .expect("the trusted path opens without scanning the text");
+    assert!(
+        loaded.get(FactId(0)).is_none(),
+        "an unreadable text hides the fact, no panic"
+    );
+    // Every accessor tolerates the bad bytes: recall renders the fact with an
+    // empty body, and a same-subject remember runs lexical similar-detection
+    // over the unreadable text — neither panics.
+    let mut store = MemStorage::new();
+    let out = loaded
+        .recall(RecallQuery::text(2 * DAY, "UNIQUETEXTMARKER"))
+        .unwrap();
+    assert!(
+        !out.rendered.contains("UNIQUETEXTMARKER"),
+        "corrupt body is empty"
+    );
+    loaded
+        .remember(
+            &mut store,
+            RememberInput {
+                entity: Some("user"),
+                ..RememberInput::text(3 * DAY, "another user fact")
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        loaded.verify(),
+        Err(Error::Corrupt("stored text is not valid UTF-8")),
+        "verify() reports the deferred text corruption"
+    );
 }
 
 #[test]

@@ -577,13 +577,15 @@ impl Memory<'_> {
                 .facts
                 .get(&fact.id.0.to_be_bytes())
                 .expect("selected ids exist");
-            let text = core::str::from_utf8(self.texts.get(record.text))
-                .expect("fact texts are written from &str");
+            // Deferred validation (specs/16 §9): tolerate invalid text bytes —
+            // an unreadable fact renders with an empty body, never a panic.
+            let text = core::str::from_utf8(self.texts.get(record.text)).unwrap_or("");
             let _ = write!(out.rendered, "- [f{}] ", fact.id.0);
-            if let Some(entity) = fact.entity.some() {
-                let name = self
-                    .entity_name(entity)
-                    .expect("a live fact's subject exists");
+            // A corrupt subject name (deferred validation, specs/16 §9)
+            // renders without the subject prefix rather than panicking.
+            if let Some(entity) = fact.entity.some()
+                && let Some(name) = self.entity_name(entity)
+            {
                 let _ = write!(out.rendered, "{name}: ");
             }
             out.rendered.push_str(text);

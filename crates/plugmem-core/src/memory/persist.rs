@@ -622,17 +622,15 @@ impl<'a> Memory<'a> {
         Ok(cfg)
     }
 
-    /// Finishes a load once every section is in place: verifies stored
-    /// text is UTF-8, reads the id counters, checks they cover the record
-    /// counts, and runs the full reference validation. Reads only the tiny
-    /// state section, so it ties the engine to nothing. Shared by both
-    /// load paths.
+    /// Finishes a load once every section is in place: reads the id
+    /// counters, checks they cover the record counts, and range-validates
+    /// references. Deliberately does **not** scan the large byte pools —
+    /// stored-text UTF-8 and the vector fact↔slot bijection are deferred to
+    /// [`Memory::verify`] (specs/16 §9), so an overlay/read-only open faults
+    /// in only the metadata, not the text or vector pools. The accessors stay
+    /// panic-free on any bytes regardless (checked `from_utf8`, bounds-checked
+    /// vector reads). Shared by both load paths.
     fn finish_load(mut mem: Self, snap: &Snapshot<'_>) -> Result<Self, Error> {
-        for (_, text) in mem.texts.iter() {
-            if core::str::from_utf8(text).is_err() {
-                return Err(Error::Corrupt("stored text is not valid UTF-8"));
-            }
-        }
         let state = section(snap, kind::ENGINE_STATE)?;
         if state.len() != STATE_LEN {
             return Err(Error::Corrupt("engine state section has a wrong length"));
@@ -650,18 +648,19 @@ impl<'a> Memory<'a> {
 
     /// Range-checks every stored id so the engine's panicking accessors
     /// are sound on loaded data (module docs). O(records) — the price of
-    /// panic-freedom on hostile input, linear and cache-friendly.
+    /// panic-freedom on hostile input, linear and cache-friendly. Does **not**
+    /// touch the large text or vector byte pools: stored-text UTF-8 and the
+    /// vector fact↔slot bijection are deferred to [`Memory::verify`]
+    /// (specs/16 §9), so an overlay/read-only open faults in only the
+    /// metadata. The accessors that read those pools are panic-free on any
+    /// bytes on their own (checked `from_utf8`, bounds-checked slot reads).
     fn validate_references(&self) -> Result<(), Error> {
         let texts = self.texts.len() as u32;
         let terms = self.terms.len() as u32;
-        // Vectors: structural self-check, then a bijection between facts
-        // flagged HAS_VECTOR and pool slots (each fact points at a slot
-        // that names it back; no slot is orphaned). The graph is checked
-        // against the pool it indexes.
-        self.vecs.validate()?;
+        // The HNSW graph is validated against the pool length it indexes
+        // (owned level0 + small upper lists; it does not read vector slots),
+        // so this stays cheap and eager.
         self.hnsw.validate(&self.vecs)?;
-        let vslots = self.vecs.len() as u32;
-        let mut with_vec = 0u32;
         for fact in self.facts.iter() {
             if fact.id.0 >= self.next_fact
                 || fact.text.0 >= texts
@@ -671,19 +670,12 @@ impl<'a> Memory<'a> {
             {
                 return Err(Error::Corrupt("fact record references out of range"));
             }
-            if fact.has_vector() {
-                if fact.vector >= vslots || self.vecs.slot_fact(fact.vector as usize) != fact.id.0 {
-                    return Err(Error::Corrupt(
-                        "fact vector slot is out of range or mismatched",
-                    ));
-                }
-                with_vec += 1;
-            } else if fact.vector != NONE_U32 {
+            // The has-vector bijection touches the vector pool and is deferred
+            // to `verify()`; the cheap direction stays — a fact without the
+            // flag must carry no slot.
+            if !fact.has_vector() && fact.vector != NONE_U32 {
                 return Err(Error::Corrupt("fact without a vector flag carries a slot"));
             }
-        }
-        if with_vec != vslots {
-            return Err(Error::Corrupt("vector pool has orphan slots"));
         }
         let mut visited = alloc::vec![false; self.tag_lists.chunks()];
         for aux in self.fact_aux.iter() {
@@ -736,6 +728,56 @@ impl<'a> Memory<'a> {
             if slot.fact.0 >= self.next_fact {
                 return Err(Error::Corrupt("temporal record references out of range"));
             }
+        }
+        Ok(())
+    }
+
+    /// Runs the integrity checks that `open` **defers** for speed and memory
+    /// (specs/16 §9) — the on-demand equivalent of SQLite's `integrity_check`.
+    ///
+    /// A load (owned, overlay or read-only) validates only the metadata, so
+    /// the large byte pools stay non-resident on an mmap'd base — an overlay
+    /// open of a multi-gigabyte database faults in only what it must. This
+    /// method sweeps the deferred pools and confirms the whole image is
+    /// well-formed: every stored text is valid UTF-8, the vector pool is
+    /// self-consistent, and facts flagged with a vector map one-to-one onto
+    /// pool slots that name them back. It reads the text and vector pools in
+    /// full, so it costs one linear pass over them (and residents them).
+    ///
+    /// Skipping it is safe: the accessors that read these pools tolerate bad
+    /// bytes on their own (invalid text hides the fact, vector reads are
+    /// bounds-checked), so a corrupt image never panics — `verify` only turns
+    /// that latent corruption into an explicit [`Error::Corrupt`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Corrupt`] for the first inconsistency found.
+    pub fn verify(&self) -> Result<(), Error> {
+        // Text: every stored blob is valid UTF-8. Accessors already tolerate
+        // invalid text gracefully; this is the eager confirmation.
+        for (_, text) in self.texts.iter() {
+            if core::str::from_utf8(text).is_err() {
+                return Err(Error::Corrupt("stored text is not valid UTF-8"));
+            }
+        }
+        // Vectors: structural self-check, then the fact↔slot bijection (each
+        // HAS_VECTOR fact points at a slot that names it back; no slot is
+        // orphaned).
+        self.vecs.validate()?;
+        let vslots = self.vecs.len() as u32;
+        let mut with_vec = 0u32;
+        for fact in self.facts.iter() {
+            if fact.has_vector() {
+                if fact.vector >= vslots || self.vecs.slot_fact(fact.vector as usize) != fact.id.0 {
+                    return Err(Error::Corrupt(
+                        "fact vector slot is out of range or mismatched",
+                    ));
+                }
+                with_vec += 1;
+            }
+        }
+        if with_vec != vslots {
+            return Err(Error::Corrupt("vector pool has orphan slots"));
         }
         Ok(())
     }

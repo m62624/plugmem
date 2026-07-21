@@ -259,6 +259,64 @@ fn corrupt_vector_snapshot_is_typed() {
     }
 }
 
+// Bitflip sweep — `catch_unwind` (unwinding) and heavy: native only, like the
+// proptest sections (specs/14 §3).
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn a_fast_load_vector_open_never_panics_and_verify_catches_corruption() {
+    // The trusted (`fast_load`) path skips the checksums *and* the vector
+    // scan for a sparse open (specs/16 §9), so a corrupt vector slot can reach
+    // the engine. Vector search reads slots with bounds-checked arithmetic, so
+    // it never panics; `verify()` catches the deferred corruption.
+    let dim = 32;
+    let mut c = cfg(dim);
+    c.fast_load = true;
+    let (mut mem, mut store) = (Memory::new(c.clone()).unwrap(), MemStorage::new());
+    let mut rng = Lcg(5);
+    let mut last = Vec::new();
+    for i in 0..20u64 {
+        let v = rng.vector(dim);
+        mem.remember(
+            &mut store,
+            RememberInput {
+                vector: Some(&v),
+                ..RememberInput::text(i * 1000, "text")
+            },
+        )
+        .unwrap();
+        last = v;
+    }
+    let bytes = mem.snapshot_bytes(0);
+
+    let mut verify_caught = false;
+    for at in (0..bytes.len()).step_by(17) {
+        let mut b = bytes.clone();
+        b[at] ^= 0x20;
+        let cc = c.clone();
+        let q = last.clone();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let Ok((mut m, _)) = Memory::from_bytes(Some(&b), &[], cc) else {
+                return false; // a typed load error is a fine outcome
+            };
+            let stats = m.stats();
+            for i in 0..stats.next_fact {
+                let _ = m.get(FactId(i));
+            }
+            let _ = m.recall(vquery(1000, &q, 5)); // search over maybe-corrupt slots
+            let _ = m.snapshot_bytes(0);
+            m.verify().is_err()
+        }));
+        match outcome {
+            Ok(caught) => verify_caught |= caught,
+            Err(_) => panic!("a fast_load vector access panicked after a flip at {at}"),
+        }
+    }
+    assert!(
+        verify_caught,
+        "verify() must catch at least one deferred vector/content corruption"
+    );
+}
+
 #[test]
 fn journal_replay_reproduces_vectors() {
     let dim = 40;

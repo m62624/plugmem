@@ -518,9 +518,11 @@ impl<'a> Memory<'a> {
 
             // Lexical signal: term-set Jaccard over the entity's text.
             let mut lexical = None;
-            if !new_terms.is_empty() {
-                let text = core::str::from_utf8(self.texts.get(record.text))
-                    .expect("fact texts are written from &str");
+            // Deferred validation (specs/16 §9): a load no longer scans the
+            // text pool, so an unreadable text simply yields no lexical signal.
+            if !new_terms.is_empty()
+                && let Ok(text) = core::str::from_utf8(self.texts.get(record.text))
+            {
                 cand_terms.clear();
                 let terms = &self.terms;
                 let cand = &mut cand_terms;
@@ -642,8 +644,10 @@ impl<'a> Memory<'a> {
         if record.is_tombstone() {
             return None;
         }
-        let text = core::str::from_utf8(self.texts.get(record.text))
-            .expect("fact texts are written from &str");
+        // Deferred validation (specs/16 §9): a load no longer scans the text
+        // pool, so tolerate invalid bytes here — a corrupt text hides the fact
+        // rather than panicking. `verify()` reports it explicitly.
+        let text = core::str::from_utf8(self.texts.get(record.text)).ok()?;
         Some(FactView { record, text })
     }
 
@@ -689,10 +693,9 @@ impl<'a> Memory<'a> {
     /// [`EntityId`] carried by [`FactRecord`].
     pub fn entity_name(&self, id: EntityId) -> Option<&str> {
         let record = self.entities.get(&id.0.to_be_bytes())?;
-        Some(
-            core::str::from_utf8(self.texts.get(record.name))
-                .expect("entity names are written from &str"),
-        )
+        // Tolerate invalid bytes (deferred validation, specs/16 §9): an
+        // unreadable name reads as `None`, never a panic.
+        core::str::from_utf8(self.texts.get(record.name)).ok()
     }
 
     /// Number of fact records currently stored (tombstoned facts count
