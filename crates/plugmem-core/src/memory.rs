@@ -333,17 +333,18 @@ impl<'a> Memory<'a> {
     /// only in the pages it actually touches.
     ///
     /// This is the write sibling of [`Memory::from_bytes`] (which owns its
-    /// bytes) — the same `snapshot + journal replay`, over a borrowed base. The
-    /// returned engine is tied to `snapshot`'s lifetime; the caller (the host)
-    /// owns the map and the exclusive lock.
+    /// bytes) — the same `snapshot + journal replay`, over a borrowed base, and
+    /// it returns the same [`OpenReport`] describing the replay. The returned
+    /// engine is tied to `snapshot`'s lifetime; the caller (the host) owns the
+    /// map and the exclusive lock.
     pub fn from_bytes_overlay(
         snapshot: &'a [u8],
         journal: &[u8],
         cfg: Config,
-    ) -> Result<Self, Error> {
+    ) -> Result<(Self, OpenReport), Error> {
         let mut mem = Self::load_snapshot_borrowed(snapshot, cfg)?;
-        mem.replay(journal)?;
-        Ok(mem)
+        let report = mem.replay(journal)?;
+        Ok((mem, report))
     }
 
     /// Applies every journal record on top of the current state (specs/03

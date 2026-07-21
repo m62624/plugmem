@@ -198,7 +198,7 @@ fn overlay_open_replays_journal_and_matches_owned() {
 
     // Owned and overlay both open snapshot + journal; overlay borrows the base.
     let (mut owned, _) = Memory::from_bytes(Some(&snap), &journal, cfg()).unwrap();
-    let mut overlay = Memory::from_bytes_overlay(&snap, &journal, cfg()).unwrap();
+    let (mut overlay, _) = Memory::from_bytes_overlay(&snap, &journal, cfg()).unwrap();
 
     assert_equal(&mut owned, &mut overlay);
     // Canonical: overlay dumps byte-identically to owned, and to the live
@@ -228,7 +228,7 @@ fn overlay_open_replays_maintain_from_the_journal() {
     let journal = store.read_journal().unwrap();
 
     let (mut owned, _) = Memory::from_bytes(Some(&snap), &journal, cfg()).unwrap();
-    let mut overlay = Memory::from_bytes_overlay(&snap, &journal, cfg()).unwrap();
+    let (mut overlay, _) = Memory::from_bytes_overlay(&snap, &journal, cfg()).unwrap();
 
     assert_equal(&mut owned, &mut overlay);
     assert_eq!(overlay.snapshot_bytes(0), owned.snapshot_bytes(0));
