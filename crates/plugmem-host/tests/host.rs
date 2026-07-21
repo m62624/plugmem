@@ -680,3 +680,195 @@ fn journal_survives_repeated_clears() {
     }
     assert_eq!(fs.journal_bytes(), 0);
 }
+
+// ---------------------------------------------------------------------------
+// Overlay write path (specs/16 §9): the default `open` mmaps the snapshot and
+// borrows it, re-mapping on snapshot. These tests prove the re-map is durable
+// and canonical, and that opening residents far less RAM than an owned load.
+// ---------------------------------------------------------------------------
+
+/// The journal path next to a base database file.
+fn journal_of(base: &std::path::Path) -> PathBuf {
+    let mut p = base.to_path_buf().into_os_string();
+    p.push(".journal");
+    PathBuf::from(p)
+}
+
+#[test]
+fn overlay_writes_survive_repeated_snapshots_and_reopen() {
+    let tmp = TempDir::new("overlay-remap");
+    let scrap = tmp.0.join("agent.plugmem.tmp");
+    {
+        // Snapshot every 4 ops: the first crosses Owned -> Mapped, every later
+        // one is a Mapped -> Mapped re-map. The engine must keep working across
+        // all of them.
+        let (db, _) = Database::builder(cfg())
+            .snapshot_every_ops(4)
+            .open(tmp.db())
+            .unwrap();
+        for i in 0..40u64 {
+            db.remember(RememberInput {
+                entity: Some("user"),
+                ..RememberInput::text(i + 1, "a durable fact written across many snapshots")
+            })
+            .unwrap();
+        }
+        assert_eq!(
+            db.stats().facts,
+            40,
+            "writes survive the re-maps while live"
+        );
+        let out = db.recall(RecallQuery::text(1_000, "durable")).unwrap();
+        assert!(out.rendered.contains("durable"));
+        assert!(!scrap.exists(), "no tmp scrap survives a snapshot");
+    } // drop releases the lock
+
+    // 40 ops at every-4 snapshots means the last op snapshotted: the journal is
+    // empty and the reopen replays nothing.
+    let (db, report) = Database::open(tmp.db(), cfg()).unwrap();
+    assert_eq!(
+        report.replayed, 0,
+        "the last op checkpointed; nothing to replay"
+    );
+    assert_eq!(db.stats().facts, 40, "all writes survived reopen");
+    let out = db.recall(RecallQuery::text(2_000, "durable")).unwrap();
+    assert!(out.rendered.contains("durable"));
+}
+
+#[test]
+fn a_re_mapped_snapshot_is_canonical_against_an_owned_replay() {
+    use plugmem_core::Memory;
+
+    let tmp = TempDir::new("overlay-canonical");
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    // Write, checkpoint (Owned -> Mapped re-map), write more (incl. a revision),
+    // checkpoint again (Mapped -> Mapped re-map): the final on-disk image is a
+    // product of the re-map path.
+    for i in 0..20u64 {
+        db.remember(RememberInput {
+            entity: Some(["user", "plugmem", "кот"][(i % 3) as usize]),
+            tags: if i % 2 == 0 { &["pref"] } else { &[] },
+            ..RememberInput::text(i + 1, "some fact about работа and tokio")
+        })
+        .unwrap();
+    }
+    db.checkpoint(100).unwrap();
+    for i in 20..35u64 {
+        db.remember(RememberInput::text(
+            i + 1,
+            "more facts after the first snapshot",
+        ))
+        .unwrap();
+    }
+    let old = db
+        .remember(RememberInput::text(500, "lived in Moscow"))
+        .unwrap();
+    db.revise(old.id, RememberInput::text(600, "lives in Berlin"))
+        .unwrap();
+    const T: u64 = 1_000;
+    db.checkpoint(T).unwrap();
+    drop(db);
+
+    // A checkpointed database has a full image and an empty journal.
+    let file = std::fs::read(tmp.db()).unwrap();
+    let journal = std::fs::read(journal_of(&tmp.db())).unwrap();
+    assert!(journal.is_empty(), "checkpoint clears the journal");
+
+    // The re-mapped snapshot dumps byte-identically to an owned replay of the
+    // same image (canonical save->load->save), and the overlay open of that
+    // image dumps the same bytes — tying the host's on-disk output to the core
+    // canonicality guarantee.
+    let (owned, _) = Memory::from_bytes(Some(&file), &journal, cfg()).unwrap();
+    assert_eq!(
+        owned.snapshot_bytes(T),
+        file,
+        "the re-mapped snapshot is canonical"
+    );
+    let (overlay, _) = Memory::from_bytes_overlay(&file, &journal, cfg()).unwrap();
+    assert_eq!(
+        overlay.snapshot_bytes(T),
+        file,
+        "overlay open matches the owned image byte-for-byte"
+    );
+}
+
+/// Process resident-set size in bytes (cross-OS: linux/macos/windows).
+fn rss() -> usize {
+    memory_stats::memory_stats()
+        .expect("a resident-set-size reading")
+        .physical_mem
+}
+
+#[test]
+fn an_overlay_open_avoids_the_second_copy_an_owned_open_pays() {
+    use plugmem_core::Memory;
+
+    let tmp = TempDir::new("overlay-rss");
+    // `fast_load` skips the whole-file xxh3 so an open touches only metadata,
+    // not the (borrowed) pool bytes — the sparse-resident win in the clear.
+    let mut c = cfg();
+    c.fast_load = true;
+
+    // A sizable checkpointed database whose byte pools dominate. Varied text
+    // (keyed by the index) keeps term df low so similar-detection stays cheap
+    // while the blob heap grows large.
+    {
+        let (db, _) = Database::builder(c.clone())
+            .snapshot_every_ops(0) // one checkpoint at the end, no mid-snapshots
+            .fsync(FsyncPolicy::OnSnapshot)
+            .open(tmp.db())
+            .unwrap();
+        for i in 0..20_000u64 {
+            // A long, mostly-shared text so the blob heap dominates the image;
+            // the few shared terms are stop-filtered, keeping postings compact.
+            let text = format!(
+                "lorem ipsum dolor sit amet consectetur adipiscing elit sed do \
+                 eiusmod tempor incididunt ut labore et dolore magna aliqua ut \
+                 enim ad minim veniam quis nostrud exercitation ullamco laboris \
+                 nisi ut aliquip ex ea commodo consequat duis aute irure item {i}",
+            );
+            db.remember(RememberInput::text(i + 1, &text)).unwrap();
+        }
+        db.checkpoint(20_000_000).unwrap();
+    }
+    let file_len = std::fs::metadata(tmp.db()).unwrap().len() as usize;
+    assert!(
+        file_len > 3 * 1024 * 1024,
+        "the test database must be large enough to measure ({file_len} bytes)"
+    );
+
+    // Overlay open (the default): mmap + borrow. Residents only metadata.
+    let before = rss();
+    let (overlay, _) = Database::open(tmp.db(), c.clone()).unwrap();
+    let overlay_rss = rss().saturating_sub(before);
+    assert_eq!(overlay.stats().facts, 20_000, "the overlay opened the base");
+    drop(overlay);
+
+    // Owned open of the same file: read into a Vec + copy every pool into an
+    // arena. Residents ~the whole image.
+    let before = rss();
+    let bytes = std::fs::read(tmp.db()).unwrap();
+    let (owned, _) = Memory::from_bytes(Some(&bytes), &[], c.clone()).unwrap();
+    let owned_rss = rss().saturating_sub(before);
+    assert_eq!(
+        owned.stats().facts,
+        20_000,
+        "the owned open loaded the base"
+    );
+    drop(owned);
+    drop(bytes);
+
+    // The owned open holds a full second copy of the image on the heap — the
+    // read buffer plus every pool copied into an arena — peaking at ~2x the
+    // file. The overlay open borrows the mapped bytes and never copies, peaking
+    // at ~1x. So the owned open costs about a whole extra image of resident
+    // memory that the overlay avoids. (The loader still faults the base in to
+    // validate it — UTF-8 text, chunk chains — so this proves the *no-copy*
+    // win, not sparse residency; the latter needs deferred validation, tracked
+    // in specs/16 §9.)
+    assert!(
+        owned_rss > overlay_rss + file_len / 2,
+        "owned open pays a second copy the overlay avoids \
+         (overlay {overlay_rss}, owned {owned_rss}, file {file_len})"
+    );
+}

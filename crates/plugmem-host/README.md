@@ -21,6 +21,16 @@ range scans, all fused by rank) lives in the engine; this crate adds:
   database residents only the pages a query touches instead of loading
   the whole file. It holds a shared lock, so **many readers map the same
   file at once** — across threads or processes — sharing the OS page cache;
+- **A write path that does not clone the file** — `Database::open`
+  memory-maps the snapshot and the engine borrows it as an *overlay*:
+  mutations land in a small owned overlay (an appended tail plus per-page
+  copy-on-write), so opening a multi-gigabyte database to append one fact
+  no longer copies the whole image into RAM. A snapshot materializes the
+  base + overlay into a fresh file and re-maps it. The measured effect: an
+  owned load holds a second copy of the image (peak ~2× the file); the
+  overlay open borrows it (peak ~1×). (The loader still validates the whole
+  image at open, so this is the no-copy win; residenting only the touched
+  pages is a planned follow-up — see `specs/16 §9`.);
 - **Maintenance policy** — auto-snapshot and optional auto-`maintain`,
   run inline (no background threads);
 - **Embedding providers** — one HTTP client for the `/v1/embeddings`

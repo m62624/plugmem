@@ -18,6 +18,10 @@ self_cell = { workspace = true }
 ureq = { workspace = true, features = ["json"] }
 serde_json = { workspace = true }
 
+[dev-dependencies]
+# Cross-OS resident-set-size probe for the overlay RAM-win test (specs/16 §9).
+memory-stats = { workspace = true }
+
 [lints]
 workspace = true
 

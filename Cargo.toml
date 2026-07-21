@@ -60,6 +60,10 @@ js-sys = "0.3.103"
 proptest = "1.11.0"
 criterion = "0.8.2"
 insta = "1.48.0"
+# Cross-platform resident-set-size probe (linux/macos/windows) for the host
+# overlay RAM-win test (specs/16 §9): proves an mmap overlay open residents
+# far less physical memory than an owned open of the same file. Dev-only.
+memory-stats = "1.2.0"
 # rand_xoshiro was reserved for testgen (specs/08) and dropped: the
 # generator implements its own PRNG in place (specs/11 §3) so corpus
 # reproducibility never depends on an external crate's stream stability.
