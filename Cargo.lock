@@ -1091,7 +1091,6 @@ name = "plugmem-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
- "plugmem-core",
  "plugmem-host",
  "serde_json",
  "toml",

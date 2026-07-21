@@ -21,10 +21,9 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
-use plugmem_core::FactId;
 use plugmem_host::{
-    Database, ExportedFact, HostError, LinkInput, ReadOnlyDatabase, RecallQuery, RecallResult,
-    RememberInput, RememberOutcome, Stats, VALID_TO_OPEN,
+    Database, ExportedFact, FactId, HostError, LinkInput, ReadOnlyDatabase, RecallQuery,
+    RecallResult, RememberInput, RememberOutcome, Stats, VALID_TO_OPEN,
 };
 use serde_json::json;
 
@@ -1137,7 +1136,7 @@ mod tests {
         let cfgfile = scratch.0.join("config.toml");
         std::fs::write(
             &cfgfile,
-            "[engine]\ndim = 512\n[embedder]\nkind = \"none\"\n",
+            "[engine]\ndim = 512\n[embedder]\nkind = \"none\"\n[maintenance]\nsnapshot_every_ops = 64\n",
         )
         .unwrap();
         let cli = Cli {
@@ -1149,6 +1148,7 @@ mod tests {
         let s = load_settings(&cli).unwrap();
         assert_eq!(s.config.dim, 512);
         assert!(s.embedder.is_none());
+        assert_eq!(s.maintenance.snapshot_every_ops, Some(64));
         // an explicit --config that does not exist is a usage error
         let cli = Cli {
             db: None,

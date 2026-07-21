@@ -201,7 +201,11 @@ fn import_from_a_fixture_jsonl() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0));
-    assert!(stdout(&out).contains("imported 3 facts"), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("imported 3 facts"),
+        "{}",
+        stdout(&out)
+    );
 
     // The imported facts are recallable, entity and tags preserved.
     let r = plugmem(&tmp.db(), &["recall", "tokio"]);

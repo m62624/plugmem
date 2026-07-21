@@ -219,6 +219,28 @@ pub(crate) fn apply_engine(cfg: &mut Config, t: &toml::Table) -> Result<(), CliE
 mod tests {
     use super::*;
 
+    /// A unique temp directory; removed on drop.
+    struct TempDir(std::path::PathBuf);
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "plugmem-cfg-{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            TempDir(dir)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn engine_and_maintenance_parse() {
         let text = "\
@@ -227,6 +249,7 @@ dim = 384
 shards_facts = 16
 [maintenance]
 snapshot_every_ops = 50
+snapshot_journal_bytes = 8192
 maintain_every_forgets = 3
 ";
         let table: toml::Table = text.parse().unwrap();
@@ -237,6 +260,7 @@ maintain_every_forgets = 3
         let mut m = Maintenance::default();
         m.merge(table["maintenance"].as_table().unwrap());
         assert_eq!(m.snapshot_every_ops, Some(50));
+        assert_eq!(m.snapshot_journal_bytes, Some(8192));
         assert_eq!(m.maintain_every_forgets, Some(3));
 
         let bad: toml::Table = "dim = \"huge\"".parse().unwrap();
@@ -247,6 +271,52 @@ maintain_every_forgets = 3
     }
 
     #[test]
+    fn embedder_merge_reads_every_field() {
+        let mut table = toml::Table::new();
+        table.insert("kind".into(), "ollama".into());
+        table.insert("url".into(), "http://localhost:11434/v1".into());
+        table.insert("model".into(), "nomic-embed-text".into());
+        table.insert("api_key_env".into(), "SOME_ENV".into());
+
+        let mut e = EmbedderCfg::default();
+        e.merge(&table);
+        assert_eq!(e.kind.as_deref(), Some("ollama"));
+        assert_eq!(e.url.as_deref(), Some("http://localhost:11434/v1"));
+        assert_eq!(e.model.as_deref(), Some("nomic-embed-text"));
+        assert_eq!(e.api_key_env.as_deref(), Some("SOME_ENV"));
+    }
+
+    #[test]
+    fn settings_open_applies_maintenance_and_embedder() {
+        // Every maintenance knob set, plus an embedder, so `Settings::open`
+        // exercises each builder branch. The embedder is never invoked by a
+        // bare open, so an unreachable url is fine here.
+        let tmp = TempDir::new("open");
+        let mut config = Config::default();
+        config.dim = 8;
+        let embedder = EmbedderCfg {
+            kind: Some("ollama".into()),
+            url: Some("http://127.0.0.1:0/v1".into()),
+            model: Some("m".into()),
+            api_key_env: None,
+        }
+        .build(8)
+        .unwrap();
+        assert!(embedder.is_some());
+        let settings = Settings {
+            config,
+            embedder,
+            maintenance: Maintenance {
+                snapshot_every_ops: Some(4),
+                snapshot_journal_bytes: Some(4096),
+                maintain_every_forgets: Some(2),
+            },
+        };
+        let db = settings.open(&tmp.0.join("m.plugmem")).unwrap();
+        assert_eq!(db.stats().facts, 0);
+    }
+
+    #[test]
     fn embedder_build_rules() {
         assert!(EmbedderCfg::default().build(0).unwrap().is_none());
         let no_url = EmbedderCfg {
@@ -254,6 +324,12 @@ maintain_every_forgets = 3
             ..Default::default()
         };
         assert!(matches!(no_url.build(384), Err(CliError::Usage(_))));
+        let no_model = EmbedderCfg {
+            kind: Some("ollama".into()),
+            url: Some("http://x/v1".into()),
+            ..Default::default()
+        };
+        assert!(matches!(no_model.build(384), Err(CliError::Usage(_))));
         let zero_dim = EmbedderCfg {
             kind: Some("ollama".into()),
             url: Some("http://x/v1".into()),
