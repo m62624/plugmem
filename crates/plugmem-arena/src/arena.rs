@@ -13,8 +13,22 @@
 //! measured `unsafe` (uninitialized page allocation) whose entire benefit is
 //! on the wasm allocation path — see [`Arena::insert`] internals and the
 //! crate-level documentation for the numbers.
+//!
+//! # Overlay opens
+//!
+//! [`Arena::load_overlay`] opens an arena whose existing pages are **borrowed**
+//! from a longer-lived buffer — typically a memory-mapped file — while the
+//! arena stays fully mutable. Because an arena mutates pages *in place* (slot
+//! shifts, page splits), it cannot use the append-only tail of
+//! [`BlobHeap`](crate::BlobHeap): instead the first write to a borrowed page
+//! copies just *that* page into an owned overlay, and pages grown after open
+//! live in an owned tail (per-page copy-on-write). The borrowed base is never
+//! mutated and never cloned as a whole, so a multi-gigabyte arena can be
+//! *written to* while resident only in the pages it actually touches. Staying
+//! true to the crate's flat philosophy, the overlay is two flat `Vec`s (a
+//! dense redirect and one contiguous copy pool) — no `Box`, no map. See
+//! `examples/overlay.rs`.
 
-use alloc::borrow::Cow;
 use alloc::vec::Vec;
 use core::fmt;
 use core::marker::PhantomData;
@@ -23,6 +37,7 @@ use core::marker::PhantomData;
 use core::cell::Cell;
 
 use crate::error::Error;
+use crate::paged::Paged;
 use crate::slot::Slot;
 
 /// Size of one arena page in bytes.
@@ -156,16 +171,19 @@ pub struct Arena<'a, T: Slot> {
     /// page beyond `counts[page] * T::SIZE` are uninitialized and must
     /// never be read.
     ///
-    /// `Cow` so the arena can either own the pool (`new`/`load` — the
-    /// writable path) or borrow it from a longer-lived buffer such as a
-    /// memory-mapped snapshot (`load_borrowed` — the zero-copy read-only
-    /// path, specs/16). Borrowing is `alloc`-only (`Cow`, no `std`/`Arc`),
-    /// so the crate stays `no_std`, and the lifetime `'a` lets the compiler
-    /// prove the arena never outlives its backing buffer. The read-only path
-    /// never mutates, so `to_mut`'s copy-up never fires and the
-    /// uninitialized-tail invariant is untouched (a borrowed pool is a
-    /// fully-initialized dumped image).
-    pool: Cow<'a, [u8]>,
+    /// A [`Paged`] backing so the arena can either own the pool (`new`/`load` —
+    /// the writable default, and the only shape on wasm32) or borrow a base
+    /// from a longer-lived buffer such as a memory-mapped snapshot
+    /// (`load_borrowed`/`load_overlay` — specs/16). The overlay open borrows
+    /// the base read-only and copies just the touched pages up on first write
+    /// (per-page copy-on-write), so a mapped database is mutated without
+    /// cloning it. The backing is `alloc`-only (no `std`/`Arc`), so the crate
+    /// stays `no_std`, and the lifetime `'a` lets the compiler prove the arena
+    /// never outlives its base. The uninitialized-tail invariant is untouched:
+    /// base pages are a fully-initialized dumped image, overlay copies are
+    /// taken from them, and freshly grown pages keep the same
+    /// read-only-up-to-`count` contract as before.
+    pool: Paged<'a, PAGE_BYTES>,
     /// Shard -> first page of its chain (`NONE` = empty shard).
     heads: Vec<u32>,
     /// Page -> successor: the next page in a shard chain, or the next free
@@ -181,6 +199,12 @@ pub struct Arena<'a, T: Slot> {
     /// allocated once) — inserts do not allocate after the first call except
     /// when growing the pool itself.
     scratch: Vec<u8>,
+    /// Reusable buffer for the cross-page slot moves in [`Arena::split`]. A
+    /// split reads a run of slots out of one page and writes it into another;
+    /// under the overlay backing those may be distinct owned pages, so the
+    /// bytes route through this buffer instead of a single in-pool
+    /// `copy_within`. Grown once; splits are amortized and off the recall path.
+    split_buf: Vec<u8>,
     cfg: ArenaCfg,
     #[cfg(feature = "counters")]
     counters: Cell<Counters>,
@@ -216,13 +240,14 @@ impl<'a, T: Slot> Arena<'a, T> {
             return Err(Error::BadShardCount { got: cfg.shards });
         }
         Ok(Self {
-            pool: Cow::Owned(Vec::new()),
+            pool: Paged::owned_empty(),
             heads: alloc::vec![NONE; cfg.shards],
             next: Vec::new(),
             counts: Vec::new(),
             free_head: NONE,
             total: 0,
             scratch: Vec::new(),
+            split_buf: Vec::new(),
             cfg,
             #[cfg(feature = "counters")]
             counters: Cell::new(Counters::default()),
@@ -311,17 +336,15 @@ impl<'a, T: Slot> Arena<'a, T> {
             (page, pos, count) = self.split(page, pos)?;
         }
 
-        let page_start = page as usize * PAGE_BYTES;
-        let slot_start = page_start + pos * T::SIZE;
-        let used_end = page_start + count * T::SIZE;
+        let slot_start = pos * T::SIZE;
+        let used_end = count * T::SIZE;
         let shifted = used_end - slot_start;
+        let bytes = self.pool.page_mut(page);
         if shifted > 0 {
             // Shift the sorted tail right by one slot; stays within the page.
-            self.pool
-                .to_mut()
-                .copy_within(slot_start..used_end, slot_start + T::SIZE);
+            bytes.copy_within(slot_start..used_end, slot_start + T::SIZE);
         }
-        self.pool.to_mut()[slot_start..slot_start + T::SIZE].copy_from_slice(slot);
+        bytes[slot_start..slot_start + T::SIZE].copy_from_slice(slot);
         bump!(self, bytes_shifted, shifted);
 
         self.counts[page as usize] += 1;
@@ -346,9 +369,7 @@ impl<'a, T: Slot> Arena<'a, T> {
             // "upper half" is the whole record when the new key precedes it,
             // otherwise the fresh page simply receives the new record.
             return Ok(if pos == 0 {
-                let src = page as usize * PAGE_BYTES;
-                let dst = fresh as usize * PAGE_BYTES;
-                self.pool.to_mut().copy_within(src..src + T::SIZE, dst);
+                self.move_slots(page, 0, fresh, T::SIZE);
                 bump!(self, bytes_shifted, T::SIZE);
                 self.counts[page as usize] = 0;
                 self.counts[fresh as usize] = 1;
@@ -361,11 +382,7 @@ impl<'a, T: Slot> Arena<'a, T> {
         // Move the upper half [half..spp) into the fresh page.
         let half = spp / 2;
         let moved = spp - half;
-        let src = page as usize * PAGE_BYTES + half * T::SIZE;
-        let dst = fresh as usize * PAGE_BYTES;
-        self.pool
-            .to_mut()
-            .copy_within(src..src + moved * T::SIZE, dst);
+        self.move_slots(page, half * T::SIZE, fresh, moved * T::SIZE);
         bump!(self, bytes_shifted, moved * T::SIZE);
         self.counts[page as usize] = half as u16;
         self.counts[fresh as usize] = moved as u16;
@@ -380,6 +397,20 @@ impl<'a, T: Slot> Arena<'a, T> {
         })
     }
 
+    /// Copies `len` bytes from `src_page` (starting at in-page offset
+    /// `src_off`) to the start of `dst_page`. The two pages may be distinct
+    /// owned pages under the overlay backing, so the bytes route through the
+    /// reusable [`Arena::split_buf`] rather than a single in-pool
+    /// `copy_within` — one immutable read of the source, then one write of the
+    /// destination (which copies-up if it is still a borrowed base page).
+    fn move_slots(&mut self, src_page: u32, src_off: usize, dst_page: u32, len: usize) {
+        let mut buf = core::mem::take(&mut self.split_buf);
+        buf.clear();
+        buf.extend_from_slice(&self.pool.page(src_page)[src_off..src_off + len]);
+        self.pool.page_mut(dst_page)[..len].copy_from_slice(&buf);
+        self.split_buf = buf;
+    }
+
     /// Returns the record with the given key prefix, if present.
     ///
     /// # Panics
@@ -387,8 +418,10 @@ impl<'a, T: Slot> Arena<'a, T> {
     /// Panics if `key.len() != T::KEY_LEN` (a caller bug, not a data
     /// condition — mirrors slice indexing).
     pub fn get(&self, key: &[u8]) -> Option<T> {
-        self.locate(key)
-            .map(|off| T::read(&self.pool[off..off + T::SIZE]))
+        self.locate(key).map(|off| {
+            let (page, rel) = (off / PAGE_BYTES, off % PAGE_BYTES);
+            T::read(&self.pool.page(page as u32)[rel..rel + T::SIZE])
+        })
     }
 
     /// `true` if a record with the given key prefix exists.
@@ -406,7 +439,10 @@ impl<'a, T: Slot> Arena<'a, T> {
     ///
     /// Panics if `key.len() != T::KEY_LEN`.
     pub fn get_slot(&self, key: &[u8]) -> Option<&[u8]> {
-        self.locate(key).map(|off| &self.pool[off..off + T::SIZE])
+        self.locate(key).map(|off| {
+            let (page, rel) = (off / PAGE_BYTES, off % PAGE_BYTES);
+            &self.pool.page(page as u32)[rel..rel + T::SIZE]
+        })
     }
 
     /// Returns a mutable view of the record's **payload** (the bytes after
@@ -421,7 +457,8 @@ impl<'a, T: Slot> Arena<'a, T> {
     /// Panics if `key.len() != T::KEY_LEN`.
     pub fn payload_mut(&mut self, key: &[u8]) -> Option<&mut [u8]> {
         let off = self.locate(key)?;
-        Some(&mut self.pool.to_mut()[off + T::KEY_LEN..off + T::SIZE])
+        let (page, rel) = (off / PAGE_BYTES, off % PAGE_BYTES);
+        Some(&mut self.pool.page_mut(page as u32)[rel + T::KEY_LEN..rel + T::SIZE])
     }
 
     /// Removes the record with the given key prefix. Returns `true` if it
@@ -448,14 +485,13 @@ impl<'a, T: Slot> Arena<'a, T> {
             }
         };
 
-        let page_start = page as usize * PAGE_BYTES;
-        let slot_start = page_start + pos * T::SIZE;
-        let used_end = page_start + count * T::SIZE;
+        let slot_start = pos * T::SIZE;
+        let used_end = count * T::SIZE;
         let tail = used_end - (slot_start + T::SIZE);
         if tail > 0 {
             // Shift the tail left over the removed slot; stays within the page.
             self.pool
-                .to_mut()
+                .page_mut(page)
                 .copy_within(slot_start + T::SIZE..used_end, slot_start);
         }
         bump!(self, bytes_shifted, tail);
@@ -602,8 +638,7 @@ impl<'a, T: Slot> Arena<'a, T> {
         out.reserve(self.pool.len());
         for (page, &count) in self.counts.iter().enumerate() {
             let used = count as usize * T::SIZE;
-            let start = page * PAGE_BYTES;
-            out.extend_from_slice(&self.pool[start..start + used]);
+            out.extend_from_slice(&self.pool.page(page as u32)[..used]);
             out.resize(out.len() + (PAGE_BYTES - used), 0);
         }
     }
@@ -633,7 +668,7 @@ impl<'a, T: Slot> Arena<'a, T> {
     /// (same gates as [`Arena::new`]); [`Error::Corrupt`] for any image
     /// inconsistency.
     pub fn load(cfg: ArenaCfg, meta: &[u8], pool: &[u8]) -> Result<Self, Error> {
-        Self::load_impl(cfg, meta, pool, Cow::Owned(pool.to_vec()))
+        Self::load_impl(cfg, meta, pool, Paged::owned_from(pool.to_vec()))
     }
 
     /// Rebuilds an arena that **borrows** its page pool from a longer-lived
@@ -646,16 +681,34 @@ impl<'a, T: Slot> Arena<'a, T> {
     ///
     /// Same as [`Arena::load`].
     pub fn load_borrowed(cfg: ArenaCfg, meta: &[u8], pool: &'a [u8]) -> Result<Self, Error> {
-        Self::load_impl(cfg, meta, pool, Cow::Borrowed(pool))
+        Self::load_impl(cfg, meta, pool, Paged::borrowed(pool))
     }
 
-    /// Shared body of [`Arena::load`] / [`Arena::load_borrowed`]: validates
-    /// the untrusted `meta`/`pool` image and adopts `backing` as the pool.
+    /// Opens an arena over a borrowed base for the **overlay** write path: the
+    /// base pages are mapped read-only, and the first write to any base page
+    /// copies just that page into owned storage (per-page copy-on-write, see
+    /// [`Paged`](crate::paged)), while pages grown after open live in an owned
+    /// tail. Unlike [`Arena::load_borrowed`] the returned arena is fully
+    /// mutable — inserts, removals and splits work — yet the borrowed base is
+    /// never cloned as a whole and never mutated, so a memory-mapped database
+    /// can be written to while resident only in the pages it actually touches.
+    /// Validation is identical to [`Arena::load`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Arena::load`].
+    pub fn load_overlay(cfg: ArenaCfg, meta: &[u8], pool: &'a [u8]) -> Result<Self, Error> {
+        Self::load_impl(cfg, meta, pool, Paged::borrowed(pool))
+    }
+
+    /// Shared body of [`Arena::load`] / [`Arena::load_borrowed`] /
+    /// [`Arena::load_overlay`]: validates the untrusted `meta`/`pool` image and
+    /// adopts `backing` as the pool.
     fn load_impl(
         cfg: ArenaCfg,
         meta: &[u8],
         pool: &[u8],
-        backing: Cow<'a, [u8]>,
+        backing: Paged<'a, PAGE_BYTES>,
     ) -> Result<Self, Error> {
         let mut arena = Self::new(cfg)?;
         if meta.len() < IMAGE_HEADER {
@@ -812,8 +865,7 @@ impl<'a, T: Slot> Arena<'a, T> {
     /// page in a chain holds at least one record — emptied pages are
     /// unlinked immediately).
     fn first_key(&self, page: u32) -> &[u8] {
-        let start = page as usize * PAGE_BYTES;
-        &self.pool[start..start + T::KEY_LEN]
+        &self.pool.page(page)[..T::KEY_LEN]
     }
 
     /// Binary search inside a page; wraps the free-function search with the
@@ -825,8 +877,7 @@ impl<'a, T: Slot> Arena<'a, T> {
         key: &[u8],
         cmps: &mut u64,
     ) -> Result<usize, usize> {
-        let start = page as usize * PAGE_BYTES;
-        search::<T>(&self.pool[start..start + PAGE_BYTES], count, key, cmps)
+        search::<T>(self.pool.page(page), count, key, cmps)
     }
 
     /// Byte offset of the slot with the given key, if present.
@@ -879,10 +930,14 @@ impl<'a, T: Slot> Arena<'a, T> {
             });
         }
         let page = (old_len / PAGE_BYTES) as u32;
-        // Every mutating path owns the pool (a borrowed pool is read-only),
-        // so `to_mut` returns the owned Vec without cloning.
-        let pool = self.pool.to_mut();
-        pool.reserve(PAGE_BYTES);
+        // Grow the owned tail by one page: the whole vector when owned, the
+        // overlay's grown tail when borrowing (the borrowed base is never
+        // resized). `grown_tail_mut` hands back that owned `Vec` directly — no
+        // clone of the base — and the new page's global index is `old_len /
+        // PAGE_BYTES` regardless of which tail holds it.
+        let tail = self.pool.grown_tail_mut();
+        let tail_len = tail.len() + PAGE_BYTES;
+        tail.reserve(PAGE_BYTES);
         // SAFETY: the new page is left uninitialized on purpose — this is the
         // one measured unsafe of the crate. Zeroing fresh pages was benched
         // at 12x slower on the wasm allocation path (wasmtime, 32k pages:
@@ -892,12 +947,13 @@ impl<'a, T: Slot> Arena<'a, T> {
         // Every read (search, get, iter, range, first_key, shifts) is
         // bounded by the page count, and a slot's bytes are fully written
         // before the count is incremented. Consequently `Arena` exposes no
-        // whole-pool reads (no `Clone`/`PartialEq`/`as_bytes`); the future
-        // snapshot writer emits only the initialized prefixes of pages
-        // (`specs/03`).
+        // whole-pool reads (no `Clone`/`PartialEq`/`as_bytes`); the snapshot
+        // writer emits only the initialized prefixes of pages (`specs/03`).
+        // Routing the same reserve+set_len at the grown tail (not the base)
+        // keeps this the crate's sole `unsafe` — the overlay adds none.
         #[allow(clippy::uninit_vec)]
         unsafe {
-            pool.set_len(new_len);
+            tail.set_len(tail_len);
         }
         self.next.push(NONE);
         self.counts.push(0);
@@ -969,10 +1025,12 @@ impl<T: Slot> Iterator for Iter<'_, T> {
                 continue;
             }
             if self.idx < self.arena.counts[self.page as usize] as usize {
-                let off = self.page as usize * PAGE_BYTES + self.idx * T::SIZE;
+                let rel = self.idx * T::SIZE;
                 self.idx += 1;
                 self.remaining -= 1;
-                return Some(T::read(&self.arena.pool[off..off + T::SIZE]));
+                return Some(T::read(
+                    &self.arena.pool.page(self.page)[rel..rel + T::SIZE],
+                ));
             }
             self.page = self.arena.next[self.page as usize];
             self.idx = 0;
@@ -1021,13 +1079,14 @@ impl<T: Slot> Iterator for Range<'_, T> {
                 continue;
             }
             if self.idx < self.arena.counts[self.page as usize] as usize {
-                let off = self.page as usize * PAGE_BYTES + self.idx * T::SIZE;
-                if &self.arena.pool[off..off + T::KEY_LEN] >= self.to {
+                let rel = self.idx * T::SIZE;
+                let page = self.arena.pool.page(self.page);
+                if page[rel..rel + T::KEY_LEN] >= *self.to {
                     // Keys only grow from here on — the scan is complete.
                     return None;
                 }
                 self.idx += 1;
-                return Some(T::read(&self.arena.pool[off..off + T::SIZE]));
+                return Some(T::read(&page[rel..rel + T::SIZE]));
             }
             self.page = self.arena.next[self.page as usize];
             self.idx = 0;

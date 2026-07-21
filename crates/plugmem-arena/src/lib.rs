@@ -103,6 +103,7 @@ mod blob;
 mod chunk;
 mod error;
 mod interner;
+mod paged;
 mod slot;
 
 pub use arena::{Arena, ArenaCfg, Iter, PAGE_BYTES, ShardMode};
