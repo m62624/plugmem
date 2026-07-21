@@ -123,6 +123,75 @@ fn cfg_default_and_builders() {
     assert_eq!(cfg.max_blob, 10);
 }
 
+/// Dumps a heap's two sections into owned buffers (the on-disk form a
+/// borrowed/overlay open reads back).
+fn dump(heap: &BlobHeap) -> (Vec<u8>, Vec<u8>) {
+    let (mut index, mut pool) = (Vec::new(), Vec::new());
+    heap.dump_index(&mut index);
+    heap.dump_pool(&mut pool);
+    (index, pool)
+}
+
+#[test]
+fn overlay_open_appends_to_tail_without_touching_base() {
+    // Base: two blobs, serialized as if from a snapshot / mmap.
+    let mut owned = BlobHeap::new(BlobHeapCfg::new());
+    owned.push(b"alpha").unwrap();
+    owned.push(b"beta").unwrap();
+    let (index, pool) = dump(&owned);
+    let base_snapshot = pool.clone();
+
+    // Open over the borrowed base, then append: the new blob lands in the
+    // owned tail, the base is never cloned or mutated.
+    let mut heap = BlobHeap::load_borrowed(BlobHeapCfg::new(), &index, &pool).unwrap();
+    assert_eq!(heap.len(), 2);
+    let c = heap.push(b"gamma").unwrap();
+    assert_eq!(c, BlobId(2));
+
+    // Reads dispatch across the base/tail boundary correctly.
+    assert_eq!(heap.get(BlobId(0)), b"alpha"); // base
+    assert_eq!(heap.get(BlobId(1)), b"beta"); // base
+    assert_eq!(heap.get(BlobId(2)), b"gamma"); // tail
+    assert_eq!(heap.len(), 3);
+    assert_eq!(heap.pool_bytes(), 5 + 4 + 5);
+
+    // The borrowed base buffer is byte-for-byte unchanged by the append.
+    assert_eq!(pool, base_snapshot);
+}
+
+#[test]
+fn overlay_dump_is_byte_identical_to_owned_and_compares_equal() {
+    // Fully-owned heap with three blobs.
+    let mut owned = BlobHeap::new(BlobHeapCfg::new());
+    for b in [b"a".as_slice(), b"bb", b"ccc"] {
+        owned.push(b).unwrap();
+    }
+    // Same blobs, but the first is a borrowed base and the rest are appended
+    // through the overlay alias — a different base/tail split.
+    let mut seed = BlobHeap::new(BlobHeapCfg::new());
+    seed.push(b"a").unwrap();
+    let (index, pool) = dump(&seed);
+    let mut overlay = BlobHeap::load_overlay(BlobHeapCfg::new(), &index, &pool).unwrap();
+    overlay.push(b"bb").unwrap();
+    overlay.push(b"ccc").unwrap();
+
+    // Canonical dumps: byte-identical regardless of the split.
+    assert_eq!(dump(&owned), dump(&overlay));
+    // And logical equality holds across the two representations.
+    assert_eq!(owned, overlay);
+}
+
+#[test]
+fn overlay_iter_spans_base_and_tail() {
+    let mut seed = BlobHeap::new(BlobHeapCfg::new());
+    seed.push(b"x").unwrap();
+    let (index, pool) = dump(&seed);
+    let mut heap = BlobHeap::load_overlay(BlobHeapCfg::new(), &index, &pool).unwrap();
+    heap.push(b"yy").unwrap();
+    let got: Vec<Vec<u8>> = heap.iter().map(|(_, b)| b.to_vec()).collect();
+    assert_eq!(got, vec![b"x".to_vec(), b"yy".to_vec()]);
+}
+
 proptest! {
     /// The heap must behave exactly like a `Vec<Vec<u8>>` under arbitrary
     /// push sequences: same ids, same contents, same iteration.

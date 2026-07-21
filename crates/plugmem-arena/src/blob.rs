@@ -10,8 +10,21 @@
 //! compaction pass (rewrite live blobs into a fresh heap and remap ids),
 //! which keeps `push`/`get` trivially O(1) and the memory image dense in the
 //! common append-mostly workload.
+//!
+//! # Overlay opens
+//!
+//! [`BlobHeap::load_borrowed`] (and its alias [`BlobHeap::load_overlay`])
+//! open a heap whose existing bytes are **borrowed** from a longer-lived
+//! buffer — typically a memory-mapped file — while any later [`push`] lands
+//! in a small **owned tail**. Because the append-only heap never rewrites an
+//! existing blob, this needs no per-page copy-on-write: a blob is wholly in
+//! the borrowed base or wholly in the tail, so reads dispatch on a single
+//! length comparison and the base is never cloned. That is what lets a
+//! multi-gigabyte heap be opened and *appended to* without loading it into
+//! RAM (see `examples/overlay.rs`).
+//!
+//! [`push`]: BlobHeap::push
 
-use alloc::borrow::Cow;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -82,21 +95,22 @@ impl Default for BlobHeapCfg {
 /// assert_eq!(heap.get(world), b"world");
 /// assert_eq!(heap.len(), 2);
 /// ```
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct BlobHeap<'a> {
-    /// All blob bytes, back to back in push order. Every byte is written
-    /// exactly once by `push` — no uninitialized regions, hence `Clone` and
-    /// `PartialEq` are safe to derive (unlike the arena).
-    ///
-    /// `Cow` so the heap can either own its pool (`new`/`load` — the
-    /// writable path) or borrow it from a longer-lived buffer such as a
-    /// memory-mapped snapshot (`load_borrowed` — the zero-copy read-only
-    /// path, specs/16). The borrow is `alloc`-only (`Cow`, no `std`/`Arc`),
-    /// so the crate stays `no_std`, and the lifetime `'a` lets the compiler
-    /// prove the heap never outlives its backing buffer. The first mutation,
-    /// if any, copies up to owned via `to_mut`.
-    pool: Cow<'a, [u8]>,
-    /// `BlobId` -> `(offset, len)` into `pool`.
+    /// Borrowed base bytes: the blobs present at open time, e.g. an mmap'd
+    /// snapshot section (`load_borrowed`). Empty (`&[]`) on the fully-owned
+    /// path (`new`/`load`), where every byte lives in `tail`. Never mutated
+    /// after open — that is what keeps the borrow zero-copy.
+    base: &'a [u8],
+    /// Owned append tail: bytes pushed after open. A [`BlobHeap::push`]
+    /// always extends this and never touches `base`, so a heap opened over a
+    /// borrowed base grows without cloning it. The logical pool is
+    /// `base` followed by `tail`; blob offsets are cumulative over that
+    /// concatenation, so each blob is wholly in one segment.
+    tail: Vec<u8>,
+    /// `BlobId` -> `(offset, len)` into the logical `base ++ tail` pool. The
+    /// offset is the cumulative logical position, independent of where the
+    /// base/tail boundary falls.
     index: Vec<(u32, u32)>,
     cfg: BlobHeapCfg,
 }
@@ -105,13 +119,38 @@ impl<'a> BlobHeap<'a> {
     /// Creates an empty heap. Allocates nothing until the first push.
     pub const fn new(cfg: BlobHeapCfg) -> Self {
         Self {
-            pool: Cow::Owned(Vec::new()),
+            base: &[],
+            tail: Vec::new(),
             index: Vec::new(),
             cfg,
         }
     }
 
+    /// Total bytes of the logical pool (`base` + `tail`).
+    fn pool_len(&self) -> usize {
+        self.base.len() + self.tail.len()
+    }
+
+    /// Bytes of one blob given its logical `(offset, len)`. A blob never
+    /// straddles the base/tail boundary — its offset is either below
+    /// `base.len()` (wholly in `base`) or at/above it (wholly in `tail`) —
+    /// so this dispatches on a single comparison and returns a contiguous
+    /// slice.
+    fn slice(&self, offset: usize, len: usize) -> &[u8] {
+        let base_len = self.base.len();
+        if offset < base_len {
+            &self.base[offset..offset + len]
+        } else {
+            let at = offset - base_len;
+            &self.tail[at..at + len]
+        }
+    }
+
     /// Appends a blob and returns its id. Zero-length blobs are valid.
+    ///
+    /// The bytes always land in the owned `tail`; a heap opened over a
+    /// borrowed base (`load_borrowed`) is appended to without cloning that
+    /// base.
     ///
     /// # Errors
     ///
@@ -130,7 +169,7 @@ impl<'a> BlobHeap<'a> {
         let capacity_exceeded = Error::CapacityExceeded {
             max_bytes: self.cfg.max_bytes,
         };
-        let offset = self.pool.len();
+        let offset = self.pool_len();
         let end = offset.checked_add(bytes.len()).ok_or(capacity_exceeded)?;
         if end > self.cfg.max_bytes || end > u32::MAX as usize {
             return Err(capacity_exceeded);
@@ -143,7 +182,7 @@ impl<'a> BlobHeap<'a> {
             .ok()
             .filter(|&i| i != u32::MAX)
             .ok_or(capacity_exceeded)?;
-        self.pool.to_mut().extend_from_slice(bytes);
+        self.tail.extend_from_slice(bytes);
         self.index.push((offset as u32, bytes.len() as u32));
         Ok(BlobId(id))
     }
@@ -156,7 +195,7 @@ impl<'a> BlobHeap<'a> {
     /// a dangling id is a caller bug, not a runtime condition.
     pub fn get(&self, id: BlobId) -> &[u8] {
         let (offset, len) = self.index[id.0 as usize];
-        &self.pool[offset as usize..(offset + len) as usize]
+        self.slice(offset as usize, len as usize)
     }
 
     /// Number of blobs stored.
@@ -169,9 +208,9 @@ impl<'a> BlobHeap<'a> {
         self.index.is_empty()
     }
 
-    /// Total bytes of blob content (the pool size).
+    /// Total bytes of blob content (the logical pool size).
     pub fn pool_bytes(&self) -> usize {
-        self.pool.len()
+        self.pool_len()
     }
 
     /// Iterates over all blobs in id order as `(id, bytes)` pairs.
@@ -180,10 +219,7 @@ impl<'a> BlobHeap<'a> {
     /// blobs, copy the live ones into a fresh heap, record the id remapping.
     pub fn iter(&self) -> impl Iterator<Item = (BlobId, &[u8])> {
         self.index.iter().enumerate().map(|(i, &(offset, len))| {
-            (
-                BlobId(i as u32),
-                &self.pool[offset as usize..(offset + len) as usize],
-            )
+            (BlobId(i as u32), self.slice(offset as usize, len as usize))
         })
     }
 
@@ -203,9 +239,13 @@ impl<'a> BlobHeap<'a> {
     }
 
     /// Appends the heap's pool section to `out` (`specs/03`) — a straight
-    /// copy: every pool byte is initialized blob content.
+    /// copy of the logical pool (`base` then `tail`): every pool byte is
+    /// initialized blob content, so an overlay heap dumps byte-identically
+    /// to the owned heap holding the same blobs.
     pub fn dump_pool(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.pool);
+        out.reserve(self.pool_len());
+        out.extend_from_slice(self.base);
+        out.extend_from_slice(&self.tail);
     }
 
     /// Rebuilds a heap from its two dumped sections.
@@ -223,18 +263,23 @@ impl<'a> BlobHeap<'a> {
     pub fn load(cfg: BlobHeapCfg, index: &[u8], pool: &[u8]) -> Result<Self, Error> {
         let rebuilt = validate_index(cfg, index, pool.len())?;
         Ok(Self {
-            pool: Cow::Owned(pool.to_vec()),
+            base: &[],
+            tail: pool.to_vec(),
             index: rebuilt,
             cfg,
         })
     }
 
-    /// Rebuilds a heap that **borrows** its pool from a longer-lived buffer
-    /// (a memory-mapped snapshot, specs/16) instead of copying it. The
-    /// index is validated and rebuilt exactly as in [`BlobHeap::load`]; no
-    /// pool byte is copied, so opening an 8 GiB heap this way touches only
-    /// the pages the reader dereferences. The heap is read-only in practice
-    /// (a mutation would copy the pool up to owned via `Cow::to_mut`).
+    /// Rebuilds a heap that **borrows** its base pool from a longer-lived
+    /// buffer (a memory-mapped snapshot, specs/16) instead of copying it.
+    /// The index is validated and rebuilt exactly as in [`BlobHeap::load`];
+    /// no base byte is copied, so opening an 8 GiB heap this way touches
+    /// only the pages the reader dereferences.
+    ///
+    /// Unlike the old whole-pool copy-on-write, this heap **stays borrowed
+    /// even under mutation**: a later [`BlobHeap::push`] appends to an owned
+    /// tail, never cloning the base. A read-only caller simply never pushes.
+    /// See also [`BlobHeap::load_overlay`].
     ///
     /// # Errors
     ///
@@ -242,12 +287,46 @@ impl<'a> BlobHeap<'a> {
     pub fn load_borrowed(cfg: BlobHeapCfg, index: &[u8], pool: &'a [u8]) -> Result<Self, Error> {
         let rebuilt = validate_index(cfg, index, pool.len())?;
         Ok(Self {
-            pool: Cow::Borrowed(pool),
+            base: pool,
+            tail: Vec::new(),
             index: rebuilt,
             cfg,
         })
     }
+
+    /// Opens a heap over a borrowed base for the **overlay** write path: the
+    /// base is mapped read-only and appends accumulate in an owned tail. For
+    /// an append-only heap this is exactly [`BlobHeap::load_borrowed`] — the
+    /// alias exists so overlay-mode callers read uniformly across the flat
+    /// structures (the in-place [`Arena`](crate::Arena) and
+    /// [`ChunkPool`](crate::ChunkPool) take a distinct page-copy-on-write
+    /// `load_overlay`).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Corrupt`] for any inconsistency (same gates as `load`).
+    pub fn load_overlay(cfg: BlobHeapCfg, index: &[u8], pool: &'a [u8]) -> Result<Self, Error> {
+        Self::load_borrowed(cfg, index, pool)
+    }
 }
+
+/// Two heaps are equal when they hold the same blobs — compared over the
+/// **logical** pool, so an owned heap and an overlay heap (borrowed base +
+/// tail) built from the same pushes compare equal despite the different
+/// base/tail split.
+impl PartialEq for BlobHeap<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cfg == other.cfg
+            && self.index == other.index
+            && self
+                .base
+                .iter()
+                .chain(&self.tail)
+                .eq(other.base.iter().chain(&other.tail))
+    }
+}
+
+impl Eq for BlobHeap<'_> {}
 
 /// Validates a dumped blob index against the pool length and rebuilds the
 /// `(offset, len)` table. Shared by [`BlobHeap::load`] and
@@ -297,7 +376,7 @@ impl fmt::Debug for BlobHeap<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BlobHeap")
             .field("blobs", &self.index.len())
-            .field("pool_bytes", &self.pool.len())
+            .field("pool_bytes", &self.pool_len())
             .finish()
     }
 }
