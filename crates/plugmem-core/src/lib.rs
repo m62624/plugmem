@@ -36,7 +36,7 @@ pub use model::{
     EdgeSlot, EntityByName, EntityRecord, FactAux, FactRecord, TemporalSlot, VALID_TO_OPEN,
     fact_flags,
 };
-pub use storage::{MemStorage, Storage};
+pub use storage::{MemScratch, MemStorage, Scratch, Storage};
 // The arena-layer ids that appear in model records are part of this
 // crate's public surface too.
 pub use plugmem_arena::{BlobId, TermId};

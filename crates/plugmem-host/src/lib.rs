@@ -30,7 +30,7 @@ pub use db::{Database, DatabaseBuilder, ExportedFact, FactSnapshot, RecoverRepor
 pub use embedder::{Embedder, NullEmbedder, OpenAiCompatEmbedder};
 pub use error::HostError;
 pub use readonly::{ReadOnlyDatabase, Scrub};
-pub use storage::{FileStorage, FsyncPolicy};
+pub use storage::{FileScratch, FileStorage, FsyncPolicy};
 
 // The engine types a host caller works with, re-exported so simple
 // embedders need only this crate.
@@ -40,3 +40,4 @@ pub use plugmem_core::{
     RecallQuery, RecallResult, RecalledEdge, RecalledFact, RememberInput, RememberOutcome, Similar,
     SimilarReason, Stats, VALID_TO_OPEN, fact_flags,
 };
+pub use plugmem_core::{MemScratch, Scratch};

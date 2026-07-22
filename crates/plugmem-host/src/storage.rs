@@ -20,8 +20,9 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Seek, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 
+use memmap2::Mmap;
 use plugmem_core::snapshot::SnapshotSink;
-use plugmem_core::{Error, Storage};
+use plugmem_core::{Error, Scratch, Storage};
 
 use crate::error::HostError;
 
@@ -318,5 +319,95 @@ impl Storage for FileStorage {
             .open(&self.journal_path)
             .map_err(|e| HostError::io(&self.journal_path, e))?;
         Ok(())
+    }
+}
+
+/// A host [`Scratch`] over a temp file (specs/16 §9, milestone H): sequential
+/// appends go through a buffered writer; [`freeze`](Scratch::freeze) flushes
+/// and memory-maps the file, so the staged pool is read (randomly and
+/// sequentially) straight from the map instead of RAM. Dropping it unmaps and
+/// deletes the temp file.
+pub struct FileScratch {
+    path: PathBuf,
+    /// `Some` while writing, taken by the first `freeze`.
+    writer: Option<BufWriter<File>>,
+    /// `Some` after `freeze` — the read-back mapping the borrow points into.
+    map: Option<Mmap>,
+    len: u64,
+}
+
+impl FileScratch {
+    /// Creates (truncating) a staging file at `path`, ready for appends.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::Io`] if the file cannot be created.
+    pub fn create(path: impl Into<PathBuf>) -> Result<Self, HostError> {
+        let path = path.into();
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .map_err(|e| HostError::io(&path, e))?;
+        Ok(Self {
+            path,
+            writer: Some(BufWriter::new(file)),
+            map: None,
+            len: 0,
+        })
+    }
+}
+
+impl Scratch for FileScratch {
+    type Error = HostError;
+
+    fn write(&mut self, bytes: &[u8]) -> Result<(), HostError> {
+        let Self {
+            writer, path, len, ..
+        } = self;
+        let w = writer.as_mut().ok_or(HostError::Engine(Error::Invalid(
+            "scratch write after freeze",
+        )))?;
+        w.write_all(bytes).map_err(|e| HostError::io(path, e))?;
+        *len += bytes.len() as u64;
+        Ok(())
+    }
+
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    fn freeze(&mut self) -> Result<&[u8], HostError> {
+        if self.map.is_none() {
+            // Flush and fsync the staged bytes, then map the file fresh.
+            let writer = self
+                .writer
+                .take()
+                .ok_or(HostError::Engine(Error::Invalid("scratch frozen twice")))?;
+            let file = writer
+                .into_inner()
+                .map_err(|e| HostError::io(&self.path, e.into_error()))?;
+            file.sync_all().map_err(|e| HostError::io(&self.path, e))?;
+            drop(file);
+            let file = File::open(&self.path).map_err(|e| HostError::io(&self.path, e))?;
+            // SAFETY: this is our private temp file — created by `create`,
+            // owned by this `FileScratch` for its whole life, deleted on drop —
+            // so no other process writes or truncates it under the map (the
+            // same argument as the read-only snapshot map, specs/16 §5).
+            let map = unsafe { Mmap::map(&file) }.map_err(|e| HostError::io(&self.path, e))?;
+            self.map = Some(map);
+        }
+        Ok(&self.map.as_ref().expect("just set")[..])
+    }
+}
+
+impl Drop for FileScratch {
+    fn drop(&mut self) {
+        // Unmap before delete: Windows refuses to remove a mapped file (the
+        // same constraint as renaming over one).
+        self.map = None;
+        self.writer = None;
+        let _ = std::fs::remove_file(&self.path);
     }
 }

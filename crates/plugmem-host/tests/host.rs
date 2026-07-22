@@ -1142,3 +1142,51 @@ fn recover_refuses_a_destination_equal_to_the_source() {
         other => panic!("expected Invalid (dst == src), got {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// FileScratch (specs/16 §9, milestone H): a temp-file staging area — sequential
+// appends, a memory-mapped read-back on freeze, and cleanup on drop.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn file_scratch_streams_freezes_and_cleans_up() {
+    use plugmem_host::{FileScratch, Scratch as _};
+
+    let tmp = TempDir::new("scratch");
+    let path = tmp.0.join("stage.tmp");
+
+    // Build a payload with many small appends, then freeze and read it back
+    // from the map — it must equal the concatenation of every write.
+    let mut expect = Vec::new();
+    {
+        let mut s = FileScratch::create(&path).unwrap();
+        assert!(s.is_empty());
+        for i in 0..1_000u32 {
+            s.write(&i.to_le_bytes()).unwrap();
+            expect.extend_from_slice(&i.to_le_bytes());
+        }
+        assert_eq!(s.len(), 4_000);
+        let frozen = s.freeze().unwrap();
+        assert_eq!(frozen, &expect[..], "freeze returns every written byte");
+        // Random read into the map.
+        assert_eq!(&frozen[8..12], &2u32.to_le_bytes());
+        assert!(path.exists(), "the staging file exists while live");
+    }
+    // Dropped: the temp file is gone.
+    assert!(!path.exists(), "the staging file is removed on drop");
+}
+
+#[test]
+fn file_scratch_refuses_a_write_after_freeze() {
+    use plugmem_host::{FileScratch, Scratch as _};
+
+    let tmp = TempDir::new("scratch-frozen");
+    let path = tmp.0.join("stage.tmp");
+    let mut s = FileScratch::create(&path).unwrap();
+    s.write(b"payload").unwrap();
+    let _ = s.freeze().unwrap(); // the borrow ends at the statement
+    assert!(
+        matches!(s.write(b"more"), Err(HostError::Engine(_))),
+        "a write after freeze is a typed error, not a silent corruption"
+    );
+}
