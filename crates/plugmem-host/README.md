@@ -82,11 +82,13 @@ of the shared file format: databases sized for the 32-bit wasm budget
 (≤ 2 GiB, the default) and databases with larger limits alike. Opening,
 reading, scanning and checkpointing go through the mmap overlay, whose
 clean pages the OS can reclaim — so those work on a database larger than
-RAM. A *rebuild* (`maintain`, and `recover`) is the exception: it
-materializes owned pools ≈ the image size, so it needs RAM on that order
-(the disk-first rebuild that lifts this is a later milestone). The
-per-structure byte costs and pool limits (what a fact, an edge or a vector
-weighs, and where each tops out) are tabulated in
+RAM. A *rebuild* (`maintain` and `recover`) is disk-first too: it streams
+the two big pools (vectors, text) through temp files and keeps only the
+metadata and the HNSW graph resident, so peak RAM tracks the record count,
+not the image size. The residual limit is the graph itself — a database
+whose graph exceeds RAM is a further tier. The per-structure byte costs and
+pool limits (what a fact, an edge or a vector weighs, and where each tops
+out) are tabulated in
 [`plugmem-core`](https://docs.rs/plugmem-core/latest)'s *Capacity — what
 weighs what*. The snapshot format is pointer-width independent — a file
 written here opens unchanged in a wasm32 or wasm64 build of the core, as
@@ -191,10 +193,13 @@ for step in ro.scrub()? {
 
 **`recover()` — Tier 2 salvage.** For *content* corruption (bad text
 bytes, a broken vector bijection): it opens the source, drops the facts
-that fail `verify()`'s per-fact checks, runs a maintenance pass so the
-survivors and their indexes are clean, and streams a fresh image to a new
-file — **leaving the source untouched** as evidence. It returns a
-`RecoverReport { kept, dropped_text, dropped_vector }`.
+that fail `verify()`'s per-fact checks, compacts the survivors and their
+indexes, and writes a fresh image to a new file — **leaving the source
+untouched** as evidence. It returns a
+`RecoverReport { kept, dropped_text, dropped_vector }`. It is **disk-first**
+(the source opens as an mmap overlay and the two big pools stream through
+temp files), so peak RAM tracks the record count — a database larger than
+RAM can be recovered, as long as its graph fits.
 
 ```rust,no_run
 use plugmem_host::{Config, Database};
@@ -209,11 +214,7 @@ println!("kept {}, dropped {} text + {} vector",
 
 **What recover does not do.** *Structural* damage — a snapshot that will
 not even parse — is not salvageable here: the source fails to open and
-recover returns the typed error. And because the rebuild is in RAM
-(≈ image size), a database far larger than available memory is out of
-scope; `recover_with_limit` refuses such an image up front with
-`HostError::TooLargeToRecover` instead of risking an OOM abort. For both
-cases the answer is the cheaper, more reliable layer below.
+recover returns the typed error; restore from a backup instead (Tier 0).
 
 **Recovery layers (first release).** Most recovery is not salvage at all:
 

@@ -347,12 +347,52 @@ build + wasm32-wasip1 сьют (specs/11 §5, specs/15). owned-путь обяз
     порчу (не парсится) **не** чинит → типизированный `Err` (Tier 0); ребилд
     in-RAM → `recover_with_limit` отвергает образ больше бюджета
     `HostError::TooLargeToRecover` до OOM; `dst` ≠ `src`.
-  - **RAM-scorecard (БД > RAM).** `open`/`read`/`scan`/`scrub`/`checkpoint` —
-    **работают** (чистые mmap-страницы вытесняемы, запись стримовая). `maintain`/
-    `recover` — до disk-first вехи (H, ниже в roadmap) требуют RAM ≈ размер
-    образа (owned-ребилд `maintain.rebuild`). Это ограничение нашего in-memory
-    ребилда, не закон формата; disk-first его снимет (лимит упадёт с «размер БД»
-    до «размер HNSW-графа»).
+  - **RAM-scorecard (БД > RAM) — на момент G.** `open`/`read`/`scan`/`scrub`/
+    `checkpoint` — **работают** (чистые mmap-страницы вытесняемы, запись
+    стримовая). `maintain`/`recover` — до вехи H требовали RAM ≈ размер образа
+    (owned-ребилд `maintain.rebuild`); снято вехой H (ниже).
+
+- **Веха H — disk-first `maintain`/`recover`: РЕАЛИЗОВАНО 2026-07-22**
+  (`plugmem-core` + `plugmem-arena` + `plugmem-host`). Снимает последний RAM-лимит:
+  пересборка больше **не** держит образ в куче.
+  - **Пересмотр по коду (важно):** ранний план H строился на «id-remap + external
+    merge sort + seek-writer». Проверка `maintain.rebuild` показала посылку ложной:
+    `maintain` **никогда не перенумеровывает id** (стабильны навсегда; purged =
+    burned; edges/by_name ride through). Ремапятся плотно только text-blob-id и
+    vector-slot, в fact-id порядке. Отсюда H **упростился**: external sort и
+    seek-writer **не нужны** (ничто не переупорядочивается; граф строится в RAM до
+    эмита → работает G0 two-pass writer).
+  - **Трейт `Scratch` (core no_std) + `FileScratch` (host).** Append-only
+    staging: `write` последовательно, `freeze` → borrowed срез (обычно mmap
+    temp-файла) для random/seq чтения, drop удаляет. Write-side брат `Storage`;
+    `MemStorage`-аналог `MemScratch` (референс, гоняет disk-first детерминированно
+    без файлов — им же property-тест).
+  - **Стрим только двух больших пулов (вариант B): VECTORS + TEXT.** Метаданные
+    (facts/aux/entities/temporal/постинги/tag_lists) + HNSW-граф строятся в RAM
+    (∝ числу записей). Честное обещание: **RAM ∝ сколько воспоминаний, не насколько
+    большое каждое.**
+  - **arena +1 агностичный плоский примитив: `BlobHeapBuilder`** — index-side
+    BlobHeap без пула (`push_len` валидирует как `push`, `dump_index` байт-в-байт).
+    Плоский (`Vec<u32>` длин), **без unsafe** (единственный unsafe арены —
+    `set_len` в `alloc_page` — не тронут).
+  - **DRY-эмит:** снапшот-writer вынес источник секций в `Sections` — один путь
+    служит и живому движку, и disk-first (где два больших пула borrow'ят `Scratch`).
+    `rebuild`/disk-first делят один walk (`rebuild_parts` над `PoolSink`). HNSW-билдер
+    **без изменений** — наведён на `VecPool` поверх frozen-scratch.
+  - **Несущий инвариант — байт-идентичность:** `disk_first == in_memory` на
+    testgen-корпусе с tombstone/revision, покрывая HNSW scratch-build И remapped-путь.
+    In-RAM `maintain` остаётся reference-оракулом.
+  - **Host:** `Database::recover` открывает src overlay'ем (mmap, вытесняемо),
+    выкидывает битые факты, пишет dst через `snapshot_disk_first` + `FileScratch` —
+    RAM ∝ числу записей; **устаревший guard `TooLargeToRecover`/`recover_with_limit`
+    удалён начисто** (disk-first не держит образ). `Database::maintain` — компактящий
+    resnapshot через `snapshot_disk_first` + re-map (как resnapshot, но disk-first).
+    Опциональный auto-maintain (`maintain_every_forgets`, off по умолчанию) остаётся
+    in-RAM — для БД, влезающих в RAM.
+  - **RAM-scorecard (БД > RAM) — итог H:** open/read/scan/scrub/checkpoint/
+    **maintain**/**recover** — все работают при RAM ∝ числу записей (метаданные +
+    граф), не размеру контента. **Остаток:** сам граф/метаданные > RAM (напр. 100M
+    векторов → граф десятки ГБ) — disk-backed граф, дальнейший тир, не в H.
 
 - **Векторный RAM — второй рычаг (overlay его НЕ решает).** Overlay
   снимает клон-на-запись и резидентность холодных данных, но не рабочее

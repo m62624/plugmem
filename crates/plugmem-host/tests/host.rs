@@ -1107,29 +1107,6 @@ fn recover_refuses_structural_corruption() {
 }
 
 #[test]
-fn recover_guards_against_an_oversized_image() {
-    let tmp = TempDir::new("recover-guard");
-    let src = tmp.db();
-    let dst = tmp.0.join("recovered.plugmem");
-    {
-        let (db, _) = Database::open(&src, cfg()).unwrap();
-        seed_checkpointed(&db);
-    }
-    // A one-byte rebuild budget is smaller than any real image: the guard fires
-    // before allocating.
-    match Database::recover_with_limit(&src, &dst, cfg(), 300, 1) {
-        Err(HostError::TooLargeToRecover {
-            image_bytes, limit, ..
-        }) => {
-            assert!(image_bytes > 1);
-            assert_eq!(limit, 1);
-        }
-        other => panic!("expected TooLargeToRecover, got {other:?}"),
-    }
-    assert!(!dst.exists());
-}
-
-#[test]
 fn recover_refuses_a_destination_equal_to_the_source() {
     let tmp = TempDir::new("recover-same");
     let src = tmp.db();
@@ -1189,4 +1166,55 @@ fn file_scratch_refuses_a_write_after_freeze() {
         matches!(s.write(b"more"), Err(HostError::Engine(_))),
         "a write after freeze is a typed error, not a silent corruption"
     );
+}
+
+#[test]
+fn maintain_compacts_disk_first_and_the_engine_stays_live() {
+    let tmp = TempDir::new("maintain-df");
+    let mut c = cfg();
+    c.dim = 8;
+    let (db, _) = Database::builder(c.clone())
+        .snapshot_every_ops(0) // no auto-snapshot noise
+        .open(tmp.db())
+        .unwrap();
+    let v = [0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
+    for i in 0..40u64 {
+        db.remember(RememberInput {
+            vector: Some(&v),
+            ..RememberInput::text(i + 1, "a fact worth some bytes to compact away")
+        })
+        .unwrap();
+    }
+    db.checkpoint(100).unwrap();
+
+    // Forget half, then compact disk-first.
+    for id in 0..20u32 {
+        db.forget(200, FactId(id)).unwrap();
+    }
+    let report = db.maintain(300).unwrap();
+    assert_eq!(report.purged, 20, "twenty tombstones purged");
+    assert!(
+        report.bytes_after < report.bytes_before,
+        "the on-disk image shrank ({} -> {})",
+        report.bytes_before,
+        report.bytes_after
+    );
+    // No scratch temp files linger.
+    assert!(!tmp.0.join("agent.plugmem.mtext.tmp").exists());
+    assert!(!tmp.0.join("agent.plugmem.mvec.tmp").exists());
+
+    // The engine keeps working: the survivors remain and it accepts writes.
+    assert_eq!(db.stats().facts, 20);
+    db.remember(RememberInput {
+        vector: Some(&v),
+        ..RememberInput::text(400, "after maintain")
+    })
+    .unwrap();
+    assert_eq!(db.stats().facts, 21);
+
+    // Reopen from the compacted file alone.
+    drop(db);
+    let (db2, _) = Database::open(tmp.db(), c).unwrap();
+    assert_eq!(db2.stats().facts, 21);
+    db2.verify().unwrap();
 }

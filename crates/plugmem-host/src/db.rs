@@ -42,7 +42,7 @@ use plugmem_core::{
 use crate::embedder::Embedder;
 use crate::error::HostError;
 use crate::readonly::ReadOnlyDatabase;
-use crate::storage::{FileStorage, FsyncPolicy};
+use crate::storage::{FileScratch, FileStorage, FsyncPolicy};
 
 self_cell::self_cell!(
     /// Owns the memory map and the overlay [`Memory`] that borrows it — the
@@ -541,14 +541,62 @@ impl Database {
         self.lock().engine.read(export_facts)
     }
 
-    /// Runs a maintenance pass now (purge, compaction, HNSW build past
-    /// the threshold — see specs/07 for the cost model).
+    /// Runs a maintenance pass now (purge, compaction, HNSW build past the
+    /// threshold — see specs/07 for the cost model).
+    ///
+    /// **Disk-first** (milestone H): the compacted image is written by streaming
+    /// the two big pools (vectors, text) through temp files and then re-mapped,
+    /// so peak RAM tracks the record count (metadata + graph), not the image
+    /// size — a database larger than RAM can be maintained. It writes a fresh
+    /// snapshot and clears the journal (like a checkpoint). The optional
+    /// auto-maintain policy (`maintain_every_forgets`) still runs in RAM inline
+    /// — it is for databases that fit.
+    ///
+    /// The report's byte counts are the on-disk image size before and after.
     pub fn maintain(&self, now: u64) -> Result<MaintainReport, HostError> {
         let mut st = self.lock();
-        let State { engine, store, .. } = &mut *st;
-        let report = engine.with(store, |mem, store| mem.maintain(store, now))?;
+        let bytes_before = std::fs::metadata(st.store.path())
+            .map(|m| m.len() as usize)
+            .unwrap_or(0);
+        let text_tmp = tmp_sibling(st.store.path(), "mtext");
+        let vec_tmp = tmp_sibling(st.store.path(), "mvec");
+
+        // Stage a compacted snapshot, streaming the big pools through scratch;
+        // this reads through the live map, so it happens before the map is
+        // dropped (as in `resnapshot`).
+        let mut purged = 0usize;
+        {
+            let State { engine, store, .. } = &mut *st;
+            store.stage_snapshot(|sink| {
+                engine.read(|mem| {
+                    let mut text_scratch = FileScratch::create(&text_tmp)?;
+                    let mut vec_scratch = FileScratch::create(&vec_tmp)?;
+                    purged = mem
+                        .snapshot_disk_first(now, &mut text_scratch, &mut vec_scratch, &mut *sink)
+                        .map_err(HostError::from)?;
+                    Ok(())
+                })
+            })?;
+        }
+        // Drop the current map before the rename (park a cheap empty engine),
+        // commit, clear the journal, then re-map the compacted file — exactly
+        // the `resnapshot` dance, so the map is never renamed over on Windows.
+        st.engine = Engine::Owned(Box::new(Memory::new(self.inner.cfg.clone())?));
+        st.store
+            .commit_snapshot()
+            .and_then(|()| st.store.clear_journal())?;
+        let (engine, _) = open_engine(&mut st.store, &self.inner.cfg)?;
+        st.engine = engine;
         st.forgets = 0;
-        Ok(report)
+        st.ops = 0;
+        let bytes_after = std::fs::metadata(st.store.path())
+            .map(|m| m.len() as usize)
+            .unwrap_or(0);
+        Ok(MaintainReport {
+            purged,
+            bytes_before,
+            bytes_after,
+        })
     }
 
     /// Writes a full snapshot and clears the journal now (re-mapping the
@@ -578,19 +626,21 @@ impl Database {
 
     /// Salvages a content-corrupt database (Tier 2, specs/16 §9): opens `src`,
     /// drops the facts that fail the per-fact content checks (`verify`'s
-    /// predicate), runs a maintenance pass so the survivors and their indexes
-    /// are physically clean, and streams a fresh image to `dst`. `src` on disk
-    /// is left untouched — the evidence is preserved.
+    /// predicate), compacts the survivors and their indexes, and writes a clean
+    /// image to `dst`. `src` on disk is left untouched — the evidence is
+    /// preserved.
+    ///
+    /// It is **disk-first** (milestone H): `src` is opened as an mmap overlay
+    /// (its pages are reclaimable) and the compacted image is written by
+    /// streaming the two big pools (vectors, text) through temp files, so peak
+    /// RAM tracks the record count (metadata + HNSW graph), not the image size.
+    /// A database far larger than RAM can be recovered, as long as its graph
+    /// fits.
     ///
     /// This handles *content* corruption (bad text bytes, a broken fact↔slot
     /// vector bijection). *Structural* damage — a snapshot that will not parse
     /// — is not salvageable here: `src` fails to open and recover returns the
     /// engine's typed error; restore from a backup instead (Tier 0).
-    ///
-    /// Recovery rebuilds the surviving image in RAM, so it needs memory ≈ the
-    /// image size. For a database far larger than available memory this is not
-    /// the tool — restore from backup — and [`Database::recover_with_limit`]
-    /// guards that case explicitly.
     ///
     /// # Errors
     ///
@@ -602,21 +652,6 @@ impl Database {
         dst: impl AsRef<Path>,
         cfg: Config,
         now: u64,
-    ) -> Result<RecoverReport, HostError> {
-        Self::recover_with_limit(src, dst, cfg, now, u64::MAX)
-    }
-
-    /// [`Database::recover`] with an explicit rebuild budget: if the source
-    /// image is larger than `max_image_bytes`, it returns
-    /// [`HostError::TooLargeToRecover`] before allocating, instead of risking
-    /// an out-of-memory abort. Pass the memory you are willing to spend on the
-    /// rebuild (the salvage materializes owned pools ≈ the image size).
-    pub fn recover_with_limit(
-        src: impl AsRef<Path>,
-        dst: impl AsRef<Path>,
-        cfg: Config,
-        now: u64,
-        max_image_bytes: u64,
     ) -> Result<RecoverReport, HostError> {
         let src = src.as_ref();
         let dst = dst.as_ref();
@@ -639,35 +674,21 @@ impl Database {
             )));
         }
 
-        // RAM guard (specs/16 §9): the rebuild materializes owned pools ≈ the
-        // image size, so refuse before OOM when the image is over budget.
-        let image_bytes = std::fs::metadata(&src_base)
-            .map(|m| m.len())
-            .map_err(|e| HostError::io(&src_base, e))?;
-        if image_bytes > max_image_bytes {
-            return Err(HostError::TooLargeToRecover {
-                path: src_base,
-                image_bytes,
-                limit: max_image_bytes,
-            });
-        }
-
-        // Read the source into an OWNED engine: map it (the owned load copies
-        // out of the map, so peak stays ≈ one image and the mapped pages are
-        // reclaimable) and replay its journal. A structurally corrupt image
-        // fails here — that is Tier 0, not salvageable content corruption.
+        // Open the source as an overlay: borrow the mmap base (reclaimable
+        // pages) and replay its journal into a small owned overlay — never an
+        // owned copy of the image. A structurally corrupt image fails here —
+        // that is Tier 0, not salvageable content corruption.
         let journal = src_store.read_journal()?;
         let file = File::open(&src_base).map_err(|e| HostError::io(&src_base, e))?;
         // SAFETY: as in `open_engine` — `src_store` holds the exclusive lock for
         // the map's whole life, so no cooperating writer touches the file.
         let map = unsafe { Mmap::map(&file) }.map_err(|e| HostError::io(&src_base, e))?;
         drop(file);
-        let (mut mem, _report) = Memory::from_bytes(Some(&map[..]), &journal, cfg.clone())?;
-        drop(map); // the owned engine copied everything out.
+        let (mut mem, _report) = Memory::from_bytes_overlay(&map[..], &journal, cfg.clone())?;
 
         // Drop each content-faulty fact into a throwaway store, so the source
-        // file is never written. Then a maintenance pass physically purges them
-        // and rebuilds a clean image (indexes + HNSW) from the survivors.
+        // file is never written. The disk-first rebuild below then physically
+        // purges them and rebuilds clean indexes + HNSW from the survivors.
         let mut scratch = MemStorage::new();
         let mut dropped_text = 0usize;
         let mut dropped_vector = 0usize;
@@ -678,24 +699,39 @@ impl Database {
                 FactFault::Vector => dropped_vector += 1,
             }
         }
-        mem.maintain(&mut scratch, now)?;
-        let kept = mem.stats().facts;
 
-        // Stream the clean image to the destination (tmp + fsync + rename), a
-        // fresh file with its own lock — never a full-image Vec (specs/16 §9).
+        // Write the compacted image to `dst`, streaming the big pools through
+        // temp scratch files (metadata + graph are the only things resident).
         let mut dst_store = FileStorage::open(dst, FsyncPolicy::OnSnapshot)?;
+        let text_tmp = tmp_sibling(dst_store.path(), "rectext");
+        let vec_tmp = tmp_sibling(dst_store.path(), "recvec");
+        let mut purged = 0usize;
         dst_store.stage_snapshot(|sink| {
-            mem.write_snapshot_to(now, &mut *sink)
-                .map_err(HostError::from)
+            let mut text_scratch = FileScratch::create(&text_tmp)?;
+            let mut vec_scratch = FileScratch::create(&vec_tmp)?;
+            purged = mem
+                .snapshot_disk_first(now, &mut text_scratch, &mut vec_scratch, &mut *sink)
+                .map_err(HostError::from)?;
+            Ok(())
         })?;
         dst_store.commit_snapshot()?;
 
+        let kept = mem.stats().facts.saturating_sub(purged);
         Ok(RecoverReport {
             kept,
             dropped_text,
             dropped_vector,
         })
     }
+}
+
+/// A temp-file path beside `base` with the given tag (for disk-first scratch).
+fn tmp_sibling(base: &Path, tag: &str) -> PathBuf {
+    let mut p = base.as_os_str().to_os_string();
+    p.push(".");
+    p.push(tag);
+    p.push(".tmp");
+    PathBuf::from(p)
 }
 
 impl std::fmt::Debug for Database {

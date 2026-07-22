@@ -39,25 +39,6 @@ pub enum HostError {
         path: PathBuf,
     },
 
-    /// [`crate::Database::recover`] refused a salvage because the snapshot is
-    /// larger than the rebuild budget. Recovery rebuilds the surviving image
-    /// in RAM (a maintenance pass materializes owned pools ≈ the image size),
-    /// so a database well past available memory cannot be recovered this way —
-    /// restore from a backup instead (Tier 0), or pass a higher limit if the
-    /// memory is there (specs/16 §9).
-    #[error(
-        "snapshot at {} is {image_bytes} bytes, over the {limit}-byte rebuild budget — restore from backup",
-        path.display()
-    )]
-    TooLargeToRecover {
-        /// The source database base path.
-        path: PathBuf,
-        /// The snapshot image size.
-        image_bytes: u64,
-        /// The rebuild budget it exceeded.
-        limit: u64,
-    },
-
     /// The engine returned a typed error.
     #[error(transparent)]
     Engine(#[from] plugmem_core::Error),
