@@ -21,6 +21,11 @@ serde_json = { workspace = true }
 [dev-dependencies]
 # Cross-OS resident-set-size probe for the overlay RAM-win test (specs/16 §9).
 memory-stats = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "integrity"
+harness = false
 
 [lints]
 workspace = true

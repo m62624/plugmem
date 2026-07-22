@@ -298,6 +298,62 @@ build + wasm32-wasip1 сьют (specs/11 §5, specs/15). owned-путь обяз
     fact/entity/edge ref-сканы. Они меньше по объёму и требуют правки
     arena / hnsw-поиска.
 
+- **Веха G — trust/sparse дефолт, scrub, потоковая запись, recover:
+  РЕАЛИЗОВАНО 2026-07-22** (`plugmem-core` + `plugmem-host`). Закрывает
+  цикл «никогда не держим весь образ в RAM» на записи и целостность
+  «обнаружил → восстановил». Делает оговорку F (строки выше про «только
+  `fast_load` даёт sparse») **исторической**: sparse теперь дефолтен.
+  - **Дефолт open → trust/sparse; `fast_load` удалён начисто.** `Snapshot::
+    parse` стал **чисто структурным** — контейнерный xxh3 при открытии больше
+    **не читается**. Модель SQLite: доверяй файлу, целостность — по требованию.
+    Понятия `fast_load` в конфиге/формате больше нет (освободившийся байт →
+    reserved must-be-zero; оффсеты не сдвинулись). panic-free цел:
+    `validate_references` (hnsw + ref-диапазоны + chunk-chain) гоняется на обоих
+    путях и не читает text/vec пулы, так что снятие чек-суммы не вернуло риск
+    паники.
+  - **`scrub()` — whole-file xxh3 по требованию (модель ZFS-scrub).**
+    `ScrubCursor: Iterator<Item = Result<ScrubProgress, Error>>` (core, no_std):
+    резюмируемый, слайсами по `budget`, стриминговый `Xxh3`; на границе секции
+    сверяет per-section хеш, на EOF — file_hash; fused после ошибки/конца. По
+    mmap читает линейно — страницы фолтятся, хешируются, остаются вытесняемыми
+    (scrub **не** резидентит весь файл). Host: `ReadOnlyDatabase::scrub` — тот
+    же курсор через `self_cell{Mmap → ScrubCursor}`, держит **shared-лок на всю
+    жизнь** = операция класса `ReadOnlyDatabase` (не per-slice лок: Windows не
+    переименует замапленный файл, а «отпускать лок между слайсами» пустило бы
+    писателя, чей rename упал бы о нашу карту). Модель A: крейт потоком не
+    владеет, пейсинг у вызывающего.
+  - **`budget` — квант пейсинга, не рычаг throughput.** Бенч-свип
+    64 КиБ…64 МиБ (core-буфер `scrub` + host-mmap `integrity`): пропускная
+    почти **плоская** (scan упирается в xxh3/полосу памяти, ~12 ГБ/с тёплый,
+    ~7 ГБ/с холодный mmap), per-slice накладные пренебрежимы даже на 64 КиБ.
+    Значит слайс выбирается по гранулярности пауз/отмены/прогресса.
+    `DEFAULT_SCRUB_BUDGET = 1 МиБ` (~sub-ms на слайс).
+  - **Потоковый `write_snapshot_to(sink)` (two-pass, core no_std).** Убран
+    полнообразный `Vec`-спайк: проход 1 считает per-section длину+xxh3 по
+    borrowed-слайсам, проход 2 стримит тела в sink под бегущий file_hash;
+    доминирующий вектор-пул пишется прямо из `(base, tail)` без owned-копии.
+    Байт-идентично старому `snapshot_bytes` (тот стал тонкой обёрткой). Чинит
+    спайк **любого** `checkpoint`/`resnapshot`, не только recover. Host `FileSink`
+    поверх `BufWriter<File>`; `stage`/`commit` разнесены так, что старая карта
+    дропается **между** ними (Windows-safe rename).
+  - **`recover()` salvage — Tier 2 (host).** `Memory::faulty_facts` атрибутирует
+    пер-факт проверки `verify()` (текст не UTF-8; vector-слот вне диапазона/не
+    называет факт обратно) → `FactFault`. `Database::recover(src, dst, cfg, now)`:
+    мапит src под exclusive-локом (owned-загрузка копирует наружу, пик ~1×
+    образа, страницы вытесняемы), форгетит битые факты в **throwaway
+    `MemStorage`** (src на диске **не пишется** — улика цела), `maintain`, стримит
+    чистый образ в **dst** через `write_snapshot_to`. Возвращает
+    `RecoverReport { kept, dropped_text, dropped_vector }`. Границы: структурную
+    порчу (не парсится) **не** чинит → типизированный `Err` (Tier 0); ребилд
+    in-RAM → `recover_with_limit` отвергает образ больше бюджета
+    `HostError::TooLargeToRecover` до OOM; `dst` ≠ `src`.
+  - **RAM-scorecard (БД > RAM).** `open`/`read`/`scan`/`scrub`/`checkpoint` —
+    **работают** (чистые mmap-страницы вытесняемы, запись стримовая). `maintain`/
+    `recover` — до disk-first вехи (H, ниже в roadmap) требуют RAM ≈ размер
+    образа (owned-ребилд `maintain.rebuild`). Это ограничение нашего in-memory
+    ребилда, не закон формата; disk-first его снимет (лимит упадёт с «размер БД»
+    до «размер HNSW-графа»).
+
 - **Векторный RAM — второй рычаг (overlay его НЕ решает).** Overlay
   снимает клон-на-запись и резидентность холодных данных, но не рабочее
   множество векторного поиска: HNSW ходит по пулу случайно, за серию

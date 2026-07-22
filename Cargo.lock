@@ -1127,6 +1127,7 @@ dependencies = [
 name = "plugmem-host"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "memmap2",
  "memory-stats",
  "plugmem-core",

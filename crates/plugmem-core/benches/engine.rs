@@ -396,6 +396,47 @@ fn bench_hnsw(c: &mut Criterion) {
     g.finish();
 }
 
+fn bench_scrub(c: &mut Criterion) {
+    use plugmem_core::snapshot::Snapshot;
+    use plugmem_core::{Config, MemStorage, Memory, RememberInput};
+
+    // The on-demand container scrub (specs/16 §9): sweep the slice budget over
+    // one warm snapshot buffer to find the knee — below it, per-`next()`
+    // overhead (parse of the cursor state, the section-boundary checks)
+    // dominates; above it, the streaming xxh3 throughput plateaus. This is the
+    // measurement behind `DEFAULT_SCRUB_BUDGET`; the host mmap bench
+    // (`plugmem-host`) adds the cold-page cost, which shifts absolute time but
+    // not the knee.
+    let mut g = c.benchmark_group("scrub");
+    g.sample_size(20);
+    let mut mem = Memory::new(Config::default()).unwrap();
+    let mut store = MemStorage::new();
+    // Wide texts so the container is large enough (~8 MiB) to sweep MiB-scale
+    // budgets.
+    let big = "lorem ipsum dolor sit amet ".repeat(75); // ~2 KiB
+    for i in 0..4_000u64 {
+        mem.remember(&mut store, RememberInput::text(i + 1, &big))
+            .unwrap();
+    }
+    let bytes = mem.snapshot_bytes(4_001);
+    let total = bytes.len() as u64;
+    eprintln!("scrub: snapshot is {total} bytes");
+    g.throughput(Throughput::Bytes(total));
+    for budget in [64 << 10, 256 << 10, 1 << 20, 4 << 20, 16 << 20, 64 << 20] {
+        g.bench_function(format!("budget_{}KiB", budget >> 10), |b| {
+            b.iter(|| {
+                let snap = Snapshot::parse(black_box(&bytes)).unwrap();
+                let mut done = 0u64;
+                for step in snap.scrub_with_budget(budget) {
+                    done = step.unwrap().done_bytes;
+                }
+                done
+            });
+        });
+    }
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_tokenizer,
@@ -404,6 +445,7 @@ criterion_group!(
     bench_idlist,
     bench_recall,
     bench_vec,
-    bench_hnsw
+    bench_hnsw,
+    bench_scrub
 );
 criterion_main!(benches);

@@ -29,12 +29,11 @@ range scans, all fused by rank) lives in the engine; this crate adds:
   base + overlay into a fresh file and re-maps it. Validation is lazy (the
   SQLite model): an open checks only the metadata, so the large text and
   vector pools stay non-resident until a query touches them — a measured
-  open residents well under half of a text-heavy image. Corruption is caught
-  when the bad record is read (never a panic) or up front with
-  `Database::verify()` — the on-demand content check. The default open
+  open residents well under half of a text-heavy image. The default open
   trusts the file and never checksums the whole image (the SQLite model),
-  so it stays sparse; byte-level container integrity is a separate
-  on-demand `scrub()`. See `specs/16 §9`.;
+  so it stays sparse; corruption is caught when the bad record is read
+  (never a panic), or on demand with `verify()` (content) and `scrub()`
+  (byte-level container integrity) — see **Integrity & recovery** below;
 - **Maintenance policy** — auto-snapshot and optional auto-`maintain`,
   run inline (no background threads);
 - **Embedding providers** — one HTTP client for the `/v1/embeddings`
@@ -80,11 +79,15 @@ println!("{}", out.rendered);
 
 Native builds are 64-bit, so a host process reads every capacity class
 of the shared file format: databases sized for the 32-bit wasm budget
-(≤ 2 GiB, the default) and databases with larger limits alike. Because a
-read-write open holds the whole image resident, the practical ceiling
-here is host RAM — the per-structure byte costs and pool limits (what a
-fact, an edge or a vector weighs, and where each tops out) are tabulated
-in [`plugmem-core`](https://docs.rs/plugmem-core/latest)'s *Capacity — what
+(≤ 2 GiB, the default) and databases with larger limits alike. Opening,
+reading, scanning and checkpointing go through the mmap overlay, whose
+clean pages the OS can reclaim — so those work on a database larger than
+RAM. A *rebuild* (`maintain`, and `recover`) is the exception: it
+materializes owned pools ≈ the image size, so it needs RAM on that order
+(the disk-first rebuild that lifts this is a later milestone). The
+per-structure byte costs and pool limits (what a fact, an edge or a vector
+weighs, and where each tops out) are tabulated in
+[`plugmem-core`](https://docs.rs/plugmem-core/latest)'s *Capacity — what
 weighs what*. The snapshot format is pointer-width independent — a file
 written here opens unchanged in a wasm32 or wasm64 build of the core, as
 long as its configured limits fit that host.
@@ -150,6 +153,76 @@ let out = ro.recall(RecallQuery::text(1_784_000_100_000, "which runtime?"))?;
 println!("{}", out.rendered);
 # Ok::<(), plugmem_host::HostError>(())
 ```
+
+## Integrity & recovery
+
+The default open trusts the file (like SQLite): it does not checksum the
+whole image, so a large database opens sparse. Integrity is on demand, in
+three layers of increasing cost, and corruption is never a panic — the
+accessors tolerate bad bytes, these turn latent damage into an explicit
+error or a repaired file.
+
+| call | checks | cost |
+|---|---|---|
+| `verify()` | *content* consistency — stored text is valid UTF-8, the fact↔vector-slot bijection holds | one linear pass over the text + vector pools |
+| `scrub()` | *byte-level* container integrity — each section's stored xxh3 and the whole-file hash (the ZFS-scrub model) | resumable; a read-handle op |
+| `recover()` | *salvage* — drop the content-corrupt facts, rebuild, write a clean copy | rebuilds in RAM ≈ image size |
+
+**`scrub()` — the bitrot detector.** A resumable iterator over the mapped
+snapshot: each `next()` hashes up to a slice budget, so you pace it
+yourself (run to completion, or a slice at a time on a background thread,
+pausing/cancelling between slices). It holds a shared lock for its whole
+life, reads the map linearly (pages fault in, get hashed, stay
+reclaimable — it never residents the whole file), and reports the first
+mismatch, naming the damaged section.
+
+```rust,no_run
+use plugmem_host::{Config, Database};
+
+let ro = Database::open_readonly("agent.plugmem", Config::default())?;
+// Verify every container byte, a slice at a time.
+for step in ro.scrub()? {
+    let progress = step?; // Err(Corrupt) names the first damaged section
+    // e.g. report progress.done_bytes / progress.total_bytes to a UI
+    let _ = progress;
+}
+# Ok::<(), plugmem_host::HostError>(())
+```
+
+**`recover()` — Tier 2 salvage.** For *content* corruption (bad text
+bytes, a broken vector bijection): it opens the source, drops the facts
+that fail `verify()`'s per-fact checks, runs a maintenance pass so the
+survivors and their indexes are clean, and streams a fresh image to a new
+file — **leaving the source untouched** as evidence. It returns a
+`RecoverReport { kept, dropped_text, dropped_vector }`.
+
+```rust,no_run
+use plugmem_host::{Config, Database};
+
+// now = a millisecond timestamp; dst must differ from src.
+let report = Database::recover("agent.plugmem", "agent.recovered.plugmem",
+                               Config::default(), 1_784_000_000_000)?;
+println!("kept {}, dropped {} text + {} vector",
+         report.kept, report.dropped_text, report.dropped_vector);
+# Ok::<(), plugmem_host::HostError>(())
+```
+
+**What recover does not do.** *Structural* damage — a snapshot that will
+not even parse — is not salvageable here: the source fails to open and
+recover returns the typed error. And because the rebuild is in RAM
+(≈ image size), a database far larger than available memory is out of
+scope; `recover_with_limit` refuses such an image up front with
+`HostError::TooLargeToRecover` instead of risking an OOM abort. For both
+cases the answer is the cheaper, more reliable layer below.
+
+**Recovery layers (first release).** Most recovery is not salvage at all:
+
+- **Tier 0 — restore.** A snapshot is one atomic file (tmp + fsync +
+  rename); back it up and copy it back. `scrub()` tells you *when* to.
+  This covers the overwhelming majority of cases.
+- **Tier 1 — regenerate.** Re-ingest from your upstream source (logs,
+  documents) into a fresh database.
+- **Tier 2 — `recover()`.** Content-corruption salvage, as above.
 
 ## Maintenance policy
 

@@ -481,7 +481,11 @@ impl<'a> Snapshot<'a> {
 }
 
 /// Default number of bytes a [`ScrubCursor`] hashes per `next()` slice
-/// (specs/16 §9). Tuned by the slice-size bench; a starting value.
+/// (specs/16 §9). The `scrub` slice-size bench sweeps 64 KiB…64 MiB and finds
+/// throughput essentially flat (the scan is xxh3/memory-bandwidth-bound, not
+/// per-slice-overhead-bound), so the budget is a *pacing* quantum, not a
+/// throughput knob: 1 MiB is ~sub-millisecond per slice — fine-grained enough
+/// to pause, cancel or report progress smoothly, with negligible overhead.
 pub const DEFAULT_SCRUB_BUDGET: usize = 1 << 20;
 
 /// Progress of an in-flight [`ScrubCursor`] scan.
