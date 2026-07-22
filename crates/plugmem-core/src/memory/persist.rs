@@ -23,12 +23,13 @@ use plugmem_arena::{
 
 use crate::config::Config;
 use crate::error::Error;
-use crate::id::NONE_U32;
+use crate::id::{FactId, NONE_U32};
 use crate::index::IdListIndex;
 use crate::index::bm25::Bm25Index;
 use crate::index::postings::PostingStore;
 use crate::index::varint::decode_u32;
 use crate::index::vecpool::VecPool;
+use crate::memory::FactFault;
 use crate::snapshot::{Prefix, SectionMeta, Snapshot, SnapshotSink, build_prefix, pad_len};
 use xxhash_rust::xxh3::Xxh3;
 
@@ -887,5 +888,38 @@ impl<'a> Memory<'a> {
             return Err(Error::Corrupt("vector pool has orphan slots"));
         }
         Ok(())
+    }
+
+    /// Attributes [`Memory::verify`]'s content checks to individual facts — the
+    /// salvage predicate for `recover` (specs/16 §9). Walks every live
+    /// (non-tombstone) fact and returns those whose stored text is not valid
+    /// UTF-8, or that are flagged with a vector whose slot is out of range or
+    /// does not name the fact back. It reads the text and vector pools (like
+    /// `verify`), so it residents them; the accessors it uses are panic-free on
+    /// any bytes. Unlike `verify`, it does not fail on the first problem — it
+    /// reports each faulty fact so the caller can `forget` it and rebuild a
+    /// clean image from the survivors.
+    pub fn faulty_facts(&self) -> Vec<(FactId, FactFault)> {
+        let vslots = self.vecs.len() as u32;
+        let mut out = Vec::new();
+        for i in 0..self.next_fact {
+            let id = FactId(i);
+            let Some(record) = self.fact(id) else {
+                continue; // unknown or tombstoned
+            };
+            if record.is_tombstone() {
+                continue;
+            }
+            if core::str::from_utf8(self.texts.get(record.text)).is_err() {
+                out.push((id, FactFault::Text));
+                continue;
+            }
+            if record.has_vector()
+                && (record.vector >= vslots || self.vecs.slot_fact(record.vector as usize) != id.0)
+            {
+                out.push((id, FactFault::Vector));
+            }
+        }
+        out
     }
 }

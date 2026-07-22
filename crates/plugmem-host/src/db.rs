@@ -30,13 +30,13 @@
 
 use std::fs::File;
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use memmap2::Mmap;
 use plugmem_core::{
-    Config, Error, FactRecord, LinkInput, MaintainReport, Memory, OpenReport, RecallQuery,
-    RecallResult, RememberInput, RememberOutcome, Stats, Storage,
+    Config, Error, FactFault, FactRecord, LinkInput, MaintainReport, MemStorage, Memory,
+    OpenReport, RecallQuery, RecallResult, RememberInput, RememberOutcome, Stats, Storage,
 };
 
 use crate::embedder::Embedder;
@@ -170,6 +170,17 @@ pub struct ExportedFact {
     pub recorded_at: u64,
     /// Validity start — preserved on import.
     pub valid_from: u64,
+}
+
+/// The outcome of a [`Database::recover`] salvage (specs/16 §9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecoverReport {
+    /// Facts written to the destination (the survivors after the purge).
+    pub kept: usize,
+    /// Facts dropped because their stored text was not valid UTF-8.
+    pub dropped_text: usize,
+    /// Facts dropped because their vector slot was out of range or mismatched.
+    pub dropped_vector: usize,
 }
 
 /// Dumps the currently-open facts (skipping closed revisions and
@@ -563,6 +574,127 @@ impl Database {
     /// for the first inconsistency found.
     pub fn verify(&self) -> Result<(), HostError> {
         Ok(self.lock().engine.read(|mem| mem.verify())?)
+    }
+
+    /// Salvages a content-corrupt database (Tier 2, specs/16 §9): opens `src`,
+    /// drops the facts that fail the per-fact content checks (`verify`'s
+    /// predicate), runs a maintenance pass so the survivors and their indexes
+    /// are physically clean, and streams a fresh image to `dst`. `src` on disk
+    /// is left untouched — the evidence is preserved.
+    ///
+    /// This handles *content* corruption (bad text bytes, a broken fact↔slot
+    /// vector bijection). *Structural* damage — a snapshot that will not parse
+    /// — is not salvageable here: `src` fails to open and recover returns the
+    /// engine's typed error; restore from a backup instead (Tier 0).
+    ///
+    /// Recovery rebuilds the surviving image in RAM, so it needs memory ≈ the
+    /// image size. For a database far larger than available memory this is not
+    /// the tool — restore from backup — and [`Database::recover_with_limit`]
+    /// guards that case explicitly.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::Locked`] if `src` or `dst` is owned elsewhere;
+    /// [`HostError::Engine`] if `src` will not parse (structural corruption) or
+    /// `dst` equals `src`; [`HostError::Io`] for filesystem failures.
+    pub fn recover(
+        src: impl AsRef<Path>,
+        dst: impl AsRef<Path>,
+        cfg: Config,
+        now: u64,
+    ) -> Result<RecoverReport, HostError> {
+        Self::recover_with_limit(src, dst, cfg, now, u64::MAX)
+    }
+
+    /// [`Database::recover`] with an explicit rebuild budget: if the source
+    /// image is larger than `max_image_bytes`, it returns
+    /// [`HostError::TooLargeToRecover`] before allocating, instead of risking
+    /// an out-of-memory abort. Pass the memory you are willing to spend on the
+    /// rebuild (the salvage materializes owned pools ≈ the image size).
+    pub fn recover_with_limit(
+        src: impl AsRef<Path>,
+        dst: impl AsRef<Path>,
+        cfg: Config,
+        now: u64,
+        max_image_bytes: u64,
+    ) -> Result<RecoverReport, HostError> {
+        let src = src.as_ref();
+        let dst = dst.as_ref();
+
+        // Lock the source exclusively for the salvage's whole life. We never
+        // write it — the lock only excludes a cooperating writer while we read.
+        let mut src_store = FileStorage::open(src, FsyncPolicy::OnSnapshot)?;
+        let src_base = src_store.path().to_path_buf();
+
+        // The destination must be a different file: recover preserves the source
+        // as evidence and writes the clean image elsewhere.
+        let same = dst == src_base
+            || matches!(
+                (std::fs::canonicalize(dst), std::fs::canonicalize(&src_base)),
+                (Ok(a), Ok(b)) if a == b
+            );
+        if same {
+            return Err(HostError::Engine(Error::Invalid(
+                "recover destination must differ from the source",
+            )));
+        }
+
+        // RAM guard (specs/16 §9): the rebuild materializes owned pools ≈ the
+        // image size, so refuse before OOM when the image is over budget.
+        let image_bytes = std::fs::metadata(&src_base)
+            .map(|m| m.len())
+            .map_err(|e| HostError::io(&src_base, e))?;
+        if image_bytes > max_image_bytes {
+            return Err(HostError::TooLargeToRecover {
+                path: src_base,
+                image_bytes,
+                limit: max_image_bytes,
+            });
+        }
+
+        // Read the source into an OWNED engine: map it (the owned load copies
+        // out of the map, so peak stays ≈ one image and the mapped pages are
+        // reclaimable) and replay its journal. A structurally corrupt image
+        // fails here — that is Tier 0, not salvageable content corruption.
+        let journal = src_store.read_journal()?;
+        let file = File::open(&src_base).map_err(|e| HostError::io(&src_base, e))?;
+        // SAFETY: as in `open_engine` — `src_store` holds the exclusive lock for
+        // the map's whole life, so no cooperating writer touches the file.
+        let map = unsafe { Mmap::map(&file) }.map_err(|e| HostError::io(&src_base, e))?;
+        drop(file);
+        let (mut mem, _report) = Memory::from_bytes(Some(&map[..]), &journal, cfg.clone())?;
+        drop(map); // the owned engine copied everything out.
+
+        // Drop each content-faulty fact into a throwaway store, so the source
+        // file is never written. Then a maintenance pass physically purges them
+        // and rebuilds a clean image (indexes + HNSW) from the survivors.
+        let mut scratch = MemStorage::new();
+        let mut dropped_text = 0usize;
+        let mut dropped_vector = 0usize;
+        for (id, fault) in mem.faulty_facts() {
+            mem.forget(&mut scratch, now, id)?;
+            match fault {
+                FactFault::Text => dropped_text += 1,
+                FactFault::Vector => dropped_vector += 1,
+            }
+        }
+        mem.maintain(&mut scratch, now)?;
+        let kept = mem.stats().facts;
+
+        // Stream the clean image to the destination (tmp + fsync + rename), a
+        // fresh file with its own lock — never a full-image Vec (specs/16 §9).
+        let mut dst_store = FileStorage::open(dst, FsyncPolicy::OnSnapshot)?;
+        dst_store.stage_snapshot(|sink| {
+            mem.write_snapshot_to(now, &mut *sink)
+                .map_err(HostError::from)
+        })?;
+        dst_store.commit_snapshot()?;
+
+        Ok(RecoverReport {
+            kept,
+            dropped_text,
+            dropped_vector,
+        })
     }
 }
 

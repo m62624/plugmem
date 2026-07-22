@@ -144,6 +144,19 @@ pub struct FactView<'a> {
     pub text: &'a str,
 }
 
+/// The per-fact content problem [`Memory::faulty_facts`] attributes to a
+/// fact — the salvage predicate `recover` uses (specs/16 §9). It mirrors the
+/// content checks [`Memory::verify`] runs, split out per fact so a caller can
+/// drop the individual bad records instead of failing the whole image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FactFault {
+    /// The fact's stored text is not valid UTF-8.
+    Text,
+    /// The fact is flagged with a vector but its slot is out of range or does
+    /// not name the fact back (the fact↔slot bijection is broken).
+    Vector,
+}
+
 /// Engine size counters (specs/05). Every field is an O(1) read; the
 /// struct is `#[non_exhaustive]` so later stages (database identity
 /// markers, HNSW state) can extend it without a breaking change.

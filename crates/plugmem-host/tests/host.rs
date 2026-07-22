@@ -984,3 +984,161 @@ fn scrub_holds_a_shared_lock_for_its_whole_life() {
     db.remember(RememberInput::text(500, "after scrub"))
         .unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// recover() salvage (specs/16 §9, Tier 2): open a content-corrupt database,
+// drop the bad records, maintain, and stream a clean image to a new file —
+// leaving the source untouched. Structural corruption is not salvageable
+// (Tier 0); the RAM guard refuses an image too large to rebuild.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn recover_drops_a_text_corrupt_fact_and_preserves_the_source() {
+    let tmp = TempDir::new("recover-text");
+    let src = tmp.db();
+    let dst = tmp.0.join("recovered.plugmem");
+    {
+        let (db, _) = Database::open(&src, cfg()).unwrap();
+        for i in 0..5u64 {
+            db.remember(RememberInput::text(
+                i + 1,
+                &format!("clean fact number {i}"),
+            ))
+            .unwrap();
+        }
+        db.remember(RememberInput::text(100, "CORRUPTME marker fact"))
+            .unwrap();
+        db.checkpoint(200).unwrap();
+    }
+    // Turn the marker fact's text into invalid UTF-8, then snapshot the source
+    // bytes so we can prove recover never rewrites them.
+    flip_byte_at(&src, b"CORRUPTME");
+    let src_after_flip = std::fs::read(&src).unwrap();
+
+    let report = Database::recover(&src, &dst, cfg(), 300).unwrap();
+    assert_eq!(report.dropped_text, 1);
+    assert_eq!(report.dropped_vector, 0);
+    assert_eq!(report.kept, 5, "the five clean facts survived");
+
+    // The destination is a clean image: it opens, has the survivors, and passes
+    // both integrity checks.
+    {
+        let ro = Database::open_readonly(&dst, cfg()).unwrap();
+        assert_eq!(ro.stats().facts, 5);
+        ro.verify().unwrap();
+        assert!(ro.scrub().unwrap().all(|s| s.is_ok()));
+        assert!(
+            !ro.export().iter().any(|f| f.text.contains("marker")),
+            "the corrupt fact is gone from the recovered image"
+        );
+    }
+    // The source on disk is byte-for-byte what it was (evidence preserved).
+    assert_eq!(
+        std::fs::read(&src).unwrap(),
+        src_after_flip,
+        "recover must leave the source untouched"
+    );
+}
+
+#[test]
+fn recover_drops_a_vector_corrupt_fact() {
+    let tmp = TempDir::new("recover-vec");
+    let src = tmp.db();
+    let dst = tmp.0.join("recovered.plugmem");
+    let mut c = cfg();
+    c.dim = 8;
+    {
+        let (db, _) = Database::open(&src, c.clone()).unwrap();
+        let v = [0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
+        for i in 0..4u64 {
+            db.remember(RememberInput {
+                vector: Some(&v),
+                ..RememberInput::text(i + 1, "a vector fact")
+            })
+            .unwrap();
+        }
+        db.checkpoint(200).unwrap();
+    }
+    // Break slot 0's owning-fact backpointer in the vector pool, so the fact
+    // that owns slot 0 no longer has a slot that names it back (the fact<->slot
+    // bijection verify() checks).
+    const VEC_POOL_KIND: u16 = 37; // persist.rs `kind::VEC_POOL`
+    let mut bytes = std::fs::read(&src).unwrap();
+    let start = {
+        let snap = plugmem_core::snapshot::Snapshot::parse(&bytes).unwrap();
+        let sec = snap.section(VEC_POOL_KIND).expect("a vector pool section");
+        sec.as_ptr() as usize - bytes.as_ptr() as usize
+    };
+    bytes[start] ^= 0xFF; // the low byte of slot 0's owning fact id
+    std::fs::write(&src, bytes).unwrap();
+
+    let report = Database::recover(&src, &dst, c.clone(), 300).unwrap();
+    assert_eq!(report.dropped_vector, 1);
+    assert_eq!(report.dropped_text, 0);
+    assert_eq!(report.kept, 3, "the three intact vector facts survived");
+
+    let ro = Database::open_readonly(&dst, c).unwrap();
+    ro.verify().unwrap();
+    assert!(ro.scrub().unwrap().all(|s| s.is_ok()));
+}
+
+#[test]
+fn recover_refuses_structural_corruption() {
+    let tmp = TempDir::new("recover-struct");
+    let src = tmp.db();
+    let dst = tmp.0.join("recovered.plugmem");
+    {
+        let (db, _) = Database::open(&src, cfg()).unwrap();
+        seed_checkpointed(&db);
+    }
+    // Break the magic so the image will not parse at all.
+    let mut bytes = std::fs::read(&src).unwrap();
+    bytes[0] = b'X';
+    std::fs::write(&src, &bytes).unwrap();
+
+    match Database::recover(&src, &dst, cfg(), 300) {
+        Err(HostError::Engine(plugmem_host::Error::Corrupt(_))) => {}
+        other => panic!("expected a structural Corrupt error, got {other:?}"),
+    }
+    assert!(
+        !dst.exists(),
+        "no destination is written when the source will not parse"
+    );
+}
+
+#[test]
+fn recover_guards_against_an_oversized_image() {
+    let tmp = TempDir::new("recover-guard");
+    let src = tmp.db();
+    let dst = tmp.0.join("recovered.plugmem");
+    {
+        let (db, _) = Database::open(&src, cfg()).unwrap();
+        seed_checkpointed(&db);
+    }
+    // A one-byte rebuild budget is smaller than any real image: the guard fires
+    // before allocating.
+    match Database::recover_with_limit(&src, &dst, cfg(), 300, 1) {
+        Err(HostError::TooLargeToRecover {
+            image_bytes, limit, ..
+        }) => {
+            assert!(image_bytes > 1);
+            assert_eq!(limit, 1);
+        }
+        other => panic!("expected TooLargeToRecover, got {other:?}"),
+    }
+    assert!(!dst.exists());
+}
+
+#[test]
+fn recover_refuses_a_destination_equal_to_the_source() {
+    let tmp = TempDir::new("recover-same");
+    let src = tmp.db();
+    {
+        let (db, _) = Database::open(&src, cfg()).unwrap();
+        seed_checkpointed(&db);
+    }
+    match Database::recover(&src, &src, cfg(), 300) {
+        Err(HostError::Engine(plugmem_host::Error::Invalid(_))) => {}
+        other => panic!("expected Invalid (dst == src), got {other:?}"),
+    }
+}

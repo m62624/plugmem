@@ -29,7 +29,7 @@ pub use config::Config;
 pub use error::Error;
 pub use id::{EntityId, FactId, NONE_U32};
 pub use memory::{
-    FactView, LinkInput, MaintainReport, Memory, OpenReport, RecallQuery, RecallResult,
+    FactFault, FactView, LinkInput, MaintainReport, Memory, OpenReport, RecallQuery, RecallResult,
     RecalledEdge, RecalledFact, RememberInput, RememberOutcome, Similar, SimilarReason, Stats,
 };
 pub use model::{
