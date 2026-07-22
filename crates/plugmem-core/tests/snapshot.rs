@@ -1,11 +1,22 @@
 //! Snapshot container tests (specs/03 test plan): canonical roundtrip,
-//! build determinism, the full bitflip matrix (every byte, two bits —
-//! always a typed error, never a panic, never a silent wrong read), the
-//! truncation sweep, fast_load semantics, and the Config codec.
+//! build determinism, the full bitflip matrix (every byte, two bits — caught
+//! by the structural parse or the on-demand scrub, never a panic, never a
+//! silent wrong read), the truncation sweep, scrub semantics, and the Config
+//! codec.
 
-use plugmem_core::config::{ENCODED_LEN, FAST_LOAD_AT, RESERVED_AT};
+use plugmem_core::config::{ENCODED_LEN, RESERVED_AT};
 use plugmem_core::snapshot::{FLAG_VECTORS, Snapshot, SnapshotWriter};
 use plugmem_core::{Config, Error};
+
+/// Runs a full container-checksum scrub over already-parsed bytes, returning
+/// the first mismatch (or `Ok` when every section and the file hash verify).
+fn scrub(bytes: &[u8]) -> Result<(), Error> {
+    let snap = Snapshot::parse(bytes)?;
+    for step in snap.scrub() {
+        step?;
+    }
+    Ok(())
+}
 
 /// A small three-section file (empty section included) used throughout.
 fn sample() -> Vec<u8> {
@@ -22,7 +33,7 @@ fn sample() -> Vec<u8> {
 fn roundtrip_and_field_access() {
     let bytes = sample();
     assert_eq!(bytes.len() % 64, 0);
-    let snap = Snapshot::parse(&bytes, false).unwrap();
+    let snap = Snapshot::parse(&bytes).unwrap();
     assert_eq!(snap.flags, 0);
     assert_eq!(snap.created_at, 1_784_000_000_000);
     assert_eq!(snap.engine_ver(), "0.1.0");
@@ -53,40 +64,33 @@ fn writer_rejects_duplicate_kinds() {
 fn vector_flag_roundtrips_and_unknown_flags_fail() {
     let w = SnapshotWriter::new();
     let bytes = w.finish(b"", FLAG_VECTORS, 7, "x");
-    assert_eq!(Snapshot::parse(&bytes, false).unwrap().flags, FLAG_VECTORS);
+    assert_eq!(Snapshot::parse(&bytes).unwrap().flags, FLAG_VECTORS);
     let w = SnapshotWriter::new();
     let bytes = w.finish(b"", 0b100, 7, "x");
     assert_eq!(
-        Snapshot::parse(&bytes, false).unwrap_err(),
+        Snapshot::parse(&bytes).unwrap_err(),
         Error::Corrupt("unknown flag bits set")
     );
 }
 
 #[test]
-fn every_bitflip_is_a_typed_error() {
+fn every_bitflip_is_caught_by_parse_or_scrub() {
     let bytes = sample();
-    let baseline = Snapshot::parse(&bytes, false).unwrap();
-    let sections: Vec<_> = [1u16, 2, 9]
-        .iter()
-        .map(|&k| baseline.section(k).unwrap().to_vec())
-        .collect();
-    drop(baseline);
     for at in 0..bytes.len() {
         for bit in [0x01u8, 0x80] {
             let mut b = bytes.clone();
             b[at] ^= bit;
-            match Snapshot::parse(&b, false) {
+            // No flip passes unnoticed: the structural parse rejects layout
+            // damage, and the on-demand scrub catches every content/checksum
+            // flip via the per-section and whole-file xxh3 (specs/16 §9).
+            match Snapshot::parse(&b) {
                 Err(_) => {}
                 Ok(snap) => {
-                    // No flip may pass unnoticed: if parsing still
-                    // succeeds, the observable content must be intact
-                    // (this would only be legal for a bit the format
-                    // ignores — there is none, so fail loudly).
-                    let same = [1u16, 2, 9]
-                        .iter()
-                        .zip(&sections)
-                        .all(|(&k, want)| snap.section(k) == Some(&want[..]));
-                    panic!("flip at {at}/bit {bit:02x} accepted (content intact: {same})");
+                    let caught = snap.scrub().any(|s| s.is_err());
+                    assert!(
+                        caught,
+                        "flip at {at}/bit {bit:02x} slipped past parse and scrub"
+                    );
                 }
             }
         }
@@ -98,7 +102,7 @@ fn truncation_is_a_typed_error() {
     let bytes = sample();
     for cut in 0..bytes.len() {
         assert!(
-            Snapshot::parse(&bytes[..cut], false).is_err(),
+            Snapshot::parse(&bytes[..cut]).is_err(),
             "prefix of {cut} bytes accepted"
         );
     }
@@ -107,12 +111,12 @@ fn truncation_is_a_typed_error() {
 #[test]
 fn structural_gates_reachable_only_by_crafting() {
     // Trailing 64-byte block of zeros: aligned, structurally silent —
-    // caught by the trailing-bytes rule (under fast_load, to show it is a
-    // structural check, not a checksum one).
+    // caught by the trailing-bytes rule (a structural check at parse, not a
+    // checksum one).
     let mut bytes = sample();
     bytes.extend_from_slice(&[0u8; 64]);
     assert_eq!(
-        Snapshot::parse(&bytes, true).unwrap_err(),
+        Snapshot::parse(&bytes).unwrap_err(),
         Error::Corrupt("trailing bytes after the last section")
     );
 
@@ -125,27 +129,30 @@ fn structural_gates_reachable_only_by_crafting() {
     let kind = b[table_start..table_start + 2].to_vec();
     b[table_start + 32..table_start + 34].copy_from_slice(&kind);
     assert_eq!(
-        Snapshot::parse(&b, true).unwrap_err(),
+        Snapshot::parse(&b).unwrap_err(),
         Error::Corrupt("duplicate section kind")
     );
 
     // Nonzero padding right after a section's payload.
-    let snap = Snapshot::parse(&bytes, true).unwrap();
+    let snap = Snapshot::parse(&bytes).unwrap();
     let payload = snap.section(1).unwrap();
     let pad_at = payload.as_ptr() as usize - bytes.as_ptr() as usize + payload.len();
     drop(snap);
     let mut b = bytes.clone();
     b[pad_at] = 1;
     assert_eq!(
-        Snapshot::parse(&b, true).unwrap_err(),
+        Snapshot::parse(&b).unwrap_err(),
         Error::Corrupt("nonzero padding after a section")
     );
 
-    // A wrong (nonzero) file hash with all section checksums intact.
+    // A wrong (nonzero) file hash with all section checksums intact: the
+    // structural parse accepts it (checksums are not verified at parse), and
+    // the scrub reports it (specs/16 §9).
     let mut b = bytes.clone();
     b[20..28].copy_from_slice(&1u64.to_le_bytes());
+    Snapshot::parse(&b).unwrap();
     assert_eq!(
-        Snapshot::parse(&b, false).unwrap_err(),
+        scrub(&b).unwrap_err(),
         Error::Corrupt("file checksum mismatch")
     );
 }
@@ -157,52 +164,64 @@ fn version_and_magic_gates() {
     // A future format version is UnsupportedVersion, not Corrupt — the
     // caller can suggest a migration.
     assert_eq!(
-        Snapshot::parse(&bytes, false).unwrap_err(),
+        Snapshot::parse(&bytes).unwrap_err(),
         Error::UnsupportedVersion(2)
     );
     let mut bytes = sample();
     bytes[0] = b'X';
     assert_eq!(
-        Snapshot::parse(&bytes, false).unwrap_err(),
+        Snapshot::parse(&bytes).unwrap_err(),
         Error::Corrupt("bad magic")
     );
 }
 
 #[test]
-fn fast_load_skips_only_checksums() {
+fn scrub_catches_content_flips_that_parse_accepts() {
     let bytes = sample();
-    // Find a byte inside section 2's payload (0xC7 filler).
+    // A byte inside section 2's payload (0xC7 filler): parse accepts it (no
+    // checksum at parse), the scrub reports the section mismatch (specs/16 §9).
     let at = bytes.iter().position(|&b| b == 0xC7).unwrap();
     let mut b = bytes.clone();
     b[at] ^= 0xFF;
-    // Checksummed parse catches it; fast_load accepts the flip (that is
-    // the documented trade for trusted local files).
+    Snapshot::parse(&b).unwrap();
     assert_eq!(
-        Snapshot::parse(&b, false).unwrap_err(),
+        scrub(&b).unwrap_err(),
         Error::Corrupt("section checksum mismatch")
     );
-    assert!(Snapshot::parse(&b, true).is_ok());
-    // Structural rules still apply under fast_load.
+
+    // Structural damage is still rejected at parse, before any scrub.
     let mut b = bytes.clone();
     b[10] = 1; // reserved header byte
-    assert!(Snapshot::parse(&b, true).is_err());
-    assert!(Snapshot::parse(&bytes[..64], true).is_err());
+    assert!(Snapshot::parse(&b).is_err());
+    assert!(Snapshot::parse(&bytes[..64]).is_err());
 }
 
 #[test]
-fn zero_file_hash_means_no_file_hash() {
-    // The spec allows omitting the file hash (0 = absent); section
-    // checksums still verify.
+fn scrub_accepts_a_clean_image_and_a_zero_file_hash() {
+    // A clean image scrubs Ok, ending at total == file length.
+    let bytes = sample();
+    let last = Snapshot::parse(&bytes)
+        .unwrap()
+        .scrub()
+        .last()
+        .unwrap()
+        .unwrap();
+    assert_eq!(last.done_bytes, last.total_bytes);
+    assert_eq!(last.total_bytes, bytes.len() as u64);
+    assert!(scrub(&bytes).is_ok());
+
+    // The spec allows omitting the file hash (0 = absent); section checksums
+    // still verify, so the scrub passes.
     let mut bytes = sample();
     bytes[20..28].copy_from_slice(&0u64.to_le_bytes());
-    assert!(Snapshot::parse(&bytes, false).is_ok());
+    assert!(scrub(&bytes).is_ok());
 }
 
 #[test]
 fn long_engine_version_is_truncated() {
     let w = SnapshotWriter::new();
     let bytes = w.finish(b"", 0, 0, "0.1.0-very-long-prerelease-tag");
-    let snap = Snapshot::parse(&bytes, false).unwrap();
+    let snap = Snapshot::parse(&bytes).unwrap();
     assert_eq!(snap.engine_ver(), "0.1.0-very-long-prerelea");
     assert_eq!(snap.engine_ver().len(), 24);
 }
@@ -213,7 +232,6 @@ fn config_codec_roundtrip() {
     cfg.dim = 384;
     cfg.max_text = 2048;
     cfg.bm25_b = 0.5;
-    cfg.fast_load = true;
     cfg.flat_to_hnsw = 30_000;
     cfg.db_uuid = 0x0123_4567_89AB_CDEF_0011_2233_4455_6677;
     let mut bytes = Vec::new();
@@ -229,12 +247,6 @@ fn config_codec_rejects_bad_input() {
     assert_eq!(
         Config::decode(&bytes[..ENCODED_LEN - 1]).unwrap_err(),
         Error::Corrupt("config block length mismatch")
-    );
-    let mut b = bytes.clone();
-    b[FAST_LOAD_AT] = 2;
-    assert_eq!(
-        Config::decode(&b).unwrap_err(),
-        Error::Corrupt("config fast_load byte must be 0 or 1")
     );
     let mut b = bytes.clone();
     b[RESERVED_AT] = 1;
@@ -259,4 +271,61 @@ fn config_codec_rejects_bad_input() {
             cfg.validate().unwrap();
         }
     }
+}
+
+#[test]
+fn scrub_slices_by_budget_and_is_resumable() {
+    let bytes = sample();
+    let total = bytes.len() as u64;
+
+    // A tiny budget forces many slices; progress is monotonic and ends exactly
+    // at the file length.
+    let snap = Snapshot::parse(&bytes).unwrap();
+    let mut steps = 0;
+    let mut prev = 0u64;
+    let mut last = None;
+    for step in snap.scrub_with_budget(8) {
+        let p = step.unwrap();
+        assert!(p.done_bytes >= prev, "progress went backwards");
+        assert!(p.done_bytes <= total);
+        prev = p.done_bytes;
+        last = Some(p);
+        steps += 1;
+    }
+    assert!(
+        steps > 1,
+        "a tiny budget should take many slices, got {steps}"
+    );
+    assert_eq!(last.unwrap().done_bytes, total);
+
+    // `.by_ref()` runs part of the scan, then the rest resumes from where it
+    // paused — the cursor carries its state.
+    let snap = Snapshot::parse(&bytes).unwrap();
+    let mut cur = snap.scrub_with_budget(8);
+    let first: Vec<_> = cur.by_ref().take(2).collect::<Result<_, _>>().unwrap();
+    assert_eq!(first.len(), 2);
+    let resumed = cur.last().unwrap().unwrap();
+    assert_eq!(resumed.done_bytes, total, "the tail resumed to completion");
+}
+
+#[test]
+fn scrub_is_fused_after_an_error() {
+    // Flip a byte inside a section body so a section checksum mismatches.
+    let bytes = sample();
+    let at = bytes.iter().position(|&b| b == 0xC7).unwrap();
+    let mut b = bytes.clone();
+    b[at] ^= 0xFF;
+
+    let snap = Snapshot::parse(&b).unwrap();
+    let mut cur = snap.scrub_with_budget(8);
+    // Some Ok slices may precede the mismatch; eventually one Err, then None.
+    let mut saw_err = false;
+    for step in cur.by_ref() {
+        if step.is_err() {
+            saw_err = true;
+            break;
+        }
+    }
+    assert!(saw_err, "the section flip must be reported");
+    assert!(cur.next().is_none(), "the cursor is fused after an error");
 }

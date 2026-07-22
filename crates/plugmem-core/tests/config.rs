@@ -24,7 +24,6 @@ fn defaults_are_valid() {
     assert_eq!(cfg.shards_postings, 2048);
     assert_eq!(cfg.rrf_k, 60);
     assert_eq!(cfg.flat_to_hnsw, 24_000);
-    assert!(!cfg.fast_load);
 }
 
 #[test]

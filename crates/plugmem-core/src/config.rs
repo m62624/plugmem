@@ -30,12 +30,10 @@ const F32S_AT: usize = USIZE_FIELDS * U64_BYTES;
 const U32S_AT: usize = F32S_AT + F32_FIELDS * F32_BYTES;
 /// Byte offset of the `db_uuid` field.
 const DB_UUID_AT: usize = U32S_AT + U32_FIELDS * U32_BYTES;
-/// Byte offset of the `fast_load` flag.
-pub const FAST_LOAD_AT: usize = DB_UUID_AT + UUID_BYTES;
-/// Byte offset of the reserved zero tail.
-pub const RESERVED_AT: usize = FAST_LOAD_AT + 1;
+/// Byte offset of the reserved zero tail (directly after `db_uuid`).
+pub const RESERVED_AT: usize = DB_UUID_AT + UUID_BYTES;
 /// Length of the reserved zero tail.
-const RESERVED_LEN: usize = 7;
+const RESERVED_LEN: usize = 8;
 /// Exact byte length of the encoded config block (see [`Config::encode`]).
 pub const ENCODED_LEN: usize = RESERVED_AT + RESERVED_LEN;
 
@@ -101,8 +99,6 @@ pub struct Config {
     pub hnsw_ef_search: usize,
     /// Vector count at which `maintain` switches Flat → HNSW.
     pub flat_to_hnsw: usize,
-    /// Skip per-section xxh3 checks when loading a trusted snapshot.
-    pub fast_load: bool,
     /// Database lineage identity (specs/12 §6). Minted **once** by the
     /// host at creation (the `no_std` core has no RNG) and persisted in
     /// every snapshot; it survives `maintain` and re-saves, so external
@@ -144,7 +140,6 @@ impl Default for Config {
             hnsw_ef_construction: 200,
             hnsw_ef_search: 64,
             flat_to_hnsw: 24_000,
-            fast_load: false,
             db_uuid: 0,
         }
     }
@@ -251,9 +246,9 @@ impl Config {
     /// block of the snapshot (specs/03). Layout, all little-endian, in
     /// field-declaration order: `usize` fields as `u64`, `f32` fields as
     /// their IEEE 754 bits, then `rrf_k`/`half_life_days`/`graph_depth` as
-    /// `u32`, `db_uuid` as a `u128`, `fast_load` as one byte, 7 reserved
-    /// zero bytes; exactly [`ENCODED_LEN`] bytes. Encoding is lossless and
-    /// canonical (float bits round-trip exactly).
+    /// `u32`, `db_uuid` as a `u128`, then 8 reserved zero bytes; exactly
+    /// [`ENCODED_LEN`] bytes. Encoding is lossless and canonical (float bits
+    /// round-trip exactly).
     pub fn encode(&self, out: &mut Vec<u8>) {
         out.reserve(ENCODED_LEN);
         for v in [
@@ -292,17 +287,15 @@ impl Config {
             out.extend_from_slice(&v.to_le_bytes());
         }
         out.extend_from_slice(&self.db_uuid.to_le_bytes());
-        out.push(u8::from(self.fast_load));
         out.extend_from_slice(&[0u8; RESERVED_LEN]);
     }
 
     /// Decodes a config block written by [`Config::encode`] and runs
     /// [`Config::validate`] on the result.
     ///
-    /// The input is untrusted: a wrong length, nonzero reserved bytes or a
-    /// non-boolean `fast_load` byte is [`Error::Corrupt`]; out-of-range
-    /// field values surface as the same [`Error::ConfigMismatch`] a
-    /// hand-built config would get.
+    /// The input is untrusted: a wrong length or nonzero reserved bytes are
+    /// [`Error::Corrupt`]; out-of-range field values surface as the same
+    /// [`Error::ConfigMismatch`] a hand-built config would get.
     ///
     /// All size fields are stored as fixed-width `u64`, so the block is
     /// identical on 32-bit and 64-bit builds of the engine. A value that
@@ -360,12 +353,7 @@ impl Config {
         let rrf_k = take_u32();
         let half_life_days = take_u32();
         let graph_depth = take_u32();
-        let db_uuid = u128::from_le_bytes(bytes[DB_UUID_AT..FAST_LOAD_AT].try_into().unwrap());
-        let fast_load = match bytes[FAST_LOAD_AT] {
-            0 => false,
-            1 => true,
-            _ => return Err(Error::Corrupt("config fast_load byte must be 0 or 1")),
-        };
+        let db_uuid = u128::from_le_bytes(bytes[DB_UUID_AT..RESERVED_AT].try_into().unwrap());
         if bytes[RESERVED_AT..ENCODED_LEN] != [0u8; RESERVED_LEN] {
             return Err(Error::Corrupt("reserved config bytes must be zero"));
         }
@@ -397,7 +385,6 @@ impl Config {
             hnsw_ef_construction,
             hnsw_ef_search,
             flat_to_hnsw,
-            fast_load,
             db_uuid,
         };
         cfg.validate()?;

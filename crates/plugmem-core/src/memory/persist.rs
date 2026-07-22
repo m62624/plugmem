@@ -3,8 +3,9 @@
 //!
 //! Saving concatenates every structure's canonical dump into the
 //! [`snapshot`](crate::snapshot) container. Loading is the untrusted-input
-//! side: after the container's structural and checksum validation, every
-//! structure validates its own image, chunk chains are walked with shared
+//! side: after the container's structural validation (checksums are checked
+//! on demand via [`Snapshot::scrub`](crate::snapshot::Snapshot::scrub), not
+//! at load), every structure validates its own image, chunk chains are walked with shared
 //! visited maps (cycles, double-claims, orphans), posting lists are fully
 //! decoded (well-formed varints, ascending ids, counts and last-id
 //! agreement), text and term pools are UTF-8-checked, and **every stored
@@ -494,7 +495,7 @@ impl<'a> Memory<'a> {
     /// nothing from `bytes` and is a `Memory<'static>`.
     pub(super) fn load_snapshot(bytes: &[u8], cfg: Config) -> Result<Self, Error> {
         cfg.validate()?;
-        let snap = Snapshot::parse(bytes, cfg.fast_load)?;
+        let snap = Snapshot::parse(bytes)?;
         let cfg = Self::reconcile_config(&snap, cfg)?;
         let mut mem = Self::new(cfg)?;
         let cfg = &mem.cfg;
@@ -597,7 +598,7 @@ impl<'a> Memory<'a> {
     /// is read-only, so copy-on-write never fires.
     pub(super) fn load_snapshot_borrowed(bytes: &'a [u8], cfg: Config) -> Result<Self, Error> {
         cfg.validate()?;
-        let snap = Snapshot::parse(bytes, cfg.fast_load)?;
+        let snap = Snapshot::parse(bytes)?;
         let cfg = Self::reconcile_config(&snap, cfg)?;
         let mut mem = Self::new(cfg)?;
         let cfg = &mem.cfg;

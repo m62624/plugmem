@@ -814,11 +814,10 @@ fn rss() -> usize {
 #[test]
 fn an_overlay_open_residents_far_less_than_the_image() {
     let tmp = TempDir::new("overlay-rss");
-    // `fast_load` skips the whole-file xxh3, and lazy validation (specs/16 §9)
-    // skips the text/vector scans — so an open faults in only the metadata and
-    // the large text pool stays non-resident.
-    let mut c = cfg();
-    c.fast_load = true;
+    // The default open is trust/sparse: it does not verify the whole-file xxh3,
+    // and lazy validation (specs/16 §9) skips the text/vector scans — so an open
+    // faults in only the metadata and the large text pool stays non-resident.
+    let c = cfg();
 
     // A sizable checkpointed database whose text pool dominates the image.
     {

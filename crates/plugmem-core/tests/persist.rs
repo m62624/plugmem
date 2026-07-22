@@ -16,15 +16,6 @@ fn cfg() -> Config {
     cfg
 }
 
-/// The trusted, sparse-open config: skips the container checksums so an open
-/// faults in only the metadata (specs/16 §9). Content validation is deferred
-/// to [`Memory::verify`], and the accessors tolerate bad bytes on their own.
-fn fast_cfg() -> Config {
-    let mut c = cfg();
-    c.fast_load = true;
-    c
-}
-
 const DAY: u64 = 86_400_000;
 
 /// A workload touching every structure: entities, tags, links, revisions,
@@ -270,40 +261,38 @@ fn config_gates_reject_structural_drift() {
 }
 
 #[test]
-fn corrupt_snapshots_are_typed_errors() {
+fn structural_corruption_is_a_typed_error_at_load() {
     let (mut mem, mut store) = (Memory::new(cfg()).unwrap(), MemStorage::new());
     workload(&mut mem, &mut store);
     let bytes = mem.snapshot_bytes(0);
 
-    // Any single-byte flip fails typed (container checksums), never
-    // panics — sample the sweep to keep the test fast.
-    for at in (0..bytes.len()).step_by(97) {
-        let mut b = bytes.clone();
-        b[at] ^= 0x40;
-        assert!(
-            Memory::from_bytes(Some(&b), &[], cfg()).is_err(),
-            "flip at {at} accepted"
-        );
-    }
-    // Truncations too.
+    // The default open is trust/sparse (specs/16 §9): only *structural* damage
+    // is rejected at load — truncations, bad magic, unknown version. Container
+    // checksums are checked on demand by scrub, content by verify(); those and
+    // the never-panic contract are covered by the sweep test below.
     for cut in (0..bytes.len()).step_by(513) {
         assert!(Memory::from_bytes(Some(&bytes[..cut]), &[], cfg()).is_err());
     }
+    let mut b = bytes.clone();
+    b[0] ^= 0xFF; // magic
+    assert!(Memory::from_bytes(Some(&b), &[], cfg()).is_err());
+    let mut b = bytes.clone();
+    b[10] = 1; // reserved header byte must be zero
+    assert!(Memory::from_bytes(Some(&b), &[], cfg()).is_err());
 }
 
 // The bitflip sweep relies on `catch_unwind` (unwinding) and is heavy — native
 // only, like the proptest sections (specs/14 §3).
 #[cfg(not(target_family = "wasm"))]
 #[test]
-fn a_fast_load_open_never_panics_and_verify_catches_corruption() {
-    // The trusted (`fast_load`) path skips the container checksums for a sparse
-    // open (specs/16 §9), so a corrupt image can reach the engine — content
+fn an_open_never_panics_through_access_and_verify_catches_corruption() {
+    // The default open is trust/sparse (specs/16 §9): it does not verify the
+    // container checksums, so a corrupt image can reach the engine — content
     // validation is deferred. The contract stays panic-free: a load either
-    // errors typed (metadata is still checked) or opens, and then every
+    // errors typed (metadata is still range-checked) or opens, and then every
     // accessor tolerates the bad bytes. `verify()` turns latent corruption into
-    // an explicit error. (The default, checksummed path rejects any flip at
-    // load — see `corrupt_snapshots_are_typed_errors`.)
-    let (mut mem, mut store) = (Memory::new(fast_cfg()).unwrap(), MemStorage::new());
+    // an explicit error.
+    let (mut mem, mut store) = (Memory::new(cfg()).unwrap(), MemStorage::new());
     workload(&mut mem, &mut store);
     let bytes = mem.snapshot_bytes(0);
 
@@ -311,7 +300,7 @@ fn a_fast_load_open_never_panics_and_verify_catches_corruption() {
         let mut b = bytes.clone();
         b[at] ^= 0x40;
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let Ok((mut m, _)) = Memory::from_bytes(Some(&b), &[], fast_cfg()) else {
+            let Ok((mut m, _)) = Memory::from_bytes(Some(&b), &[], cfg()) else {
                 return; // a typed load error is a fine outcome
             };
             // Access sweep: nothing may panic on the corrupt image.
@@ -323,10 +312,7 @@ fn a_fast_load_open_never_panics_and_verify_catches_corruption() {
             let _ = m.snapshot_bytes(0);
             let _ = m.verify(); // Ok or Err, never a panic
         }));
-        assert!(
-            outcome.is_ok(),
-            "a fast_load access panicked after a flip at {at}"
-        );
+        assert!(outcome.is_ok(), "an access panicked after a flip at {at}");
     }
 }
 
@@ -336,7 +322,7 @@ fn verify_accepts_a_clean_image_and_reports_deferred_text_corruption() {
     // a clean image passes; a stored text corrupted past the (skipped) checksums
     // opens fine and is caught by `verify()`, while `get` hides the fact and
     // nothing panics.
-    let (mut mem, mut store) = (Memory::new(fast_cfg()).unwrap(), MemStorage::new());
+    let (mut mem, mut store) = (Memory::new(cfg()).unwrap(), MemStorage::new());
     mem.remember(
         &mut store,
         RememberInput {
@@ -346,7 +332,7 @@ fn verify_accepts_a_clean_image_and_reports_deferred_text_corruption() {
     )
     .unwrap();
     let clean = mem.snapshot_bytes(0);
-    let (loaded, _) = Memory::from_bytes(Some(&clean), &[], fast_cfg()).unwrap();
+    let (loaded, _) = Memory::from_bytes(Some(&clean), &[], cfg()).unwrap();
     assert!(loaded.verify().is_ok(), "a clean image verifies");
 
     // Corrupt the stored text: find the marker and make a byte invalid UTF-8.
@@ -357,8 +343,8 @@ fn verify_accepts_a_clean_image_and_reports_deferred_text_corruption() {
     let mut bad = clean.clone();
     bad[at] = 0xFF; // not a valid UTF-8 start byte
 
-    let (mut loaded, _) = Memory::from_bytes(Some(&bad), &[], fast_cfg())
-        .expect("the trusted path opens without scanning the text");
+    let (mut loaded, _) = Memory::from_bytes(Some(&bad), &[], cfg())
+        .expect("the trust/sparse default open does not scan the text");
     assert!(
         loaded.get(FactId(0)).is_none(),
         "an unreadable text hides the fact, no panic"

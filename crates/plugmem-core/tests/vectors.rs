@@ -231,7 +231,7 @@ fn snapshot_roundtrip_with_vectors_is_canonical() {
 }
 
 #[test]
-fn corrupt_vector_snapshot_is_typed() {
+fn truncated_vector_snapshot_errors_at_load() {
     let dim = 32;
     let (mut mem, mut store) = (Memory::new(cfg(dim)).unwrap(), MemStorage::new());
     let mut rng = Lcg(5);
@@ -247,14 +247,13 @@ fn corrupt_vector_snapshot_is_typed() {
         .unwrap();
     }
     let bytes = mem.snapshot_bytes(0);
-    // A single-byte flip anywhere (the vector section included) fails
-    // typed, never panics.
-    for at in (0..bytes.len()).step_by(53) {
-        let mut b = bytes.clone();
-        b[at] ^= 0x20;
+    // Truncations break the structure and fail typed at load, never panic.
+    // Content flips (the vector section included) are trust/sparse — caught by
+    // scrub/verify, exercised by `a_vector_open_never_panics_...`.
+    for cut in (0..bytes.len()).step_by(53) {
         assert!(
-            Memory::from_bytes(Some(&b), &[], cfg(dim)).is_err(),
-            "flip at {at} accepted"
+            Memory::from_bytes(Some(&bytes[..cut]), &[], cfg(dim)).is_err(),
+            "truncation to {cut} accepted"
         );
     }
 }
@@ -263,14 +262,13 @@ fn corrupt_vector_snapshot_is_typed() {
 // proptest sections (specs/14 §3).
 #[cfg(not(target_family = "wasm"))]
 #[test]
-fn a_fast_load_vector_open_never_panics_and_verify_catches_corruption() {
-    // The trusted (`fast_load`) path skips the checksums *and* the vector
-    // scan for a sparse open (specs/16 §9), so a corrupt vector slot can reach
-    // the engine. Vector search reads slots with bounds-checked arithmetic, so
-    // it never panics; `verify()` catches the deferred corruption.
+fn a_vector_open_never_panics_and_verify_catches_corruption() {
+    // The default trust/sparse open skips the checksums *and* the vector scan
+    // (specs/16 §9), so a corrupt vector slot can reach the engine. Vector
+    // search reads slots with bounds-checked arithmetic, so it never panics;
+    // `verify()` catches the deferred corruption.
     let dim = 32;
-    let mut c = cfg(dim);
-    c.fast_load = true;
+    let c = cfg(dim);
     let (mut mem, mut store) = (Memory::new(c.clone()).unwrap(), MemStorage::new());
     let mut rng = Lcg(5);
     let mut last = Vec::new();
@@ -308,7 +306,7 @@ fn a_fast_load_vector_open_never_panics_and_verify_catches_corruption() {
         }));
         match outcome {
             Ok(caught) => verify_caught |= caught,
-            Err(_) => panic!("a fast_load vector access panicked after a flip at {at}"),
+            Err(_) => panic!("a vector access panicked after a flip at {at}"),
         }
     }
     assert!(
