@@ -346,7 +346,8 @@ build + wasm32-wasip1 сьют (specs/11 §5, specs/15). owned-путь обяз
     `RecoverReport { kept, dropped_text, dropped_vector }`. Границы: структурную
     порчу (не парсится) **не** чинит → типизированный `Err` (Tier 0); ребилд
     in-RAM → `recover_with_limit` отвергает образ больше бюджета
-    `HostError::TooLargeToRecover` до OOM; `dst` ≠ `src`.
+    `HostError::TooLargeToRecover` до OOM; `dst` ≠ `src`. *(Guard — только G3;
+    веха H сделала recover disk-first и **удалила** его начисто, см. ниже.)*
   - **RAM-scorecard (БД > RAM) — на момент G.** `open`/`read`/`scan`/`scrub`/
     `checkpoint` — **работают** (чистые mmap-страницы вытесняемы, запись
     стримовая). `maintain`/`recover` — до вехи H требовали RAM ≈ размер образа

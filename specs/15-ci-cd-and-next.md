@@ -130,7 +130,10 @@ required-чеком **«CI passed»**; лейбл `benchmark` (создастс�
 
 Сделано и закрыто: ядро (этапы 1–4 + HNSW этап 6), plugmem-host,
 testgen, README core/host, wasm-классы ёмкости (specs/14), CI/CD (этот
-док). Дальше — **этап 5** (specs/06 — источник истины по поведению):
+док), **интегрити+RAM (specs/16 §9 вехи G+H, 2026-07-22):** trust/sparse
+дефолт открытия, `scrub()`/`verify()`/`recover()`, потоковая запись снапшота,
+и **disk-first `maintain`/`recover`** — пересборка при RAM ∝ числу записей,
+не размеру контента. Дальше — **этап 5** (specs/06 — источник истины по поведению):
 
 1. **plugmem-cli** (`crates/plugmem-cli`, стаб готов): команды из
    таблицы specs/06 поверх `plugmem_host::Database`; exit-коды 0/1/2;
