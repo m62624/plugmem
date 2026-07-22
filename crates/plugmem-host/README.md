@@ -31,10 +31,10 @@ range scans, all fused by rank) lives in the engine; this crate adds:
   vector pools stay non-resident until a query touches them — a measured
   open residents well under half of a text-heavy image. Corruption is caught
   when the bad record is read (never a panic) or up front with
-  `Database::verify()` — the on-demand integrity check. (Full sparse
-  residency needs the trusted `fast_load` config, which skips the whole-file
-  checksum; the default checksummed open still reads the file to verify it.
-  See `specs/16 §9`.);
+  `Database::verify()` — the on-demand content check. The default open
+  trusts the file and never checksums the whole image (the SQLite model),
+  so it stays sparse; byte-level container integrity is a separate
+  on-demand `scrub()`. See `specs/16 §9`.;
 - **Maintenance policy** — auto-snapshot and optional auto-`maintain`,
   run inline (no background threads);
 - **Embedding providers** — one HTTP client for the `/v1/embeddings`

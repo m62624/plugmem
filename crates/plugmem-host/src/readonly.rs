@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use memmap2::Mmap;
+use plugmem_core::snapshot::{DEFAULT_SCRUB_BUDGET, ScrubCursor, ScrubProgress, Snapshot};
 use plugmem_core::{Config, FactId, Memory, RecallQuery, RecallResult, Stats, Storage};
 
 use crate::db::FactSnapshot;
@@ -158,6 +159,39 @@ impl ReadOnlyDatabase {
         Ok(mapped.borrow_dependent().verify()?)
     }
 
+    /// A resumable byte-level container scrub of the snapshot file, with the
+    /// default slice budget (specs/16 §9 — the ZFS-scrub model). See
+    /// [`Scrub`] and [`ReadOnlyDatabase::scrub_with_budget`].
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::Locked`]/[`HostError::Io`]/[`HostError::Engine`] if the
+    /// file cannot be locked, mapped, or structurally parsed for the scan.
+    pub fn scrub(&self) -> Result<Scrub, HostError> {
+        self.scrub_with_budget(DEFAULT_SCRUB_BUDGET)
+    }
+
+    /// A resumable container scrub hashing at most `budget` bytes per
+    /// [`Iterator::next`] (specs/16 §9).
+    ///
+    /// The returned [`Scrub`] owns its own map and its own shared advisory
+    /// lock over the same file, so it holds a reader's lock for its whole
+    /// life (a writer is refused with [`HostError::Locked`] while any scrub
+    /// or read-only handle lives) and can be moved to its own thread — the
+    /// caller paces the scan (`next`, pause, resume, cancel) exactly like
+    /// the core [`ScrubCursor`]. Dropping it releases the lock.
+    ///
+    /// It is independent of `self`: the scrub keeps running after this handle
+    /// is dropped. A non-empty journal is not an obstacle — the scrub checks
+    /// the on-disk snapshot container as-is.
+    ///
+    /// # Errors
+    ///
+    /// As [`ReadOnlyDatabase::scrub`].
+    pub fn scrub_with_budget(&self, budget: usize) -> Result<Scrub, HostError> {
+        Scrub::open(&self.path, budget)
+    }
+
     /// Dumps the currently-open facts for a human-readable backup
     /// (specs/06). See [`ExportedFact`](crate::ExportedFact).
     pub fn export(&self) -> Vec<crate::db::ExportedFact> {
@@ -180,5 +214,94 @@ impl std::fmt::Debug for ReadOnlyDatabase {
             .field("facts", &stats.facts)
             .field("entities", &stats.entities)
             .finish()
+    }
+}
+
+self_cell::self_cell!(
+    /// Owns the memory map and the [`ScrubCursor`] that borrows it. As with
+    /// [`MappedMemory`], the only `unsafe` is the inherent mmap call, not the
+    /// self-reference.
+    struct MappedScrub {
+        owner: Mmap,
+        #[covariant]
+        dependent: BorrowedScrub,
+    }
+);
+
+/// The dependent type constructor. [`ScrubCursor`] is covariant in its
+/// lifetime (it borrows the mapped bytes as `&'a [u8]` and owns the rest),
+/// so borrowing the map is sound.
+type BorrowedScrub<'a> = ScrubCursor<'a>;
+
+/// A resumable, byte-level container scrub over a memory-mapped snapshot
+/// (specs/16 §9 — the ZFS-scrub model). Obtained from
+/// [`ReadOnlyDatabase::scrub`].
+///
+/// It implements [`Iterator`]: each [`Iterator::next`] hashes up to the slice
+/// budget and yields `Ok(ScrubProgress)`, verifying each section's stored
+/// xxh3 as its body completes and the whole-file hash at EOF; the first
+/// mismatch yields `Err(HostError::Engine(Error::Corrupt(..)))` and then
+/// `None` (fused). Because it only reads the mapped bytes linearly, the pages
+/// fault in, get hashed and stay reclaimable — a scrub never residents the
+/// whole file.
+///
+/// It owns a shared advisory lock for its whole life (a reader's lock), so a
+/// writer is refused while it lives, and it is [`Send`] — pace it on its own
+/// thread. One-shot: obtain a new scrub to scan again.
+pub struct Scrub {
+    mapped: MappedScrub,
+    /// Holds the shared advisory lock for the scrub's whole life (never read
+    /// — the lock is the point), independent of the originating handle.
+    _store: FileStorage,
+}
+
+impl Scrub {
+    /// Maps the snapshot at `path` under a fresh shared lock and builds the
+    /// cursor. See [`ReadOnlyDatabase::scrub_with_budget`].
+    fn open(path: &Path, budget: usize) -> Result<Self, HostError> {
+        // A shared lock: coexists with the originating read-only handle and
+        // with other readers, excludes every writer. The fsync policy is
+        // irrelevant — a scrub never writes — but the type needs one.
+        let store = FileStorage::open_shared(path, FsyncPolicy::OnSnapshot)?;
+        let base = store.path().to_path_buf();
+
+        let file = File::open(&base).map_err(|e| HostError::io(&base, e))?;
+        // SAFETY: identical to `ReadOnlyDatabase::open` — the shared lock in
+        // `store` is held for this scrub's whole life and excludes every
+        // exclusive (read-write) owner, so no cooperating process writes or
+        // truncates the file while the map is live (specs/16 §5).
+        let map = unsafe { Mmap::map(&file) }.map_err(|e| HostError::io(&base, e))?;
+        drop(file);
+
+        let mapped = MappedScrub::try_new(map, |map| {
+            Snapshot::parse(&map[..])
+                .map(|snap| snap.scrub_with_budget(budget))
+                .map_err(HostError::from)
+        })?;
+
+        Ok(Self {
+            mapped,
+            _store: store,
+        })
+    }
+}
+
+impl Iterator for Scrub {
+    type Item = Result<ScrubProgress, HostError>;
+
+    /// Hashes the next slice, mapping a core [`Error`](plugmem_core::Error)
+    /// mismatch into [`HostError::Engine`]. `None` once complete or fused.
+    fn next(&mut self) -> Option<Self::Item> {
+        self.mapped
+            .with_dependent_mut(|_map, cur| cur.next())
+            .map(|step| step.map_err(HostError::from))
+    }
+}
+
+impl std::fmt::Debug for Scrub {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Scrub")
+            .field("path", &self._store.path())
+            .finish_non_exhaustive()
     }
 }

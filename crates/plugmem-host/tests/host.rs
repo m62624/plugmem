@@ -873,3 +873,114 @@ fn an_overlay_open_residents_far_less_than_the_image() {
          (overlay {overlay_rss}, file {file_len})"
     );
 }
+
+// ---------------------------------------------------------------------------
+// On-demand scrub (specs/16 §9): the default open trusts the file, so byte-level
+// container integrity is a separate, resumable read-handle op. These prove the
+// scrub verifies a clean image, catches a flipped section byte on disk, and
+// holds a reader's lock for its whole life — independent of the handle it came
+// from.
+// ---------------------------------------------------------------------------
+
+/// Flips one byte of the on-disk snapshot at the first occurrence of `needle`
+/// (a substring of some fact's text, so the flip lands inside a section body,
+/// which the structural parse accepts but the scrub must catch).
+fn flip_byte_at(path: &std::path::Path, needle: &[u8]) {
+    let mut bytes = std::fs::read(path).unwrap();
+    let at = bytes
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .expect("needle present in the snapshot");
+    bytes[at] ^= 0xFF;
+    std::fs::write(path, bytes).unwrap();
+}
+
+#[test]
+fn scrub_verifies_a_clean_image_and_slices_by_budget() {
+    let tmp = TempDir::new("scrub-clean");
+    {
+        let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+        seed_checkpointed(&db);
+    }
+    let file_len = std::fs::metadata(tmp.db()).unwrap().len();
+
+    let ro = Database::open_readonly(tmp.db(), cfg()).unwrap();
+
+    // A tiny budget forces many slices; progress is monotonic and ends exactly
+    // at the file length, every slice Ok.
+    let mut steps = 0;
+    let mut prev = 0u64;
+    let mut last = None;
+    for step in ro.scrub_with_budget(64).unwrap() {
+        let p = step.expect("a clean image scrubs Ok");
+        assert!(p.done_bytes >= prev, "progress went backwards");
+        assert!(p.done_bytes <= file_len);
+        assert_eq!(p.total_bytes, file_len);
+        prev = p.done_bytes;
+        last = Some(p);
+        steps += 1;
+    }
+    assert!(
+        steps > 1,
+        "a tiny budget should take many slices, got {steps}"
+    );
+    assert_eq!(last.unwrap().done_bytes, file_len, "the scan reached EOF");
+
+    // The default budget scrubs the same clean image to completion.
+    assert!(ro.scrub().unwrap().all(|s| s.is_ok()));
+}
+
+#[test]
+fn scrub_catches_a_flipped_section_byte_on_disk() {
+    let tmp = TempDir::new("scrub-corrupt");
+    {
+        let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+        seed_checkpointed(&db);
+    }
+    // Corrupt a byte inside the text pool while the lock is free.
+    flip_byte_at(&tmp.db(), b"tokio");
+
+    // The default open still succeeds (trust/sparse parse is structural)...
+    let ro = Database::open_readonly(tmp.db(), cfg()).unwrap();
+    // ...and the scrub reports the container mismatch, then fuses.
+    let mut cur = ro.scrub_with_budget(64).unwrap();
+    let mut err = None;
+    for step in cur.by_ref() {
+        if let Err(e) = step {
+            err = Some(e);
+            break;
+        }
+    }
+    match err {
+        Some(HostError::Engine(plugmem_host::Error::Corrupt(msg))) => {
+            assert_eq!(msg, "section checksum mismatch");
+        }
+        other => panic!("expected a Corrupt scrub error, got {other:?}"),
+    }
+    assert!(cur.next().is_none(), "the scrub is fused after an error");
+}
+
+#[test]
+fn scrub_holds_a_shared_lock_for_its_whole_life() {
+    let tmp = TempDir::new("scrub-lock");
+    {
+        let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+        seed_checkpointed(&db);
+    }
+    let ro = Database::open_readonly(tmp.db(), cfg()).unwrap();
+    let scrub = ro.scrub().unwrap();
+    // Debug is a summary, never the contents.
+    assert!(format!("{scrub:?}").contains("Scrub"));
+    // The scrub owns its own shared lock — it survives dropping the handle it
+    // came from, and still excludes an exclusive (read-write) opener.
+    drop(ro);
+    match Database::open(tmp.db(), cfg()) {
+        Err(HostError::Locked { path }) => assert_eq!(path, tmp.db()),
+        other => panic!("expected Locked while a scrub is live, got {other:?}"),
+    }
+    // Dropping the scrub releases the lock; the writer opens again.
+    drop(scrub);
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    db.remember(RememberInput::text(500, "after scrub"))
+        .unwrap();
+}

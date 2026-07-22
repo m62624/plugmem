@@ -29,11 +29,12 @@ mod storage;
 pub use db::{Database, DatabaseBuilder, ExportedFact, FactSnapshot};
 pub use embedder::{Embedder, NullEmbedder, OpenAiCompatEmbedder};
 pub use error::HostError;
-pub use readonly::ReadOnlyDatabase;
+pub use readonly::{ReadOnlyDatabase, Scrub};
 pub use storage::{FileStorage, FsyncPolicy};
 
 // The engine types a host caller works with, re-exported so simple
 // embedders need only this crate.
+pub use plugmem_core::snapshot::{DEFAULT_SCRUB_BUDGET, ScrubProgress};
 pub use plugmem_core::{
     Config, EntityId, Error, FactId, FactRecord, LinkInput, MaintainReport, OpenReport,
     RecallQuery, RecallResult, RecalledEdge, RecalledFact, RememberInput, RememberOutcome, Similar,
