@@ -16,7 +16,7 @@ mod cli;
 mod config;
 
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -28,7 +28,7 @@ use plugmem_host::{
 use serde_json::json;
 
 use crate::cli::{Cli, Command};
-use crate::config::load_settings;
+use crate::config::{Settings, load_settings};
 
 /// Environment variable naming the database file (below the `--db` flag).
 pub(crate) const ENV_DB: &str = "PLUGMEM_DB";
@@ -81,6 +81,16 @@ fn run_parsed(cli: Cli, out: &mut impl Write) -> u8 {
         Ok(s) => s,
         Err(e) => return report_err(&e),
     };
+
+    // `recover` is a standalone salvage on file paths — it opens the source
+    // itself (under an exclusive lock) and writes a fresh destination, so it
+    // runs before the normal open. `scrub` is a byte-level container check over
+    // a read-only (shared-lock) open, which requires a checkpointed database.
+    match &cli.command {
+        Command::Recover { dst } => return do_recover(&path, dst, &settings, cli.json, out),
+        Command::Scrub => return do_scrub(&path, &settings, cli.json, out),
+        _ => {}
+    }
 
     // Read-only commands can open the snapshot zero-copy (mmap, shared lock):
     // many readers at once, no whole-file load. `recall` needs the embedder
@@ -283,7 +293,91 @@ fn execute(
             }
             Ok(0)
         }
+        Command::Verify => {
+            // A clean image returns Ok; corruption is a typed error the caller
+            // maps to exit 2.
+            db.verify()?;
+            if json {
+                writeln!(out, "{}", json!({ "ok": true })).ok();
+            } else {
+                writeln!(out, "integrity ok").ok();
+            }
+            Ok(0)
+        }
+        // Handled in `run_parsed` before the read-write open.
+        Command::Scrub | Command::Recover { .. } => {
+            unreachable!("scrub/recover are dispatched before execute")
+        }
     }
+}
+
+/// Salvages `src` into a fresh `dst` (specs/16 §9): `Database::recover` opens
+/// the source under an exclusive lock, drops the content-corrupt facts, and
+/// writes a clean disk-first copy. The source is left untouched.
+fn do_recover(src: &Path, dst: &Path, settings: &Settings, json: bool, out: &mut impl Write) -> u8 {
+    match Database::recover(src, dst, settings.config.clone(), now_ms()) {
+        Ok(r) => {
+            if json {
+                writeln!(
+                    out,
+                    "{}",
+                    json!({
+                        "kept": r.kept,
+                        "dropped_text": r.dropped_text,
+                        "dropped_vector": r.dropped_vector,
+                        "dst": dst.display().to_string(),
+                    })
+                )
+                .ok();
+            } else {
+                writeln!(
+                    out,
+                    "recovered to {}: kept {}, dropped {} text + {} vector",
+                    dst.display(),
+                    r.kept,
+                    r.dropped_text,
+                    r.dropped_vector
+                )
+                .ok();
+            }
+            0
+        }
+        Err(HostError::Locked { path }) => report_locked(&path),
+        Err(e) => report_err(&CliError::Host(e)),
+    }
+}
+
+/// Runs a byte-level container scrub over a read-only (shared-lock) open. A
+/// clean image exits 0; the first damaged section is a typed error (exit 2). A
+/// dirty journal forbids the read-only open — the reported `NeedsCheckpoint`
+/// tells the caller to run `maintain` first.
+fn do_scrub(path: &Path, settings: &Settings, json: bool, out: &mut impl Write) -> u8 {
+    let ro = match Database::open_readonly(path, settings.config.clone()) {
+        Ok(ro) => ro,
+        Err(HostError::Locked { path }) => return report_locked(&path),
+        Err(e) => return report_err(&CliError::Host(e)),
+    };
+    let scrub = match ro.scrub() {
+        Ok(s) => s,
+        Err(e) => return report_err(&CliError::Host(e)),
+    };
+    let mut done = 0u64;
+    let mut total = 0u64;
+    for step in scrub {
+        match step {
+            Ok(p) => {
+                done = p.done_bytes;
+                total = p.total_bytes;
+            }
+            Err(e) => return report_err(&CliError::Host(e)),
+        }
+    }
+    if json {
+        writeln!(out, "{}", json!({ "ok": true, "bytes": done })).ok();
+    } else {
+        writeln!(out, "scrub ok: {done}/{total} bytes verified").ok();
+    }
+    0
 }
 
 /// Builds the [`RecallQuery`] for a `recall` command and passes it to `f`.

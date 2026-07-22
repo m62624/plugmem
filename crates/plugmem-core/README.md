@@ -278,6 +278,29 @@ any `Error` but never a panic or undefined behavior, and after a
 successful load every stored id is range-checked, every chunk chain
 walked, every invariant the hot path relies on re-established.
 
+### Integrity and recovery
+
+Loading is **trust/sparse by default** (the SQLite model): it validates the
+metadata but does **not** read the container checksums or scan the two large
+byte pools, so a big database opens without faulting them in. The accessors
+tolerate bad bytes on their own — invalid text hides a fact, a bad vector slot
+is skipped — so a corrupt image never panics. Integrity is then on demand, in
+layers:
+
+- `Memory::verify()` — content consistency: every stored text is valid UTF-8
+  and the fact↔vector-slot bijection holds (the equivalent of SQLite's
+  `integrity_check`).
+- a resumable byte-level **container scrub** (per-section and whole-file xxh3),
+  exposed by the host as `ReadOnlyDatabase::scrub()` — the bitrot detector.
+- `Memory::faulty_facts()` — the per-fact salvage predicate the host's
+  `recover()` uses to drop the corrupt records and write a clean copy.
+
+Both the streaming snapshot writer (`write_snapshot_to`) and the disk-first
+rebuild (`snapshot_disk_first`, over a host-provided `Scratch`) let the host
+maintain and recover a database larger than RAM without ever materializing the
+whole image — the engine provides the algorithm, the host the files (see
+[`plugmem-host`](https://docs.rs/plugmem-host/latest) and `specs/16 §9`).
+
 Each database carries a `db_uuid` (minted by the host at creation) so
 external holders of fact ids can tell "same database" from "a different
 one".

@@ -37,11 +37,12 @@ pub(crate) struct Cli {
 /// The `--help` long description.
 const LONG_ABOUT: &str = "\
 A local memory an agent talks to in four verbs — remember / recall / revise / forget — \
-plus link / show / stats / maintain / export / import. Recall fuses lexical (BM25), \
-vector, entity-graph and temporal evidence into one ranked, token-budgeted block. One \
-database is a single snapshot file plus a journal; point --db at it (default ./plugmem.db, \
-or $PLUGMEM_DB). Human output by default, --json for tooling. Exit code: 0 ok, 1 not found \
-/ database locked, 2 usage or runtime error.";
+plus link / show / stats / maintain / export / import, and integrity: verify / scrub / \
+recover. Recall fuses lexical (BM25), vector, entity-graph and temporal evidence into one \
+ranked, token-budgeted block. One database is a single snapshot file plus a journal; point \
+--db at it (default ./plugmem.db, or $PLUGMEM_DB). Human output by default, --json for \
+tooling. Exit code: 0 ok, 1 not found / database locked, 2 usage / runtime error / \
+corruption.";
 
 /// The footer, aimed at an agent that reached the binary without the skill.
 const AFTER_HELP: &str = "\
@@ -130,6 +131,21 @@ pub(crate) enum Command {
     Stats,
     /// Run a maintenance pass now (purge tombstones, compact, build HNSW).
     Maintain,
+    /// Check content integrity (text UTF-8, vector↔fact consistency) — the
+    /// on-demand equivalent of SQLite's `integrity_check`. Exit 2 on damage.
+    Verify,
+    /// Scrub the snapshot's byte-level container integrity (per-section and
+    /// whole-file checksums), a slice at a time. Requires a checkpointed
+    /// database (run `maintain` first if the journal is dirty). Exit 2 on
+    /// the first damaged section.
+    Scrub,
+    /// Salvage a content-corrupt database into a fresh file: drop the facts
+    /// that fail `verify`, compact the survivors, and write a clean copy to
+    /// DST — the source (`--db`) is left untouched. Disk-first (bounded RAM).
+    Recover {
+        /// Destination file for the recovered image (must differ from `--db`).
+        dst: PathBuf,
+    },
     /// Dump the currently-open facts as JSONL (one fact per line) to stdout.
     Export,
     /// Load facts from a JSONL file (as written by `export`), re-remembering

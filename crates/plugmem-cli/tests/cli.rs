@@ -215,3 +215,68 @@ fn import_from_a_fixture_jsonl() {
         stdout(&r)
     );
 }
+
+#[test]
+fn verify_reports_a_clean_database() {
+    let tmp = TempDir::new("verify-ok");
+    plugmem(&tmp.db(), &["remember", "a clean fact"]);
+    let out = plugmem(&tmp.db(), &["verify"]);
+    assert!(out.status.success(), "verify of a clean db exits 0");
+    assert!(stdout(&out).contains("integrity ok"), "{}", stdout(&out));
+}
+
+#[test]
+fn scrub_verifies_a_checkpointed_database() {
+    let tmp = TempDir::new("scrub-ok");
+    plugmem(&tmp.db(), &["remember", "a fact worth some bytes to scrub"]);
+    // maintain checkpoints (empties the journal) so the read-only scrub opens.
+    plugmem(&tmp.db(), &["maintain"]);
+    let out = plugmem(&tmp.db(), &["scrub"]);
+    assert!(
+        out.status.success(),
+        "scrub of a clean db exits 0: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout(&out).contains("scrub ok"), "{}", stdout(&out));
+}
+
+#[test]
+fn scrub_detects_on_disk_corruption() {
+    let tmp = TempDir::new("scrub-corrupt");
+    plugmem(&tmp.db(), &["remember", "a corruptible tokio fact"]);
+    plugmem(&tmp.db(), &["maintain"]);
+    // Flip a byte inside a section body (the text pool).
+    let mut bytes = std::fs::read(tmp.db()).unwrap();
+    let at = bytes.windows(5).position(|w| w == b"tokio").unwrap();
+    bytes[at] ^= 0xFF;
+    std::fs::write(tmp.db(), bytes).unwrap();
+    let out = plugmem(&tmp.db(), &["scrub"]);
+    assert_eq!(out.status.code(), Some(2), "corruption exits 2");
+}
+
+#[test]
+fn recover_writes_a_clean_copy_and_preserves_the_source() {
+    let tmp = TempDir::new("recover");
+    plugmem(&tmp.db(), &["remember", "keep me"]);
+    plugmem(&tmp.db(), &["maintain"]); // materialize a snapshot file to salvage
+    let dst = tmp.0.join("recovered.plugmem");
+    let out = plugmem(&tmp.db(), &["recover", dst.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "recover exits 0: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout(&out).contains("recovered to"), "{}", stdout(&out));
+    assert!(dst.exists(), "the destination was written");
+    assert!(tmp.db().exists(), "the source is preserved");
+    // The recovered database is usable.
+    assert!(plugmem(&dst, &["stats"]).status.success());
+}
+
+#[test]
+fn recover_refuses_a_destination_equal_to_the_source() {
+    let tmp = TempDir::new("recover-same");
+    plugmem(&tmp.db(), &["remember", "a fact"]);
+    let out = plugmem(&tmp.db(), &["recover", tmp.db().to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(2), "dst == src is a usage error");
+}
