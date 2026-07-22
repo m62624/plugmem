@@ -315,11 +315,19 @@ measures the same workload.
 
 ## Capacity — what weighs what
 
-The writer holds the whole database **resident** (flat arenas mutated in
-place, snapshotted on demand), so on a 64-bit host the practical ceiling
-is **RAM**, not addressing. Below that, each structure tops out at the
-width of its own internal index. Every byte cost here is fixed by the
-`Slot` definitions in `model.rs` and the pool strides — not estimates:
+How much is **resident** depends on the open. Through an owned `Storage`
+(the in-RAM `MemStorage`, or a wasm host that owns the bytes) the whole
+database is held resident. Through the native host's memory-mapped overlay
+it is **not**: the mapped pages are reclaimable, and even a rebuild
+(`maintain`/`recover`) streams the two big pools through scratch, so peak
+RAM tracks the record count, not the image size (see
+[`plugmem-host`](https://docs.rs/plugmem-host/latest) and `specs/16 §9`).
+The sizes below are the **owned-resident** case — the worst case; an overlay
+open residents far less.
+
+Either way, each structure tops out at the width of its own internal index.
+Every byte cost here is fixed by the `Slot` definitions in `model.rs` and the
+pool strides — not estimates:
 
 | Structure | Holds | Per unit | Indexed by | Ceiling |
 |---|---|---|---|---|
@@ -343,9 +351,10 @@ billion), but two softer walls arrive first:
 - **`texts` 4 GiB** — the sum of every fact's text plus entity names.
   At ~200 B/fact that is **~21 M facts** of text; at ~120 B, ~36 M.
   Usually the first hard wall for a text-heavy memory.
-- **RAM**, since the writer is fully resident — and with vectors this
-  binds first: d768 embeddings are 872 B each, so 10 M vectors alone are
-  **~8.7 GiB**.
+- **RAM** on the owned-resident path — and with vectors this binds first:
+  d768 embeddings are 872 B each, so 10 M vectors alone are **~8.7 GiB**.
+  A native overlay open sidesteps this (mmap pages are reclaimable); it is
+  the ceiling for the owned/wasm path.
 
 Worked sizes (native / wasm64; no vectors unless noted):
 
