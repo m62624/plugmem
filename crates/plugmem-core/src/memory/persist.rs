@@ -26,10 +26,12 @@ use crate::error::Error;
 use crate::id::{FactId, NONE_U32};
 use crate::index::IdListIndex;
 use crate::index::bm25::Bm25Index;
+use crate::index::hnsw::HnswGraph;
 use crate::index::postings::PostingStore;
 use crate::index::varint::decode_u32;
 use crate::index::vecpool::VecPool;
 use crate::memory::FactFault;
+use crate::model::{EntityRecord, FactAux, FactRecord, TemporalSlot};
 use crate::snapshot::{Prefix, SectionMeta, Snapshot, SnapshotSink, build_prefix, pad_len};
 use xxhash_rust::xxh3::Xxh3;
 
@@ -86,9 +88,32 @@ mod kind {
 /// Byte length of the engine-state section.
 const STATE_LEN: usize = 24;
 
-/// The callback [`Memory::emit_sections`] drives once per snapshot section:
-/// the section `kind` and the byte pieces whose concatenation is its body.
+/// The callback [`Memory::emit_sections_from`] drives once per snapshot
+/// section: the section `kind` and the byte pieces whose concatenation is its
+/// body.
 type SectionFn<'f> = dyn FnMut(u16, &[&[u8]]) -> Result<(), Error> + 'f;
+
+/// The engine structures a snapshot emit reads for the *rebuildable* sections —
+/// everything `maintain` recompacts. Bundled behind references so one emit path
+/// serves both the live engine (`self`'s own structures, [`Memory::sections`])
+/// and the disk-first rebuild (freshly rebuilt metadata + graph, with the two
+/// big pools borrowing a `Scratch`, specs/16 §9). The ride-through structures —
+/// the interner, the by-name index, the edges, and the id counters — are read
+/// straight from `self` in [`Memory::emit_sections_from`]; `maintain` never
+/// touches them, so they are the same on both paths.
+pub(crate) struct Sections<'r, 'a> {
+    pub(crate) facts: &'r Arena<'a, FactRecord>,
+    pub(crate) fact_aux: &'r Arena<'a, FactAux>,
+    pub(crate) entities: &'r Arena<'a, EntityRecord>,
+    pub(crate) temporal: &'r Arena<'a, TemporalSlot>,
+    pub(crate) texts: &'r BlobHeap<'a>,
+    pub(crate) tag_lists: &'r ChunkPool<'a>,
+    pub(crate) bm25: &'r Bm25Index<'a>,
+    pub(crate) tags_idx: &'r IdListIndex<'a>,
+    pub(crate) entity_facts: &'r IdListIndex<'a>,
+    pub(crate) vecs: &'r VecPool<'a>,
+    pub(crate) hnsw: &'r HnswGraph<'a>,
+}
 
 /// Dumps an arena as its `(meta, pool)` section pair.
 fn arena_sections<T: Slot>(a: &Arena<'_, T>) -> (Vec<u8>, Vec<u8>) {
@@ -286,29 +311,41 @@ impl<'a> Bm25Index<'a> {
 }
 
 impl<'a> Memory<'a> {
+    /// A [`Sections`] view over this engine's own structures — the source for
+    /// an ordinary snapshot.
+    fn sections(&self) -> Sections<'_, 'a> {
+        Sections {
+            facts: &self.facts,
+            fact_aux: &self.fact_aux,
+            entities: &self.entities,
+            temporal: &self.temporal,
+            texts: &self.texts,
+            tag_lists: &self.tag_lists,
+            bm25: &self.bm25,
+            tags_idx: &self.tags_idx,
+            entity_facts: &self.entity_facts,
+            vecs: &self.vecs,
+            hnsw: &self.hnsw,
+        }
+    }
+
     /// Emits every snapshot section in canonical order, handing each to `f`
     /// as its `kind` and one-or-more byte pieces (concatenated = the section
-    /// body). Most sections are a single owned buffer produced on the fly and
-    /// dropped after `f` returns; the dominant vector pool is handed as its
-    /// two borrowed pieces (`base`, `tail`) with no owned copy. Called twice
-    /// by [`Memory::write_snapshot_to`] (size/hash pass, then write pass), so
-    /// it must be deterministic and side-effect free.
-    fn emit_sections(&self, f: &mut SectionFn<'_>) -> Result<(), Error> {
+    /// body). The rebuildable sections come from `s`; the ride-through ones
+    /// (by-name, edges, interner, id counters — untouched by `maintain`) come
+    /// from `self`. Most sections are a single owned buffer produced on the fly
+    /// and dropped after `f` returns; the dominant vector pool is handed as its
+    /// two borrowed pieces (`base`, `tail`) with no owned copy. Called twice by
+    /// the writer (size/hash pass, then write pass), so it must be deterministic
+    /// and side-effect free.
+    fn emit_sections_from(&self, s: &Sections<'_, '_>, f: &mut SectionFn<'_>) -> Result<(), Error> {
         for (mk, pk, arena) in [
-            (
-                kind::FACTS_META,
-                kind::FACTS_POOL,
-                arena_sections(&self.facts),
-            ),
-            (
-                kind::AUX_META,
-                kind::AUX_POOL,
-                arena_sections(&self.fact_aux),
-            ),
+            (kind::FACTS_META, kind::FACTS_POOL, arena_sections(s.facts)),
+            (kind::AUX_META, kind::AUX_POOL, arena_sections(s.fact_aux)),
             (
                 kind::ENTITIES_META,
                 kind::ENTITIES_POOL,
-                arena_sections(&self.entities),
+                arena_sections(s.entities),
             ),
             (
                 kind::BY_NAME_META,
@@ -328,7 +365,7 @@ impl<'a> Memory<'a> {
             (
                 kind::TEMPORAL_META,
                 kind::TEMPORAL_POOL,
-                arena_sections(&self.temporal),
+                arena_sections(s.temporal),
             ),
         ] {
             let (m, p) = arena;
@@ -336,8 +373,8 @@ impl<'a> Memory<'a> {
             f(pk, &[&p])?;
         }
         let (mut i, mut p) = (Vec::new(), Vec::new());
-        self.texts.dump_index(&mut i);
-        self.texts.dump_pool(&mut p);
+        s.texts.dump_index(&mut i);
+        s.texts.dump_pool(&mut p);
         f(kind::TEXTS_INDEX, &[&i])?;
         f(kind::TEXTS_POOL, &[&p])?;
         let (mut i, mut p, mut t) = (Vec::new(), Vec::new(), Vec::new());
@@ -348,19 +385,19 @@ impl<'a> Memory<'a> {
         f(kind::TERMS_POOL, &[&p])?;
         f(kind::TERMS_TABLE, &[&t])?;
         let (mut m, mut p) = (Vec::new(), Vec::new());
-        self.tag_lists.dump_meta(&mut m);
-        self.tag_lists.dump_pool(&mut p);
+        s.tag_lists.dump_meta(&mut m);
+        s.tag_lists.dump_pool(&mut p);
         f(kind::TAG_LISTS_META, &[&m])?;
         f(kind::TAG_LISTS_POOL, &[&p])?;
-        for (k, bytes) in self.bm25.dump_pairs() {
+        for (k, bytes) in s.bm25.dump_pairs() {
             f(k, &[&bytes])?;
         }
-        let [hm, hp, cm, cp] = self.tags_idx.dump_sections();
+        let [hm, hp, cm, cp] = s.tags_idx.dump_sections();
         f(kind::TAGS_HANDLES_META, &[&hm])?;
         f(kind::TAGS_HANDLES_POOL, &[&hp])?;
         f(kind::TAGS_CHUNKS_META, &[&cm])?;
         f(kind::TAGS_CHUNKS_POOL, &[&cp])?;
-        let [hm, hp, cm, cp] = self.entity_facts.dump_sections();
+        let [hm, hp, cm, cp] = s.entity_facts.dump_sections();
         f(kind::ENTFACTS_HANDLES_META, &[&hm])?;
         f(kind::ENTFACTS_HANDLES_POOL, &[&hp])?;
         f(kind::ENTFACTS_CHUNKS_META, &[&cm])?;
@@ -368,17 +405,17 @@ impl<'a> Memory<'a> {
         let mut state = Vec::with_capacity(STATE_LEN);
         state.extend_from_slice(&self.next_fact.to_le_bytes());
         state.extend_from_slice(&self.next_entity.to_le_bytes());
-        state.extend_from_slice(&self.bm25.docs().to_le_bytes());
-        state.extend_from_slice(&self.bm25.total_len().to_le_bytes());
+        state.extend_from_slice(&s.bm25.docs().to_le_bytes());
+        state.extend_from_slice(&s.bm25.total_len().to_le_bytes());
         f(kind::ENGINE_STATE, &[&state])?;
         // The vector pool is one flat section (empty when dim is 0), streamed
         // as its two borrowed pieces so the dominant pool needs no owned copy.
-        f(kind::VEC_POOL, &self.vecs.pieces())?;
+        f(kind::VEC_POOL, &s.vecs.pieces())?;
         // The HNSW graph: header, flat level-0 blocks, and the upper-level
         // arena + list pool (all empty in the flat regime).
-        f(kind::HNSW_META, &[&self.hnsw.dump_meta()])?;
-        f(kind::HNSW_LEVEL0, &[&self.hnsw.dump_level0()])?;
-        let [um, up, lm, lp] = self.hnsw.dump_upper();
+        f(kind::HNSW_META, &[&s.hnsw.dump_meta()])?;
+        f(kind::HNSW_LEVEL0, &[&s.hnsw.dump_level0()])?;
+        let [um, up, lm, lp] = s.hnsw.dump_upper();
         f(kind::HNSW_UPPER_META, &[&um])?;
         f(kind::HNSW_UPPER_POOL, &[&up])?;
         f(kind::HNSW_LISTS_META, &[&lm])?;
@@ -397,8 +434,19 @@ impl<'a> Memory<'a> {
     /// # Errors
     ///
     /// Propagates whatever `sink` reports (e.g. an I/O error from a file sink).
-    pub fn write_snapshot_to(
+    pub fn write_snapshot_to(&self, created_at: u64, sink: impl SnapshotSink) -> Result<(), Error> {
+        self.write_snapshot_with(&self.sections(), created_at, sink)
+    }
+
+    /// The snapshot writer over an explicit [`Sections`] source — the shared
+    /// core of [`Memory::write_snapshot_to`] (which passes `self`'s own
+    /// sections) and the disk-first rebuild (which passes freshly rebuilt
+    /// metadata with the big pools borrowing a `Scratch`, specs/16 §9). Since
+    /// both drive the *same* emit, the disk-first output is byte-identical to a
+    /// snapshot taken after an in-RAM `maintain`.
+    pub(crate) fn write_snapshot_with(
         &self,
+        s: &Sections<'_, '_>,
         created_at: u64,
         mut sink: impl SnapshotSink,
     ) -> Result<(), Error> {
@@ -412,7 +460,7 @@ impl<'a> Memory<'a> {
 
         // Pass 1: (kind, len, hash) for every section — small and bounded.
         let mut metas: Vec<SectionMeta> = Vec::new();
-        self.emit_sections(&mut |kind, pieces| {
+        self.emit_sections_from(s, &mut |kind, pieces| {
             let mut h = Xxh3::new();
             let mut len = 0u64;
             for p in pieces {
@@ -445,7 +493,7 @@ impl<'a> Memory<'a> {
         // Pass 2: section bodies + alignment padding, into sink and hash.
         let zero = [0u8; 64]; // ALIGN — padding is always shorter than this.
         let mut idx = 0usize;
-        self.emit_sections(&mut |_, pieces| {
+        self.emit_sections_from(s, &mut |_, pieces| {
             for p in pieces {
                 sink.write(p)?;
                 file_hash.update(p);

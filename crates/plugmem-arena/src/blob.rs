@@ -317,6 +317,98 @@ impl<'a> BlobHeap<'a> {
     }
 }
 
+/// The **index side** of a [`BlobHeap`], built without holding the pool.
+///
+/// A [`BlobHeap`] keeps two things: the concatenated blob bytes (the pool) and
+/// a per-blob length table (the index). When the pool is streamed somewhere
+/// else — a file, a staging area — and never held in RAM, this builder tracks
+/// just the index: [`push_len`](BlobHeapBuilder::push_len) records one blob of a
+/// given length (validating exactly as [`BlobHeap::push`] would) and hands back
+/// its [`BlobId`], and [`dump_index`](BlobHeapBuilder::dump_index) emits the
+/// section **byte-identically** to [`BlobHeap::dump_index`]. Pair its index with
+/// the separately-streamed pool bytes and [`BlobHeap::load_borrowed`]
+/// reconstructs the exact same heap.
+///
+/// It is flat and allocation-lean — one `u32` per blob — so the index of a
+/// multi-gigabyte heap stays small while the pool lives on disk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlobHeapBuilder {
+    /// Per-blob length, in push order — the whole state of the index.
+    lens: Vec<u32>,
+    /// Running total of the pool the lengths describe.
+    pool_len: usize,
+    cfg: BlobHeapCfg,
+}
+
+impl BlobHeapBuilder {
+    /// An empty index builder for a pool with the given config.
+    pub const fn new(cfg: BlobHeapCfg) -> Self {
+        Self {
+            lens: Vec::new(),
+            pool_len: 0,
+            cfg,
+        }
+    }
+
+    /// Records a blob of `len` bytes and returns its id — the streaming
+    /// counterpart of [`BlobHeap::push`], validating identically so a builder
+    /// and a heap fed the same lengths accept and reject in lockstep.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::BlobTooLarge`] if `len` exceeds [`BlobHeapCfg::max_blob`];
+    /// - [`Error::CapacityExceeded`] if the pool would grow past
+    ///   [`BlobHeapCfg::max_bytes`] or the inherent 4 GiB `u32` ceiling, or if
+    ///   the blob count would reach `u32::MAX`.
+    pub fn push_len(&mut self, len: usize) -> Result<BlobId, Error> {
+        if len > self.cfg.max_blob {
+            return Err(Error::BlobTooLarge {
+                len,
+                max_blob: self.cfg.max_blob,
+            });
+        }
+        let capacity_exceeded = Error::CapacityExceeded {
+            max_bytes: self.cfg.max_bytes,
+        };
+        let end = self.pool_len.checked_add(len).ok_or(capacity_exceeded)?;
+        if end > self.cfg.max_bytes || end > u32::MAX as usize {
+            return Err(capacity_exceeded);
+        }
+        let id = u32::try_from(self.lens.len())
+            .ok()
+            .filter(|&i| i != u32::MAX)
+            .ok_or(capacity_exceeded)?;
+        self.lens.push(len as u32);
+        self.pool_len = end;
+        Ok(BlobId(id))
+    }
+
+    /// Number of blobs recorded.
+    pub fn len(&self) -> usize {
+        self.lens.len()
+    }
+
+    /// `true` when no blob has been recorded.
+    pub fn is_empty(&self) -> bool {
+        self.lens.is_empty()
+    }
+
+    /// Total bytes of the pool the recorded lengths describe.
+    pub fn pool_bytes(&self) -> usize {
+        self.pool_len
+    }
+
+    /// Appends the index section — `[blobs u32]` then one `len u32` per blob —
+    /// byte-identically to [`BlobHeap::dump_index`].
+    pub fn dump_index(&self, out: &mut Vec<u8>) {
+        out.reserve(INDEX_HEADER + self.lens.len() * LEN_BYTES);
+        out.extend_from_slice(&(self.lens.len() as u32).to_le_bytes());
+        for &len in &self.lens {
+            out.extend_from_slice(&len.to_le_bytes());
+        }
+    }
+}
+
 /// Two heaps are equal when they hold the same blobs — compared over the
 /// **logical** pool, so an owned heap and an overlay heap (borrowed base +
 /// tail) built from the same pushes compare equal despite the different

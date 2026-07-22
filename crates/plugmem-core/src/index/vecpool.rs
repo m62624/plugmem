@@ -126,9 +126,10 @@ impl<'a> VecPool<'a> {
 
     /// The `stride` bytes of slot `i`, dispatched to `base` or `tail`. The
     /// base is a whole number of slots (framed on load), so slot `i` never
-    /// straddles the boundary.
+    /// straddles the boundary. `pub(crate)` so the disk-first rebuild can stream
+    /// a survivor slot straight into a `Scratch` (specs/16 §9).
     #[inline]
-    fn slot_bytes(&self, i: usize) -> &[u8] {
+    pub(crate) fn slot_bytes(&self, i: usize) -> &[u8] {
         let stride = self.stride();
         let start = i * stride;
         let base_len = self.base.len();

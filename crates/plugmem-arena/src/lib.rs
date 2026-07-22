@@ -107,7 +107,7 @@ mod paged;
 mod slot;
 
 pub use arena::{Arena, ArenaCfg, Iter, PAGE_BYTES, ShardMode};
-pub use blob::{BlobHeap, BlobHeapCfg, BlobId};
+pub use blob::{BlobHeap, BlobHeapBuilder, BlobHeapCfg, BlobId};
 pub use chunk::{CHUNK_BYTES, CHUNK_PAYLOAD, ChunkIter, ChunkPool, ChunkPoolCfg, ListHandle};
 pub use error::Error;
 pub use interner::{Interner, TermId};

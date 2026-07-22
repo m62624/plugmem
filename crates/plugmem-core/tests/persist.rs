@@ -3,7 +3,8 @@
 //! and corruption rejection.
 
 use plugmem_core::{
-    Config, Error, FactId, LinkInput, MemStorage, Memory, RecallQuery, RememberInput, Storage,
+    Config, Error, FactId, LinkInput, MemScratch, MemStorage, Memory, RecallQuery, RememberInput,
+    Scratch, Storage,
 };
 
 fn cfg() -> Config {
@@ -474,4 +475,125 @@ fn write_snapshot_to_streams_and_matches_snapshot_bytes() {
         "no write should span the whole image (largest {largest}, file {})",
         sink.out.len()
     );
+}
+
+/// Milestone H (specs/16 §9): the disk-first rebuild must produce a snapshot
+/// **byte-identical** to one taken after an in-RAM `maintain` — the load-bearing
+/// invariant that lets a big database be maintained/recovered on either path.
+/// `MemScratch` drives the streaming path deterministically, with no files.
+fn vector_corpus(mem: &mut Memory<'_>, store: &mut MemStorage, n: u64) {
+    for i in 0..n {
+        let v: Vec<f32> = (0..8).map(|k| ((i * 7 + k) % 13) as f32 / 13.0).collect();
+        mem.remember(
+            store,
+            RememberInput {
+                entity: Some(["user", "plugmem", "кот"][(i % 3) as usize]),
+                tags: if i % 2 == 0 { &["pref"] } else { &[] },
+                vector: Some(&v),
+                ..RememberInput::text((i + 1) * DAY, "факт about работа and tokio vectors")
+            },
+        )
+        .unwrap();
+    }
+}
+
+/// Runs a disk-first snapshot and an in-RAM `maintain`+snapshot from the same
+/// state and asserts the bytes match. Returns the purge count.
+fn assert_disk_first_matches(mem: &mut Memory<'_>, store: &mut MemStorage, now: u64) -> usize {
+    // Disk-first is read-only over `mem`: stream the big pools through scratch.
+    let mut disk = Vec::new();
+    let (mut ts, mut vs) = (MemScratch::new(), MemScratch::new());
+    let purged = mem
+        .snapshot_disk_first(now, &mut ts, &mut vs, &mut disk)
+        .unwrap();
+    // In-RAM: maintain (mutates `mem`) then snapshot.
+    mem.maintain(store, now).unwrap();
+    let in_ram = mem.snapshot_bytes(now);
+    assert_eq!(
+        disk, in_ram,
+        "disk-first output must be byte-identical to in-RAM"
+    );
+    purged
+}
+
+#[test]
+fn disk_first_maintain_is_byte_identical_to_in_memory() {
+    let mut c = cfg();
+    c.dim = 8;
+    c.flat_to_hnsw = 16; // low, so 56 survivors actually build the HNSW graph
+
+    let mut mem = Memory::new(c.clone()).unwrap();
+    let mut store = MemStorage::new();
+    vector_corpus(&mut mem, &mut store, 60);
+    // Tombstones (to purge) and a revision (a closed record, kept).
+    for id in [5u32, 13, 27, 41] {
+        mem.forget(&mut store, 100 * DAY, FactId(id)).unwrap();
+    }
+    mem.revise(
+        &mut store,
+        FactId(9),
+        RememberInput::text(101 * DAY, "revised"),
+    )
+    .unwrap();
+
+    // Round 1: the HNSW graph is built from scratch on both paths.
+    let purged = assert_disk_first_matches(&mut mem, &mut store, 200 * DAY);
+    assert_eq!(purged, 4, "the four tombstones were purged");
+
+    // The disk-first image is a valid, loadable snapshot.
+    let mut disk = Vec::new();
+    let (mut ts, mut vs) = (MemScratch::new(), MemScratch::new());
+    mem.snapshot_disk_first(201 * DAY, &mut ts, &mut vs, &mut disk)
+        .unwrap();
+    let (reloaded, _) = Memory::from_bytes(Some(&disk), &[], c).unwrap();
+    assert_eq!(reloaded.stats().facts, mem.stats().facts);
+
+    // Round 2: the graph now exists, so the rebuild takes the carry-over
+    // (remapped) path — still byte-identical.
+    mem.forget(&mut store, 300 * DAY, FactId(20)).unwrap();
+    mem.forget(&mut store, 300 * DAY, FactId(33)).unwrap();
+    let purged = assert_disk_first_matches(&mut mem, &mut store, 400 * DAY);
+    assert_eq!(purged, 2, "the two new tombstones were purged");
+}
+
+/// A `Scratch` that fails once a byte budget is exhausted — proves the
+/// disk-first rebuild surfaces a staging failure as a typed error instead of
+/// panicking or writing a truncated image.
+struct FailingScratch {
+    budget: usize,
+}
+
+impl Scratch for FailingScratch {
+    type Error = &'static str;
+
+    fn write(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
+        self.budget = self.budget.checked_sub(bytes.len()).ok_or("scratch full")?;
+        Ok(())
+    }
+
+    fn len(&self) -> u64 {
+        0
+    }
+
+    fn freeze(&mut self) -> Result<&[u8], &'static str> {
+        Ok(&[])
+    }
+}
+
+#[test]
+fn disk_first_propagates_a_scratch_error() {
+    let mut c = cfg();
+    c.dim = 8;
+    let mut mem = Memory::new(c).unwrap();
+    let mut store = MemStorage::new();
+    vector_corpus(&mut mem, &mut store, 5);
+
+    // The text scratch runs out mid-rebuild: the error propagates as Storage.
+    let mut text = FailingScratch { budget: 10 };
+    let mut vec = MemScratch::new();
+    let mut out = Vec::new();
+    assert!(matches!(
+        mem.snapshot_disk_first(1, &mut text, &mut vec, &mut out),
+        Err(Error::Storage(_))
+    ));
 }

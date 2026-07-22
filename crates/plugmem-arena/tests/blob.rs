@@ -1,7 +1,7 @@
 //! Boundary tests for `BlobHeap` (specs/01 test plan) plus a property model
 //! against `Vec<Vec<u8>>`.
 
-use plugmem_arena::{BlobHeap, BlobHeapCfg, BlobId, Error};
+use plugmem_arena::{BlobHeap, BlobHeapBuilder, BlobHeapCfg, BlobId, Error};
 use proptest::prelude::*;
 
 #[test]
@@ -121,6 +121,64 @@ fn cfg_default_and_builders() {
     let cfg = BlobHeapCfg::new().with_max_bytes(100).with_max_blob(10);
     assert_eq!(cfg.max_bytes, 100);
     assert_eq!(cfg.max_blob, 10);
+}
+
+#[test]
+fn builder_index_matches_a_heap_byte_for_byte() {
+    let blobs: [&[u8]; 4] = [b"alpha", b"", b"a longer blob here", b"z"];
+
+    // A heap built by pushing the bytes...
+    let mut heap = BlobHeap::new(BlobHeapCfg::new());
+    // ...and a builder fed only the lengths must agree on ids and on the index
+    // section byte for byte (the pool is streamed elsewhere).
+    let mut builder = BlobHeapBuilder::new(BlobHeapCfg::new());
+    for b in blobs {
+        assert_eq!(heap.push(b).unwrap(), builder.push_len(b.len()).unwrap());
+    }
+    assert_eq!(builder.len(), heap.len());
+    assert_eq!(builder.pool_bytes(), heap.pool_bytes());
+
+    let mut heap_index = Vec::new();
+    heap.dump_index(&mut heap_index);
+    let mut builder_index = Vec::new();
+    builder.dump_index(&mut builder_index);
+    assert_eq!(builder_index, heap_index);
+
+    // Pairing the builder's index with the pool the heap dumped reloads the
+    // exact same heap (the disk-first path: index in RAM, pool on disk).
+    let mut pool = Vec::new();
+    heap.dump_pool(&mut pool);
+    let reloaded = BlobHeap::load_borrowed(BlobHeapCfg::new(), &builder_index, &pool).unwrap();
+    assert_eq!(reloaded, heap);
+}
+
+#[test]
+fn builder_validates_identically_to_push() {
+    // max_blob: a too-long blob is rejected the same way by both.
+    let cfg = BlobHeapCfg::new().with_max_blob(4);
+    assert!(matches!(
+        BlobHeapBuilder::new(cfg).push_len(5),
+        Err(Error::BlobTooLarge { .. })
+    ));
+    assert!(matches!(
+        BlobHeap::new(cfg).push(b"12345"),
+        Err(Error::BlobTooLarge { .. })
+    ));
+
+    // max_bytes: the pool ceiling trips both at the same point.
+    let cfg = BlobHeapCfg::new().with_max_bytes(6);
+    let mut builder = BlobHeapBuilder::new(cfg);
+    builder.push_len(4).unwrap();
+    assert!(matches!(
+        builder.push_len(3),
+        Err(Error::CapacityExceeded { .. })
+    ));
+    let mut heap = BlobHeap::new(cfg);
+    heap.push(b"1234").unwrap();
+    assert!(matches!(
+        heap.push(b"567"),
+        Err(Error::CapacityExceeded { .. })
+    ));
 }
 
 /// Dumps a heap's two sections into owned buffers (the on-disk form a

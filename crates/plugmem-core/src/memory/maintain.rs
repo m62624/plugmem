@@ -36,7 +36,8 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use plugmem_arena::{
-    Arena, ArenaCfg, BlobHeap, BlobHeapCfg, ChunkPool, ChunkPoolCfg, ListHandle, ShardMode,
+    Arena, ArenaCfg, BlobHeap, BlobHeapBuilder, BlobHeapCfg, BlobId, ChunkPool, ChunkPoolCfg,
+    ListHandle, ShardMode,
 };
 
 use crate::error::Error;
@@ -46,11 +47,86 @@ use crate::index::bm25::Bm25Index;
 use crate::index::hnsw::{HnswGraph, HnswScratch};
 use crate::index::vecpool::VecPool;
 use crate::journal::Op;
+use crate::memory::persist::Sections;
 use crate::model::{EntityRecord, FactAux, FactRecord, TemporalSlot};
-use crate::storage::Storage;
+use crate::snapshot::SnapshotSink;
+use crate::storage::{Scratch, Storage};
 use crate::tokenizer::Tokenizer;
 
 use super::Memory;
+
+/// Maps a [`Scratch`] error into the engine's storage-error variant.
+fn scratch_err<E: core::fmt::Debug>(e: E) -> Error {
+    Error::Storage(format!("{e:?}"))
+}
+
+/// Sink for the two dominant pools (text, vectors) during a rebuild. The in-RAM
+/// path ([`OwnedPools`]) builds them owned; the disk-first path
+/// ([`StreamPools`]) streams them into a [`Scratch`] and never holds them
+/// (specs/16 §9). Everything else a rebuild produces is metadata — small enough
+/// (∝ record count) to build in RAM on either path.
+trait PoolSink {
+    /// Records a text blob, returning its new dense id.
+    fn push_text(&mut self, bytes: &[u8]) -> Result<BlobId, Error>;
+    /// Copies vector slot `slot` of `src`, returning its new dense slot.
+    fn push_vector(&mut self, src: &VecPool<'_>, slot: u32) -> Result<u32, Error>;
+}
+
+/// In-RAM pools: the classic owned rebuild.
+struct OwnedPools {
+    texts: BlobHeap<'static>,
+    vecs: VecPool<'static>,
+}
+
+impl PoolSink for OwnedPools {
+    fn push_text(&mut self, bytes: &[u8]) -> Result<BlobId, Error> {
+        Ok(self.texts.push(bytes)?)
+    }
+
+    fn push_vector(&mut self, src: &VecPool<'_>, slot: u32) -> Result<u32, Error> {
+        Ok(self.vecs.copy_slot(src, slot))
+    }
+}
+
+/// Disk-first pools: text bytes and vector slots stream into two `Scratch`es;
+/// only the flat text index ([`BlobHeapBuilder`]) and the slot counter stay in
+/// RAM (both ∝ record count).
+struct StreamPools<'s, T: Scratch, V: Scratch> {
+    text_scratch: &'s mut T,
+    text_index: BlobHeapBuilder,
+    vec_scratch: &'s mut V,
+    vec_count: u32,
+}
+
+impl<T: Scratch, V: Scratch> PoolSink for StreamPools<'_, T, V> {
+    fn push_text(&mut self, bytes: &[u8]) -> Result<BlobId, Error> {
+        self.text_scratch.write(bytes).map_err(scratch_err)?;
+        Ok(self.text_index.push_len(bytes.len())?)
+    }
+
+    fn push_vector(&mut self, src: &VecPool<'_>, slot: u32) -> Result<u32, Error> {
+        self.vec_scratch
+            .write(src.slot_bytes(slot as usize))
+            .map_err(scratch_err)?;
+        let new = self.vec_count;
+        self.vec_count += 1;
+        Ok(new)
+    }
+}
+
+/// The rebuildable metadata (everything but the two big pools and the graph):
+/// produced by [`Memory::rebuild_parts`] and shared by the in-RAM and
+/// disk-first paths.
+struct RebuildMeta {
+    facts: Arena<'static, FactRecord>,
+    fact_aux: Arena<'static, FactAux>,
+    entities: Arena<'static, EntityRecord>,
+    temporal: Arena<'static, TemporalSlot>,
+    tag_lists: ChunkPool<'static>,
+    bm25: Bm25Index<'static>,
+    tags_idx: IdListIndex<'static>,
+    entity_facts: IdListIndex<'static>,
+}
 
 /// Report of a `maintain` pass (specs/05).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -144,15 +220,49 @@ impl Memory<'_> {
     /// of purged tombstones.
     fn rebuild(&self) -> Result<(Rebuilt, usize), Error> {
         let cfg = &self.cfg;
+        let blob = BlobHeapCfg::new()
+            .with_max_bytes(cfg.max_bytes)
+            .with_max_blob(cfg.max_blob);
+        let mut pools = OwnedPools {
+            texts: BlobHeap::new(blob),
+            vecs: VecPool::new(cfg.dim, cfg.max_bytes),
+        };
+        let (m, vec_map, purged) = self.rebuild_parts(&mut pools)?;
+        let hnsw = self.rebuild_graph(&vec_map, &pools.vecs)?;
+        Ok((
+            Rebuilt {
+                facts: m.facts,
+                entities: m.entities,
+                fact_aux: m.fact_aux,
+                texts: pools.texts,
+                tag_lists: m.tag_lists,
+                bm25: m.bm25,
+                tags_idx: m.tags_idx,
+                entity_facts: m.entity_facts,
+                temporal: m.temporal,
+                vecs: pools.vecs,
+                hnsw,
+            },
+            purged,
+        ))
+    }
+
+    /// Builds the compacted metadata and pushes the two big pools through
+    /// `pools` — the walk shared by the in-RAM rebuild ([`OwnedPools`]) and the
+    /// disk-first one ([`StreamPools`]). Ids are **not** renumbered (specs/02);
+    /// only text-blob ids and vector slots are re-densified, in fact-id order,
+    /// so both paths produce byte-identical output. Returns the metadata, the
+    /// old→new vector-slot map (for the graph) and the purge count.
+    fn rebuild_parts<P: PoolSink>(
+        &self,
+        pools: &mut P,
+    ) -> Result<(RebuildMeta, alloc::vec::Vec<u32>, usize), Error> {
+        let cfg = &self.cfg;
         let uni =
             |shards: usize| ArenaCfg::new(shards, ShardMode::Uniform).with_max_bytes(cfg.max_bytes);
         let ord =
             |shards: usize| ArenaCfg::new(shards, ShardMode::Ordered).with_max_bytes(cfg.max_bytes);
-        let blob = BlobHeapCfg::new()
-            .with_max_bytes(cfg.max_bytes)
-            .with_max_blob(cfg.max_blob);
 
-        let mut texts = BlobHeap::new(blob);
         let mut entities = Arena::new(uni(cfg.shards_entities))?;
         let mut facts = Arena::new(uni(cfg.shards_facts))?;
         let mut fact_aux = Arena::new(uni(cfg.shards_facts))?;
@@ -161,16 +271,15 @@ impl Memory<'_> {
         let mut tags_idx = IdListIndex::new(cfg.shards_postings, cfg.max_bytes)?;
         let mut entity_facts = IdListIndex::new(cfg.shards_entities, cfg.max_bytes)?;
         let mut temporal = Arena::new(ord(cfg.shards_temporal))?;
-        let mut vecs = VecPool::new(cfg.dim, cfg.max_bytes);
 
-        // Entities first (id order), each with its name copied into the new
-        // heap. Entities are never purged, so a gap is corruption.
+        // Entities first (id order), each with its name pushed into the new
+        // text pool. Entities are never purged, so a gap is corruption.
         for eid in 0..self.next_entity {
             let rec = self
                 .entities
                 .get(&eid.to_be_bytes())
                 .ok_or(Error::Corrupt("maintain: entity id gap"))?;
-            let name_id = texts.push(self.texts.get(rec.name))?;
+            let name_id = pools.push_text(self.texts.get(rec.name))?;
             entities.insert(&EntityRecord {
                 name: name_id,
                 ..rec
@@ -207,9 +316,9 @@ impl Memory<'_> {
                 continue;
             }
 
-            // Live fact: copy its text and re-derive every index.
+            // Live fact: push its text and re-derive every index.
             let text_bytes = self.texts.get(rec.text);
-            let text_id = texts.push(text_bytes)?;
+            let text_id = pools.push_text(text_bytes)?;
             let text = core::str::from_utf8(text_bytes)
                 .map_err(|_| Error::Corrupt("maintain: fact text is not UTF-8"))?;
 
@@ -253,9 +362,9 @@ impl Memory<'_> {
                 fact: id,
             })?;
 
-            // Vector: copy the already-quantized slot verbatim.
+            // Vector: push the already-quantized slot verbatim.
             let vector = if rec.has_vector() {
-                let new_slot = vecs.copy_slot(&self.vecs, rec.vector);
+                let new_slot = pools.push_vector(&self.vecs, rec.vector)?;
                 vec_map[rec.vector as usize] = new_slot;
                 new_slot
             } else {
@@ -268,24 +377,85 @@ impl Memory<'_> {
             })?;
         }
 
-        let hnsw = self.rebuild_graph(&vec_map, &vecs)?;
-
         Ok((
-            Rebuilt {
+            RebuildMeta {
                 facts,
-                entities,
                 fact_aux,
-                texts,
+                entities,
+                temporal,
                 tag_lists,
                 bm25,
                 tags_idx,
                 entity_facts,
-                temporal,
-                vecs,
-                hnsw,
             },
+            vec_map,
             purged,
         ))
+    }
+
+    /// Disk-first compaction (specs/16 §9, milestone H): rebuilds the compacted
+    /// image and writes it to `sink`, streaming the two big pools (text,
+    /// vectors) through `text_scratch`/`vec_scratch` so peak RAM stays ∝ the
+    /// record count (metadata + graph), never ∝ the content size. Byte-identical
+    /// to a snapshot taken after an in-RAM [`Memory::maintain`] — it drives the
+    /// same walk (`rebuild_parts`) and the same emit (`write_snapshot_with`),
+    /// the pools merely borrowing the frozen scratch instead of RAM. Returns the
+    /// purge count.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Corrupt`] for a malformed source, [`Error::Storage`] from a
+    /// scratch or the sink, or a pool ceiling error (a subset never exceeds it).
+    pub fn snapshot_disk_first<T: Scratch, V: Scratch, Sk: SnapshotSink>(
+        &self,
+        created_at: u64,
+        text_scratch: &mut T,
+        vec_scratch: &mut V,
+        sink: Sk,
+    ) -> Result<usize, Error> {
+        let cfg = &self.cfg;
+        let blob = BlobHeapCfg::new()
+            .with_max_bytes(cfg.max_bytes)
+            .with_max_blob(cfg.max_blob);
+        let mut pools = StreamPools {
+            text_scratch,
+            text_index: BlobHeapBuilder::new(blob),
+            vec_scratch,
+            vec_count: 0,
+        };
+        let (m, vec_map, purged) = self.rebuild_parts(&mut pools)?;
+
+        // Freeze the staged pools and borrow them as the two big sections; the
+        // metadata and graph are the only things in RAM.
+        let StreamPools {
+            text_scratch,
+            text_index,
+            vec_scratch,
+            ..
+        } = pools;
+        let mut text_index_bytes = Vec::new();
+        text_index.dump_index(&mut text_index_bytes);
+        let text_pool = text_scratch.freeze().map_err(scratch_err)?;
+        let vec_pool = vec_scratch.freeze().map_err(scratch_err)?;
+        let texts = BlobHeap::load_borrowed(blob, &text_index_bytes, text_pool)?;
+        let vecs = VecPool::from_parts_borrowed(cfg.dim, cfg.max_bytes, vec_pool)?;
+        let hnsw = self.rebuild_graph(&vec_map, &vecs)?;
+
+        let sections = Sections {
+            facts: &m.facts,
+            fact_aux: &m.fact_aux,
+            entities: &m.entities,
+            temporal: &m.temporal,
+            texts: &texts,
+            tag_lists: &m.tag_lists,
+            bm25: &m.bm25,
+            tags_idx: &m.tags_idx,
+            entity_facts: &m.entity_facts,
+            vecs: &vecs,
+            hnsw: &hnsw,
+        };
+        self.write_snapshot_with(&sections, created_at, sink)?;
+        Ok(purged)
     }
 
     /// The vector index's maintenance policy (specs/04 §5 phase 2), all
