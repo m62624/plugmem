@@ -386,19 +386,29 @@ impl Database {
     /// dropping the map **before** the rename keeps the write portable
     /// (a mapped file cannot be renamed over on Windows).
     fn resnapshot(&self, st: &mut State, now: u64) -> Result<(), HostError> {
-        let bytes = st.engine.read(|mem| mem.snapshot_bytes(now));
+        // Stream the image straight to the tmp file — never a full-image Vec
+        // (specs/16 §9). This reads through the live map, so it happens
+        // **before** the map is dropped.
+        {
+            let State { engine, store, .. } = &mut *st;
+            store.stage_snapshot(|sink| {
+                engine
+                    .read(|mem| mem.write_snapshot_to(now, &mut *sink))
+                    .map_err(HostError::from)
+            })?;
+        }
         // Drop the current map before the rename: park a cheap empty engine.
-        // It is replaced by the fresh overlay below — or, if the write fails,
+        // It is replaced by the fresh overlay below — or, if the commit fails,
         // rebuilt from the intact on-disk snapshot + journal.
         st.engine = Engine::Owned(Box::new(Memory::new(self.inner.cfg.clone())?));
         let write = st
             .store
-            .write_snapshot(&bytes)
+            .commit_snapshot()
             .and_then(|()| st.store.clear_journal());
         // Re-open regardless: on success the fresh file, on failure the
         // untouched old file + journal (journal replay is idempotent, so a
         // failed `clear_journal` does not corrupt state). Then surface the
-        // write error, if any.
+        // commit error, if any.
         let (engine, _) = open_engine(&mut st.store, &self.inner.cfg)?;
         st.engine = engine;
         write

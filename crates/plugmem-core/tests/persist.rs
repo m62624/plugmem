@@ -436,3 +436,56 @@ fn db_uuid_is_minted_once_and_gates_opens() {
     kept.maintain(&mut store, 300 * DAY).unwrap();
     assert_eq!(kept.stats().db_uuid, uuid);
 }
+
+/// A sink that records every write so the test can prove the writer streams
+/// section by section (specs/16 §9) instead of assembling one full-image
+/// buffer. Storage lives outside the sink, so the impl is on `&mut`.
+#[derive(Default)]
+struct RecordingSink {
+    out: Vec<u8>,
+    writes: Vec<usize>,
+}
+
+impl plugmem_core::snapshot::SnapshotSink for &mut RecordingSink {
+    fn write(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        self.writes.push(bytes.len());
+        self.out.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn patch(&mut self, at: u64, bytes: &[u8]) -> Result<(), Error> {
+        let at = at as usize;
+        self.out[at..at + bytes.len()].copy_from_slice(bytes);
+        Ok(())
+    }
+}
+
+#[test]
+fn write_snapshot_to_streams_and_matches_snapshot_bytes() {
+    let (mut mem, mut store) = (Memory::new(cfg()).unwrap(), MemStorage::new());
+    workload(&mut mem, &mut store);
+
+    let canonical = mem.snapshot_bytes(999);
+    let mut sink = RecordingSink::default();
+    mem.write_snapshot_to(999, &mut sink).unwrap();
+
+    // Streaming is byte-identical to the materialized path.
+    assert_eq!(
+        sink.out, canonical,
+        "streamed bytes must equal snapshot_bytes"
+    );
+
+    // It streams: many bounded writes, and no single write is the whole image
+    // (that would mean a full-image buffer was assembled).
+    assert!(
+        sink.writes.len() > 40,
+        "expected one write per section body + padding, got {}",
+        sink.writes.len()
+    );
+    let largest = sink.writes.iter().copied().max().unwrap();
+    assert!(
+        largest < sink.out.len(),
+        "no write should span the whole image (largest {largest}, file {})",
+        sink.out.len()
+    );
+}

@@ -28,7 +28,8 @@ use crate::index::bm25::Bm25Index;
 use crate::index::postings::PostingStore;
 use crate::index::varint::decode_u32;
 use crate::index::vecpool::VecPool;
-use crate::snapshot::{Snapshot, SnapshotWriter};
+use crate::snapshot::{Prefix, SectionMeta, Snapshot, SnapshotSink, build_prefix, pad_len};
+use xxhash_rust::xxh3::Xxh3;
 
 use super::Memory;
 
@@ -82,6 +83,10 @@ mod kind {
 
 /// Byte length of the engine-state section.
 const STATE_LEN: usize = 24;
+
+/// The callback [`Memory::emit_sections`] drives once per snapshot section:
+/// the section `kind` and the byte pieces whose concatenation is its body.
+type SectionFn<'f> = dyn FnMut(u16, &[&[u8]]) -> Result<(), Error> + 'f;
 
 /// Dumps an arena as its `(meta, pool)` section pair.
 fn arena_sections<T: Slot>(a: &Arena<'_, T>) -> (Vec<u8>, Vec<u8>) {
@@ -205,16 +210,18 @@ impl<'a, const TF: bool> PostingStore<'a, TF> {
 }
 
 impl<'a> Bm25Index<'a> {
-    fn dump_into(&self, w: &mut SnapshotWriter) -> Result<(), Error> {
+    /// The six BM25 sections as `(kind, bytes)` pairs, in canonical order.
+    fn dump_pairs(&self) -> [(u16, Vec<u8>); 6] {
         let [hm, hp, cm, cp] = self.postings().dump_sections();
-        w.section(kind::BM25_HANDLES_META, hm)?;
-        w.section(kind::BM25_HANDLES_POOL, hp)?;
-        w.section(kind::BM25_CHUNKS_META, cm)?;
-        w.section(kind::BM25_CHUNKS_POOL, cp)?;
         let (dm, dp) = arena_sections(self.doc_len_arena());
-        w.section(kind::BM25_DOCLEN_META, dm)?;
-        w.section(kind::BM25_DOCLEN_POOL, dp)?;
-        Ok(())
+        [
+            (kind::BM25_HANDLES_META, hm),
+            (kind::BM25_HANDLES_POOL, hp),
+            (kind::BM25_CHUNKS_META, cm),
+            (kind::BM25_CHUNKS_POOL, cp),
+            (kind::BM25_DOCLEN_META, dm),
+            (kind::BM25_DOCLEN_POOL, dp),
+        ]
     }
 
     /// Owned load: postings and per-document lengths are copied
@@ -277,85 +284,122 @@ impl<'a> Bm25Index<'a> {
 }
 
 impl<'a> Memory<'a> {
-    /// Serializes the whole engine into snapshot-container bytes.
-    /// Deterministic and canonical: save → load → save is byte-identical.
-    pub fn snapshot_bytes(&self, created_at: u64) -> Vec<u8> {
-        let mut w = SnapshotWriter::new();
-        let mut push = |k: u16, bytes: Vec<u8>| {
-            w.section(k, bytes)
-                .expect("section kinds are unique consts");
-        };
-        let (m, p) = arena_sections(&self.facts);
-        push(kind::FACTS_META, m);
-        push(kind::FACTS_POOL, p);
-        let (m, p) = arena_sections(&self.fact_aux);
-        push(kind::AUX_META, m);
-        push(kind::AUX_POOL, p);
-        let (m, p) = arena_sections(&self.entities);
-        push(kind::ENTITIES_META, m);
-        push(kind::ENTITIES_POOL, p);
-        let (m, p) = arena_sections(&self.by_name);
-        push(kind::BY_NAME_META, m);
-        push(kind::BY_NAME_POOL, p);
-        let (m, p) = arena_sections(&self.edges_out);
-        push(kind::EDGES_OUT_META, m);
-        push(kind::EDGES_OUT_POOL, p);
-        let (m, p) = arena_sections(&self.edges_in);
-        push(kind::EDGES_IN_META, m);
-        push(kind::EDGES_IN_POOL, p);
-        let (m, p) = arena_sections(&self.temporal);
-        push(kind::TEMPORAL_META, m);
-        push(kind::TEMPORAL_POOL, p);
+    /// Emits every snapshot section in canonical order, handing each to `f`
+    /// as its `kind` and one-or-more byte pieces (concatenated = the section
+    /// body). Most sections are a single owned buffer produced on the fly and
+    /// dropped after `f` returns; the dominant vector pool is handed as its
+    /// two borrowed pieces (`base`, `tail`) with no owned copy. Called twice
+    /// by [`Memory::write_snapshot_to`] (size/hash pass, then write pass), so
+    /// it must be deterministic and side-effect free.
+    fn emit_sections(&self, f: &mut SectionFn<'_>) -> Result<(), Error> {
+        for (mk, pk, arena) in [
+            (
+                kind::FACTS_META,
+                kind::FACTS_POOL,
+                arena_sections(&self.facts),
+            ),
+            (
+                kind::AUX_META,
+                kind::AUX_POOL,
+                arena_sections(&self.fact_aux),
+            ),
+            (
+                kind::ENTITIES_META,
+                kind::ENTITIES_POOL,
+                arena_sections(&self.entities),
+            ),
+            (
+                kind::BY_NAME_META,
+                kind::BY_NAME_POOL,
+                arena_sections(&self.by_name),
+            ),
+            (
+                kind::EDGES_OUT_META,
+                kind::EDGES_OUT_POOL,
+                arena_sections(&self.edges_out),
+            ),
+            (
+                kind::EDGES_IN_META,
+                kind::EDGES_IN_POOL,
+                arena_sections(&self.edges_in),
+            ),
+            (
+                kind::TEMPORAL_META,
+                kind::TEMPORAL_POOL,
+                arena_sections(&self.temporal),
+            ),
+        ] {
+            let (m, p) = arena;
+            f(mk, &[&m])?;
+            f(pk, &[&p])?;
+        }
         let (mut i, mut p) = (Vec::new(), Vec::new());
         self.texts.dump_index(&mut i);
         self.texts.dump_pool(&mut p);
-        push(kind::TEXTS_INDEX, i);
-        push(kind::TEXTS_POOL, p);
+        f(kind::TEXTS_INDEX, &[&i])?;
+        f(kind::TEXTS_POOL, &[&p])?;
         let (mut i, mut p, mut t) = (Vec::new(), Vec::new(), Vec::new());
         self.terms.dump_index(&mut i);
         self.terms.dump_pool(&mut p);
         self.terms.dump_table(&mut t);
-        push(kind::TERMS_INDEX, i);
-        push(kind::TERMS_POOL, p);
-        push(kind::TERMS_TABLE, t);
+        f(kind::TERMS_INDEX, &[&i])?;
+        f(kind::TERMS_POOL, &[&p])?;
+        f(kind::TERMS_TABLE, &[&t])?;
         let (mut m, mut p) = (Vec::new(), Vec::new());
         self.tag_lists.dump_meta(&mut m);
         self.tag_lists.dump_pool(&mut p);
-        push(kind::TAG_LISTS_META, m);
-        push(kind::TAG_LISTS_POOL, p);
-        self.bm25.dump_into(&mut w).expect("unique kinds");
+        f(kind::TAG_LISTS_META, &[&m])?;
+        f(kind::TAG_LISTS_POOL, &[&p])?;
+        for (k, bytes) in self.bm25.dump_pairs() {
+            f(k, &[&bytes])?;
+        }
         let [hm, hp, cm, cp] = self.tags_idx.dump_sections();
-        let mut push = |k: u16, bytes: Vec<u8>| {
-            w.section(k, bytes).expect("unique kinds");
-        };
-        push(kind::TAGS_HANDLES_META, hm);
-        push(kind::TAGS_HANDLES_POOL, hp);
-        push(kind::TAGS_CHUNKS_META, cm);
-        push(kind::TAGS_CHUNKS_POOL, cp);
+        f(kind::TAGS_HANDLES_META, &[&hm])?;
+        f(kind::TAGS_HANDLES_POOL, &[&hp])?;
+        f(kind::TAGS_CHUNKS_META, &[&cm])?;
+        f(kind::TAGS_CHUNKS_POOL, &[&cp])?;
         let [hm, hp, cm, cp] = self.entity_facts.dump_sections();
-        push(kind::ENTFACTS_HANDLES_META, hm);
-        push(kind::ENTFACTS_HANDLES_POOL, hp);
-        push(kind::ENTFACTS_CHUNKS_META, cm);
-        push(kind::ENTFACTS_CHUNKS_POOL, cp);
+        f(kind::ENTFACTS_HANDLES_META, &[&hm])?;
+        f(kind::ENTFACTS_HANDLES_POOL, &[&hp])?;
+        f(kind::ENTFACTS_CHUNKS_META, &[&cm])?;
+        f(kind::ENTFACTS_CHUNKS_POOL, &[&cp])?;
         let mut state = Vec::with_capacity(STATE_LEN);
         state.extend_from_slice(&self.next_fact.to_le_bytes());
         state.extend_from_slice(&self.next_entity.to_le_bytes());
         state.extend_from_slice(&self.bm25.docs().to_le_bytes());
         state.extend_from_slice(&self.bm25.total_len().to_le_bytes());
-        push(kind::ENGINE_STATE, state);
-        // The vector pool is one flat section (empty when dim is 0); dim
-        // and stride are derived from the stored config on load.
-        push(kind::VEC_POOL, self.vecs.dump());
-        // The HNSW graph: header, flat level-0 blocks, and the
-        // upper-level arena + list pool (all empty in the flat regime).
-        push(kind::HNSW_META, self.hnsw.dump_meta());
-        push(kind::HNSW_LEVEL0, self.hnsw.dump_level0());
+        f(kind::ENGINE_STATE, &[&state])?;
+        // The vector pool is one flat section (empty when dim is 0), streamed
+        // as its two borrowed pieces so the dominant pool needs no owned copy.
+        f(kind::VEC_POOL, &self.vecs.pieces())?;
+        // The HNSW graph: header, flat level-0 blocks, and the upper-level
+        // arena + list pool (all empty in the flat regime).
+        f(kind::HNSW_META, &[&self.hnsw.dump_meta()])?;
+        f(kind::HNSW_LEVEL0, &[&self.hnsw.dump_level0()])?;
         let [um, up, lm, lp] = self.hnsw.dump_upper();
-        push(kind::HNSW_UPPER_META, um);
-        push(kind::HNSW_UPPER_POOL, up);
-        push(kind::HNSW_LISTS_META, lm);
-        push(kind::HNSW_LISTS_POOL, lp);
+        f(kind::HNSW_UPPER_META, &[&um])?;
+        f(kind::HNSW_UPPER_POOL, &[&up])?;
+        f(kind::HNSW_LISTS_META, &[&lm])?;
+        f(kind::HNSW_LISTS_POOL, &[&lp])?;
+        Ok(())
+    }
 
+    /// Streams the whole engine into snapshot-container bytes through `sink`,
+    /// never materializing the full image (specs/16 §9): a first pass computes
+    /// each section's length and checksum, the header+table prefix is written,
+    /// then a second pass streams the section bodies (the dominant vector pool
+    /// straight from its borrowed pieces) while a running hash accumulates the
+    /// file checksum, patched into the header at the end. Deterministic and
+    /// canonical — byte-identical to [`Memory::snapshot_bytes`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates whatever `sink` reports (e.g. an I/O error from a file sink).
+    pub fn write_snapshot_to(
+        &self,
+        created_at: u64,
+        mut sink: impl SnapshotSink,
+    ) -> Result<(), Error> {
         let mut cfg_bytes = Vec::new();
         self.cfg.encode(&mut cfg_bytes);
         let flags = if self.cfg.dim > 0 {
@@ -363,7 +407,69 @@ impl<'a> Memory<'a> {
         } else {
             0
         };
-        w.finish(&cfg_bytes, flags, created_at, env!("CARGO_PKG_VERSION"))
+
+        // Pass 1: (kind, len, hash) for every section — small and bounded.
+        let mut metas: Vec<SectionMeta> = Vec::new();
+        self.emit_sections(&mut |kind, pieces| {
+            let mut h = Xxh3::new();
+            let mut len = 0u64;
+            for p in pieces {
+                h.update(p);
+                len += p.len() as u64;
+            }
+            metas.push(SectionMeta {
+                kind,
+                len,
+                hash: h.digest(),
+            });
+            Ok(())
+        })?;
+
+        let Prefix {
+            bytes: prefix,
+            offsets,
+            file_len: _,
+        } = build_prefix(
+            &cfg_bytes,
+            flags,
+            created_at,
+            env!("CARGO_PKG_VERSION"),
+            &metas,
+        );
+        sink.write(&prefix)?;
+        let mut file_hash = Xxh3::new();
+        file_hash.update(&prefix);
+
+        // Pass 2: section bodies + alignment padding, into sink and hash.
+        let zero = [0u8; 64]; // ALIGN — padding is always shorter than this.
+        let mut idx = 0usize;
+        self.emit_sections(&mut |_, pieces| {
+            for p in pieces {
+                sink.write(p)?;
+                file_hash.update(p);
+            }
+            let n = pad_len(offsets[idx], metas[idx].len);
+            sink.write(&zero[..n])?;
+            file_hash.update(&zero[..n]);
+            idx += 1;
+            Ok(())
+        })?;
+
+        sink.patch(
+            crate::snapshot::FILE_HASH_OFFSET,
+            &file_hash.digest().to_le_bytes(),
+        )
+    }
+
+    /// Serializes the whole engine into snapshot-container bytes.
+    /// Deterministic and canonical: save → load → save is byte-identical.
+    /// A thin wrapper over [`Memory::write_snapshot_to`] into a `Vec`; large
+    /// databases should prefer streaming into a file sink.
+    pub fn snapshot_bytes(&self, created_at: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.write_snapshot_to(created_at, &mut out)
+            .expect("writing a snapshot into a Vec is infallible");
+        out
     }
 
     /// Writes a full snapshot and clears the journal (specs/05).

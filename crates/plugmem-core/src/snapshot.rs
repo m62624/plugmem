@@ -179,6 +179,129 @@ impl SnapshotWriter {
     }
 }
 
+/// One section's size and checksum, computed in the streaming writer's
+/// first pass (see [`build_prefix`]).
+#[derive(Debug, Clone, Copy)]
+pub struct SectionMeta {
+    /// Section kind tag (unique per file).
+    pub kind: u16,
+    /// Section body length in bytes (before alignment padding).
+    pub len: u64,
+    /// xxh3 of the section body.
+    pub hash: u64,
+}
+
+/// The header + config + section-table region of a snapshot: everything
+/// before the first section body. Small and bounded (kilobytes), so it is
+/// materialized even when the bodies stream (specs/16 §9).
+#[derive(Debug)]
+pub struct Prefix {
+    /// The prefix bytes, ready to write. The file-hash field is left zero;
+    /// the caller patches it via [`SnapshotSink::set_file_hash`] once the
+    /// whole body has streamed through the running hash.
+    pub bytes: Vec<u8>,
+    /// Absolute byte offset of each section body, in `metas` order.
+    pub offsets: Vec<u64>,
+    /// Total file length (aligned end of the last section).
+    pub file_len: u64,
+}
+
+/// A byte sink for streaming a snapshot without materializing the whole
+/// image (specs/16 §9): `write` appends in file order, `patch` overwrites a
+/// short run at an absolute offset — used once for the header file-hash
+/// field, the only non-sequential write, done after the body has streamed.
+pub trait SnapshotSink {
+    /// Appends `bytes` at the current position.
+    ///
+    /// # Errors
+    /// Whatever the underlying sink reports (e.g. an I/O error).
+    fn write(&mut self, bytes: &[u8]) -> Result<(), Error>;
+
+    /// Overwrites `bytes` at absolute offset `at` (already-written region).
+    ///
+    /// # Errors
+    /// Whatever the underlying sink reports.
+    fn patch(&mut self, at: u64, bytes: &[u8]) -> Result<(), Error>;
+}
+
+impl SnapshotSink for &mut Vec<u8> {
+    fn write(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        self.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn patch(&mut self, at: u64, bytes: &[u8]) -> Result<(), Error> {
+        let at = at as usize;
+        self[at..at + bytes.len()].copy_from_slice(bytes);
+        Ok(())
+    }
+}
+
+/// Absolute offset of the header file-hash field — the one location the
+/// streaming writer patches after the running hash is known.
+pub const FILE_HASH_OFFSET: u64 = FILE_HASH_AT as u64;
+
+/// Lays out the header, config block and section table from per-section
+/// `(kind, len, hash)` metadata (the streaming writer's first pass), byte
+/// for byte identical to [`SnapshotWriter::finish`]'s leading region. The
+/// caller then streams each section body followed by
+/// [`pad_len`] zero bytes, feeding a running [`Xxh3`] the prefix and every
+/// body/pad byte, and finally calls [`SnapshotSink::set_file_hash`].
+pub fn build_prefix(
+    config: &[u8],
+    flags: u16,
+    created_at: u64,
+    engine_ver: &str,
+    metas: &[SectionMeta],
+) -> Prefix {
+    let count = metas.len();
+    let config_end = HEADER as u64 + config.len() as u64;
+    let table_start = align_up(config_end);
+    let table_end = table_start + (count * ENTRY) as u64;
+
+    let mut offsets = Vec::with_capacity(count);
+    let mut cursor = align_up(table_end);
+    for m in metas {
+        offsets.push(cursor);
+        cursor = align_up(cursor + m.len);
+    }
+    let file_len = cursor;
+
+    let prefix_len = align_up(table_end) as usize;
+    let mut out = alloc::vec![0u8; prefix_len];
+    out[0..4].copy_from_slice(&MAGIC.to_le_bytes());
+    out[4..6].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
+    out[6..8].copy_from_slice(&flags.to_le_bytes());
+    out[8..10].copy_from_slice(&(count as u16).to_le_bytes());
+    out[16..20].copy_from_slice(&(config.len() as u32).to_le_bytes());
+    out[28..36].copy_from_slice(&created_at.to_le_bytes());
+    let ver = engine_ver.as_bytes();
+    let ver_len = ver.len().min(24);
+    out[36..36 + ver_len].copy_from_slice(&ver[..ver_len]);
+    out[HEADER..HEADER + config.len()].copy_from_slice(config);
+
+    for (i, m) in metas.iter().enumerate() {
+        let at = table_start as usize + i * ENTRY;
+        out[at..at + 2].copy_from_slice(&m.kind.to_le_bytes());
+        out[at + 2..at + 4].copy_from_slice(&(ALIGN as u16).to_le_bytes());
+        out[at + 8..at + 16].copy_from_slice(&offsets[i].to_le_bytes());
+        out[at + 16..at + 24].copy_from_slice(&m.len.to_le_bytes());
+        out[at + 24..at + 32].copy_from_slice(&m.hash.to_le_bytes());
+    }
+    // The file-hash field (FILE_HASH_AT) stays zero; the caller patches it.
+    Prefix {
+        bytes: out,
+        offsets,
+        file_len,
+    }
+}
+
+/// Alignment-padding length that follows a section body of `len` starting
+/// at `offset` (zero bytes up to the next [`ALIGN`] boundary).
+pub fn pad_len(offset: u64, len: u64) -> usize {
+    (align_up(offset + len) - (offset + len)) as usize
+}
+
 /// A parsed, validated snapshot borrowing the input buffer.
 #[derive(Debug)]
 pub struct Snapshot<'a> {

@@ -429,15 +429,24 @@ impl<'a> VecPool<'a> {
         Ok(())
     }
 
-    /// The vector section as one contiguous buffer (`base ++ tail`) — the
-    /// persistence composer dumps this one section. Byte-identical to the
-    /// owned pool holding the same slots, so an overlay snapshot is
-    /// canonical.
+    /// The vector section as one contiguous buffer (`base ++ tail`).
+    /// Byte-identical to the owned pool holding the same slots, so an overlay
+    /// snapshot is canonical. Test-only: production streams via
+    /// [`VecPool::pieces`], which needs no owned copy.
+    #[cfg(test)]
     pub(crate) fn dump(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.pool_len());
         out.extend_from_slice(self.base);
         out.extend_from_slice(&self.tail);
         out
+    }
+
+    /// The vector section as its two contiguous pieces (`base`, `tail`)
+    /// without concatenating them — lets the streaming snapshot writer
+    /// (specs/16 §9) emit the dominant pool with no owned full-section copy.
+    /// Concatenated, the pieces equal the section (`base ++ tail`).
+    pub(crate) fn pieces(&self) -> [&[u8]; 2] {
+        [self.base, &self.tail]
     }
 
     /// Rebuilds a pool from its dumped section, checking only the framing

@@ -17,12 +17,19 @@
 //! it even on abnormal termination.
 
 use std::fs::{File, OpenOptions};
-use std::io::Write as _;
+use std::io::{BufWriter, Seek, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 
-use plugmem_core::Storage;
+use plugmem_core::snapshot::SnapshotSink;
+use plugmem_core::{Error, Storage};
 
 use crate::error::HostError;
+
+/// Maps a filesystem error into the engine's storage-error variant so it can
+/// cross the [`SnapshotSink`] boundary (which speaks [`plugmem_core::Error`]).
+fn sink_io(e: std::io::Error) -> Error {
+    Error::Storage(format!("{e}"))
+}
 
 /// When journal appends reach the disk (specs/13 §2).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -156,6 +163,36 @@ impl FileStorage {
         self.journal.metadata().map(|m| m.len()).unwrap_or(0)
     }
 
+    /// Streams a snapshot into the tmp file and fsyncs it, **without**
+    /// renaming — the durable-but-not-yet-visible half of an atomic replace
+    /// (specs/16 §9). `write` drives the engine's streaming snapshot writer
+    /// against a buffered file sink, so the image never all lives in RAM at
+    /// once. Split from [`FileStorage::commit_snapshot`] because the caller
+    /// must drop the mmap of the old snapshot **between** the two: streaming
+    /// reads through that map, but a mapped file cannot be renamed over on
+    /// Windows. A staged tmp is cleaned up on the next exclusive open.
+    pub(crate) fn stage_snapshot(
+        &mut self,
+        write: impl FnOnce(&mut FileSink) -> Result<(), HostError>,
+    ) -> Result<(), HostError> {
+        let file = File::create(&self.tmp_path).map_err(|e| HostError::io(&self.tmp_path, e))?;
+        let mut sink = FileSink::new(file, self.tmp_path.clone());
+        write(&mut sink)?;
+        let file = sink.finish()?;
+        file.sync_all()
+            .map_err(|e| HostError::io(&self.tmp_path, e))?;
+        Ok(())
+    }
+
+    /// Renames the staged tmp file over the snapshot and fsyncs the directory
+    /// — the visible half of the atomic replace. Call only after
+    /// [`FileStorage::stage_snapshot`] and after dropping any mmap of the old
+    /// snapshot.
+    pub(crate) fn commit_snapshot(&mut self) -> Result<(), HostError> {
+        std::fs::rename(&self.tmp_path, &self.base).map_err(|e| HostError::io(&self.base, e))?;
+        self.sync_dir()
+    }
+
     /// Fsyncs the directory holding the database (unix only — the
     /// rename's durability point).
     fn sync_dir(&self) -> Result<(), HostError> {
@@ -166,6 +203,48 @@ impl FileStorage {
                 .and_then(|d| d.sync_all())
                 .map_err(|e| HostError::io(dir, e))?;
         }
+        Ok(())
+    }
+}
+
+/// A streaming [`SnapshotSink`] over a buffered file: sequential section
+/// writes are buffered, and the single `patch` (the header file-hash, once
+/// the running hash is known) flushes and seeks. Lets a snapshot stream to
+/// disk without a full-image buffer (specs/16 §9).
+pub(crate) struct FileSink {
+    buf: BufWriter<File>,
+    path: PathBuf,
+}
+
+impl FileSink {
+    fn new(file: File, path: PathBuf) -> Self {
+        Self {
+            buf: BufWriter::new(file),
+            path,
+        }
+    }
+
+    /// Flushes the buffer and returns the underlying file for fsync.
+    fn finish(self) -> Result<File, HostError> {
+        self.buf
+            .into_inner()
+            .map_err(|e| HostError::io(&self.path, e.into_error()))
+    }
+}
+
+impl SnapshotSink for &mut FileSink {
+    fn write(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        self.buf.write_all(bytes).map_err(sink_io)
+    }
+
+    fn patch(&mut self, at: u64, bytes: &[u8]) -> Result<(), Error> {
+        // The one non-sequential write: flush buffered bytes, seek to the
+        // header field, patch it, then restore the position to the end.
+        self.buf.flush().map_err(sink_io)?;
+        let file = self.buf.get_mut();
+        file.seek(SeekFrom::Start(at)).map_err(sink_io)?;
+        file.write_all(bytes).map_err(sink_io)?;
+        file.seek(SeekFrom::End(0)).map_err(sink_io)?;
         Ok(())
     }
 }
