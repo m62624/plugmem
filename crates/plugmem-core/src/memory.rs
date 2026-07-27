@@ -45,7 +45,7 @@ mod persist;
 mod recall;
 
 pub use maintain::MaintainReport;
-pub use recall::{RecallQuery, RecallResult, RecalledEdge, RecalledFact, source};
+pub use recall::{RecallQuery, RecallResult, RecallScratch, RecalledEdge, RecalledFact, source};
 
 /// Input of `remember` and `revise` (specs/05).
 #[derive(Clone, Copy, Debug)]
@@ -248,7 +248,6 @@ pub struct Memory<'a> {
     tokenizer: Tokenizer,
     tf_scratch: Vec<(u32, u8)>,
     name_scratch: String,
-    recall_scratch: recall::RecallScratch,
 }
 
 impl<'a> Memory<'a> {
@@ -288,7 +287,6 @@ impl<'a> Memory<'a> {
             tokenizer: Tokenizer::new(),
             tf_scratch: Vec::new(),
             name_scratch: String::new(),
-            recall_scratch: recall::RecallScratch::default(),
             cfg,
         })
     }

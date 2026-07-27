@@ -30,7 +30,8 @@ pub use error::Error;
 pub use id::{EntityId, FactId, NONE_U32};
 pub use memory::{
     FactFault, FactView, LinkInput, MaintainReport, Memory, OpenReport, RecallQuery, RecallResult,
-    RecalledEdge, RecalledFact, RememberInput, RememberOutcome, Similar, SimilarReason, Stats,
+    RecallScratch, RecalledEdge, RecalledFact, RememberInput, RememberOutcome, Similar,
+    SimilarReason, Stats,
 };
 pub use model::{
     EdgeSlot, EntityByName, EntityRecord, FactAux, FactRecord, TemporalSlot, VALID_TO_OPEN,

@@ -39,6 +39,7 @@ use crate::index::hnsw::HnswScratch;
 use crate::index::vecpool::{VecScratch, dot_i8};
 use crate::index::{IntersectScratch, intersect};
 use crate::model::{FactRecord, VALID_TO_OPEN};
+use crate::tokenizer::Tokenizer;
 
 use super::Memory;
 
@@ -179,9 +180,23 @@ pub struct RecallResult {
     pub truncated: bool,
 }
 
-/// Reusable recall scratch, owned by the engine.
+/// Reusable recall scratch — **caller-owned**, so [`Memory::recall`] and
+/// [`Memory::recall_into`] take `&self`: many readers can recall the same
+/// engine at once, each threading its own scratch (the host wraps one per
+/// thread). Carries every buffer a recall mutates — the query-side term/score
+/// vectors, the fusion map, *and* its own tokenizer and name-normalization
+/// buffer — so a recall never touches the engine's write-side scratches. Reused
+/// across calls it upholds the zero-alloc invariant (specs/05, specs/07 §2).
+///
+/// Opaque: construct with [`RecallScratch::new`] (or `Default`) and pass by
+/// `&mut`; the fields are engine-internal.
 #[derive(Debug, Default)]
-pub(super) struct RecallScratch {
+pub struct RecallScratch {
+    /// Read-path tokenizer (query text + entity-name normalization). Kept here,
+    /// not in [`Memory`], so recall stays `&self`; writers use the engine's own.
+    tokenizer: Tokenizer,
+    /// Scratch for one normalized entity name during graph-anchor resolution.
+    name_scratch: String,
     bm25: Bm25Scratch,
     intersect: IntersectScratch,
     allow: Vec<FactId>,
@@ -201,21 +216,38 @@ pub(super) struct RecallScratch {
     tags_tmp: Vec<TermId>,
 }
 
+impl RecallScratch {
+    /// An empty recall scratch (all buffers grow on first use). One per
+    /// concurrent reader; reused across that reader's calls for zero-alloc.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 impl Memory<'_> {
-    /// Runs a recall, allocating a fresh [`RecallResult`]. Convenience
-    /// wrapper over [`Memory::recall_into`].
-    pub fn recall(&mut self, q: RecallQuery<'_>) -> Result<RecallResult, Error> {
+    /// Runs a recall, allocating a fresh [`RecallScratch`] and
+    /// [`RecallResult`]. Convenience over [`Memory::recall_into`] for one-shot
+    /// callers; a hot loop should own a [`RecallScratch`] and call
+    /// `recall_into` to stay zero-alloc.
+    pub fn recall(&self, q: RecallQuery<'_>) -> Result<RecallResult, Error> {
+        let mut scratch = RecallScratch::default();
         let mut out = RecallResult::default();
-        self.recall_into(q, &mut out)?;
+        self.recall_into(q, &mut scratch, &mut out)?;
         Ok(out)
     }
 
-    /// Runs a recall into a reused result (the zero-alloc path: after
-    /// warm-up neither the engine scratches nor `out` allocate).
+    /// Runs a recall into a reused result and caller-owned scratch (the
+    /// zero-alloc path: after warm-up neither `s` nor `out` allocate).
     ///
-    /// `&mut self` is for the scratch buffers only — recall never mutates
-    /// data (specs/05).
-    pub fn recall_into(&mut self, q: RecallQuery<'_>, out: &mut RecallResult) -> Result<(), Error> {
+    /// Takes `&self` — recall never mutates engine data; every mutable buffer
+    /// it needs lives in `s` (specs/05). This is what lets many readers recall
+    /// one engine concurrently, each with its own [`RecallScratch`].
+    pub fn recall_into(
+        &self,
+        q: RecallQuery<'_>,
+        s: &mut RecallScratch,
+        out: &mut RecallResult,
+    ) -> Result<(), Error> {
         out.facts.clear();
         out.edges.clear();
         out.rendered.clear();
@@ -224,7 +256,6 @@ impl Memory<'_> {
         let k = if q.k == 0 { 8 } else { q.k.min(64) };
         let budget = q.token_budget.unwrap_or(512);
         let as_of = q.as_of.unwrap_or(q.now);
-        let mut s = core::mem::take(&mut self.recall_scratch);
 
         // 1. Tag allow-set. An unknown tag can match nothing.
         s.allow.clear();
@@ -241,7 +272,6 @@ impl Memory<'_> {
         }
         let filtered = !q.tags.is_empty();
         if filtered && (dead_tag || s.allow.is_empty()) {
-            self.recall_scratch = s;
             return Ok(());
         }
 
@@ -250,8 +280,10 @@ impl Memory<'_> {
         if let Some(text) = q.text {
             s.query_terms.clear();
             let terms = &self.terms;
+            // Disjoint field borrows of `s`: the tokenizer writes into
+            // `query_terms`, both live in the caller's scratch.
             let query_terms = &mut s.query_terms;
-            self.tokenizer.tokenize(text, &mut |token| {
+            s.tokenizer.tokenize(text, &mut |token| {
                 if let Some(term) = terms.lookup(token) {
                     query_terms.push(term.0);
                 }
@@ -298,30 +330,26 @@ impl Memory<'_> {
                     &mut s.vec_out,
                 )
             } else {
-                self.vec_graph_source(v, &q, as_of, filtered, &mut s)
+                self.vec_graph_source(v, &q, as_of, filtered, s)
             };
-            if let Err(e) = res {
-                self.recall_scratch = s;
-                return Err(e);
-            }
+            res?;
         }
 
-        // Graph anchors resolve here (name normalization needs the
-        // mutable tokenizer scratch); expansion itself is read-only.
+        // Graph anchors resolve here (name normalization needs the tokenizer
+        // and name buffer — both in the caller's scratch); expansion is
+        // read-only. `tokenizer` and `name_scratch` are disjoint fields of `s`.
         s.visited.clear();
         for name in q.entities {
-            let mut norm = core::mem::take(&mut self.name_scratch);
-            super::normalize_name(&mut self.tokenizer, name, &mut norm);
-            let found = self.lookup_entity_by_norm(&norm);
-            self.name_scratch = norm;
+            super::normalize_name(&mut s.tokenizer, name, &mut s.name_scratch);
+            let found = self.lookup_entity_by_norm(&s.name_scratch);
             if let Some(id) = found
                 && !s.visited.iter().any(|&(e, _)| e == id)
             {
                 s.visited.push((id, 1.0));
             }
         }
-        self.graph_source(&q, as_of, filtered, &mut s, out);
-        self.time_source(&q, as_of, filtered, &mut s);
+        self.graph_source(&q, as_of, filtered, s, out);
+        self.time_source(&q, as_of, filtered, s);
 
         // 4. RRF fusion.
         s.fused.clear();
@@ -381,7 +409,6 @@ impl Memory<'_> {
 
         // 7. Render.
         self.render(out, &mut s.tags_tmp);
-        self.recall_scratch = s;
         Ok(())
     }
 

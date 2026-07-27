@@ -25,7 +25,11 @@ impl Memory {
     pub fn remember_batch<S: Storage>(&mut self, s: &mut S,
         inputs: &[RememberInput<'_>], skip_similar: bool)
         -> Result<Vec<RememberOutcome>, Error>;
-    pub fn recall(&mut self, q: RecallQuery<'_>) -> Result<RecallResult, Error>;
+    /// &self — весь мутабельный скретч у вызывающего (RecallScratch), поэтому
+    /// много читателей могут recall'ить один движок одновременно.
+    pub fn recall(&self, q: RecallQuery<'_>) -> Result<RecallResult, Error>;
+    pub fn recall_into(&self, q: RecallQuery<'_>, s: &mut RecallScratch,
+        out: &mut RecallResult) -> Result<(), Error>;
     pub fn revise<S: Storage>(&mut self, s: &mut S, target: FactId, input: RememberInput<'_>)
         -> Result<RememberOutcome, Error>;
     pub fn forget<S: Storage>(&mut self, s: &mut S, now: u64, id: FactId) -> Result<bool, Error>;
@@ -48,9 +52,14 @@ impl Memory {
 }
 ```
 
-`recall` принимает `&mut self` только ради скретч-буферов (историческая
-альтернатива — interior mutability; отвергнута: явность дешевле). Данные recall
-не меняет.
+`recall` принимает `&self`: данные он не меняет, а все мутабельные буферы
+(term/score-векторы, fusion-мапа, **собственный токенизатор и name-буфер**)
+вынесены в caller-owned `RecallScratch`. Это и есть ключ к конкурентному чтению —
+N читателей recall'ят один движок параллельно, каждый со своим `RecallScratch`
+(на native-хосте host держит по одному на поток). `recall` — удобная обёртка,
+заводящая скретч и результат сама; горячий цикл владеет `RecallScratch` и зовёт
+`recall_into` ради zero-alloc. Синхронизация (`RwLock`/thread-local) живёт в
+host, ядро остаётся `no_std` и берёт лишь явный `&mut RecallScratch`.
 
 ## Входы/выходы
 

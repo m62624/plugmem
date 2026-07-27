@@ -8,7 +8,9 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
-use plugmem_core::{Config, MemStorage, Memory, RecallQuery, RecallResult, RememberInput, Storage};
+use plugmem_core::{
+    Config, MemStorage, Memory, RecallQuery, RecallResult, RecallScratch, RememberInput, Storage,
+};
 
 static ALLOCS: AtomicU64 = AtomicU64::new(0);
 /// Total bytes requested from the allocator — the measure that tells a whole
@@ -123,12 +125,13 @@ fn recall_and_get_allocate_nothing_after_warmup() {
         ..RecallQuery::text(600_000, "tokio memory arenas roadmap")
     };
     let mut out = RecallResult::default();
+    let mut scratch = RecallScratch::new();
     // Warm-up: two passes let every scratch and result buffer reach its
     // high-water mark.
-    mem.recall_into(q, &mut out).unwrap();
-    mem.recall_into(q, &mut out).unwrap();
+    mem.recall_into(q, &mut scratch, &mut out).unwrap();
+    mem.recall_into(q, &mut scratch, &mut out).unwrap();
 
-    let (n, _) = allocs(|| mem.recall_into(q, &mut out).unwrap());
+    let (n, _) = allocs(|| mem.recall_into(q, &mut scratch, &mut out).unwrap());
     assert_eq!(n, 0, "recall allocated {n} times after warm-up");
     assert!(!out.facts.is_empty(), "the gate must measure a real query");
 
@@ -196,10 +199,11 @@ fn graph_regime_recall_allocates_nothing_after_warmup() {
         ..RecallQuery::text(2_000_000, "")
     };
     let mut out = RecallResult::default();
-    mem.recall_into(q, &mut out).unwrap();
-    mem.recall_into(q, &mut out).unwrap();
+    let mut scratch = RecallScratch::new();
+    mem.recall_into(q, &mut scratch, &mut out).unwrap();
+    mem.recall_into(q, &mut scratch, &mut out).unwrap();
 
-    let (n, _) = allocs(|| mem.recall_into(q, &mut out).unwrap());
+    let (n, _) = allocs(|| mem.recall_into(q, &mut scratch, &mut out).unwrap());
     assert_eq!(n, 0, "graph-regime recall allocated {n} times");
     assert!(!out.facts.is_empty());
 }

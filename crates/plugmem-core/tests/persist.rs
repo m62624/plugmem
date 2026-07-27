@@ -301,7 +301,7 @@ fn an_open_never_panics_through_access_and_verify_catches_corruption() {
         let mut b = bytes.clone();
         b[at] ^= 0x40;
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let Ok((mut m, _)) = Memory::from_bytes(Some(&b), &[], cfg()) else {
+            let Ok((m, _)) = Memory::from_bytes(Some(&b), &[], cfg()) else {
                 return; // a typed load error is a fine outcome
             };
             // Access sweep: nothing may panic on the corrupt image.

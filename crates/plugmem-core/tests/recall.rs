@@ -69,7 +69,7 @@ fn ids(result: &plugmem_core::RecallResult) -> Vec<u32> {
 
 #[test]
 fn lexical_recall_ranks_by_relevance() {
-    let (mut mem, _) = fixture();
+    let (mem, _) = fixture();
     let r = mem
         .recall(RecallQuery::text(500 * DAY, "tokio async"))
         .unwrap();
@@ -80,7 +80,7 @@ fn lexical_recall_ranks_by_relevance() {
 
 #[test]
 fn graph_source_pulls_neighbor_facts_and_edges() {
-    let (mut mem, _) = fixture();
+    let (mem, _) = fixture();
     // Anchoring at the *project* pulls the user's facts through the edge.
     let r = mem
         .recall(RecallQuery {
@@ -102,7 +102,7 @@ fn graph_source_pulls_neighbor_facts_and_edges() {
 
 #[test]
 fn sources_agree_and_disagree() {
-    let (mut mem, _) = fixture();
+    let (mem, _) = fixture();
     // Text matches f2; the entity anchor also reaches f2 → agreement
     // ranks it above facts that only one source saw.
     let r = mem
@@ -118,7 +118,7 @@ fn sources_agree_and_disagree() {
 
 #[test]
 fn temporal_range_recalls_the_window_recent_first() {
-    let (mut mem, _) = fixture();
+    let (mem, _) = fixture();
     let r = mem
         .recall(RecallQuery {
             text: None,
@@ -132,7 +132,7 @@ fn temporal_range_recalls_the_window_recent_first() {
 
 #[test]
 fn tag_filter_is_an_intersection_with_every_source() {
-    let (mut mem, _) = fixture();
+    let (mem, _) = fixture();
     let r = mem
         .recall(RecallQuery {
             tags: &["pref"],
@@ -229,7 +229,7 @@ fn rendered_block_is_a_golden_contract() {
 
 #[test]
 fn k_and_token_budget_truncate() {
-    let (mut mem, _) = fixture();
+    let (mem, _) = fixture();
     let r = mem
         .recall(RecallQuery {
             k: 1,
@@ -252,7 +252,7 @@ fn k_and_token_budget_truncate() {
 
 #[test]
 fn recall_is_deterministic_and_pure() {
-    let (mut mem, _) = fixture();
+    let (mem, _) = fixture();
     let q = RecallQuery {
         entities: &["user"],
         ..RecallQuery::text(500 * DAY, "tokio engine")
@@ -272,16 +272,21 @@ fn recall_is_deterministic_and_pure() {
 
 #[test]
 fn reused_result_buffers_are_equivalent_to_fresh_ones() {
-    let (mut mem, _) = fixture();
+    let (mem, _) = fixture();
     let q = RecallQuery {
         entities: &["plugmem"],
         ..RecallQuery::text(500 * DAY, "arenas")
     };
     let fresh = mem.recall(q).unwrap();
     let mut reused = plugmem_core::RecallResult::default();
-    mem.recall_into(RecallQuery::text(500 * DAY, "tokio"), &mut reused)
-        .unwrap();
-    mem.recall_into(q, &mut reused).unwrap();
+    let mut scratch = plugmem_core::RecallScratch::new();
+    mem.recall_into(
+        RecallQuery::text(500 * DAY, "tokio"),
+        &mut scratch,
+        &mut reused,
+    )
+    .unwrap();
+    mem.recall_into(q, &mut scratch, &mut reused).unwrap();
     assert_eq!(fresh.rendered, reused.rendered);
     assert_eq!(ids(&fresh), ids(&reused));
 }

@@ -201,7 +201,7 @@ fn last_now(ops: &[plugmem_testgen::GenOp]) -> u64 {
 }
 
 fn bench_recall(c: &mut Criterion) {
-    use plugmem_core::{Config, MemStorage, Memory, RecallQuery, RecallResult};
+    use plugmem_core::{Config, MemStorage, Memory, RecallQuery, RecallResult, RecallScratch};
     use plugmem_testgen::{Gen, GenOp, Profile, apply, word_for};
 
     let mut g = c.benchmark_group("recall");
@@ -240,6 +240,7 @@ fn bench_recall(c: &mut Criterion) {
     let text = format!("{} {} {}", word_for(1), word_for(400), word_for(2500));
 
     let mut out = RecallResult::default();
+    let mut scratch = RecallScratch::new();
     let anchors = [entity.as_str()];
     let q = RecallQuery {
         entities: &anchors,
@@ -248,7 +249,8 @@ fn bench_recall(c: &mut Criterion) {
     g.throughput(Throughput::Elements(1));
     g.bench_function("structural_100k", |b| {
         b.iter(|| {
-            mem.recall_into(black_box(q), &mut out).unwrap();
+            mem.recall_into(black_box(q), &mut scratch, &mut out)
+                .unwrap();
             out.facts.len()
         });
     });
@@ -276,7 +278,8 @@ fn bench_recall(c: &mut Criterion) {
     };
     g.bench_function("tags_and_range_100k", |b| {
         b.iter(|| {
-            mem.recall_into(black_box(tagged), &mut out).unwrap();
+            mem.recall_into(black_box(tagged), &mut scratch, &mut out)
+                .unwrap();
             out.facts.len()
         });
     });
@@ -284,7 +287,7 @@ fn bench_recall(c: &mut Criterion) {
 }
 
 fn bench_vec(c: &mut Criterion) {
-    use plugmem_core::{Config, MemStorage, Memory, RecallQuery, RecallResult};
+    use plugmem_core::{Config, MemStorage, Memory, RecallQuery, RecallResult, RecallScratch};
     use plugmem_testgen::{Gen, GenOp, Profile, apply};
 
     // The specs/11 A.5(9) gate corpus: 24k vectors of dim 384 — the
@@ -321,6 +324,7 @@ fn bench_vec(c: &mut Criterion) {
         .expect("every remember carries a vector at dim > 0");
     let now = last_now(&ops) + 1;
     let mut out = RecallResult::default();
+    let mut scratch = RecallScratch::new();
     let q = RecallQuery {
         vector: Some(&query),
         k: 8,
@@ -330,7 +334,8 @@ fn bench_vec(c: &mut Criterion) {
     g.throughput(Throughput::Elements(1));
     g.bench_function("flat_24k_d384_k8", |b| {
         b.iter(|| {
-            mem.recall_into(black_box(q), &mut out).unwrap();
+            mem.recall_into(black_box(q), &mut scratch, &mut out)
+                .unwrap();
             out.facts.len()
         });
     });
@@ -338,7 +343,7 @@ fn bench_vec(c: &mut Criterion) {
 }
 
 fn bench_hnsw(c: &mut Criterion) {
-    use plugmem_core::{Config, MemStorage, Memory, RecallQuery, RecallResult};
+    use plugmem_core::{Config, MemStorage, Memory, RecallQuery, RecallResult, RecallScratch};
     use plugmem_testgen::{Gen, GenOp, Profile, apply};
 
     // Above the default flat_to_hnsw threshold (24k): `maintain` builds
@@ -380,6 +385,7 @@ fn bench_hnsw(c: &mut Criterion) {
         })
         .expect("every remember carries a vector");
     let mut out = RecallResult::default();
+    let mut scratch = RecallScratch::new();
     let q = RecallQuery {
         vector: Some(&query),
         k: 8,
@@ -389,7 +395,8 @@ fn bench_hnsw(c: &mut Criterion) {
     g.throughput(Throughput::Elements(1));
     g.bench_function("search_30k_d384_k8_ef64", |b| {
         b.iter(|| {
-            mem.recall_into(black_box(q), &mut out).unwrap();
+            mem.recall_into(black_box(q), &mut scratch, &mut out)
+                .unwrap();
             out.facts.len()
         });
     });
@@ -398,7 +405,7 @@ fn bench_hnsw(c: &mut Criterion) {
 
 fn bench_search_matrix(c: &mut Criterion) {
     use criterion::BenchmarkId;
-    use plugmem_core::{Config, MemStorage, Memory, RecallQuery, RecallResult};
+    use plugmem_core::{Config, MemStorage, Memory, RecallQuery, RecallResult, RecallScratch};
     use plugmem_testgen::{Gen, GenOp, Profile, apply};
 
     // Baseline sweep for vector search across **fill** (how many memories) and
@@ -457,6 +464,7 @@ fn bench_search_matrix(c: &mut Criterion) {
                 })
                 .expect("every remember carries a vector at dim > 0");
             let mut out = RecallResult::default();
+            let mut scratch = RecallScratch::new();
             let q = RecallQuery {
                 vector: Some(&query),
                 k: 8,
@@ -466,7 +474,8 @@ fn bench_search_matrix(c: &mut Criterion) {
             g.throughput(Throughput::Elements(1));
             g.bench_function(BenchmarkId::new(format!("d{dim}"), fill), |b| {
                 b.iter(|| {
-                    mem.recall_into(black_box(q), &mut out).unwrap();
+                    mem.recall_into(black_box(q), &mut scratch, &mut out)
+                        .unwrap();
                     out.facts.len()
                 });
             });

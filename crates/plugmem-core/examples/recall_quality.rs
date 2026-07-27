@@ -24,7 +24,9 @@
 
 #[cfg(not(target_family = "wasm"))]
 fn main() {
-    use plugmem_core::{Config, FactId, MemStorage, Memory, RecallQuery, RecallResult};
+    use plugmem_core::{
+        Config, FactId, MemStorage, Memory, RecallQuery, RecallResult, RecallScratch,
+    };
     use plugmem_testgen::{Gen, GenOp, Profile, apply};
 
     /// Cosine similarity between two equal-length f32 vectors. Zero-norm
@@ -125,6 +127,7 @@ fn main() {
             // Sample queries evenly across the corpus.
             let step = (corpus.len() / QUERIES).max(1);
             let mut out = RecallResult::default();
+            let mut scratch = RecallScratch::new();
             let mut sum = 0.0f64;
             let mut min = 1.0f32;
             let mut n = 0usize;
@@ -139,7 +142,7 @@ fn main() {
                     text: None,
                     ..RecallQuery::text(now, "")
                 };
-                mem.recall_into(q, &mut out).unwrap();
+                mem.recall_into(q, &mut scratch, &mut out).unwrap();
                 let hits = out
                     .facts
                     .iter()

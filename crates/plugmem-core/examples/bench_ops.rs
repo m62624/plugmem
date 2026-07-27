@@ -25,7 +25,9 @@ fn main() {
 
     use plugmem_core::index::bm25::{Bm25Index, Bm25Scratch};
     use plugmem_core::index::{IdListIndex, IntersectScratch, intersect};
-    use plugmem_core::{Config, FactId, MemStorage, Memory, RecallQuery, RecallResult};
+    use plugmem_core::{
+        Config, FactId, MemStorage, Memory, RecallQuery, RecallResult, RecallScratch,
+    };
     use plugmem_testgen::{Gen, GenOp, Profile, apply};
 
     /// Best-of-`reps` wall time of `f`, in microseconds, after `warm`
@@ -185,6 +187,7 @@ fn main() {
             })
             .expect("every remember carries a vector at dim > 0");
         let mut out = RecallResult::default();
+        let mut scratch = RecallScratch::new();
         let q = RecallQuery {
             vector: Some(&query),
             k: 8,
@@ -192,7 +195,7 @@ fn main() {
             ..RecallQuery::text(now, "")
         };
         best_us(30, 200, || {
-            mem.recall_into(q, &mut out).unwrap();
+            mem.recall_into(q, &mut scratch, &mut out).unwrap();
             out.facts.len()
         })
     }

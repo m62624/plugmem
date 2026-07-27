@@ -19,7 +19,9 @@
 
 use std::time::Instant;
 
-use plugmem_core::{Config, FactId, MemStorage, Memory, RecallQuery, RecallResult, RememberInput};
+use plugmem_core::{
+    Config, FactId, MemStorage, Memory, RecallQuery, RecallResult, RecallScratch, RememberInput,
+};
 use plugmem_host::{Embedder, OpenAiCompatEmbedder};
 
 const DIM: usize = 768;
@@ -331,6 +333,7 @@ fn main() {
     println!("# (synthetic testgen baseline for comparison: flat d768 2k = 0.854)");
     println!("query_k\tsieve\trecall_mean\trecall_min\tsearch_us");
     let mut out = RecallResult::default();
+    let mut scratch = RecallScratch::new();
     for &kq in &K_SWEEP {
         let sieve = (4 * kq).max(64);
         let (mut sum, mut min, mut n) = (0.0f64, 1.0f32, 0usize);
@@ -342,7 +345,7 @@ fn main() {
                 text: None,
                 ..RecallQuery::text(now, "")
             };
-            mem.recall_into(query, &mut out).unwrap();
+            mem.recall_into(query, &mut scratch, &mut out).unwrap();
             let self_fid = fid_of[q];
             // recall@K_EVAL: how many of the true 8 nearest appear anywhere in
             // the top-k the engine returned.

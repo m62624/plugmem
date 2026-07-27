@@ -217,7 +217,7 @@ fn snapshot_roundtrip_with_vectors_is_canonical() {
         vecs.push((has, v));
     }
     let bytes = mem.snapshot_bytes(0);
-    let (mut loaded, report) = Memory::from_bytes(Some(&bytes), &[], cfg(dim)).unwrap();
+    let (loaded, report) = Memory::from_bytes(Some(&bytes), &[], cfg(dim)).unwrap();
     assert_eq!(report.replayed, 0);
     // Canonical: save → load → save is byte-identical.
     assert_eq!(loaded.snapshot_bytes(0), bytes);
@@ -293,7 +293,7 @@ fn a_vector_open_never_panics_and_verify_catches_corruption() {
         let cc = c.clone();
         let q = last.clone();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let Ok((mut m, _)) = Memory::from_bytes(Some(&b), &[], cc) else {
+            let Ok((m, _)) = Memory::from_bytes(Some(&b), &[], cc) else {
                 return false; // a typed load error is a fine outcome
             };
             let stats = m.stats();
