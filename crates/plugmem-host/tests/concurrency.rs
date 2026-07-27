@@ -12,7 +12,9 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Barrier};
+use std::time::Duration;
 
 use plugmem_host::{Config, Database, FactId, ReadOnlyDatabase, RecallQuery, RememberInput};
 
@@ -73,6 +75,27 @@ fn xorshift(seed: u64) -> impl FnMut() -> u64 {
 }
 
 fn _assert_send_sync<T: Send + Sync>() {}
+
+/// Runs `body` (which spawns and joins its own worker threads) under a wall
+/// clock deadline. A hang inside — a lock-ordering deadlock, a writer starved
+/// forever, a guard never released — trips the deadline instead of blocking the
+/// whole test binary; a panic inside is re-raised. This turns "no deadlock"
+/// from an implicit belief into a checked property.
+fn run_with_deadline(secs: u64, label: &str, body: impl FnOnce() + Send + 'static) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        body();
+        let _ = tx.send(());
+    });
+    match rx.recv_timeout(Duration::from_secs(secs)) {
+        Ok(()) => worker.join().unwrap(),
+        // The worker dropped `tx` without signalling — it panicked; re-raise it.
+        Err(RecvTimeoutError::Disconnected) => worker.join().unwrap(),
+        Err(RecvTimeoutError::Timeout) => {
+            panic!("{label}: did not finish within {secs}s — possible deadlock/hang")
+        }
+    }
+}
 
 #[test]
 fn database_and_readonly_are_send_sync() {
@@ -214,4 +237,122 @@ fn readonly_serves_concurrent_readers_consistently() {
         h.join().unwrap();
     }
     assert_eq!(ro.stats().facts, FACTS as usize);
+}
+
+#[test]
+fn mixed_read_write_contention_progresses_without_deadlock() {
+    // Many threads each interleave writes, checkpoints and reads on one shared
+    // handle. Writes and checkpoints take the exclusive guard, reads the shared
+    // one; a lock-ordering bug or a never-released guard would hang here. The
+    // deadline turns that into a failure, not a stuck binary. No lost updates:
+    // the final fact count must equal the writes that reported success.
+    run_with_deadline(60, "mixed contention", || {
+        const THREADS: usize = 6;
+        const OPS: u64 = 400;
+
+        let tmp = TempDir::new("mixed");
+        let (db, _) = Database::builder(Config::default())
+            .snapshot_every_ops(97) // frequent re-map under the readers
+            .open(tmp.db())
+            .unwrap();
+        let db = Arc::new(db);
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let writes = Arc::new(AtomicU64::new(0));
+        let clock = Arc::new(AtomicU64::new(1));
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|t| {
+                let db = Arc::clone(&db);
+                let barrier = Arc::clone(&barrier);
+                let writes = Arc::clone(&writes);
+                let clock = Arc::clone(&clock);
+                std::thread::spawn(move || {
+                    let mut rng = xorshift(0x9E37_0000 ^ t as u64);
+                    barrier.wait();
+                    for _ in 0..OPS {
+                        match rng() % 8 {
+                            0..=2 => {
+                                let now = clock.fetch_add(1, Ordering::Relaxed);
+                                let v = writes.fetch_add(1, Ordering::Relaxed);
+                                db.remember(RememberInput::text(now, &fact_text(v)))
+                                    .unwrap();
+                            }
+                            3 => {
+                                let now = clock.fetch_add(1, Ordering::Relaxed);
+                                db.checkpoint(now).unwrap();
+                            }
+                            _ => {
+                                let out = db
+                                    .recall(RecallQuery {
+                                        k: 8,
+                                        ..RecallQuery::text(1 << 40, "marker split")
+                                    })
+                                    .unwrap();
+                                for f in &out.facts {
+                                    if let Some(s) = db.get(f.id) {
+                                        assert_consistent(&s.text);
+                                    }
+                                }
+                                let _ = db.stats();
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        // Every remember that returned Ok is present — writers serialized
+        // cleanly, none clobbered another (remember only appends here).
+        assert_eq!(
+            db.stats().facts as u64,
+            writes.load(Ordering::Relaxed),
+            "a counted write went missing — a lost update"
+        );
+    });
+}
+
+#[test]
+fn concurrent_writers_with_checkpoints_never_lose_a_write() {
+    // Pure write contention: every thread appends its own disjoint block while
+    // some also checkpoint. Writers serialize on the exclusive guard; the exact
+    // final count proves none deadlocked and none was lost. Under a deadline so
+    // a serialization bug fails fast instead of hanging.
+    run_with_deadline(60, "writer serialization", || {
+        const THREADS: u64 = 8;
+        const PER: u64 = 200;
+
+        let tmp = TempDir::new("writers");
+        let (db, _) = Database::open(tmp.db(), Config::default()).unwrap();
+        let db = Arc::new(db);
+        let barrier = Arc::new(Barrier::new(THREADS as usize));
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|t| {
+                let db = Arc::clone(&db);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for i in 0..PER {
+                        // Disjoint timestamps per thread so nothing collides.
+                        let now = 1 + t * PER + i;
+                        db.remember(RememberInput::text(now, &fact_text(now)))
+                            .unwrap();
+                        if i.is_multiple_of(64) {
+                            db.checkpoint(now).unwrap();
+                        }
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(
+            db.stats().facts as u64,
+            THREADS * PER,
+            "every write from every thread must land exactly once"
+        );
+    });
 }
