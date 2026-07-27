@@ -78,6 +78,11 @@ memory-stats = "1.2.0"
 [workspace.lints.rust]
 missing_docs = "deny"
 unsafe_op_in_unsafe_fn = "deny"
+# `cargo-tarpaulin` sets `--cfg=tarpaulin`; declare it so `#[cfg_attr(tarpaulin,
+# ignore)]` on the timing-sensitive concurrency stress tests does not trip the
+# unexpected-cfg lint. Those tests are covered by normal `cargo test`; under
+# tarpaulin's ptrace slowdown they only time out without adding coverage.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin)'] }
 
 [workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"

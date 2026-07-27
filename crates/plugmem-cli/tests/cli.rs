@@ -29,6 +29,16 @@ impl TempDir {
     }
 }
 
+/// The current snapshot generation file for a database `base`: `base` is now a
+/// tiny manifest (magic/ver/gen/checksum, little-endian) naming `base.snap.<gen>`.
+fn snapshot_file(base: &std::path::Path) -> PathBuf {
+    let m = std::fs::read(base).expect("manifest present");
+    let generation = u64::from_le_bytes(m[8..16].try_into().unwrap());
+    let mut p = base.to_path_buf().into_os_string();
+    p.push(format!(".snap.{generation}"));
+    PathBuf::from(p)
+}
+
 impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
@@ -245,11 +255,12 @@ fn scrub_detects_on_disk_corruption() {
     let tmp = TempDir::new("scrub-corrupt");
     plugmem(&tmp.db(), &["remember", "a corruptible tokio fact"]);
     plugmem(&tmp.db(), &["maintain"]);
-    // Flip a byte inside a section body (the text pool).
-    let mut bytes = std::fs::read(tmp.db()).unwrap();
+    // Flip a byte inside a section body (the text pool) of the snapshot.
+    let snap = snapshot_file(&tmp.db());
+    let mut bytes = std::fs::read(&snap).unwrap();
     let at = bytes.windows(5).position(|w| w == b"tokio").unwrap();
     bytes[at] ^= 0xFF;
-    std::fs::write(tmp.db(), bytes).unwrap();
+    std::fs::write(&snap, bytes).unwrap();
     let out = plugmem(&tmp.db(), &["scrub"]);
     assert_eq!(out.status.code(), Some(2), "corruption exits 2");
 }

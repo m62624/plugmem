@@ -111,19 +111,21 @@ impl ReadOnlyDatabase {
         if !journal.is_empty() {
             return Err(HostError::NeedsCheckpoint { path: base });
         }
+        let Some(genp) = store.current_snapshot_path()? else {
+            // No published generation to map — checkpoint the database first.
+            return Err(HostError::NeedsCheckpoint { path: base });
+        };
 
-        let file = File::open(&base).map_err(|e| HostError::io(&base, e))?;
-        // SAFETY: mapping a file is inherently unsafe — a concurrent
-        // truncate or overwrite of the mapped file would fault the
-        // process (SIGBUS/exception) on the next page access. Our
-        // correctness argument (specs/16 §5): this handle holds a shared
-        // advisory lock (`_store`) for its whole life, and a shared lock
-        // excludes every exclusive (read-write) owner, so no cooperating
-        // process writes or truncates the file while the map is live —
-        // other shared readers only read. A foreign `truncate`/`rm` under
-        // a live handle is out of contract — the same caveat as corrupting
-        // any database file under a running engine.
-        let map = unsafe { Mmap::map(&file) }.map_err(|e| HostError::io(&base, e))?;
+        let file = File::open(&genp).map_err(|e| HostError::io(&genp, e))?;
+        // SAFETY: mapping a file is inherently unsafe — a concurrent truncate
+        // or overwrite of the mapped file would fault the process
+        // (SIGBUS/exception) on the next page access. Our correctness argument
+        // (specs/16 §5): a generation file is **immutable** — a checkpoint
+        // publishes a new generation and never rewrites this one — and this
+        // handle holds a shared lock (`_store`) for its whole life. A foreign
+        // `truncate`/`rm` under a live handle is out of contract — the same
+        // caveat as corrupting any database file under a running engine.
+        let map = unsafe { Mmap::map(&file) }.map_err(|e| HostError::io(&genp, e))?;
         // The `File` handle is no longer needed: `Mmap` owns the mapping.
         drop(file);
 
@@ -303,13 +305,16 @@ impl Scrub {
         // irrelevant — a scrub never writes — but the type needs one.
         let store = FileStorage::open_shared(path, FsyncPolicy::OnSnapshot)?;
         let base = store.path().to_path_buf();
+        let Some(genp) = store.current_snapshot_path()? else {
+            return Err(HostError::NeedsCheckpoint { path: base });
+        };
 
-        let file = File::open(&base).map_err(|e| HostError::io(&base, e))?;
-        // SAFETY: identical to `ReadOnlyDatabase::open` — the shared lock in
-        // `store` is held for this scrub's whole life and excludes every
-        // exclusive (read-write) owner, so no cooperating process writes or
-        // truncates the file while the map is live (specs/16 §5).
-        let map = unsafe { Mmap::map(&file) }.map_err(|e| HostError::io(&base, e))?;
+        let file = File::open(&genp).map_err(|e| HostError::io(&genp, e))?;
+        // SAFETY: identical to `ReadOnlyDatabase::open` — a generation file is
+        // immutable (a checkpoint publishes a new one, never rewrites this), and
+        // the shared lock in `store` is held for this scrub's whole life
+        // (specs/16 §5).
+        let map = unsafe { Mmap::map(&file) }.map_err(|e| HostError::io(&genp, e))?;
         drop(file);
 
         let mapped = MappedScrub::try_new(map, |map| {

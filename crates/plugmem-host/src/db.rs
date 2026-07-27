@@ -36,7 +36,6 @@
 
 use std::cell::RefCell;
 use std::fs::File;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 #[cfg(feature = "counters")]
 use std::sync::MutexGuard;
@@ -124,30 +123,24 @@ impl Engine {
 /// file (a brand-new database) opens owned and empty — the file appears at the
 /// first snapshot. `store` must already hold the exclusive lock.
 fn open_engine(store: &mut FileStorage, cfg: &Config) -> Result<(Engine, OpenReport), HostError> {
-    let base = store.path().to_path_buf();
-    let file = match File::open(&base) {
-        Ok(f) => f,
-        Err(e) if e.kind() == ErrorKind::NotFound => {
-            // No snapshot file to map yet. The database is owned until the
-            // first snapshot writes the file (later opens map it) — but a
-            // journal may already exist (mutations before any snapshot), so
-            // still replay it into the owned engine.
-            let journal = store.read_journal()?;
-            let (mem, report) = Memory::from_bytes(None, &journal, cfg.clone())?;
-            return Ok((Engine::Owned(Box::new(mem)), report));
-        }
-        Err(e) => return Err(HostError::io(&base, e)),
-    };
     let journal = store.read_journal()?;
+    let Some(genp) = store.current_snapshot_path()? else {
+        // No published generation yet. The database is owned until the first
+        // checkpoint publishes one — but a journal may already exist (mutations
+        // before any snapshot), so still replay it into the owned engine.
+        let (mem, report) = Memory::from_bytes(None, &journal, cfg.clone())?;
+        return Ok((Engine::Owned(Box::new(mem)), report));
+    };
+    let file = File::open(&genp).map_err(|e| HostError::io(&genp, e))?;
     // SAFETY: mapping a file is inherently unsafe — a concurrent truncate or
     // overwrite of the mapped file would fault the process (SIGBUS/exception)
     // on the next page access. Our correctness argument (specs/16 §5): the
-    // `store` holds the **exclusive** advisory lock for the whole life of this
-    // handle, so no cooperating process writes or truncates the file while the
-    // map is live. A foreign `truncate`/`rm` under a live handle is out of
-    // contract — the same caveat as corrupting any database file under a
-    // running engine.
-    let map = unsafe { Mmap::map(&file) }.map_err(|e| HostError::io(&base, e))?;
+    // generation file is **immutable** (a checkpoint publishes a new one and
+    // never rewrites this), and the `store` holds the exclusive writer lock, so
+    // nothing overwrites it under the map. A foreign `truncate`/`rm` under a
+    // live handle is out of contract — the same caveat as corrupting any
+    // database file under a running engine.
+    let map = unsafe { Mmap::map(&file) }.map_err(|e| HostError::io(&genp, e))?;
     // The `File` handle is no longer needed: `Mmap` owns the mapping.
     drop(file);
     // Replay the journal into the overlay: no whole-arena clone, only the
@@ -620,9 +613,18 @@ impl Database {
     /// The report's byte counts are the on-disk image size before and after.
     pub fn maintain(&self, now: u64) -> Result<MaintainReport, HostError> {
         let mut st = self.write();
-        let bytes_before = std::fs::metadata(st.store.path())
-            .map(|m| m.len() as usize)
-            .unwrap_or(0);
+        // The image size is the current snapshot generation's, not the tiny
+        // manifest at the base path.
+        let snap_len = |store: &FileStorage| -> usize {
+            store
+                .current_snapshot_path()
+                .ok()
+                .flatten()
+                .and_then(|p| std::fs::metadata(&p).ok())
+                .map(|m| m.len() as usize)
+                .unwrap_or(0)
+        };
+        let bytes_before = snap_len(&st.store);
         let text_tmp = tmp_sibling(st.store.path(), "mtext");
         let vec_tmp = tmp_sibling(st.store.path(), "mvec");
 
@@ -654,9 +656,7 @@ impl Database {
         st.engine = engine;
         st.forgets = 0;
         st.ops = 0;
-        let bytes_after = std::fs::metadata(st.store.path())
-            .map(|m| m.len() as usize)
-            .unwrap_or(0);
+        let bytes_after = snap_len(&st.store);
         Ok(MaintainReport {
             purged,
             bytes_before,
@@ -744,10 +744,15 @@ impl Database {
         // owned copy of the image. A structurally corrupt image fails here —
         // that is Tier 0, not salvageable content corruption.
         let journal = src_store.read_journal()?;
-        let file = File::open(&src_base).map_err(|e| HostError::io(&src_base, e))?;
-        // SAFETY: as in `open_engine` — `src_store` holds the exclusive lock for
-        // the map's whole life, so no cooperating writer touches the file.
-        let map = unsafe { Mmap::map(&file) }.map_err(|e| HostError::io(&src_base, e))?;
+        let Some(genp) = src_store.current_snapshot_path()? else {
+            return Err(HostError::Engine(Error::Corrupt(
+                "source database has no published snapshot to recover",
+            )));
+        };
+        let file = File::open(&genp).map_err(|e| HostError::io(&genp, e))?;
+        // SAFETY: as in `open_engine` — the generation file is immutable and
+        // `src_store` holds the exclusive lock, so nothing touches it under us.
+        let map = unsafe { Mmap::map(&file) }.map_err(|e| HostError::io(&genp, e))?;
         drop(file);
         let (mut mem, _report) = Memory::from_bytes_overlay(&map[..], &journal, cfg.clone())?;
 

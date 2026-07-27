@@ -105,6 +105,7 @@ fn database_and_readonly_are_send_sync() {
 }
 
 #[test]
+#[cfg_attr(tarpaulin, ignore)] // timing stress: runs under `cargo test`, skipped under coverage
 fn concurrent_readers_with_a_writer_never_see_a_torn_fact() {
     const WRITES: u64 = 3_000;
     const READERS: usize = 8;
@@ -185,6 +186,7 @@ fn concurrent_readers_with_a_writer_never_see_a_torn_fact() {
 }
 
 #[test]
+#[cfg_attr(tarpaulin, ignore)] // timing stress: runs under `cargo test`, skipped under coverage
 fn readonly_serves_concurrent_readers_consistently() {
     const FACTS: u64 = 500;
     const READERS: usize = 8;
@@ -240,6 +242,7 @@ fn readonly_serves_concurrent_readers_consistently() {
 }
 
 #[test]
+#[cfg_attr(tarpaulin, ignore)] // timing stress: runs under `cargo test`, skipped under coverage
 fn mixed_read_write_contention_progresses_without_deadlock() {
     // Many threads each interleave writes, checkpoints and reads on one shared
     // handle. Writes and checkpoints take the exclusive guard, reads the shared
@@ -314,6 +317,7 @@ fn mixed_read_write_contention_progresses_without_deadlock() {
 }
 
 #[test]
+#[cfg_attr(tarpaulin, ignore)] // timing stress: runs under `cargo test`, skipped under coverage
 fn concurrent_writers_with_checkpoints_never_lose_a_write() {
     // Pure write contention: every thread appends its own disjoint block while
     // some also checkpoint. Writers serialize on the exclusive guard; the exact

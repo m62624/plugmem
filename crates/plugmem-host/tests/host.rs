@@ -391,12 +391,86 @@ fn leftover_tmp_scrap_is_discarded_on_open() {
         db.remember(RememberInput::text(1, "keep me")).unwrap();
         db.checkpoint(2).unwrap();
     }
-    // A crashed half-write leaves a tmp file; the snapshot is intact.
-    let scrap = tmp.0.join("agent.plugmem.tmp");
-    std::fs::write(&scrap, b"half-written garbage").unwrap();
+    // A crashed checkpoint leaves an orphan generation (and its staging tmp)
+    // that the manifest never came to point at; the live snapshot is intact.
+    let orphan = tmp.0.join("agent.plugmem.snap.999");
+    let orphan_tmp = tmp.0.join("agent.plugmem.snap.999.tmp");
+    std::fs::write(&orphan, b"half-written generation").unwrap();
+    std::fs::write(&orphan_tmp, b"staging garbage").unwrap();
     let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
-    assert!(!scrap.exists(), "the scrap must be removed");
+    assert!(!orphan.exists(), "the orphan generation must be removed");
+    assert!(!orphan_tmp.exists(), "the staging tmp must be removed");
     assert_eq!(db.stats().facts, 1, "the real snapshot loaded");
+}
+
+/// The number of `base.snap.<N>` generation files present (committed, not tmp).
+fn generation_count(base: &std::path::Path) -> usize {
+    let dir = base.parent().unwrap();
+    let name = base.file_name().unwrap().to_str().unwrap();
+    let prefix = format!("{name}.snap.");
+    std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| {
+            let f = e.file_name();
+            let f = f.to_string_lossy();
+            f.strip_prefix(&prefix)
+                .is_some_and(|rest| rest.parse::<u64>().is_ok())
+        })
+        .count()
+}
+
+#[test]
+fn checkpoint_advances_the_generation_and_reclaims_the_old() {
+    let tmp = TempDir::new("generations");
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+
+    db.remember(RememberInput::text(1, "first")).unwrap();
+    db.checkpoint(10).unwrap();
+    // The manifest is a small fixed record naming generation 1; exactly one
+    // committed generation file exists.
+    assert_eq!(
+        std::fs::metadata(tmp.db()).unwrap().len(),
+        24,
+        "manifest size"
+    );
+    assert!(snapshot_file(&tmp.db()).exists(), "generation 1 exists");
+    assert_eq!(generation_count(&tmp.db()), 1);
+
+    db.remember(RememberInput::text(2, "second")).unwrap();
+    db.checkpoint(20).unwrap();
+    // The manifest now names generation 2; generation 1 has been reclaimed —
+    // still exactly one generation on disk (no accumulation).
+    let g2 = snapshot_file(&tmp.db());
+    assert!(
+        g2.to_string_lossy().ends_with(".snap.2"),
+        "advanced to gen 2"
+    );
+    assert!(g2.exists());
+    assert!(
+        !tmp.0.join("agent.plugmem.snap.1").exists(),
+        "the old generation is reclaimed"
+    );
+    assert_eq!(generation_count(&tmp.db()), 1);
+}
+
+#[test]
+fn a_corrupt_manifest_is_rejected_on_open() {
+    let tmp = TempDir::new("bad-manifest");
+    {
+        let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+        db.remember(RememberInput::text(1, "x")).unwrap();
+        db.checkpoint(2).unwrap();
+    }
+    // Flip the manifest magic: it no longer validates, so an open refuses it
+    // rather than trusting a garbage generation number.
+    let mut m = std::fs::read(tmp.db()).unwrap();
+    m[0] ^= 0xFF;
+    std::fs::write(tmp.db(), &m).unwrap();
+    match Database::open(tmp.db(), cfg()) {
+        Err(HostError::Engine(plugmem_host::Error::Corrupt(_))) => {}
+        other => panic!("expected a Corrupt manifest error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -694,10 +768,21 @@ fn journal_of(base: &std::path::Path) -> PathBuf {
     PathBuf::from(p)
 }
 
+/// The current snapshot generation file for a database `base`: read the
+/// manifest (magic/ver/gen/checksum, little-endian) and build `base.snap.<gen>`.
+/// `base` itself is the tiny manifest now, not the image.
+fn snapshot_file(base: &std::path::Path) -> PathBuf {
+    let m = std::fs::read(base).expect("manifest present");
+    assert_eq!(m.len(), 24, "manifest is a fixed 24-byte record");
+    let generation = u64::from_le_bytes(m[8..16].try_into().unwrap());
+    let mut p = base.to_path_buf().into_os_string();
+    p.push(format!(".snap.{generation}"));
+    PathBuf::from(p)
+}
+
 #[test]
 fn overlay_writes_survive_repeated_snapshots_and_reopen() {
     let tmp = TempDir::new("overlay-remap");
-    let scrap = tmp.0.join("agent.plugmem.tmp");
     {
         // Snapshot every 4 ops: the first crosses Owned -> Mapped, every later
         // one is a Mapped -> Mapped re-map. The engine must keep working across
@@ -720,7 +805,11 @@ fn overlay_writes_survive_repeated_snapshots_and_reopen() {
         );
         let out = db.recall(RecallQuery::text(1_000, "durable")).unwrap();
         assert!(out.rendered.contains("durable"));
-        assert!(!scrap.exists(), "no tmp scrap survives a snapshot");
+        let has_tmp = std::fs::read_dir(&tmp.0)
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().ends_with(".tmp"));
+        assert!(!has_tmp, "no staging tmp survives a snapshot");
     } // drop releases the lock
 
     // 40 ops at every-4 snapshots means the last op snapshotted: the journal is
@@ -770,7 +859,7 @@ fn a_re_mapped_snapshot_is_canonical_against_an_owned_replay() {
     drop(db);
 
     // A checkpointed database has a full image and an empty journal.
-    let file = std::fs::read(tmp.db()).unwrap();
+    let file = std::fs::read(snapshot_file(&tmp.db())).unwrap();
     let journal = std::fs::read(journal_of(&tmp.db())).unwrap();
     assert!(journal.is_empty(), "checkpoint clears the journal");
 
@@ -849,7 +938,7 @@ fn an_overlay_open_residents_far_less_than_the_image() {
         }
         db.checkpoint(20_000_000).unwrap();
     }
-    let file_len = std::fs::metadata(tmp.db()).unwrap().len() as usize;
+    let file_len = std::fs::metadata(snapshot_file(&tmp.db())).unwrap().len() as usize;
     assert!(
         file_len > 8 * 1024 * 1024,
         "the test database must be large enough to measure ({file_len} bytes)"
@@ -902,7 +991,7 @@ fn scrub_verifies_a_clean_image_and_slices_by_budget() {
         let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
         seed_checkpointed(&db);
     }
-    let file_len = std::fs::metadata(tmp.db()).unwrap().len();
+    let file_len = std::fs::metadata(snapshot_file(&tmp.db())).unwrap().len();
 
     let ro = Database::open_readonly(tmp.db(), cfg()).unwrap();
 
@@ -938,7 +1027,7 @@ fn scrub_catches_a_flipped_section_byte_on_disk() {
         seed_checkpointed(&db);
     }
     // Corrupt a byte inside the text pool while the lock is free.
-    flip_byte_at(&tmp.db(), b"tokio");
+    flip_byte_at(&snapshot_file(&tmp.db()), b"tokio");
 
     // The default open still succeeds (trust/sparse parse is structural)...
     let ro = Database::open_readonly(tmp.db(), cfg()).unwrap();
@@ -1011,9 +1100,10 @@ fn recover_drops_a_text_corrupt_fact_and_preserves_the_source() {
         db.checkpoint(200).unwrap();
     }
     // Turn the marker fact's text into invalid UTF-8, then snapshot the source
-    // bytes so we can prove recover never rewrites them.
-    flip_byte_at(&src, b"CORRUPTME");
-    let src_after_flip = std::fs::read(&src).unwrap();
+    // generation bytes so we can prove recover never rewrites them.
+    let src_snap = snapshot_file(&src);
+    flip_byte_at(&src_snap, b"CORRUPTME");
+    let src_after_flip = std::fs::read(&src_snap).unwrap();
 
     let report = Database::recover(&src, &dst, cfg(), 300).unwrap();
     assert_eq!(report.dropped_text, 1);
@@ -1034,7 +1124,7 @@ fn recover_drops_a_text_corrupt_fact_and_preserves_the_source() {
     }
     // The source on disk is byte-for-byte what it was (evidence preserved).
     assert_eq!(
-        std::fs::read(&src).unwrap(),
+        std::fs::read(&src_snap).unwrap(),
         src_after_flip,
         "recover must leave the source untouched"
     );
@@ -1063,14 +1153,15 @@ fn recover_drops_a_vector_corrupt_fact() {
     // that owns slot 0 no longer has a slot that names it back (the fact<->slot
     // bijection verify() checks).
     const VEC_POOL_KIND: u16 = 37; // persist.rs `kind::VEC_POOL`
-    let mut bytes = std::fs::read(&src).unwrap();
+    let src_snap = snapshot_file(&src);
+    let mut bytes = std::fs::read(&src_snap).unwrap();
     let start = {
         let snap = plugmem_core::snapshot::Snapshot::parse(&bytes).unwrap();
         let sec = snap.section(VEC_POOL_KIND).expect("a vector pool section");
         sec.as_ptr() as usize - bytes.as_ptr() as usize
     };
     bytes[start] ^= 0xFF; // the low byte of slot 0's owning fact id
-    std::fs::write(&src, bytes).unwrap();
+    std::fs::write(&src_snap, bytes).unwrap();
 
     let report = Database::recover(&src, &dst, c.clone(), 300).unwrap();
     assert_eq!(report.dropped_vector, 1);
@@ -1091,10 +1182,11 @@ fn recover_refuses_structural_corruption() {
         let (db, _) = Database::open(&src, cfg()).unwrap();
         seed_checkpointed(&db);
     }
-    // Break the magic so the image will not parse at all.
-    let mut bytes = std::fs::read(&src).unwrap();
+    // Break the snapshot's magic so the image will not parse at all.
+    let src_snap = snapshot_file(&src);
+    let mut bytes = std::fs::read(&src_snap).unwrap();
     bytes[0] = b'X';
-    std::fs::write(&src, &bytes).unwrap();
+    std::fs::write(&src_snap, &bytes).unwrap();
 
     match Database::recover(&src, &dst, cfg(), 300) {
         Err(HostError::Engine(plugmem_host::Error::Corrupt(_))) => {}

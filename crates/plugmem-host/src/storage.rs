@@ -1,20 +1,26 @@
-//! `FileStorage`: the engine's `Storage` trait over two files with an
-//! exclusive advisory lock (specs/13 §2).
+//! `FileStorage`: the engine's `Storage` trait over a **versioned** on-disk
+//! layout — immutable snapshot generations named by a tiny manifest (specs/13,
+//! specs/16). This is what lets a reader map a stable snapshot while a writer
+//! keeps working: the writer never overwrites a live file, it publishes a new
+//! generation and repoints the manifest.
 //!
 //! Layout for `base = "agent.plugmem"`:
 //!
 //! | file | role |
 //! |---|---|
-//! | `agent.plugmem` | the snapshot (the engine's memory image) |
-//! | `agent.plugmem.journal` | the append-only journal since it |
-//! | `agent.plugmem.lock` | the empty advisory-lock file |
-//! | `agent.plugmem.tmp` | scratch for the atomic snapshot replace |
+//! | `agent.plugmem` | the **manifest** — a tiny record naming the current snapshot generation |
+//! | `agent.plugmem.snap.<N>` | **generation N** — an immutable full snapshot image; never rewritten |
+//! | `agent.plugmem.journal` | the append-only journal since the current generation |
+//! | `agent.plugmem.lock` | the advisory-lock file (writer-vs-writer) |
+//! | `agent.plugmem.snap.<N>.tmp`, `agent.plugmem.manifest.tmp` | staging for the atomic writes |
 //!
-//! Snapshot writes are atomic: the bytes go to the tmp file, the tmp is
-//! fsynced, renamed over the snapshot, and the directory is fsynced
-//! (unix) — a reader can observe the old image or the new one, never a
-//! torn one. The lock is held from `open` until drop; the OS releases
-//! it even on abnormal termination.
+//! A checkpoint streams the fresh image to `…snap.<N+1>.tmp`, fsyncs it,
+//! renames it to `…snap.<N+1>` (an immutable file, never overwritten), then
+//! atomically repoints the manifest (tmp + fsync + rename + directory fsync).
+//! The old generation is reclaimed once nothing maps it. A reader always
+//! observes a manifest pointing at a generation that already exists on disk.
+//! The lock is held from `open` until drop; the OS releases it even on
+//! abnormal termination.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Seek, SeekFrom, Write as _};
@@ -63,9 +69,13 @@ enum LockMode {
 /// File-backed [`Storage`] holding an advisory lock on its database.
 #[derive(Debug)]
 pub struct FileStorage {
+    /// The manifest path (what the caller points at).
     base: PathBuf,
     journal_path: PathBuf,
-    tmp_path: PathBuf,
+    /// Staging path for the atomic manifest publish.
+    manifest_tmp: PathBuf,
+    /// The generation the manifest currently names; `0` = no snapshot yet.
+    current_gen: u64,
     /// Keeps the advisory lock alive; the handle itself is never read.
     _lock: File,
     /// The journal in append mode, kept open across appends.
@@ -108,7 +118,7 @@ impl FileStorage {
         let base = base.into();
         let lock_path = suffixed(&base, "lock");
         let journal_path = suffixed(&base, "journal");
-        let tmp_path = suffixed(&base, "tmp");
+        let manifest_tmp = suffixed(&base, "manifest.tmp");
 
         let lock = OpenOptions::new()
             .create(true)
@@ -130,13 +140,21 @@ impl FileStorage {
             }
         }
 
-        // A leftover tmp file is a crashed half-write: the rename never
-        // happened, so the snapshot is intact — discard the scrap. This is
-        // the writer's crash recovery: only an exclusive owner does it. A
-        // shared reader must not mutate the directory, and concurrent
-        // readers would race on the remove.
-        if mode == LockMode::Exclusive && tmp_path.exists() {
-            std::fs::remove_file(&tmp_path).map_err(|e| HostError::io(&tmp_path, e))?;
+        let current_gen = read_manifest(&base)?.unwrap_or(0);
+
+        // Crash recovery: discard scraps of a checkpoint that never published
+        // (orphan generation files and staging tmps). Only the exclusive owner
+        // does it — a shared reader must not mutate the directory, and the
+        // manifest always names a generation that already exists on disk.
+        if mode == LockMode::Exclusive {
+            cleanup_orphans(
+                &base,
+                if current_gen == 0 {
+                    None
+                } else {
+                    Some(current_gen)
+                },
+            )?;
         }
 
         let journal = OpenOptions::new()
@@ -148,7 +166,8 @@ impl FileStorage {
         Ok(Self {
             base,
             journal_path,
-            tmp_path,
+            manifest_tmp,
+            current_gen,
             _lock: lock,
             journal,
             fsync,
@@ -165,47 +184,64 @@ impl FileStorage {
         self.journal.metadata().map(|m| m.len()).unwrap_or(0)
     }
 
-    /// Streams a snapshot into the tmp file and fsyncs it, **without**
-    /// renaming — the durable-but-not-yet-visible half of an atomic replace
-    /// (specs/16 §9). `write` drives the engine's streaming snapshot writer
-    /// against a buffered file sink, so the image never all lives in RAM at
-    /// once. Split from [`FileStorage::commit_snapshot`] because the caller
-    /// must drop the mmap of the old snapshot **between** the two: streaming
-    /// reads through that map, but a mapped file cannot be renamed over on
-    /// Windows. A staged tmp is cleaned up on the next exclusive open.
+    /// The path of the snapshot file the manifest currently names, or `None`
+    /// for a fresh database with no published snapshot. Callers that map the
+    /// snapshot (`open_engine`, `ReadOnlyDatabase`, `Scrub`, `recover`) resolve
+    /// through this instead of mapping `base` (which is now the manifest).
+    pub(crate) fn current_snapshot_path(&self) -> Result<Option<PathBuf>, HostError> {
+        Ok(read_manifest(&self.base)?.map(|g| gen_path(&self.base, g)))
+    }
+
+    /// The next generation number this storage will publish.
+    fn next_gen(&self) -> u64 {
+        self.current_gen + 1
+    }
+
+    /// Streams a snapshot into the next generation's tmp file and fsyncs it,
+    /// **without** publishing — the durable-but-not-yet-visible half of a
+    /// checkpoint (specs/16 §9). `write` drives the engine's streaming snapshot
+    /// writer against a buffered file sink, so the image never all lives in RAM
+    /// at once. Split from [`FileStorage::commit_snapshot`] because the caller
+    /// must drop the mmap of the *old* generation **between** the two: staging
+    /// reads through that map, and the reclaim in `commit` deletes it. A staged
+    /// tmp is cleaned up on the next exclusive open.
     pub(crate) fn stage_snapshot(
         &mut self,
         write: impl FnOnce(&mut FileSink) -> Result<(), HostError>,
     ) -> Result<(), HostError> {
-        let file = File::create(&self.tmp_path).map_err(|e| HostError::io(&self.tmp_path, e))?;
-        let mut sink = FileSink::new(file, self.tmp_path.clone());
+        let tmp = gen_tmp_path(&self.base, self.next_gen());
+        let file = File::create(&tmp).map_err(|e| HostError::io(&tmp, e))?;
+        let mut sink = FileSink::new(file, tmp.clone());
         write(&mut sink)?;
         let file = sink.finish()?;
-        file.sync_all()
-            .map_err(|e| HostError::io(&self.tmp_path, e))?;
+        file.sync_all().map_err(|e| HostError::io(&tmp, e))?;
         Ok(())
     }
 
-    /// Renames the staged tmp file over the snapshot and fsyncs the directory
-    /// — the visible half of the atomic replace. Call only after
-    /// [`FileStorage::stage_snapshot`] and after dropping any mmap of the old
-    /// snapshot.
+    /// Publishes the staged generation: rename its tmp to the immutable
+    /// `snap.<N+1>`, repoint the manifest, then reclaim the previous
+    /// generation. Call only after [`FileStorage::stage_snapshot`] and after
+    /// dropping any mmap of the old generation.
     pub(crate) fn commit_snapshot(&mut self) -> Result<(), HostError> {
-        std::fs::rename(&self.tmp_path, &self.base).map_err(|e| HostError::io(&self.base, e))?;
-        self.sync_dir()
+        let next = self.next_gen();
+        let tmp = gen_tmp_path(&self.base, next);
+        let genp = gen_path(&self.base, next);
+        std::fs::rename(&tmp, &genp).map_err(|e| HostError::io(&genp, e))?;
+        sync_dir(&self.base)?;
+        publish_manifest(&self.base, &self.manifest_tmp, next)?;
+        let prev = self.current_gen;
+        self.current_gen = next;
+        self.reclaim_previous(prev);
+        Ok(())
     }
 
-    /// Fsyncs the directory holding the database (unix only — the
-    /// rename's durability point).
-    fn sync_dir(&self) -> Result<(), HostError> {
-        #[cfg(unix)]
-        {
-            let dir = self.base.parent().unwrap_or(Path::new("."));
-            File::open(dir)
-                .and_then(|d| d.sync_all())
-                .map_err(|e| HostError::io(dir, e))?;
+    /// Reclaims a superseded generation (single-writer layout: nothing else
+    /// maps it once the writer has re-mapped the new one). Best-effort — a
+    /// failed delete just leaves a scrap the next exclusive open sweeps.
+    fn reclaim_previous(&self, generation: u64) {
+        if generation >= 1 {
+            let _ = std::fs::remove_file(gen_path(&self.base, generation));
         }
-        Ok(())
     }
 }
 
@@ -259,25 +295,160 @@ fn suffixed(base: &Path, ext: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// Manifest magic ("PMGL" — distinct from the snapshot's own `MAGIC`).
+const MANIFEST_MAGIC: u32 = 0x504D_474C;
+/// On-disk manifest version (the layout, not the snapshot format).
+const MANIFEST_VERSION: u16 = 1;
+/// Manifest length: magic(4) + version(2) + pad(2) + gen(8) + checksum(8).
+const MANIFEST_LEN: usize = 24;
+
+/// 64-bit FNV-1a — a dependency-free integrity check for the manifest. The
+/// manifest is written atomically (tmp + rename), so it can never be torn; this
+/// only catches external garbage / bit-rot in the tiny fixed record.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// The snapshot file for generation `n`: `base` + `.snap.<n>`.
+fn gen_path(base: &Path, n: u64) -> PathBuf {
+    suffixed(base, &format!("snap.{n}"))
+}
+
+/// The staging path for generation `n`: `base` + `.snap.<n>.tmp`.
+fn gen_tmp_path(base: &Path, n: u64) -> PathBuf {
+    suffixed(base, &format!("snap.{n}.tmp"))
+}
+
+/// Reads and validates the manifest at `base`. `Ok(None)` when it is absent (a
+/// fresh database); `Err(Corrupt)` when it is present but malformed; `Err(Io)`
+/// on a real filesystem failure. The returned generation is always ≥ 1.
+fn read_manifest(base: &Path) -> Result<Option<u64>, HostError> {
+    let bytes = match std::fs::read(base) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(HostError::io(base, e)),
+    };
+    let ok = bytes.len() == MANIFEST_LEN
+        && u32::from_le_bytes(bytes[0..4].try_into().unwrap()) == MANIFEST_MAGIC
+        && u16::from_le_bytes(bytes[4..6].try_into().unwrap()) == MANIFEST_VERSION
+        && fnv1a(&bytes[0..16]) == u64::from_le_bytes(bytes[16..24].try_into().unwrap());
+    if !ok {
+        return Err(HostError::Engine(Error::Corrupt("manifest is corrupt")));
+    }
+    Ok(Some(u64::from_le_bytes(bytes[8..16].try_into().unwrap())))
+}
+
+/// Atomically publishes `gen` as the current generation: write a fresh manifest
+/// to `manifest_tmp`, fsync, rename over `base`, fsync the directory.
+fn publish_manifest(base: &Path, manifest_tmp: &Path, generation: u64) -> Result<(), HostError> {
+    let mut buf = [0u8; MANIFEST_LEN];
+    buf[0..4].copy_from_slice(&MANIFEST_MAGIC.to_le_bytes());
+    buf[4..6].copy_from_slice(&MANIFEST_VERSION.to_le_bytes());
+    buf[8..16].copy_from_slice(&generation.to_le_bytes());
+    let sum = fnv1a(&buf[0..16]);
+    buf[16..24].copy_from_slice(&sum.to_le_bytes());
+    let mut f = File::create(manifest_tmp).map_err(|e| HostError::io(manifest_tmp, e))?;
+    f.write_all(&buf)
+        .and_then(|()| f.sync_all())
+        .map_err(|e| HostError::io(manifest_tmp, e))?;
+    drop(f);
+    std::fs::rename(manifest_tmp, base).map_err(|e| HostError::io(base, e))?;
+    sync_dir(base)
+}
+
+/// Fsyncs the directory holding the database (unix only — the rename's
+/// durability point).
+fn sync_dir(base: &Path) -> Result<(), HostError> {
+    #[cfg(unix)]
+    {
+        let dir = base.parent().filter(|p| !p.as_os_str().is_empty());
+        let dir = dir.unwrap_or_else(|| Path::new("."));
+        File::open(dir)
+            .and_then(|d| d.sync_all())
+            .map_err(|e| HostError::io(dir, e))?;
+    }
+    #[cfg(not(unix))]
+    let _ = base;
+    Ok(())
+}
+
+/// Removes crash debris left by an interrupted checkpoint: every `snap.<n>`
+/// (and its `.tmp`) whose generation is not `keep`, plus the manifest tmp. Only
+/// the exclusive (writer) owner calls this — in the single-writer layout the
+/// manifest's generation is the only live snapshot; anything else is a scrap
+/// from a checkpoint that never published. `keep = None` (a fresh database with
+/// no manifest) sweeps every generation file.
+fn cleanup_orphans(base: &Path, keep: Option<u64>) -> Result<(), HostError> {
+    let dir = base
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = base
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    let prefix = format!("{name}.snap.");
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(HostError::io(dir, e)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| HostError::io(dir, e))?;
+        let fname = entry.file_name();
+        let Some(fname) = fname.to_str() else {
+            continue;
+        };
+        let Some(rest) = fname.strip_prefix(&prefix) else {
+            continue;
+        };
+        let num = rest.strip_suffix(".tmp").unwrap_or(rest);
+        match num.parse::<u64>() {
+            // The live generation's committed file survives; its stale tmp does not.
+            Ok(n) if keep == Some(n) && !rest.ends_with(".tmp") => {}
+            Ok(_) => {
+                let _ = std::fs::remove_file(entry.path());
+            }
+            Err(_) => {}
+        }
+    }
+    let _ = std::fs::remove_file(suffixed(base, "manifest.tmp"));
+    Ok(())
+}
+
 impl Storage for FileStorage {
     type Error = HostError;
 
     fn read_snapshot(&mut self) -> Result<Option<Vec<u8>>, HostError> {
-        match std::fs::read(&self.base) {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(HostError::io(&self.base, e)),
+        match self.current_snapshot_path()? {
+            Some(p) => Ok(Some(std::fs::read(&p).map_err(|e| HostError::io(&p, e))?)),
+            None => Ok(None),
         }
     }
 
     fn write_snapshot(&mut self, bytes: &[u8]) -> Result<(), HostError> {
-        let mut tmp = File::create(&self.tmp_path).map_err(|e| HostError::io(&self.tmp_path, e))?;
-        tmp.write_all(bytes)
-            .and_then(|()| tmp.sync_all())
-            .map_err(|e| HostError::io(&self.tmp_path, e))?;
-        drop(tmp);
-        std::fs::rename(&self.tmp_path, &self.base).map_err(|e| HostError::io(&self.base, e))?;
-        self.sync_dir()
+        // Publish a new immutable generation (the non-streaming path): stage
+        // its tmp, rename to snap.<N+1>, repoint the manifest, reclaim the old.
+        let next = self.next_gen();
+        let tmp = gen_tmp_path(&self.base, next);
+        let mut f = File::create(&tmp).map_err(|e| HostError::io(&tmp, e))?;
+        f.write_all(bytes)
+            .and_then(|()| f.sync_all())
+            .map_err(|e| HostError::io(&tmp, e))?;
+        drop(f);
+        let genp = gen_path(&self.base, next);
+        std::fs::rename(&tmp, &genp).map_err(|e| HostError::io(&genp, e))?;
+        sync_dir(&self.base)?;
+        publish_manifest(&self.base, &self.manifest_tmp, next)?;
+        let prev = self.current_gen;
+        self.current_gen = next;
+        self.reclaim_previous(prev);
+        Ok(())
     }
 
     fn read_journal(&mut self) -> Result<Vec<u8>, HostError> {
