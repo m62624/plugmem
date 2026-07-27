@@ -1,9 +1,9 @@
 100000	native	plugmem Arena (Ordered)	insert_ns	69.1
-100000	native	plugmem Arena (Uniform)	get_ns	64.6
+100000	native	plugmem Arena (Uniform)	get_ns	56.9
 100000	native	sorted Vec (bulk)	insert_ns	18.9
-100000	native	std BTreeMap	get_ns	95.1
+100000	native	std BTreeMap	get_ns	81.3
 100000	native	std BTreeMap	insert_ns	88.6
-100000	native	std HashMap	get_ns	14.8
+100000	native	std HashMap	get_ns	10.9
 100000	native	std HashMap	insert_ns	27.1
 100000	wasmer	plugmem Arena (Ordered)	insert_ns	84.1
 100000	wasmer	plugmem Arena (Uniform)	get_ns	75.8
@@ -13,37 +13,37 @@
 100000	wasmer	std HashMap	get_ns	17.6
 100000	wasmer	std HashMap	insert_ns	35.3
 100000	wasmtime	plugmem Arena (Ordered)	insert_ns	89.5
-100000	wasmtime	plugmem Arena (Uniform)	get_ns	74.5
+100000	wasmtime	plugmem Arena (Uniform)	get_ns	73.8
 100000	wasmtime	sorted Vec (bulk)	insert_ns	19.1
-100000	wasmtime	std BTreeMap	get_ns	91.1
+100000	wasmtime	std BTreeMap	get_ns	87.7
 100000	wasmtime	std BTreeMap	insert_ns	118.3
-100000	wasmtime	std HashMap	get_ns	15.7
+100000	wasmtime	std HashMap	get_ns	16.3
 100000	wasmtime	std HashMap	insert_ns	34.5
 1000000	native	HashMap+Vec (intern baseline)	allocs	200024.0
-1000000	native	HashMap+Vec (intern baseline)	insert_ns	44.8
+1000000	native	HashMap+Vec (intern baseline)	insert_ns	43.8
 1000000	native	Vec<Vec<u8>> (blob baseline)	allocs	1000019.0
-1000000	native	Vec<Vec<u8>> (blob baseline)	insert_ns	57.8
+1000000	native	Vec<Vec<u8>> (blob baseline)	insert_ns	58.8
 1000000	native	Vec<u8> per list (chunk baseline)	allocs	11265.0
-1000000	native	Vec<u8> per list (chunk baseline)	insert_ns	3.9
+1000000	native	Vec<u8> per list (chunk baseline)	insert_ns	4.0
 1000000	native	plugmem Arena (Ordered)	allocs	40.0
-1000000	native	plugmem Arena (Ordered)	ins_p99	414.8
+1000000	native	plugmem Arena (Ordered)	ins_p99	374.0
 1000000	native	plugmem Arena (Ordered)	insert_ns	131.8
 1000000	native	plugmem Arena (Ordered)	mem_b	33.6
 1000000	native	plugmem Arena (Uniform)	get_ns	124.3
 1000000	native	plugmem BlobHeap	allocs	40.0
-1000000	native	plugmem BlobHeap	insert_ns	37.3
+1000000	native	plugmem BlobHeap	insert_ns	37.5
 1000000	native	plugmem ChunkPool	allocs	36.0
-1000000	native	plugmem ChunkPool	insert_ns	5.9
+1000000	native	plugmem ChunkPool	insert_ns	6.3
 1000000	native	plugmem Interner	allocs	49.0
-1000000	native	plugmem Interner	insert_ns	28.7
+1000000	native	plugmem Interner	insert_ns	30.5
 1000000	native	std BTreeMap	allocs	133419.0
 1000000	native	std BTreeMap	get_ns	142.2
-1000000	native	std BTreeMap	ins_p99	463.2
+1000000	native	std BTreeMap	ins_p99	439.2
 1000000	native	std BTreeMap	insert_ns	136.6
 1000000	native	std BTreeMap	mem_b	20.7
 1000000	native	std HashMap	allocs	20.0
 1000000	native	std HashMap	get_ns	19.0
-1000000	native	std HashMap	ins_p99	123.5
+1000000	native	std HashMap	ins_p99	119.8
 1000000	native	std HashMap	insert_ns	46.1
 1000000	native	std HashMap	mem_b	35.7
 1000000	wasmer	HashMap+Vec (intern baseline)	allocs	200024.0
@@ -74,33 +74,33 @@
 1000000	wasmer	std HashMap	insert_ns	52.0
 1000000	wasmer	std HashMap	mem_b	35.7
 1000000	wasmtime	HashMap+Vec (intern baseline)	allocs	200024.0
-1000000	wasmtime	HashMap+Vec (intern baseline)	insert_ns	56.0
+1000000	wasmtime	HashMap+Vec (intern baseline)	insert_ns	58.3
 1000000	wasmtime	Vec<Vec<u8>> (blob baseline)	allocs	1000019.0
-1000000	wasmtime	Vec<Vec<u8>> (blob baseline)	insert_ns	24.0
+1000000	wasmtime	Vec<Vec<u8>> (blob baseline)	insert_ns	23.4
 1000000	wasmtime	Vec<u8> per list (chunk baseline)	allocs	11265.0
-1000000	wasmtime	Vec<u8> per list (chunk baseline)	insert_ns	2.9
+1000000	wasmtime	Vec<u8> per list (chunk baseline)	insert_ns	2.7
 1000000	wasmtime	plugmem Arena (Ordered)	allocs	40.0
-1000000	wasmtime	plugmem Arena (Ordered)	ins_p99	538.5
+1000000	wasmtime	plugmem Arena (Ordered)	ins_p99	568.0
 1000000	wasmtime	plugmem Arena (Ordered)	insert_ns	163.4
 1000000	wasmtime	plugmem Arena (Ordered)	mem_b	33.6
 1000000	wasmtime	plugmem Arena (Uniform)	get_ns	143.1
 1000000	wasmtime	plugmem BlobHeap	allocs	40.0
-1000000	wasmtime	plugmem BlobHeap	insert_ns	20.9
+1000000	wasmtime	plugmem BlobHeap	insert_ns	20.4
 1000000	wasmtime	plugmem ChunkPool	allocs	36.0
-1000000	wasmtime	plugmem ChunkPool	insert_ns	15.5
+1000000	wasmtime	plugmem ChunkPool	insert_ns	17.8
 1000000	wasmtime	plugmem Interner	allocs	49.0
-1000000	wasmtime	plugmem Interner	insert_ns	47.0
+1000000	wasmtime	plugmem Interner	insert_ns	47.2
 1000000	wasmtime	std BTreeMap	allocs	133419.0
 1000000	wasmtime	std BTreeMap	get_ns	150.8
-1000000	wasmtime	std BTreeMap	ins_p99	559.5
+1000000	wasmtime	std BTreeMap	ins_p99	517.0
 1000000	wasmtime	std BTreeMap	insert_ns	172.5
 1000000	wasmtime	std BTreeMap	mem_b	20.0
 1000000	wasmtime	std HashMap	allocs	20.0
 1000000	wasmtime	std HashMap	get_ns	25.5
-1000000	wasmtime	std HashMap	ins_p99	205.8
+1000000	wasmtime	std HashMap	ins_p99	183.8
 1000000	wasmtime	std HashMap	insert_ns	53.0
 1000000	wasmtime	std HashMap	mem_b	35.7
-core	native	BM25 (3 terms, 10k)	latency_us	63.6
-core	native	HNSW (30k, d384)	latency_us	194.3
-core	native	flat vector (24k, d384)	latency_us	222.4
-core	native	tags (3 lists, 100k)	latency_us	47.3
+core	native	BM25 (3 terms, 10k)	latency_us	67.1
+core	native	HNSW (30k, d384)	latency_us	177.0
+core	native	flat vector (24k, d384)	latency_us	226.9
+core	native	tags (3 lists, 100k)	latency_us	55.9
