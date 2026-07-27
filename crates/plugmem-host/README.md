@@ -156,6 +156,42 @@ println!("{}", out.rendered);
 # Ok::<(), plugmem_host::HostError>(())
 ```
 
+## Memory: the mmap path, and rebuilds larger than RAM
+
+This is where the engine's flat-arena design pays off at the OS level, and
+where the recommendation is: **prefer the mmap open, and let the OS manage
+resident memory.** Developer-to-developer, here is what actually happens.
+
+- **Both opens are zero-copy.** `open` and `open_readonly` memory-map the
+  snapshot and hand the engine a borrowed *overlay* over the mapping — the
+  bytes are never read into a heap copy. Opening a multi-GiB database is a
+  `mmap` plus a bounds-check, regardless of size; only the pages you actually
+  dereference fault in, and the OS is free to evict clean ones under pressure.
+  So resident memory tracks your **working set**, not the file size.
+- **Writes don't break the borrow.** A read-write handle appends new records
+  to a small owned tail; the mmap'd base is never rewritten in place (the
+  append-only structures make this safe without copy-on-write). A checkpoint
+  streams the fresh image to a temp file and atomically renames it — which is
+  also why the writer unmaps before renaming (Windows refuses to rename a file
+  that is still mapped).
+- **Recommendation — build occasionally, read a lot.** For a read-mostly
+  memory served to a fan-out of agents, `open_readonly` is the sweet spot: many
+  shared-lock handles map the *same* snapshot, sharing one copy in the OS page
+  cache. You pay for the file once no matter how many readers. Take a
+  read-write handle only when you actually mutate, then drop back to readers.
+- **Rebuilds don't need the file to fit in RAM.** `maintain` and `recover` run
+  **disk-first**: the engine streams the two large pools (vectors, text)
+  through a temp `Scratch` file this crate provides (a sibling of the database,
+  mmap'd on freeze, deleted on drop), keeping only metadata and the HNSW graph
+  resident. Peak RAM is therefore ∝ **record count**, not content size — so a
+  database well past RAM can still be compacted and salvaged. On bare `no_std`
+  (no files) the engine falls back to the in-RAM rebuild; the host always has
+  the disk-first path.
+
+The net picture: one file, embedded, no server — but it opens, serves and even
+rebuilds a database larger than memory, because nothing here ever holds the
+whole image resident.
+
 ## Integrity & recovery
 
 The default open trusts the file (like SQLite): it does not checksum the

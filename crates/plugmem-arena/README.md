@@ -36,6 +36,16 @@ file-backed, locking host with embedders, [`plugmem-host`](https://docs.rs/plugm
    pool follows the target's address space — capped at 4 GiB on wasm32 linear
    memory, RAM-bound on a 64-bit host. Serialized dumps store lengths, not
    offsets, so the format is identical across pointer widths.
+4. **Borrowed opens are zero-copy.** A container can open *over* a borrowed
+   buffer — its dumped sections inside a longer-lived slice — without copying
+   them, while later writes accumulate in a small owned tail (`load_borrowed` /
+   the page-level `load_overlay`). This is a general primitive: the crate is
+   storage-agnostic and names no host. It exists because the append-only
+   structures never rewrite an existing record, so a blob or page is wholly in
+   the borrowed base or wholly in the tail — no per-page copy-on-write. A caller
+   that memory-maps a file gets an open-and-append over gigabytes that touches
+   only the pages it reads; a caller that owns its bytes simply passes them and
+   the tail holds everything. The arena does not know or care which.
 
 ### Memory image = file format
 

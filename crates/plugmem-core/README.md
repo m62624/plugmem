@@ -255,6 +255,67 @@ plus an exponential recency boost. Selection is greedy under `k` and a
 token budget, and the result includes both structured facts and a
 rendered block ready to paste into a prompt.
 
+## Algorithms and optimizations
+
+One place to see every technique in the engine and *why* it is there —
+each is a deliberate trade-off, not a default. Details are in the sections
+around this one; this is the map.
+
+**Memory (keep RAM ∝ number of facts, not size of content):**
+
+- **Flat byte arenas** — all state is `Vec<u8>`/`Vec<u32>`, no `Box`/`HashMap`
+  in the persistent data. Why: no pointer chasing, no per-node allocation, and
+  the in-RAM image *is* the on-disk format, so load is adopt-not-parse. Cost:
+  compaction is an explicit `maintain` pass, not free deletion.
+- **int8 vector quantization** — embeddings stored as symmetric int8 of the
+  L2-normalized vector; f32 is never persisted. Why: ~4× smaller than f32 and
+  the dominant RAM consumer at scale. Cost: rescore is int8-exact, not f32-exact
+  (measured harmless — see `bench-history/`).
+- **Overlay open (mmap + owned tail)** — a database opens zero-copy over an
+  mmap; later appends land in a small owned tail, the borrowed base is never
+  cloned. Why: opening a multi-GiB file touches only the pages actually read,
+  and the OS can evict them. Cost: the borrow ties the handle to the mapping's
+  lifetime.
+- **Disk-first maintain/recover** — the two large pools (vectors, text) stream
+  through a host `Scratch` file instead of being rebuilt in RAM. Why: rebuild
+  RAM becomes ∝ record count + graph, not content size, so a database larger
+  than RAM can still be compacted. Cost: needs host temp-file I/O (unavailable
+  on bare no_std, which falls back to the in-RAM path).
+- **Streaming snapshot writer** — the image is written section-by-section, never
+  materialized as one buffer. Why: a checkpoint of a huge database does not spike
+  memory to the full image size.
+
+**Speed:**
+
+- **Two-phase vector search** — a 1-bit sign-signature Hamming prefilter
+  (popcount, SIMD-friendly) narrows to `max(4k, 64)` candidates, then an exact
+  int8-cosine rescore ranks them. Why: the cheap prefilter skips the expensive
+  rescore for almost everything. Cost: a coarse signature can drop a true
+  neighbour before rescore (widen the query `k` to recover it — nearly free).
+- **HNSW graph** above a size threshold (Malkov & Yashunin) — sub-linear
+  approximate search with the neighbor-selection heuristic and early-stopped
+  beam. Why: linear scan stops paying off past ~tens of thousands of vectors.
+  Cost: a one-time build in `maintain` (~ms/vector) and approximate recall.
+- **Delta + LEB128 posting lists** with a stop-frequency guard. Why: compact
+  lists decode fast and a hub term cannot dominate query cost.
+- **Bounded everything in fusion** — per-source candidate cap (`SOURCE_CAP`),
+  graph expansion budgets, greedy top-k. Why: one hub entity or one common term
+  can never blow a query up; cost is a fixed ceiling regardless of data shape.
+- **Zero allocations after warm-up** — `recall`/`get` reuse scratch buffers,
+  enforced by a counting-allocator test. Why: predictable latency, no GC-like
+  pauses.
+
+**Quality:**
+
+- **Reciprocal rank fusion** — merges sources by rank, not score, so no
+  per-source calibration is needed. **Recency boost** and **graph decay^depth**
+  tilt results toward fresh and closely-linked facts.
+
+The two committed benchmarks that back these — `benches/engine.rs` (Criterion
+speed) and `examples/recall_quality.rs` (recall vs an exact-cosine oracle) —
+plus their recorded baselines in `bench-history/`, are what turn "should be
+faster/accurate" into a number you can regress against.
+
 ## Storage and durability
 
 All state lives in flat byte structures (sorted page arenas, blob heaps,
