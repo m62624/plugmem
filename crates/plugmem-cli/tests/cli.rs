@@ -2,6 +2,8 @@
 //! the human/JSON split, and lock behaviour. The command logic itself is
 //! unit-tested in the library; here we exercise the actual executable.
 
+use std::io::{Read as _, Write as _};
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
@@ -211,6 +213,113 @@ fn read_only_commands_coexist_with_a_live_writer() {
         Some(1),
         "a second writer is still locked out",
     );
+}
+
+/// A minimal `/v1/embeddings` mock: one thread, `responses` sequential canned
+/// replies with deterministic `dim`-length vectors (seeded by input length),
+/// honoring request order. Returns the base URL. No network leaves localhost.
+fn spawn_mock_embedder(dim: usize, responses: usize) -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        for _ in 0..responses {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = vec![0u8; 65536];
+            let mut read = 0usize;
+            let body_start = loop {
+                read += sock.read(&mut buf[read..]).unwrap();
+                let head = String::from_utf8_lossy(&buf[..read]);
+                if let Some(at) = head.find("\r\n\r\n") {
+                    let len: usize = head
+                        .lines()
+                        .find_map(|l| {
+                            l.strip_prefix("content-length: ")
+                                .or_else(|| l.strip_prefix("Content-Length: "))
+                        })
+                        .unwrap()
+                        .trim()
+                        .parse()
+                        .unwrap();
+                    if read >= at + 4 + len {
+                        break at + 4;
+                    }
+                }
+            };
+            let body: serde_json::Value = serde_json::from_slice(&buf[body_start..read]).unwrap();
+            let inputs = body["input"].as_array().unwrap();
+            let data: Vec<serde_json::Value> = inputs
+                .iter()
+                .enumerate()
+                .map(|(i, text)| {
+                    let seed = text.as_str().unwrap().len() as f32;
+                    let embedding: Vec<f32> = (0..dim).map(|j| (seed + j as f32).sin()).collect();
+                    serde_json::json!({ "index": i, "embedding": embedding })
+                })
+                .collect();
+            let payload = serde_json::json!({ "data": data }).to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+                payload.len()
+            );
+            sock.write_all(response.as_bytes()).unwrap();
+        }
+    });
+    (format!("http://{addr}/v1"), handle)
+}
+
+#[test]
+fn recall_with_an_embedder_coexists_with_a_live_writer() {
+    let dim = 8;
+    // Exactly two embed calls: the seeding `remember`, then the `recall` query.
+    let (url, server) = spawn_mock_embedder(dim, 2);
+    let tmp = TempDir::new("embed-coexist");
+
+    // A config pointing the embedder at the mock server.
+    let config = tmp.0.join("config.toml");
+    std::fs::write(
+        &config,
+        format!("[engine]\ndim = {dim}\n\n[embedder]\nkind = \"openai\"\nurl = \"{url}\"\nmodel = \"mock\"\n"),
+    )
+    .unwrap();
+
+    let plug = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_plugmem-cli"))
+            .arg("--db")
+            .arg(tmp.db())
+            .arg("--config")
+            .arg(&config)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // Seed a fact (embeds its text via the mock) and publish a generation.
+    assert!(
+        plug(&["remember", "a fact about tokio and работа"])
+            .status
+            .success()
+    );
+    assert!(plug(&["checkpoint"]).status.success());
+
+    // Hold the writer lock in-process, matching the on-disk vector dimension.
+    let mut wcfg = Config::default();
+    wcfg.dim = dim;
+    let (_writer, _r) = Database::open(tmp.db(), wcfg).unwrap();
+
+    // recall embeds its query via the mock (before the open), then opens
+    // read-only and pins the published generation — coexisting with the writer.
+    // Without the read-only path this would have opened the writer handle and
+    // hit `Locked` (exit 1).
+    let r = plug(&["recall", "tokio"]);
+    assert_eq!(
+        r.status.code(),
+        Some(0),
+        "embedded recall must coexist with a live writer; stderr={}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    assert!(stdout(&r).contains("tokio"), "{}", stdout(&r));
+
+    server.join().unwrap();
 }
 
 #[test]
