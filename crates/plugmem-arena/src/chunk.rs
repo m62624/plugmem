@@ -98,6 +98,7 @@ impl Default for ChunkPoolCfg {
 /// A handle is only meaningful with the pool that filled it; passing it to
 /// another pool reads unrelated (but initialized) chunks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ListHandle {
     /// First chunk of the chain (`NONE` = empty list).
     head: u32,

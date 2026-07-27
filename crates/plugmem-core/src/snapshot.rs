@@ -182,6 +182,7 @@ impl SnapshotWriter {
 /// One section's size and checksum, computed in the streaming writer's
 /// first pass (see [`build_prefix`]).
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SectionMeta {
     /// Section kind tag (unique per file).
     pub kind: u16,
@@ -195,6 +196,7 @@ pub struct SectionMeta {
 /// before the first section body. Small and bounded (kilobytes), so it is
 /// materialized even when the bodies stream (specs/16 §9).
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Prefix {
     /// The prefix bytes, ready to write. The file-hash field is left zero;
     /// the caller patches it via [`SnapshotSink::patch`] once the
@@ -490,6 +492,7 @@ pub const DEFAULT_SCRUB_BUDGET: usize = 1 << 20;
 
 /// Progress of an in-flight [`ScrubCursor`] scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ScrubProgress {
     /// Bytes checksummed so far (equals `total_bytes` on the final item).
     pub done_bytes: u64,

@@ -10,6 +10,7 @@ extern crate alloc;
 
 /// Every way an engine call can fail.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
 pub enum Error {
     /// A pool or table would grow past its configured ceiling.

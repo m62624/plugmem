@@ -49,6 +49,7 @@ pub use recall::{RecallQuery, RecallResult, RecalledEdge, RecalledFact, source};
 
 /// Input of `remember` and `revise` (specs/05).
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct RememberInput<'a> {
     /// Host timestamp, unix milliseconds.
     pub now: u64,
@@ -85,6 +86,7 @@ impl<'a> RememberInput<'a> {
 
 /// Input of `link` (specs/05).
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct LinkInput<'a> {
     /// Host timestamp, unix milliseconds.
     pub now: u64,
@@ -100,6 +102,7 @@ pub struct LinkInput<'a> {
 
 /// Result of `remember`/`revise` (specs/05).
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RememberOutcome {
     /// The new fact's id.
     pub id: FactId,
@@ -114,6 +117,7 @@ pub struct RememberOutcome {
 
 /// One similar-fact hint (specs/05).
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Similar {
     /// The existing fact.
     pub id: FactId,
@@ -126,6 +130,7 @@ pub struct Similar {
 
 /// Why a fact was flagged as similar (specs/05).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SimilarReason {
     /// Same subject entity and a term-set overlap above the configured
     /// Jaccard threshold.
@@ -137,6 +142,7 @@ pub enum SimilarReason {
 
 /// A read view of one fact.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct FactView<'a> {
     /// The raw record (temporality, flags, references).
     pub record: FactRecord,
@@ -149,6 +155,7 @@ pub struct FactView<'a> {
 /// content checks [`Memory::verify`] runs, split out per fact so a caller can
 /// drop the individual bad records instead of failing the whole image.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum FactFault {
     /// The fact's stored text is not valid UTF-8.
     Text,
@@ -161,6 +168,7 @@ pub enum FactFault {
 /// struct is `#[non_exhaustive]` so later stages (database identity
 /// markers, HNSW state) can extend it without a breaking change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct Stats {
     /// Fact records currently stored (live, closed, and tombstoned facts
@@ -190,6 +198,7 @@ pub struct Stats {
 
 /// Report of an `open`: what the journal replay found.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OpenReport {
     /// Journal records applied.
     pub replayed: usize,

@@ -43,6 +43,7 @@ const HEADER: usize = U32_BYTES + U32_BYTES;
 
 /// One decoded journal record, borrowing the scanned buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct JournalEntry<'a> {
     /// Operation tag (engine-defined; see specs/03 op table).
     pub op: u8,
@@ -90,6 +91,7 @@ pub fn encode_entry(out: &mut Vec<u8>, op: u8, payload: &[u8]) {
 /// Not `Eq`: the raw `f32` vector rides along so replay can re-quantize
 /// it deterministically (specs/04 §5), and `f32` is only `PartialEq`.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum Op<'a> {
     /// Op 1/2: a new fact (op 2 additionally closes `revises`).
     Remember {

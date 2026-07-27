@@ -43,6 +43,7 @@ pub const ENCODED_LEN: usize = RESERVED_AT + RESERVED_LEN;
 /// let the engine call [`Config::validate`] (it is also callable directly —
 /// useful for surfacing config errors early in wrappers).
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct Config {
     /// Vector dimension; `0` disables the vector layer entirely. Max 4096.

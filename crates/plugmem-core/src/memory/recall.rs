@@ -81,6 +81,7 @@ const STOP_DF_FLOOR: u64 = 1024;
 /// A recall request (specs/05). `Default`-like construction via
 /// [`RecallQuery::text`] plus field overrides.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct RecallQuery<'a> {
     /// Host timestamp, unix milliseconds.
     pub now: u64,
@@ -129,6 +130,7 @@ impl<'a> RecallQuery<'a> {
 
 /// One recalled fact (specs/05).
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RecalledFact {
     /// The fact.
     pub id: FactId,
@@ -149,6 +151,7 @@ pub struct RecalledFact {
 /// One edge the graph source walked (specs/05: agents want the relations,
 /// not only the facts).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RecalledEdge {
     /// Source entity.
     pub src: EntityId,
@@ -163,6 +166,7 @@ pub struct RecalledEdge {
 /// A recall response. Reusable: pass to
 /// [`Memory::recall_into`] repeatedly and the buffers are recycled.
 #[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RecallResult {
     /// Selected facts, descending fused score.
     pub facts: Vec<RecalledFact>,

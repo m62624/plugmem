@@ -32,6 +32,7 @@ use crate::index::postings::PostingStore;
 /// Per-document length record: `[fact 4 | len u16 | pad 2]`, Uniform
 /// arena.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DocLenSlot {
     /// The document (fact) id — the key.
     pub fact: FactId,

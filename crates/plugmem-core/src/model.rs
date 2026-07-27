@@ -46,6 +46,7 @@ pub mod fact_flags {
 /// | 32 | 8 | `valid_from` |
 /// | 40 | 8 | `valid_to` |
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FactRecord {
     /// Fact id — the key.
     pub id: FactId,
@@ -135,6 +136,7 @@ impl Slot for FactRecord {
 /// Split from [`FactRecord`] so the hot 48-byte record stays hot: tags are
 /// touched only by tag-filtered queries and `maintain`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FactAux {
     /// Fact id — the key.
     pub id: FactId,
@@ -169,6 +171,7 @@ impl Slot for FactAux {
 /// | 12 | 8 | `created_at` |
 /// | 20 | 4 | `flags` (reserved, 0 in v1) |
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EntityRecord {
     /// Entity id — the key.
     pub id: EntityId,
@@ -212,6 +215,7 @@ impl Slot for EntityRecord {
 /// `name_term` yields at most one record; the full pair keeps the slot
 /// unique and self-describing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EntityByName {
     /// Interned normalized name.
     pub name_term: TermId,
@@ -245,6 +249,7 @@ impl Slot for EntityByName {
 /// prefix range scan. An edge is unique per `(src, rel, dst)`; re-linking
 /// updates the provenance payload.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EdgeSlot {
     /// First key component (out-arena: source; in-arena: destination).
     pub a: EntityId,
@@ -285,6 +290,7 @@ impl Slot for EdgeSlot {
 /// Range scans answer "what was recorded in this window"; validity
 /// filtering happens per candidate on its [`FactRecord`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TemporalSlot {
     /// When the fact was recorded (knowledge axis).
     pub recorded_at: u64,

@@ -14,6 +14,7 @@ categories = ["database-implementations", "artificial-intelligence", "text-proce
 plugmem-arena = { workspace = true }
 thiserror = { workspace = true }
 xxhash-rust = { workspace = true }
+serde = { workspace = true, optional = true }
 hashbrown = { workspace = true }
 unicode-segmentation = { workspace = true }
 unicode-normalization = { workspace = true }
@@ -27,6 +28,7 @@ proptest = { workspace = true }
 criterion = { workspace = true }
 insta = { workspace = true }
 plugmem-testgen = { workspace = true }
+serde_json = { workspace = true }
 
 [[bench]]
 name = "engine"
@@ -34,6 +36,11 @@ harness = false
 
 [features]
 counters = ["plugmem-arena/counters"]
+# Optional serde Serialize/Deserialize on the public data types. Off by default;
+# forwards to plugmem-arena's serde so the re-exported ids (FactId/TermId/BlobId)
+# serialize too. Borrowed input types (RememberInput/RecallQuery/LinkInput) are
+# Serialize-only — they hold `&str`/`&[&str]` that cannot be deserialized owned.
+serde = ["dep:serde", "plugmem-arena/serde"]
 
 [lints]
 workspace = true

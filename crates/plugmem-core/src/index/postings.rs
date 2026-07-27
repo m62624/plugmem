@@ -23,6 +23,7 @@ use crate::index::varint::{MAX_VARINT, decode_u32, encode_u32};
 /// bytes, Uniform arena. `count` doubles as the document frequency for
 /// BM25; `last` is the highest id in the list (the delta base).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct IdListSlot {
     /// The indexed key (a `TermId`, a tag's `TermId`, an `EntityId` — the
     /// owner decides; raw here to serve them all).

@@ -13,6 +13,7 @@ use crate::chunk::CHUNK_PAYLOAD;
 /// because they are caller bugs, not runtime conditions; each method
 /// documents its panics.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum Error {
     /// Growing a byte pool would exceed the structure's configured
     /// `max_bytes` ceiling.

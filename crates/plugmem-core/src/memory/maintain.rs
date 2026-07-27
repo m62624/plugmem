@@ -130,6 +130,7 @@ struct RebuildMeta {
 
 /// Report of a `maintain` pass (specs/05).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MaintainReport {
     /// Tombstoned facts physically removed by this pass (their ids stay
     /// burned; a second pass over the same state purges nothing).

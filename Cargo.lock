@@ -1119,6 +1119,8 @@ dependencies = [
  "plugmem-arena",
  "plugmem-testgen",
  "proptest",
+ "serde",
+ "serde_json",
  "thiserror",
  "unicode-normalization",
  "unicode-segmentation",
