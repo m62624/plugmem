@@ -41,6 +41,20 @@
       "20000_flat": { "mean": 0.680, "min": 0.250 },
       "60000_hnsw": { "mean": 0.414, "min": 0.000 }
     },
-    "interpretation": "Recall is bounded by the CURRENT design, not a harness bug. Even 'flat' is two-phase: a 1-bit sign-signature Hamming prefilter keeps only the best max(4k,64)=64 candidates, which are then int8-rescored — so a true f32 neighbour missed by the coarse signature is never rescored. The fixed 64-candidate sieve is why flat recall falls as fill grows (64/2000 vs 64/20000). HNSW adds graph-approximation loss on top; min=0.000 is a worst-case query where signature+graph missed all 8. This is the quality a signature-tier / binary-traversal optimization will move — watch whether it drops from these numbers or holds."
+    "interpretation": "Recall is bounded by the CURRENT design, not a harness bug. Even 'flat' is two-phase: a 1-bit sign-signature Hamming prefilter keeps only the best max(4k,64)=64 candidates, which are then int8-rescored — so a true f32 neighbour missed by the coarse signature is never rescored. The fixed 64-candidate sieve is why flat recall falls as fill grows (64/2000 vs 64/20000). HNSW adds graph-approximation loss on top; min=0.000 is a worst-case query where signature+graph missed all 8. NOTE: these are SYNTHETIC testgen vectors (random) — their nearest neighbours are near-arbitrary, so this understates real quality. See real_embeddings below."
+  },
+
+  "real_embeddings_ollama": {
+    "source": "cargo run --release -p plugmem-host --example recall_ollama (crates/plugmem-host/examples/recall_ollama.rs)",
+    "model": "ollama nomic-embed-text, dim 768",
+    "corpus": "2000 meaningful English sentences (topic templates x fillers), flat regime, recall@8 vs exact f32 cosine over 200 sampled queries, self-excluded, w_recency=0",
+    "sweep_by_query_k": {
+      "note": "query k widens the sieve (max(4k,64)) AND the returned window; recall@8 = true top-8 found anywhere in the returned top-k",
+      "k8_sieve64":  { "recall_mean": 0.867, "recall_min": 0.500, "search_us": 127.2 },
+      "k16_sieve64": { "recall_mean": 1.000, "recall_min": 1.000, "search_us": 123.7 },
+      "k32_sieve128":{ "recall_mean": 1.000, "recall_min": 1.000, "search_us": 123.2 },
+      "k64_sieve256":{ "recall_mean": 1.000, "recall_min": 1.000, "search_us": 123.6 }
+    },
+    "conclusion": "On REAL embeddings there is no quality problem. recall@8 hits 1.000 (even worst-case) at k=16 — the true 8 neighbours ARE found, the default k=8 window just clips ones int8 nudged to ranks 9-16. Speed is flat across k (~124 us) because the O(n) signature pass dominates and rescoring a few more candidates is nearly free. So 'raise recall without losing speed' is almost free: retrieve with a k x2 margin internally, return top-k. No signature-tier / binary-traversal / format change is warranted by recall at this scale. The synthetic baseline was pessimistic (random vectors)."
   }
 }
