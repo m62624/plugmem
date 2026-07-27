@@ -77,7 +77,7 @@ pub fn run() -> ExitCode {
 /// (`0` ok, `1` soft miss / locked, `2` error). Errors go to stderr.
 fn run_parsed(cli: Cli, out: &mut impl Write) -> u8 {
     let path = resolve_db_path(cli.db.as_deref());
-    let settings = match load_settings(&cli) {
+    let mut settings = match load_settings(&cli) {
         Ok(s) => s,
         Err(e) => return report_err(&e),
     };
@@ -92,19 +92,30 @@ fn run_parsed(cli: Cli, out: &mut impl Write) -> u8 {
         _ => {}
     }
 
-    // Read-only commands can open the snapshot zero-copy (mmap, shared lock):
-    // many readers at once, no whole-file load. `recall` needs the embedder
-    // to embed its query, so it takes the read-only path only when none is
-    // configured. A dirty (un-checkpointed) journal forbids a read-only open,
-    // so those fall through to the read-write path.
-    let readonly_ok = match &cli.command {
-        Command::Show { .. } | Command::Stats | Command::Export => true,
-        Command::Recall { .. } => settings.embedder.is_none(),
-        _ => false,
-    };
+    // Read-only commands open the snapshot zero-copy (mmap, shared lock) and
+    // coexist with a live writer process (Variant 2 MVCC) — they never take the
+    // writer lock. `verify` is a pure content check, so it belongs here too.
+    // `recall` embeds its text query *before* the open (mirroring the host's
+    // "embed outside the lock" rule) so it can search by vector on the read-only
+    // path, which carries no embedder. A dirty (un-checkpointed) journal forbids
+    // a read-only open, so those fall through to the read-write path.
+    let readonly_ok = matches!(
+        &cli.command,
+        Command::Show { .. }
+            | Command::Stats
+            | Command::Export
+            | Command::Verify
+            | Command::Recall { .. }
+    );
     if readonly_ok {
+        let recall_vector = match embed_recall_query(&mut settings, &cli.command) {
+            Ok(v) => v,
+            Err(e) => return report_err(&e),
+        };
         match Database::open_readonly(&path, settings.config.clone()) {
-            Ok(ro) => return execute_ro(&ro, &cli.command, cli.json, out),
+            Ok(ro) => {
+                return execute_ro(&ro, &cli.command, recall_vector.as_deref(), cli.json, out);
+            }
             Err(HostError::Locked { path }) => return report_locked(&path),
             // Any other failure — a missing snapshot (fresh db), a dirty
             // journal (NeedsCheckpoint), or a corrupt image — is handled by
@@ -156,15 +167,23 @@ fn resolve_db_path(flag: Option<&std::path::Path>) -> PathBuf {
 
 /// Runs a read-only command over a zero-copy [`ReadOnlyDatabase`] (mmap,
 /// shared lock). Only the commands `run_parsed` routes here appear.
-fn execute_ro(ro: &ReadOnlyDatabase, cmd: &Command, json: bool, out: &mut impl Write) -> u8 {
+fn execute_ro(
+    ro: &ReadOnlyDatabase,
+    cmd: &Command,
+    recall_vector: Option<&[f32]>,
+    json: bool,
+    out: &mut impl Write,
+) -> u8 {
     match cmd {
-        Command::Recall { .. } => match with_recall_query(cmd, now_ms(), |q| ro.recall(q)) {
-            Ok(res) => {
-                render_recall(&res, json, out);
-                0
+        Command::Recall { .. } => {
+            match with_recall_query(cmd, now_ms(), recall_vector, |q| ro.recall(q)) {
+                Ok(res) => {
+                    render_recall(&res, json, out);
+                    0
+                }
+                Err(e) => report_err(&CliError::Host(e)),
             }
-            Err(e) => report_err(&CliError::Host(e)),
-        },
+        }
         Command::Show { id } => render_show(ro.get(FactId(*id)), *id, json, out),
         Command::Stats => {
             render_stats(&ro.stats(), json, out);
@@ -174,6 +193,18 @@ fn execute_ro(ro: &ReadOnlyDatabase, cmd: &Command, json: bool, out: &mut impl W
             render_export(&ro.export(), json, out);
             0
         }
+        // A clean image returns Ok; corruption is a typed error mapped to exit 2.
+        Command::Verify => match ro.verify() {
+            Ok(()) => {
+                if json {
+                    writeln!(out, "{}", json!({ "ok": true })).ok();
+                } else {
+                    writeln!(out, "integrity ok").ok();
+                }
+                0
+            }
+            Err(e) => report_err(&CliError::Host(e)),
+        },
         _ => unreachable!("execute_ro only receives read-only commands"),
     }
 }
@@ -222,7 +253,7 @@ fn execute(
             Ok(0)
         }
         Command::Recall { .. } => {
-            let res = with_recall_query(cmd, now, |q| db.recall(q))?;
+            let res = with_recall_query(cmd, now, None, |q| db.recall(q))?;
             render_recall(&res, json, out);
             Ok(0)
         }
@@ -389,11 +420,40 @@ fn do_scrub(path: &Path, settings: &Settings, json: bool, out: &mut impl Write) 
     0
 }
 
+/// Embeds a `recall` command's text query into a vector using the configured
+/// embedder, so the read-only path (which carries no embedder) can still search
+/// by meaning while a writer process holds the database. Returns `None` when the
+/// command is not `recall`, carries no query text, or no embedder is configured
+/// — recall then falls back to lexical/structural sources. Mirrors the host's
+/// "embed before the lock" rule (specs/13 §1); the embed happens before the open
+/// so a locked database only costs the embed on the rare read-write fallback.
+fn embed_recall_query(
+    settings: &mut Settings,
+    cmd: &Command,
+) -> Result<Option<Vec<f32>>, CliError> {
+    let Command::Recall {
+        query: Some(text), ..
+    } = cmd
+    else {
+        return Ok(None);
+    };
+    let Some(embedder) = settings.embedder.as_mut() else {
+        return Ok(None);
+    };
+    let mut vectors = embedder.embed(&[text.as_str()]).map_err(CliError::Host)?;
+    Ok(vectors.pop())
+}
+
 /// Builds the [`RecallQuery`] for a `recall` command and passes it to `f`.
 /// A closure (not a return) because the query borrows temporary tag/entity
 /// slices that must outlive the call. Used by both the read-write and
 /// read-only paths.
-fn with_recall_query<R>(cmd: &Command, now: u64, f: impl FnOnce(RecallQuery<'_>) -> R) -> R {
+fn with_recall_query<R>(
+    cmd: &Command,
+    now: u64,
+    override_vector: Option<&[f32]>,
+    f: impl FnOnce(RecallQuery<'_>) -> R,
+) -> R {
     let Command::Recall {
         query,
         tags,
@@ -409,10 +469,13 @@ fn with_recall_query<R>(cmd: &Command, now: u64, f: impl FnOnce(RecallQuery<'_>)
     let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
     let ent_refs: Vec<&str> = entities.iter().map(String::as_str).collect();
     let range_pair = range.as_ref().map(|v| (v[0], v[1]));
+    // `override_vector` is set only on the read-only path, where the CLI has
+    // already embedded the text query; the read-write path leaves it `None` and
+    // the host embeds inside `recall` (specs/13 §1).
     let q = RecallQuery {
         now,
         text: query.as_deref(),
-        vector: None,
+        vector: override_vector,
         tags: &tag_refs,
         entities: &ent_refs,
         as_of: *as_of,
@@ -683,6 +746,68 @@ mod tests {
     use plugmem_host::Config;
 
     use super::*;
+
+    /// A stub embedder returning a fixed vector per input — no network.
+    struct StubEmbedder;
+    impl plugmem_host::Embedder for StubEmbedder {
+        fn dim(&self) -> usize {
+            3
+        }
+        fn embed(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>, HostError> {
+            Ok(texts.iter().map(|_| vec![0.1, 0.2, 0.3]).collect())
+        }
+    }
+
+    fn recall_cmd(query: Option<&str>) -> Command {
+        Command::Recall {
+            query: query.map(str::to_owned),
+            tags: vec![],
+            entities: vec![],
+            as_of: None,
+            range: None,
+            k: 0,
+            closed: false,
+        }
+    }
+
+    fn settings_with(embedder: Option<Box<dyn plugmem_host::Embedder>>) -> crate::config::Settings {
+        crate::config::Settings {
+            config: Config::default(),
+            embedder,
+            maintenance: crate::config::Maintenance::default(),
+        }
+    }
+
+    #[test]
+    fn embed_recall_query_embeds_recall_text_only_when_an_embedder_is_set() {
+        // recall text + embedder → a vector.
+        let mut with = settings_with(Some(Box::new(StubEmbedder)));
+        assert_eq!(
+            embed_recall_query(&mut with, &recall_cmd(Some("tokio"))).unwrap(),
+            Some(vec![0.1, 0.2, 0.3])
+        );
+
+        // no embedder → None (recall falls back to lexical/structural sources).
+        let mut without = settings_with(None);
+        assert_eq!(
+            embed_recall_query(&mut without, &recall_cmd(Some("tokio"))).unwrap(),
+            None
+        );
+
+        // recall with no query text → None (nothing to embed).
+        let mut with_empty = settings_with(Some(Box::new(StubEmbedder)));
+        assert_eq!(
+            embed_recall_query(&mut with_empty, &recall_cmd(None)).unwrap(),
+            None
+        );
+
+        // a non-recall command → None even with an embedder configured.
+        let mut with_stats = settings_with(Some(Box::new(StubEmbedder)));
+        assert_eq!(
+            embed_recall_query(&mut with_stats, &Command::Stats).unwrap(),
+            None
+        );
+    }
 
     /// A throwaway database on a unique temp path; removed on drop.
     struct TempDb(PathBuf);

@@ -168,6 +168,52 @@ fn a_locked_database_exits_one() {
 }
 
 #[test]
+fn read_only_commands_coexist_with_a_live_writer() {
+    let tmp = TempDir::new("coexist");
+    // Seed and checkpoint via the CLI so a snapshot generation is published.
+    assert!(
+        plugmem(&tmp.db(), &["remember", "a fact about tokio"])
+            .status
+            .success()
+    );
+    assert!(plugmem(&tmp.db(), &["checkpoint"]).status.success());
+
+    // Hold the writer lock in-process — a live writer that HAS published a
+    // generation. Variant 2 (MVCC): read-only commands pin that generation and
+    // run alongside the writer, unlike `a_locked_database_exits_one` where the
+    // fresh writer published nothing to read.
+    let (_writer, _r) = Database::open(tmp.db(), Config::default()).unwrap();
+
+    for cmd in [
+        ["stats"].as_slice(),
+        &["show", "0"],
+        &["export"],
+        &["verify"],
+        &["recall", "tokio"],
+    ] {
+        let r = plugmem(&tmp.db(), cmd);
+        assert_eq!(
+            r.status.code(),
+            Some(0),
+            "read command {cmd:?} must coexist with a live writer; stderr={}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+    }
+    // The two newly read-only-routed commands produce their expected output.
+    assert!(stdout(&plugmem(&tmp.db(), &["verify"])).contains("integrity ok"));
+    assert!(stdout(&plugmem(&tmp.db(), &["recall", "tokio"])).contains("tokio"));
+
+    // A second *writer* is still refused while the lock is held.
+    assert_eq!(
+        plugmem(&tmp.db(), &["remember", "second writer"])
+            .status
+            .code(),
+        Some(1),
+        "a second writer is still locked out",
+    );
+}
+
+#[test]
 fn config_file_is_accepted_and_missing_one_is_a_usage_error() {
     let tmp = TempDir::new("config");
     let with_config = |args: &[&str]| {
