@@ -40,6 +40,10 @@ unicode-segmentation = { version = "1.13.3", default-features = false }
 unicode-normalization = { version = "0.1.25", default-features = false }
 # Float math for no_std (BM25 idf/tf norms, recency decay).
 libm = { version = "0.2.16", default-features = false }
+# Optional serde support, gated behind each crate's `serde` feature (off by
+# default). no_std-compatible: `derive` + `alloc`, no std. Used only to
+# Serialize/Deserialize the public data types for JSON-facing consumers.
+serde = { version = "1.0.229", default-features = false, features = ["derive", "alloc"] }
 
 # Wrapper dependencies (std)
 clap = { version = "4.6.2", features = ["derive"] }

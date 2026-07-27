@@ -44,10 +44,12 @@ const LEN_BYTES: usize = core::mem::size_of::<u32>();
 /// [`Slot`](crate::Slot)s; the newtype only guards against mixing them with
 /// other integer ids.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BlobId(pub u32);
 
 /// [`BlobHeap`] configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BlobHeapCfg {
     /// Hard ceiling for the byte pool; a push that would grow past it fails
     /// with [`Error::CapacityExceeded`]. The pool is otherwise bounded only by

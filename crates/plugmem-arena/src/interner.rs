@@ -22,6 +22,7 @@ use crate::error::Error;
 /// Handle to one interned string: dense, assigned in first-seen order,
 /// starting at 0. Numerically equal to the underlying heap's `BlobId`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TermId(pub u32);
 
 /// Initial hash-table size (slots); must be a power of two.

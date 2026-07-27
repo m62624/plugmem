@@ -88,6 +88,7 @@ macro_rules! bump {
 
 /// How keys are mapped to shards.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ShardMode {
     /// Shard = Fibonacci hash of the key's leading bytes. Spreads any key
     /// distribution (including sequential ids) evenly across shards. Global
@@ -106,6 +107,7 @@ pub enum ShardMode {
 /// Stored verbatim in snapshots later (`specs/03`), so everything that
 /// affects byte interpretation lives here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ArenaCfg {
     /// Number of shards; must be a non-zero power of two.
     pub shards: usize,

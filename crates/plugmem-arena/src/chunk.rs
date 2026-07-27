@@ -61,6 +61,7 @@ const NONE: u32 = u32::MAX;
 
 /// [`ChunkPool`] configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ChunkPoolCfg {
     /// Hard ceiling for the chunk pool; allocating a chunk past it fails
     /// with [`Error::CapacityExceeded`].

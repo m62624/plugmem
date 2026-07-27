@@ -13,6 +13,7 @@ categories = ["data-structures", "memory-management", "no-std", "embedded", "was
 [dependencies]
 thiserror = { workspace = true }
 xxhash-rust = { workspace = true }
+serde = { workspace = true, optional = true }
 
 # Test/bench harnesses are native-only: proptest's transitive deps do not
 # compile for wasm targets, and the wasm builds only need the library and
@@ -20,6 +21,7 @@ xxhash-rust = { workspace = true }
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 proptest = { workspace = true }
 criterion = { workspace = true }
+serde_json = { workspace = true }
 
 [[bench]]
 name = "storage"
@@ -28,6 +30,9 @@ harness = false
 [features]
 # Deterministic work counters (perf gates); zero cost when disabled.
 counters = []
+# Optional serde Serialize/Deserialize on the public data types (ids, configs).
+# Off by default; pulls in serde only when enabled.
+serde = ["dep:serde"]
 
 [lints]
 workspace = true
