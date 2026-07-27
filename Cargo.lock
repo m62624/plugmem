@@ -1136,6 +1136,7 @@ dependencies = [
  "memory-stats",
  "plugmem-core",
  "self_cell",
+ "serde",
  "serde_json",
  "thiserror",
  "ureq",

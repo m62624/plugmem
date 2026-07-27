@@ -146,6 +146,7 @@ fn open_engine(store: &mut FileStorage, cfg: &Config) -> Result<(Engine, OpenRep
 /// An owned view of one fact — [`Memory::get`] returns borrows that
 /// cannot cross the lock, so the database hands out copies.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FactSnapshot {
     /// The raw record (temporality, flags, references).
     pub record: FactRecord,
@@ -159,6 +160,7 @@ pub struct FactSnapshot {
 /// a round-trip; the knowledge itself (text, subject name, tags, validity
 /// start) is.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExportedFact {
     /// The fact text.
     pub text: String,
@@ -174,6 +176,7 @@ pub struct ExportedFact {
 
 /// The outcome of a [`Database::recover`] salvage (specs/16 §9).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RecoverReport {
     /// Facts written to the destination (the survivors after the purge).
     pub kept: usize,

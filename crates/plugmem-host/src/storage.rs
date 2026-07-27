@@ -34,6 +34,7 @@ fn sink_io(e: std::io::Error) -> Error {
 
 /// When journal appends reach the disk (specs/13 §2).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum FsyncPolicy {
     /// Fsync after every appended journal record — every acknowledged
     /// mutation survives a power cut. The default: durability is worth
