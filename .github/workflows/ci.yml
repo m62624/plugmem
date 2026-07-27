@@ -46,10 +46,11 @@ jobs:
   # a glance (fail-fast off keeps the others going).
   #
   # Features change which code compiles (specs/07 §8: clippy on one combo does
-  # not cover the others). The one feature axis that alters the code surface is
-  # `counters` (the deterministic perf gates), so clippy and tests each run with
-  # it off and on. (There is no `std` feature: the core and arena are `no_std`
-  # unconditionally; the real no_std gate is the wasm32v1-none build job below.)
+  # not cover the others). Two feature axes alter the code surface: `counters`
+  # (the deterministic perf gates) and `serde` (Serialize/Deserialize derives),
+  # so clippy and tests run with each off and on. (There is no `std` feature:
+  # the core and arena are `no_std` unconditionally; the real no_std gate is the
+  # wasm32v1-none build job below.)
 
   check:
     name: lint + test (${{ matrix.name }})
@@ -81,10 +82,14 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Clippy (counters — a different code surface)
         run: cargo clippy --workspace --all-targets --features counters -- -D warnings
+      - name: Clippy (serde — a different code surface)
+        run: cargo clippy --workspace --all-targets --features serde -- -D warnings
       - name: Tests (default)
         run: cargo test --workspace
       - name: Tests (counters — includes the deterministic perf gates)
         run: cargo test --workspace --features counters
+      - name: Tests (serde — the JSON round-trip suite)
+        run: cargo test --workspace --features serde
 
   # --- portability checks, in parallel with the lint+test matrix above -------
 
@@ -107,6 +112,10 @@ jobs:
         run: >-
           cargo build -p plugmem-arena -p plugmem-core
           --features counters --target wasm32v1-none
+      - name: Build again with serde (proves serde works under no_std)
+        run: >-
+          cargo build -p plugmem-arena -p plugmem-core
+          --features serde --target wasm32v1-none
 
   # The whole contract test suite of the core, executed on a REAL 32-bit
   # target under both independent wasm runtimes, in both feature

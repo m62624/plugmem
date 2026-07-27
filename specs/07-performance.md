@@ -162,11 +162,11 @@ size) -> impl Iterator<Item = Op>` (операции, не состояние �
 
 1. fmt + clippy (deny warnings) — весь workspace, **матрица фич** для
    библиотек: `default` / `--no-default-features` /
-   `--no-default-features --features counters` / `--features counters`
-   (проверено руками 2026-07-18: все 4 комбинации по нулям; фичи меняют
-   набор компилируемого кода, clippy одной комбинации не ловит остальные).
-2. Тесты native (stable) + доктесты — тоже в обеих feature-конфигурациях
-   (`default` и `--features counters`).
+   `--no-default-features --features counters` / `--features counters` /
+   `--features serde` (две оси меняют набор компилируемого кода — counters и
+   serde; clippy одной комбинации не ловит остальные).
+2. Тесты native (stable) + доктесты — в трёх feature-конфигурациях
+   (`default`, `--features counters`, `--features serde` — JSON round-trip).
 3. Тесты core под wasmtime — **реализовано 2026-07-20**: полный
    контрактный сьют на `wasm32-wasip1` (proptest-секции гейтятся от
    wasm — их харнесс нативный), команда в `specs/14 §5`; первый же

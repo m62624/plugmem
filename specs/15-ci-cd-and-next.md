@@ -34,13 +34,13 @@
 ## 2. `ci.yml` — джобы (все параллельны, гейт один)
 
 1. **check** (матрица Linux/Windows/macOS, fail-fast off): fmt →
-   **clippy ×4 комбо** (`default` / `no-default` / `counters` /
-   `no-default+counters`, `-D warnings`) → **тесты ×2**
-   (`default` и `--features counters` — перф-гейты живут только под
-   counters). Фичи меняют компилируемый код — одна комбинация не
-   покрывает остальные (specs/07 §8).
-2. **no_std**: сборка arena+core под `wasm32v1-none`, обе комбинации
-   counters.
+   **clippy** по комбо `default` / `no-default` / `counters` /
+   `no-default+counters` / `serde` (`-D warnings`) → **тесты ×3**
+   (`default`, `--features counters` — перф-гейты живут только под counters,
+   `--features serde` — JSON round-trip сьют). Две оси меняют компилируемый
+   код — counters и serde; одна комбинация не покрывает остальные (specs/07 §8).
+2. **no_std**: сборка arena+core под `wasm32v1-none` — `default`, `counters`
+   и `serde` (последняя доказывает, что serde работает в no_std).
 3. **wasm-suite** (матрица {wasmtime, wasmer} × {default, counters}):
    **полный контрактный сьют ядра на настоящем 32-битном таргете**
    `wasm32-wasip1`, release. proptest-секции нативные (погейчены в самих
