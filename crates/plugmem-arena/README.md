@@ -32,8 +32,10 @@ file-backed, locking host with embedders, [`plugmem-host`](https://docs.rs/plugm
    is picked in O(1) (top key bits or Fibonacci hash), a short chain walk
    peeks one first-key per page, then binary search and a bounded `memmove`
    inside one page.
-3. **32-bit friendly.** Ids and offsets are `u32`; pools are inherently
-   capped at 4 GiB — a deliberate fit for wasm32 linear memory.
+3. **32-bit friendly.** Ids are `u32`; byte-pool offsets are `usize`, so a
+   pool follows the target's address space — capped at 4 GiB on wasm32 linear
+   memory, RAM-bound on a 64-bit host. Serialized dumps store lengths, not
+   offsets, so the format is identical across pointer widths.
 
 ### Memory image = file format
 

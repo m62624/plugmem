@@ -250,6 +250,35 @@ fn overlay_iter_spans_base_and_tail() {
     assert_eq!(got, vec![b"x".to_vec(), b"yy".to_vec()]);
 }
 
+// --- Pool offset width: the ceiling is `usize`, not a fixed 4 GiB ---
+//
+// The pool offset is a `usize`, so the byte-pool ceiling follows the target's
+// address space: past 4 GiB on a 64-bit host, capped at its address space on a
+// 32-bit one. `BlobHeapBuilder` tracks only lengths (no byte pool), so this
+// asserts the lift without allocating gigabytes — its length accounting is
+// identical to `BlobHeap::push`. (The 32-bit side — the same growth tripping
+// `CapacityExceeded` rather than wrapping, and a `> 4 GiB` database refused
+// with `ConfigMismatch` — is exercised under wasm32-wasip1 by the core suite;
+// arena's own integration tests don't build there because `proptest` doesn't.)
+
+/// A builder accumulates a pool past the old 4 GiB `u32` ceiling on a 64-bit
+/// host. This is where lifting the offset to `usize` pays off — a text-heavy
+/// database is no longer wall-capped below its RAM/`max_bytes` limit.
+#[test]
+#[cfg(target_pointer_width = "64")]
+fn pool_offset_exceeds_4gib_on_64bit() {
+    let mut builder = BlobHeapBuilder::new(BlobHeapCfg::new());
+    let gib = 1usize << 30;
+    for _ in 0..5 {
+        builder.push_len(gib).unwrap(); // 5 GiB total — past u32::MAX
+    }
+    assert_eq!(builder.pool_bytes(), 5 * gib);
+    assert!(
+        builder.pool_bytes() > u32::MAX as usize,
+        "the pool grew past the old 4 GiB u32 ceiling"
+    );
+}
+
 proptest! {
     /// The heap must behave exactly like a `Vec<Vec<u8>>` under arbitrary
     /// push sequences: same ids, same contents, same iteration.

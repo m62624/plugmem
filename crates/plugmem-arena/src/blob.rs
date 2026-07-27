@@ -50,9 +50,9 @@ pub struct BlobId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlobHeapCfg {
     /// Hard ceiling for the byte pool; a push that would grow past it fails
-    /// with [`Error::CapacityExceeded`]. The pool is also inherently capped
-    /// at 4 GiB because offsets are stored as `u32` (a deliberate fit for
-    /// the 32-bit wasm address space).
+    /// with [`Error::CapacityExceeded`]. The pool is otherwise bounded only by
+    /// `usize`: 4 GiB on a 32-bit target (e.g. wasm32 linear memory), the host
+    /// address space / RAM on a 64-bit one.
     pub max_bytes: usize,
     /// Per-blob length ceiling; a longer blob fails with
     /// [`Error::BlobTooLarge`]. Guards against one runaway value swallowing
@@ -61,8 +61,8 @@ pub struct BlobHeapCfg {
 }
 
 impl BlobHeapCfg {
-    /// Creates a config with no pool limit (beyond the inherent 4 GiB) and
-    /// no per-blob limit.
+    /// Creates a config with no pool limit (beyond `usize`: 4 GiB on 32-bit,
+    /// the address space on 64-bit) and no per-blob limit.
     pub const fn new() -> Self {
         Self {
             max_bytes: usize::MAX,
@@ -116,9 +116,12 @@ pub struct BlobHeap<'a> {
     /// concatenation, so each blob is wholly in one segment.
     tail: Vec<u8>,
     /// `BlobId` -> `(offset, len)` into the logical `base ++ tail` pool. The
-    /// offset is the cumulative logical position, independent of where the
-    /// base/tail boundary falls.
-    index: Vec<(u32, u32)>,
+    /// offset is the cumulative logical position (a `usize`, so a 64-bit host
+    /// addresses a pool past 4 GiB; a 32-bit host caps at its address space),
+    /// independent of where the base/tail boundary falls. The length stays a
+    /// `u32` — a single blob is bounded by `max_blob` — which keeps the entry
+    /// compact and the dumped index format unchanged.
+    index: Vec<(usize, u32)>,
     cfg: BlobHeapCfg,
 }
 
@@ -164,8 +167,8 @@ impl<'a> BlobHeap<'a> {
     /// - [`Error::BlobTooLarge`] if `bytes` is longer than
     ///   [`BlobHeapCfg::max_blob`];
     /// - [`Error::CapacityExceeded`] if the pool would grow past
-    ///   [`BlobHeapCfg::max_bytes`] (or past the inherent 4 GiB `u32`
-    ///   offset ceiling).
+    ///   [`BlobHeapCfg::max_bytes`] or the `usize` pool ceiling (4 GiB on a
+    ///   32-bit target).
     pub fn push(&mut self, bytes: &[u8]) -> Result<BlobId, Error> {
         if bytes.len() > self.cfg.max_blob {
             return Err(Error::BlobTooLarge {
@@ -177,20 +180,24 @@ impl<'a> BlobHeap<'a> {
             max_bytes: self.cfg.max_bytes,
         };
         let offset = self.pool_len();
+        // `checked_add` bounds the cumulative offset to `usize`, which is the
+        // pool ceiling on a 32-bit host (4 GiB); on 64-bit only `max_bytes`
+        // and RAM bind. The blob length itself stays within `u32` via the
+        // `max_blob` check above.
         let end = offset.checked_add(bytes.len()).ok_or(capacity_exceeded)?;
-        if end > self.cfg.max_bytes || end > u32::MAX as usize {
+        if end > self.cfg.max_bytes {
             return Err(capacity_exceeded);
         }
         // Ids are u32 with `u32::MAX` excluded so `id + 1` always fits (the
         // interner's table relies on that); unreachable in practice before
-        // the offset ceiling unless the heap holds billions of zero-length
+        // the pool ceiling unless the heap holds billions of zero-length
         // blobs.
         let id = u32::try_from(self.index.len())
             .ok()
             .filter(|&i| i != u32::MAX)
             .ok_or(capacity_exceeded)?;
         self.tail.extend_from_slice(bytes);
-        self.index.push((offset as u32, bytes.len() as u32));
+        self.index.push((offset, bytes.len() as u32));
         Ok(BlobId(id))
     }
 
@@ -202,7 +209,7 @@ impl<'a> BlobHeap<'a> {
     /// a dangling id is a caller bug, not a runtime condition.
     pub fn get(&self, id: BlobId) -> &[u8] {
         let (offset, len) = self.index[id.0 as usize];
-        self.slice(offset as usize, len as usize)
+        self.slice(offset, len as usize)
     }
 
     /// Number of blobs stored.
@@ -225,9 +232,10 @@ impl<'a> BlobHeap<'a> {
     /// This is the substrate for the owner-driven compaction pass: walk the
     /// blobs, copy the live ones into a fresh heap, record the id remapping.
     pub fn iter(&self) -> impl Iterator<Item = (BlobId, &[u8])> {
-        self.index.iter().enumerate().map(|(i, &(offset, len))| {
-            (BlobId(i as u32), self.slice(offset as usize, len as usize))
-        })
+        self.index
+            .iter()
+            .enumerate()
+            .map(|(i, &(offset, len))| (BlobId(i as u32), self.slice(offset, len as usize)))
     }
 
     /// Appends the heap's index section to `out` (`specs/03`).
@@ -260,9 +268,8 @@ impl<'a> BlobHeap<'a> {
     /// The input is **untrusted** — validation is O(blobs), never panics
     /// on arbitrary bytes: exact index length, per-blob length within
     /// `cfg.max_blob`, and the lengths summing exactly to the pool size
-    /// (which itself must fit `cfg.max_bytes` and the `u32` offset
-    /// ceiling). Blob *content* is the owner's data and is not
-    /// interpreted.
+    /// (which itself must fit `cfg.max_bytes` and the `usize` pool ceiling).
+    /// Blob *content* is the owner's data and is not interpreted.
     ///
     /// # Errors
     ///
@@ -358,8 +365,8 @@ impl BlobHeapBuilder {
     ///
     /// - [`Error::BlobTooLarge`] if `len` exceeds [`BlobHeapCfg::max_blob`];
     /// - [`Error::CapacityExceeded`] if the pool would grow past
-    ///   [`BlobHeapCfg::max_bytes`] or the inherent 4 GiB `u32` ceiling, or if
-    ///   the blob count would reach `u32::MAX`.
+    ///   [`BlobHeapCfg::max_bytes`] or the `usize` pool ceiling (4 GiB on a
+    ///   32-bit target), or if the blob count would reach `u32::MAX`.
     pub fn push_len(&mut self, len: usize) -> Result<BlobId, Error> {
         if len > self.cfg.max_blob {
             return Err(Error::BlobTooLarge {
@@ -370,8 +377,10 @@ impl BlobHeapBuilder {
         let capacity_exceeded = Error::CapacityExceeded {
             max_bytes: self.cfg.max_bytes,
         };
+        // Same ceiling as `BlobHeap::push`: `checked_add` caps the pool at
+        // `usize` (4 GiB on a 32-bit host), `max_bytes` binds on 64-bit.
         let end = self.pool_len.checked_add(len).ok_or(capacity_exceeded)?;
-        if end > self.cfg.max_bytes || end > u32::MAX as usize {
+        if end > self.cfg.max_bytes {
             return Err(capacity_exceeded);
         }
         let id = u32::try_from(self.lens.len())
@@ -434,7 +443,7 @@ fn validate_index(
     cfg: BlobHeapCfg,
     index: &[u8],
     pool_len: usize,
-) -> Result<Vec<(u32, u32)>, Error> {
+) -> Result<Vec<(usize, u32)>, Error> {
     if index.len() < INDEX_HEADER {
         return Err(Error::Corrupt("blob index shorter than its header"));
     }
@@ -445,11 +454,14 @@ fn validate_index(
     if index.len() as u64 != INDEX_HEADER as u64 + u64::from(blobs) * LEN_BYTES as u64 {
         return Err(Error::Corrupt("blob index length mismatch"));
     }
-    if pool_len > cfg.max_bytes || pool_len > u32::MAX as usize {
+    // `pool_len` is a real `&[u8]` length, so on a 32-bit host it can never
+    // exceed the address space — the 4 GiB cap is enforced by `usize` itself.
+    // On 64-bit only `max_bytes` binds.
+    if pool_len > cfg.max_bytes {
         return Err(Error::Corrupt("blob pool exceeds the configured ceiling"));
     }
     let mut rebuilt = Vec::with_capacity(blobs as usize);
-    let mut offset = 0u64;
+    let mut offset: usize = 0;
     for i in 0..blobs as usize {
         let at = INDEX_HEADER + i * LEN_BYTES;
         let len = u32::from_le_bytes(index[at..at + LEN_BYTES].try_into().unwrap());
@@ -458,13 +470,16 @@ fn validate_index(
                 "blob length exceeds the configured max_blob",
             ));
         }
-        rebuilt.push((offset as u32, len));
-        offset += u64::from(len);
-        if offset > pool_len as u64 {
-            return Err(Error::Corrupt("blob lengths overrun the pool"));
-        }
+        rebuilt.push((offset, len));
+        // `checked_add` keeps the cumulative offset within `usize`; the
+        // `> pool_len` gate then rejects any lengths overrunning the pool
+        // (and, on 32-bit, an overflow that would wrap).
+        offset = offset
+            .checked_add(len as usize)
+            .filter(|&o| o <= pool_len)
+            .ok_or(Error::Corrupt("blob lengths overrun the pool"))?;
     }
-    if offset != pool_len as u64 {
+    if offset != pool_len {
         return Err(Error::Corrupt("blob lengths do not cover the pool"));
     }
     Ok(rebuilt)

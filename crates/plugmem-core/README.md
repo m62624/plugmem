@@ -358,8 +358,8 @@ pool strides — not estimates:
 | `temporal` | `recorded_at` index entry | **12 B** / fact | u32 page × 4 KiB | 16 TiB pool |
 | `entities` + `by_name` | one entity | 24 + 8 = **32 B** | u32 page × 4 KiB | 4.29 B entities |
 | `edges_out` + `edges_in` | one typed edge (both directions) | 16 + 16 = **32 B** | u32 page × 4 KiB | 16 TiB pool |
-| `texts` (blob heap) | **all** fact texts + entity names, concatenated | its text length | **u32 byte offset** | **4 GiB total** |
-| `terms` (interner) | vocabulary: unique tokens, tags, relation names | deduped term length | **u32 byte offset** | **4 GiB total** |
+| `texts` (blob heap) | **all** fact texts + entity names, concatenated | its text length | **usize byte offset** | **4 GiB on 32-bit; RAM-bound on 64-bit** |
+| `terms` (interner) | vocabulary: unique tokens, tags, relation names | deduped term length | **usize byte offset** | **4 GiB on 32-bit; RAM-bound on 64-bit** |
 | `tag_lists` + postings | tag/term/entity → fact lists | ~varint / entry | u32 chunk × 64 B | 256 GiB each |
 | `vecs` (vector pool) | one int8-quantized embedding | `8 + 8·⌈dim/64⌉ + dim` B | u32 slot | 4.29 B vectors |
 | HNSW graph | neighbor blocks | ≈ `m0 × 4 B` / vector | u32 node id | 4.29 B nodes |
@@ -371,9 +371,10 @@ Per-vector stride, concretely: **d384 → 440 B**, **d768 → 872 B**,
 **The binding limit is rarely the id space.** Ids are `u32` (4.29
 billion), but two softer walls arrive first:
 
-- **`texts` 4 GiB** — the sum of every fact's text plus entity names.
-  At ~200 B/fact that is **~21 M facts** of text; at ~120 B, ~36 M.
-  Usually the first hard wall for a text-heavy memory.
+- **`texts` 4 GiB on 32-bit** — the sum of every fact's text plus entity
+  names. At ~200 B/fact that is **~21 M facts** of text; at ~120 B, ~36 M.
+  The first hard wall for a text-heavy memory *on wasm32*; on a 64-bit host
+  the pool offset is a `usize`, so this pool is RAM-bound, not wall-capped.
 - **RAM** on the owned-resident path — and with vectors this binds first:
   d768 embeddings are 872 B each, so 10 M vectors alone are **~8.7 GiB**.
   A native overlay open sidesteps this (mmap pages are reclaimable); it is
@@ -387,25 +388,27 @@ Worked sizes (native / wasm64; no vectors unless noted):
 | 1 M facts + d384 vectors (wasm32 ceiling) | ~0.9 GB — arenas ~90 MB, text ~120 MB, vecs ~440 MB, index | wasm32 ≤ 2 GiB budget |
 | 10 M facts + d768 vectors | ~13 GB — vecs ~8.7 GB dominate; text ~1.2 GB (< 4 GiB) | 64-bit host, comfortably |
 
-So on 64-bit, **vectors and text dominate RAM**: you run out of memory
-(or reach the 4 GiB text pool near ~20 M facts) far sooner than the
-4.29 B id space.
+So on 64-bit, **vectors and text dominate RAM**: you run out of memory far
+sooner than the 4.29 B id space (the text pool is no longer a 4 GiB wall
+there — it is `usize`-bound).
 
 ### Address-space classes
 
 | Target | `usize` | Total resident image |
 |---|---|---|
 | **wasm32** (Wasm 2.0; `wasm32v1-none`, `-wasip1`) | 32-bit | **≤ 4 GiB total** — every pool + code + stack share one linear memory. Realistic DB ~1–2 GiB; design center 100 k facts, ceiling 1 M. |
-| **wasm64** (Wasm 3.0 [memory64](https://github.com/WebAssembly/memory64)) | 64-bit | RAM-bound; the per-pool caps above still apply |
-| **native 64-bit** | 64-bit | RAM-bound; `max_bytes` raisable past 4 GiB |
+| **wasm64** (Wasm 3.0 [memory64](https://github.com/WebAssembly/memory64)) | 64-bit | RAM-bound; the byte-pool offset is a 64-bit `usize`, so text/vocabulary pools lift past 4 GiB |
+| **native 64-bit** | 64-bit | RAM-bound; `max_bytes` raisable past 4 GiB (text/vocabulary pools too) |
 | **native 32-bit** | 32-bit | like wasm32; a > 4 GiB-class DB is refused with `ConfigMismatch` (a typed error, not corruption) |
 
-The per-pool 4 GiB byte-offset caps are a deliberate **wasm32 fit**, not
-a host addressing limit: on 64-bit they are the *floor* (raise
-`max_bytes`, hold arenas and vectors far past 4 GiB in total), but a
-single text or vocabulary byte-pool still tops out at 4 GiB whatever the
-pointer width — a serialization choice, traded for a compact, portable
-snapshot. See [WebAssembly 2.0 and 3.0](#webassembly-20-and-30).
+The per-pool byte-offset ceiling is the **target's `usize`**, not a fixed
+4 GiB: on a 32-bit target (wasm32) that is 4 GiB — a natural fit for linear
+memory; on a 64-bit host a single text or vocabulary pool is RAM-/`max_bytes`-
+bound like every other pool. The **snapshot format is identical** across
+pointer widths — dumps store per-blob lengths, not offsets, so a file written
+anywhere reloads anywhere it fits (a > 4 GiB-pool file simply cannot be
+addressed on a 32-bit host, and is refused with `ConfigMismatch` rather than
+truncated). See [WebAssembly 2.0 and 3.0](#webassembly-20-and-30).
 
 ## Limits, stated plainly
 
