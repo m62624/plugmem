@@ -20,6 +20,12 @@ serde_json = { workspace = true }
 serde = { workspace = true, optional = true }
 
 [features]
+# Deterministic work counters (perf gates), forwarded to plugmem-core. Enabling
+# it changes the engine lock from an RwLock to a Mutex (the arena's counter
+# Cells are not Sync), so read-only verbs serialize instead of running
+# concurrently. It is a single-threaded perf-measurement build — do NOT enable
+# it in normal use; leave it off to keep concurrent readers.
+counters = ["plugmem-core/counters"]
 # Optional serde Serialize/Deserialize on the public data types (FactSnapshot,
 # ExportedFact, RecoverReport, FsyncPolicy). Off by default; forwards to
 # plugmem-core's serde. HostError is not covered — it wraps std::io::Error,

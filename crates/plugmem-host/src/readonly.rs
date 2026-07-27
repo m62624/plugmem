@@ -23,13 +23,24 @@
 //! is mapped — which is exactly the safety argument for the mmap (see the
 //! `unsafe` block in [`ReadOnlyDatabase::open`]).
 
+use std::cell::RefCell;
 use std::fs::File;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "counters")]
 use std::sync::Mutex;
 
 use memmap2::Mmap;
 use plugmem_core::snapshot::{DEFAULT_SCRUB_BUDGET, ScrubCursor, ScrubProgress, Snapshot};
-use plugmem_core::{Config, FactId, Memory, RecallQuery, RecallResult, Stats, Storage};
+use plugmem_core::{
+    Config, FactId, Memory, RecallQuery, RecallResult, RecallScratch, Stats, Storage,
+};
+
+thread_local! {
+    /// Per-thread recall scratch — the read-only analog of the one in
+    /// [`crate::db`]. `recall` borrows the mapped engine shared (`&Memory`), so
+    /// many threads recall one handle at once, each reusing its own scratch.
+    static RECALL_SCRATCH: RefCell<RecallScratch> = RefCell::new(RecallScratch::new());
+}
 
 use crate::db::FactSnapshot;
 use crate::error::HostError;
@@ -55,9 +66,16 @@ type BorrowedMemory<'a> = Memory<'a>;
 /// (specs/16). See the module docs. `Send + Sync` — share it across
 /// threads behind a reference or an `Arc`.
 pub struct ReadOnlyDatabase {
-    /// The map and the engine borrowing it. Behind a `Mutex` because
-    /// `recall` reuses internal scratch buffers (`&mut Memory`), and to
-    /// keep the handle `Sync`.
+    /// The map and the engine borrowing it. Normally no lock: every verb
+    /// borrows it shared (`&Memory`) — `recall` keeps its mutable scratch
+    /// per-thread — so many threads read one handle concurrently. Under
+    /// `counters` the engine embeds the arena's non-`Sync` counter `Cells`, so
+    /// it is wrapped in a `Mutex` to stay `Sync` (readers serialize — fine for
+    /// that single-threaded perf build). Purely internal: the public API is the
+    /// same under every feature.
+    #[cfg(not(feature = "counters"))]
+    mapped: MappedMemory,
+    #[cfg(feature = "counters")]
     mapped: Mutex<MappedMemory>,
     /// Holds the shared advisory lock for the handle's whole life (never
     /// read — the lock is the point). Shared with other readers, but it
@@ -115,10 +133,27 @@ impl ReadOnlyDatabase {
             MappedMemory::try_new(map, |map| Memory::from_bytes_borrowed(&map[..], &[], cfg))?;
 
         Ok(Self {
+            #[cfg(not(feature = "counters"))]
+            mapped,
+            #[cfg(feature = "counters")]
             mapped: Mutex::new(mapped),
             _store: store,
             path: base,
         })
+    }
+
+    /// Runs `f` over the mapped engine (`&Memory`). Normally a lock-free shared
+    /// borrow (concurrent readers); under `counters` it takes the `Mutex` first.
+    /// Private — the lock strategy never reaches the public API.
+    #[cfg(not(feature = "counters"))]
+    fn with_mem<R>(&self, f: impl FnOnce(&Memory<'_>) -> R) -> R {
+        f(self.mapped.borrow_dependent())
+    }
+
+    #[cfg(feature = "counters")]
+    fn with_mem<R>(&self, f: impl FnOnce(&Memory<'_>) -> R) -> R {
+        let guard = self.mapped.lock().unwrap_or_else(|e| e.into_inner());
+        f(guard.borrow_dependent())
     }
 
     /// Runs a recall (specs/04). Same semantics as
@@ -126,23 +161,29 @@ impl ReadOnlyDatabase {
     /// a text-only query is not auto-embedded, so pass a vector for the
     /// vector source.
     pub fn recall(&self, q: RecallQuery<'_>) -> Result<RecallResult, HostError> {
-        let mut mapped = self.mapped.lock().unwrap_or_else(|e| e.into_inner());
-        Ok(mapped.with_dependent_mut(|_map, mem| mem.recall(q))?)
+        self.with_mem(|mem| {
+            RECALL_SCRATCH.with(|scratch| {
+                let mut scratch = scratch.borrow_mut();
+                let mut out = RecallResult::default();
+                mem.recall_into(q, &mut scratch, &mut out)?;
+                Ok(out)
+            })
+        })
     }
 
     /// An owned copy of one fact, or `None` for unknown/tombstoned ids.
     pub fn get(&self, id: FactId) -> Option<FactSnapshot> {
-        let mapped = self.mapped.lock().unwrap_or_else(|e| e.into_inner());
-        mapped.borrow_dependent().get(id).map(|v| FactSnapshot {
-            record: v.record,
-            text: v.text.to_string(),
+        self.with_mem(|mem| {
+            mem.get(id).map(|v| FactSnapshot {
+                record: v.record,
+                text: v.text.to_string(),
+            })
         })
     }
 
     /// Engine size counters.
     pub fn stats(&self) -> Stats {
-        let mapped = self.mapped.lock().unwrap_or_else(|e| e.into_inner());
-        mapped.borrow_dependent().stats()
+        self.with_mem(|mem| mem.stats())
     }
 
     /// Runs the on-demand integrity check (specs/16 §9) — the equivalent of
@@ -155,8 +196,7 @@ impl ReadOnlyDatabase {
     ///
     /// [`HostError::Engine`] for the first inconsistency found.
     pub fn verify(&self) -> Result<(), HostError> {
-        let mapped = self.mapped.lock().unwrap_or_else(|e| e.into_inner());
-        Ok(mapped.borrow_dependent().verify()?)
+        Ok(self.with_mem(|mem| mem.verify())?)
     }
 
     /// A resumable byte-level container scrub of the snapshot file, with the
@@ -195,8 +235,7 @@ impl ReadOnlyDatabase {
     /// Dumps the currently-open facts for a human-readable backup
     /// (specs/06). See [`ExportedFact`](crate::ExportedFact).
     pub fn export(&self) -> Vec<crate::db::ExportedFact> {
-        let mapped = self.mapped.lock().unwrap_or_else(|e| e.into_inner());
-        crate::db::export_facts(mapped.borrow_dependent())
+        self.with_mem(crate::db::export_facts)
     }
 
     /// The database base path.

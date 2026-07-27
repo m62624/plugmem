@@ -131,9 +131,15 @@ or one writer, never both at once.**
   agents cheaply. When you need to write, drop the readers and open
   read-write.
 - **One process, many threads or agents.** A `Database` is a
-  `Clone + Send + Sync` handle; clone it freely. Every verb serializes
-  on an internal mutex — at microsecond engine calls that is a queue,
-  not a bottleneck. `ReadOnlyDatabase` is `Send + Sync` too.
+  `Clone + Send + Sync` handle; clone it freely. The read verbs
+  (`recall`/`get`/`stats`/`export`/`verify`) take a *shared* guard and run
+  **concurrently**; the write verbs take an *exclusive* guard and serialize
+  — against each other and against readers (an `RwLock` over the engine, the
+  same reader/writer discipline as the file lock, one level down). At
+  microsecond engine calls neither is a bottleneck. `ReadOnlyDatabase` is
+  `Send + Sync` too, and its reads are lock-free — a fan-out of reader
+  threads over one mapped snapshot. (Each reader thread keeps its own recall
+  scratch, so concurrent `recall`s never contend.)
 - **Many files.** Fully independent databases: separate locks, separate
   mutexes, natural parallelism. Two models each with their own memory
   file never contend; two models sharing one memory clone one handle.
@@ -293,6 +299,15 @@ against a local mock — no network in CI.
   (`FactSnapshot`, `ExportedFact`, `RecoverReport`, `FsyncPolicy`), forwarding
   to `plugmem-core/serde`. Off by default. `HostError` is deliberately not
   covered — it wraps `std::io::Error`, which is not serializable.
+- `counters` — deterministic work counters for the perf gates, forwarded to
+  `plugmem-core/counters`. **Do not enable it in normal use — it is a
+  single-threaded measurement build only.** The arena's counter `Cell`s are
+  not `Sync`, so with `counters` on the engine lock falls back from an
+  `RwLock` to a `Mutex`: the read verbs then **serialize** instead of running
+  concurrently. The public API is identical either way — only the internal
+  lock (and thus read concurrency) changes. Leave it off to keep concurrent
+  readers; reach for it only when measuring operation counts in a specific
+  scenario.
 
 ## License
 

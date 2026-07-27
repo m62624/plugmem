@@ -2,17 +2,23 @@
 //! one lock (specs/13 §1, §3).
 //!
 //! The orchestration model in one paragraph: a `Database` handle is
-//! `Clone + Send + Sync` (an `Arc` around a mutex-guarded engine), so
+//! `Clone + Send + Sync` (an `Arc` around an `RwLock`-guarded engine), so
 //! any number of threads or agents in one process share one file by
-//! cloning the handle — every verb serializes on the mutex, which at
-//! microsecond engine calls is a queue, not a bottleneck. A second
-//! *process* (or a second `Database` on the same path) is refused with
-//! [`HostError::Locked`] by the file lock. Different files are fully
+//! cloning the handle — the read verbs (`recall`/`get`/`stats`/…) run
+//! concurrently under a shared guard, the write verbs serialize under an
+//! exclusive one; at microsecond engine calls neither is a bottleneck. A
+//! second *process* (or a second `Database` on the same path) is refused
+//! with [`HostError::Locked`] by the file lock. Different files are fully
 //! independent — open as many `Database`s as you have files.
 //!
 //! Everything expensive and external — computing embeddings over HTTP —
-//! happens **before** the mutex is taken: while one agent waits for its
+//! happens **before** the lock is taken: while one agent waits for its
 //! embedding provider, others keep reading and writing.
+//!
+//! (Under the `counters` perf-gate feature the engine's instrumentation
+//! `Cell`s are not `Sync`, so the lock falls back to a `Mutex` and reads
+//! serialize — a single-threaded measurement build; the public API is
+//! unchanged. See `StateLock`.)
 //!
 //! ## Overlay write path (specs/16 §9)
 //!
@@ -28,16 +34,29 @@
 //! database has no file to map yet: it opens *owned* and empty, and switches
 //! to the mapped overlay at its first snapshot.
 
+use std::cell::RefCell;
 use std::fs::File;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+#[cfg(feature = "counters")]
+use std::sync::MutexGuard;
+use std::sync::{Arc, Mutex};
+#[cfg(not(feature = "counters"))]
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use memmap2::Mmap;
 use plugmem_core::{
     Config, Error, FactFault, FactRecord, LinkInput, MaintainReport, MemStorage, Memory,
-    OpenReport, RecallQuery, RecallResult, RememberInput, RememberOutcome, Stats, Storage,
+    OpenReport, RecallQuery, RecallResult, RecallScratch, RememberInput, RememberOutcome, Stats,
+    Storage,
 };
+
+thread_local! {
+    /// Per-thread recall scratch. `recall` takes `&self` on the engine, so many
+    /// reader threads recall one [`Database`] at once; each reuses its own
+    /// scratch here (zero re-alloc after warm-up, no lock on the hot path).
+    static RECALL_SCRATCH: RefCell<RecallScratch> = RefCell::new(RecallScratch::new());
+}
 
 use crate::embedder::Embedder;
 use crate::error::HostError;
@@ -290,7 +309,7 @@ impl DatabaseBuilder {
         let (engine, report) = open_engine(&mut store, &self.cfg)?;
         let db = Database {
             inner: Arc::new(Inner {
-                state: Mutex::new(State {
+                state: StateLock::new(State {
                     engine,
                     store,
                     ops: 0,
@@ -307,8 +326,19 @@ impl DatabaseBuilder {
     }
 }
 
+/// The engine lock. Normally an `RwLock` so read-only verbs run concurrently
+/// (the whole point of Variant 1). Under `counters`, `State` embeds the arena's
+/// non-`Sync` instrumentation `Cell`s, and `RwLock<T>` needs `T: Sync` to hand
+/// out shared guards — so there we fall back to a `Mutex`. `counters` is a
+/// single-threaded perf-gate build, so serialized readers cost nothing there,
+/// and the `Mutex` keeps `Database: Send + Sync` so every test still builds.
+#[cfg(not(feature = "counters"))]
+type StateLock = RwLock<State>;
+#[cfg(feature = "counters")]
+type StateLock = Mutex<State>;
+
 struct Inner {
-    state: Mutex<State>,
+    state: StateLock,
     embedder: Option<Mutex<Box<dyn Embedder>>>,
     /// Kept to rebuild the overlay engine after a re-map on snapshot.
     cfg: Config,
@@ -370,10 +400,34 @@ impl Database {
         }
     }
 
-    fn lock(&self) -> MutexGuard<'_, State> {
-        // A panicked verb cannot leave the engine half-mutated (check
-        // first, mutate last is the engine's own law), so a poisoned
-        // lock is recoverable.
+    /// A shared (read) guard — for the read-only verbs (`recall`/`get`/
+    /// `stats`/`export`/`verify`). Many run at once; they exclude only writers.
+    /// (Under `counters` the lock is a `Mutex`, so reads serialize — see
+    /// [`StateLock`].) A panicked verb cannot leave the engine half-mutated
+    /// (check first, mutate last is the engine's own law), so a poisoned lock
+    /// is recoverable.
+    #[cfg(not(feature = "counters"))]
+    fn read(&self) -> RwLockReadGuard<'_, State> {
+        self.inner.state.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// An exclusive (write) guard — for the mutating verbs. Serializes writers
+    /// against each other and against every concurrent reader.
+    #[cfg(not(feature = "counters"))]
+    fn write(&self) -> RwLockWriteGuard<'_, State> {
+        self.inner.state.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Under `counters` the engine lock is a `Mutex`: `read` and `write` both
+    /// take the one exclusive guard (readers serialize — acceptable for the
+    /// single-threaded perf-gate build). See [`StateLock`].
+    #[cfg(feature = "counters")]
+    fn read(&self) -> MutexGuard<'_, State> {
+        self.inner.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[cfg(feature = "counters")]
+    fn write(&self) -> MutexGuard<'_, State> {
         self.inner.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -460,7 +514,7 @@ impl Database {
             vector: embedded.as_deref().or(input.vector),
             ..input
         };
-        let mut st = self.lock();
+        let mut st = self.write();
         let State { engine, store, .. } = &mut *st;
         let out = engine.with(store, |mem, store| mem.remember(store, input))?;
         self.after_mutation(&mut st, input.now)?;
@@ -478,9 +532,17 @@ impl Database {
             vector: embedded.as_deref().or(q.vector),
             ..q
         };
-        let mut st = self.lock();
-        let State { engine, store, .. } = &mut *st;
-        Ok(engine.with(store, |mem, _store| mem.recall(q))?)
+        // A shared guard: concurrent recalls run in parallel. `recall_into`
+        // takes `&self` on the engine and a per-thread scratch, so there is no
+        // writer path and no cross-reader contention on the hot path.
+        let st = self.read();
+        RECALL_SCRATCH.with(|scratch| {
+            let mut scratch = scratch.borrow_mut();
+            let mut out = RecallResult::default();
+            st.engine
+                .read(|mem| mem.recall_into(q, &mut scratch, &mut out))?;
+            Ok(out)
+        })
     }
 
     /// Revises `target` (same auto-embedding rule as `remember`).
@@ -497,7 +559,7 @@ impl Database {
             vector: embedded.as_deref().or(input.vector),
             ..input
         };
-        let mut st = self.lock();
+        let mut st = self.write();
         let State { engine, store, .. } = &mut *st;
         let out = engine.with(store, |mem, store| mem.revise(store, target, input))?;
         self.after_mutation(&mut st, input.now)?;
@@ -506,7 +568,7 @@ impl Database {
 
     /// Tombstones a fact.
     pub fn forget(&self, now: u64, id: plugmem_core::FactId) -> Result<bool, HostError> {
-        let mut st = self.lock();
+        let mut st = self.write();
         let State { engine, store, .. } = &mut *st;
         let fresh = engine.with(store, |mem, store| mem.forget(store, now, id))?;
         st.forgets += 1;
@@ -516,7 +578,7 @@ impl Database {
 
     /// Upserts a typed edge.
     pub fn link(&self, input: LinkInput<'_>) -> Result<(), HostError> {
-        let mut st = self.lock();
+        let mut st = self.write();
         let State { engine, store, .. } = &mut *st;
         engine.with(store, |mem, store| mem.link(store, input))?;
         self.after_mutation(&mut st, input.now)?;
@@ -525,7 +587,7 @@ impl Database {
 
     /// An owned copy of one fact, or `None` for unknown/tombstoned ids.
     pub fn get(&self, id: plugmem_core::FactId) -> Option<FactSnapshot> {
-        self.lock().engine.read(|mem| {
+        self.read().engine.read(|mem| {
             mem.get(id).map(|v| FactSnapshot {
                 record: v.record,
                 text: v.text.to_string(),
@@ -535,13 +597,13 @@ impl Database {
 
     /// Engine size counters.
     pub fn stats(&self) -> Stats {
-        self.lock().engine.read(|mem| mem.stats())
+        self.read().engine.read(|mem| mem.stats())
     }
 
     /// Dumps the currently-open facts for a human-readable backup
     /// (specs/06). See [`ExportedFact`].
     pub fn export(&self) -> Vec<ExportedFact> {
-        self.lock().engine.read(export_facts)
+        self.read().engine.read(export_facts)
     }
 
     /// Runs a maintenance pass now (purge, compaction, HNSW build past the
@@ -557,7 +619,7 @@ impl Database {
     ///
     /// The report's byte counts are the on-disk image size before and after.
     pub fn maintain(&self, now: u64) -> Result<MaintainReport, HostError> {
-        let mut st = self.lock();
+        let mut st = self.write();
         let bytes_before = std::fs::metadata(st.store.path())
             .map(|m| m.len() as usize)
             .unwrap_or(0);
@@ -605,7 +667,7 @@ impl Database {
     /// Writes a full snapshot and clears the journal now (re-mapping the
     /// fresh file — see [`Database::resnapshot`]).
     pub fn checkpoint(&self, now: u64) -> Result<(), HostError> {
-        let mut st = self.lock();
+        let mut st = self.write();
         self.resnapshot(&mut st, now)?;
         st.ops = 0;
         Ok(())
@@ -624,7 +686,7 @@ impl Database {
     /// [`HostError::Engine`] wrapping [`Error::Corrupt`](plugmem_core::Error)
     /// for the first inconsistency found.
     pub fn verify(&self) -> Result<(), HostError> {
-        Ok(self.lock().engine.read(|mem| mem.verify())?)
+        Ok(self.read().engine.read(|mem| mem.verify())?)
     }
 
     /// Salvages a content-corrupt database (Tier 2, specs/16 §9): opens `src`,
