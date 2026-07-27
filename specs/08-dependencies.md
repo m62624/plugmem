@@ -15,6 +15,7 @@
 | `unicode-segmentation` | 1.13.3 | `default-features = false` | ✅ собран (2026-07-18) | UAX #29 word boundaries токенизатора v2 |
 | `unicode-normalization` | 0.1.25 | `default-features = false` | ✅ собран (2026-07-18) | NFKC + канонич. декомпозиция (фолдинг диакритики) |
 | `libm` | 0.2.16 | `default-features = false` | ✅ собран (2026-07-18) | float-математика BM25/recency в no_std |
+| `serde` | 1.0.229 | `optional = true, default-features = false, features = ["derive", "alloc"]` | ✅ собран (2026-07-27, incl. wasm32v1-none) | **optional**, за feature `serde` (по умолчанию выкл.): Serialize/Deserialize публичных data-типов для JSON-обёрток; тянется только при включённой фиче |
 | — baseline | — | пустой `#![no_std]` крейт | ✅ собран | контроль методики |
 
 Цена unicode-таблиц в wasm-бинаре измерена минимальным cdylib-пробником

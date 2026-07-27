@@ -308,6 +308,10 @@ to toggle (it builds and is gated on `wasm32v1-none` in CI).
 - `counters` — deterministic work counters on every structure (key
   comparisons, bytes shifted, pages allocated, chain steps, splits,
   interner probes). Zero cost when disabled.
+- `serde` — `Serialize`/`Deserialize` on the public data types (the dense
+  ids `BlobId`/`TermId`, the config structs, `ShardMode`, `ListHandle`).
+  Off by default; pulls in `serde` (itself `no_std`, `derive` + `alloc`) only
+  when enabled, so the default build keeps its minimal dependency set.
 
 ## Testing
 

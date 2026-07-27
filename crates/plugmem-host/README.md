@@ -287,6 +287,13 @@ protocol. The dimension is configured explicitly (no startup probe);
 a server answering with a different one is a typed error. Tests run
 against a local mock — no network in CI.
 
+## Feature flags
+
+- `serde` — `Serialize`/`Deserialize` on the public data types
+  (`FactSnapshot`, `ExportedFact`, `RecoverReport`, `FsyncPolicy`), forwarding
+  to `plugmem-core/serde`. Off by default. `HostError` is deliberately not
+  covered — it wraps `std::io::Error`, which is not serializable.
+
 ## License
 
 MIT.

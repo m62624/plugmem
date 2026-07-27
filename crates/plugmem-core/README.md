@@ -496,6 +496,13 @@ The crate is `no_std + alloc` unconditionally — there is no `std` feature
 (it builds and is gated on `wasm32v1-none` in CI).
 
 - `counters` — the deterministic work counters; zero cost when off.
+- `serde` — `Serialize`/`Deserialize` on the public **data** types (ids,
+  `Config`, the model records, `RememberOutcome`, `Stats`, `RecallResult`,
+  `MaintainReport`, …). Owned types round-trip; borrowed inputs
+  (`RememberInput`, `RecallQuery`, …) and `Error` are Serialize-only (they hold
+  `&str`/`&'static str`). Off by default; forwards to `plugmem-arena/serde` so
+  the re-exported ids serialize too. Behavioral types (`Memory`, `Tokenizer`,
+  the index structures) are not serializable by design.
 
 ### WebAssembly 2.0 and 3.0
 
