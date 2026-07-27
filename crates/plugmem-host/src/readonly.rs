@@ -31,9 +31,7 @@ use std::sync::Mutex;
 
 use memmap2::Mmap;
 use plugmem_core::snapshot::{DEFAULT_SCRUB_BUDGET, ScrubCursor, ScrubProgress, Snapshot};
-use plugmem_core::{
-    Config, FactId, Memory, RecallQuery, RecallResult, RecallScratch, Stats, Storage,
-};
+use plugmem_core::{Config, FactId, Memory, RecallQuery, RecallResult, RecallScratch, Stats};
 
 thread_local! {
     /// Per-thread recall scratch — the read-only analog of the one in
@@ -44,7 +42,7 @@ thread_local! {
 
 use crate::db::FactSnapshot;
 use crate::error::HostError;
-use crate::storage::{FileStorage, FsyncPolicy};
+use crate::storage::pin_current_generation;
 
 self_cell::self_cell!(
     /// Owns the memory map and the [`Memory`] that borrows it. `self_cell`
@@ -77,12 +75,12 @@ pub struct ReadOnlyDatabase {
     mapped: MappedMemory,
     #[cfg(feature = "counters")]
     mapped: Mutex<MappedMemory>,
-    /// Holds the shared advisory lock for the handle's whole life (never
-    /// read — the lock is the point). Shared with other readers, but it
-    /// excludes every writer, which is what makes the mmap safe: no
-    /// cooperating writer can touch the file under us.
-    _store: FileStorage,
-    /// The database base path.
+    /// Holds a **shared** lock on the mapped generation file for this handle's
+    /// whole life — never read, but it *pins* the generation against the
+    /// writer's GC (the writer's exclusive try-lock fails while we hold this),
+    /// so the immutable snapshot we borrow can never be reclaimed under us.
+    _pin: File,
+    /// The database base (manifest) path.
     path: PathBuf,
 }
 
@@ -91,46 +89,30 @@ impl ReadOnlyDatabase {
     ///
     /// # Errors
     ///
-    /// [`HostError::Locked`] when the file is owned elsewhere;
-    /// [`HostError::NeedsCheckpoint`] when the journal is non-empty (open
-    /// read-write once to checkpoint, then retry); [`HostError::Io`] when
-    /// the snapshot file is missing or cannot be mapped;
-    /// [`HostError::Engine`] for a corrupt image or a config mismatch.
+    /// [`HostError::NeedsCheckpoint`] when the database has no published
+    /// snapshot generation yet (checkpoint it once, then retry); [`HostError::Io`]
+    /// when the generation file cannot be mapped; [`HostError::Engine`] for a
+    /// corrupt image or a config mismatch.
     pub(crate) fn open(path: impl Into<PathBuf>, cfg: Config) -> Result<Self, HostError> {
-        // A shared lock: coexists with other readers, excludes every
-        // writer (specs/13 §1). The fsync policy is irrelevant — we never
-        // write — but the type needs one.
-        let mut store = FileStorage::open_shared(path, FsyncPolicy::OnSnapshot)?;
-        let base = store.path().to_path_buf();
-
-        // A read-only open must not replay: require a checkpointed
-        // database. A cleanly checkpointed journal is byte-empty (the
-        // snapshot truncates it to zero); anything else means the caller
-        // should fold it in read-write first.
-        let journal = store.read_journal()?;
-        if !journal.is_empty() {
-            return Err(HostError::NeedsCheckpoint { path: base });
-        }
-        let Some(genp) = store.current_snapshot_path()? else {
-            // No published generation to map — checkpoint the database first.
+        let base: PathBuf = path.into();
+        // Pin the current generation with a shared lock (no writer lock — a
+        // reader coexists with the writer). The reader maps this immutable
+        // generation and ignores the journal, which belongs to the *next*
+        // generation the writer is building: this is the snapshot-isolation
+        // reader, "as of the last published checkpoint".
+        let Some((pin, genp)) = pin_current_generation(&base)? else {
+            // No published generation yet — checkpoint the database first.
             return Err(HostError::NeedsCheckpoint { path: base });
         };
 
-        let file = File::open(&genp).map_err(|e| HostError::io(&genp, e))?;
-        // SAFETY: mapping a file is inherently unsafe — a concurrent truncate
-        // or overwrite of the mapped file would fault the process
-        // (SIGBUS/exception) on the next page access. Our correctness argument
-        // (specs/16 §5): a generation file is **immutable** — a checkpoint
-        // publishes a new generation and never rewrites this one — and this
-        // handle holds a shared lock (`_store`) for its whole life. A foreign
-        // `truncate`/`rm` under a live handle is out of contract — the same
-        // caveat as corrupting any database file under a running engine.
-        let map = unsafe { Mmap::map(&file) }.map_err(|e| HostError::io(&genp, e))?;
-        // The `File` handle is no longer needed: `Mmap` owns the mapping.
-        drop(file);
-
-        // Borrow the mapped bytes into the engine. The journal is empty
-        // (checked above), so no replay and no copy-on-write.
+        // SAFETY: mapping a file is inherently unsafe — a concurrent truncate or
+        // overwrite would fault the process on the next page access. Our
+        // argument (specs/16 §5): a generation file is **immutable** (a
+        // checkpoint publishes a *new* generation, never rewrites this one), and
+        // `pin` holds a shared lock on it for this handle's whole life, so the
+        // writer's GC cannot reclaim it under us. A foreign `truncate`/`rm` is
+        // out of contract — the same caveat as corrupting any live database file.
+        let map = unsafe { Mmap::map(&pin) }.map_err(|e| HostError::io(&genp, e))?;
         let mapped =
             MappedMemory::try_new(map, |map| Memory::from_bytes_borrowed(&map[..], &[], cfg))?;
 
@@ -139,7 +121,7 @@ impl ReadOnlyDatabase {
             mapped,
             #[cfg(feature = "counters")]
             mapped: Mutex::new(mapped),
-            _store: store,
+            _pin: pin,
             path: base,
         })
     }
@@ -286,36 +268,33 @@ type BorrowedScrub<'a> = ScrubCursor<'a>;
 /// fault in, get hashed and stay reclaimable — a scrub never residents the
 /// whole file.
 ///
-/// It owns a shared advisory lock for its whole life (a reader's lock), so a
-/// writer is refused while it lives, and it is [`Send`] — pace it on its own
-/// thread. One-shot: obtain a new scrub to scan again.
+/// It pins its generation with a shared lock for its whole life (independent of
+/// the handle it came from), so the writer's GC cannot reclaim it while it runs.
+/// It is [`Send`] — pace it on its own thread. One-shot: obtain a new scrub to
+/// scan again.
 pub struct Scrub {
     mapped: MappedScrub,
-    /// Holds the shared advisory lock for the scrub's whole life (never read
-    /// — the lock is the point), independent of the originating handle.
-    _store: FileStorage,
+    /// Holds the shared lock on the scrubbed generation for the scrub's whole
+    /// life (never read — the pin is the point), independent of the handle.
+    _pin: File,
 }
 
 impl Scrub {
-    /// Maps the snapshot at `path` under a fresh shared lock and builds the
-    /// cursor. See [`ReadOnlyDatabase::scrub_with_budget`].
-    fn open(path: &Path, budget: usize) -> Result<Self, HostError> {
-        // A shared lock: coexists with the originating read-only handle and
-        // with other readers, excludes every writer. The fsync policy is
-        // irrelevant — a scrub never writes — but the type needs one.
-        let store = FileStorage::open_shared(path, FsyncPolicy::OnSnapshot)?;
-        let base = store.path().to_path_buf();
-        let Some(genp) = store.current_snapshot_path()? else {
-            return Err(HostError::NeedsCheckpoint { path: base });
+    /// Pins and maps the current generation at `base`, then builds the cursor.
+    /// See [`ReadOnlyDatabase::scrub_with_budget`].
+    fn open(base: &Path, budget: usize) -> Result<Self, HostError> {
+        // Pin the current generation with a shared lock (coexists with other
+        // readers and the writer; blocks only the writer's GC of this one).
+        let Some((pin, genp)) = pin_current_generation(base)? else {
+            return Err(HostError::NeedsCheckpoint {
+                path: base.to_path_buf(),
+            });
         };
 
-        let file = File::open(&genp).map_err(|e| HostError::io(&genp, e))?;
         // SAFETY: identical to `ReadOnlyDatabase::open` — a generation file is
-        // immutable (a checkpoint publishes a new one, never rewrites this), and
-        // the shared lock in `store` is held for this scrub's whole life
-        // (specs/16 §5).
-        let map = unsafe { Mmap::map(&file) }.map_err(|e| HostError::io(&genp, e))?;
-        drop(file);
+        // immutable, and `pin` holds a shared lock on it for this scrub's whole
+        // life, so GC cannot reclaim it under the map (specs/16 §5).
+        let map = unsafe { Mmap::map(&pin) }.map_err(|e| HostError::io(&genp, e))?;
 
         let mapped = MappedScrub::try_new(map, |map| {
             Snapshot::parse(&map[..])
@@ -323,10 +302,7 @@ impl Scrub {
                 .map_err(HostError::from)
         })?;
 
-        Ok(Self {
-            mapped,
-            _store: store,
-        })
+        Ok(Self { mapped, _pin: pin })
     }
 }
 
@@ -344,8 +320,6 @@ impl Iterator for Scrub {
 
 impl std::fmt::Debug for Scrub {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Scrub")
-            .field("path", &self._store.path())
-            .finish_non_exhaustive()
+        f.debug_struct("Scrub").finish_non_exhaustive()
     }
 }

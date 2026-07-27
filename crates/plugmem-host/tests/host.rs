@@ -455,6 +455,42 @@ fn checkpoint_advances_the_generation_and_reclaims_the_old() {
 }
 
 #[test]
+fn gc_reclaims_unpinned_generations_and_a_pin_keeps_one() {
+    let tmp = TempDir::new("gc-pin");
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    db.remember(RememberInput::text(1, "one")).unwrap();
+    db.checkpoint(10).unwrap();
+    // Repeated checkpoints with no reader: each reclaims the previous, so
+    // exactly one generation is ever on disk.
+    for i in 0..5u64 {
+        db.remember(RememberInput::text(20 + i, "more")).unwrap();
+        db.checkpoint(30 + i).unwrap();
+    }
+    assert_eq!(
+        generation_count(&tmp.db()),
+        1,
+        "unpinned generations are reclaimed"
+    );
+
+    // Pin the current generation with a reader, then checkpoint: the pinned
+    // generation survives GC (its shared lock blocks reclaim), so two coexist.
+    let pinned = snapshot_file(&tmp.db());
+    let ro = Database::open_readonly(tmp.db(), cfg()).unwrap();
+    db.remember(RememberInput::text(100, "after pin")).unwrap();
+    db.checkpoint(110).unwrap();
+    assert!(pinned.exists(), "the pinned generation survives GC");
+    assert_eq!(generation_count(&tmp.db()), 2, "pinned + current");
+    assert_eq!(ro.stats().facts, 6, "the reader sees its pinned snapshot");
+
+    // Drop the reader; the next checkpoint reclaims the now-unpinned generation.
+    drop(ro);
+    db.remember(RememberInput::text(200, "after drop")).unwrap();
+    db.checkpoint(210).unwrap();
+    assert!(!pinned.exists(), "the unpinned generation is reclaimed");
+    assert_eq!(generation_count(&tmp.db()), 1);
+}
+
+#[test]
 fn a_corrupt_manifest_is_rejected_on_open() {
     let tmp = TempDir::new("bad-manifest");
     {
@@ -650,24 +686,20 @@ fn open_readonly_refuses_a_dirty_journal() {
 }
 
 #[test]
-fn open_readonly_holds_a_shared_lock_and_frees_it_on_drop() {
-    let tmp = TempDir::new("ro-lock");
+fn open_readonly_does_not_block_the_writer() {
+    let tmp = TempDir::new("ro-nonblock");
     {
         let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
         seed_checkpointed(&db);
     }
     let ro = Database::open_readonly(tmp.db(), cfg()).unwrap();
-    // The read-only handle holds a *shared* lock: a writer is still
-    // refused (shared excludes exclusive)...
-    match Database::open(tmp.db(), cfg()) {
-        Err(HostError::Locked { path }) => assert_eq!(path, tmp.db()),
-        other => panic!("expected Locked, got {other:?}"),
-    }
-    drop(ro);
-    // Released on drop: the file opens (and writes) again.
+    // A reader does not take the writer lock (it pins its generation instead),
+    // so a writer opens alongside it and writes — no Locked.
     let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
-    db.remember(RememberInput::text(300, "after readonly"))
+    db.remember(RememberInput::text(300, "written while a reader is live"))
         .unwrap();
+    // The reader is unaffected — still its pinned generation.
+    assert_eq!(ro.stats().facts, 30);
 }
 
 #[test]
@@ -683,8 +715,8 @@ fn many_readers_share_one_snapshot() {
         (db.stats().facts, db.recall(q).unwrap().rendered)
     };
 
-    // Several read-only handles map the same file at once — shared locks
-    // coexist — and every one answers identically.
+    // Several read-only handles map the same generation at once and answer
+    // identically.
     let readers: Vec<ReadOnlyDatabase> = (0..4)
         .map(|_| Database::open_readonly(tmp.db(), cfg()).unwrap())
         .collect();
@@ -693,34 +725,39 @@ fn many_readers_share_one_snapshot() {
         assert_eq!(ro.recall(q).unwrap().rendered, rendered);
     }
 
-    // While any reader is live, a writer is still refused.
-    assert!(matches!(
-        Database::open(tmp.db(), cfg()),
-        Err(HostError::Locked { .. })
-    ));
-
-    // Dropping all readers frees the shared lock; the writer opens again.
-    drop(readers);
+    // A writer opens alongside the live readers (they hold no writer lock) and
+    // writes; the readers still answer from their pinned generation.
     let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
-    db.remember(RememberInput::text(300, "after readers"))
+    db.remember(RememberInput::text(300, "while readers are live"))
         .unwrap();
+    for ro in &readers {
+        assert_eq!(ro.stats().facts, facts, "readers are pinned");
+    }
+    drop(readers);
 }
 
 #[test]
-fn a_writer_blocks_a_reader() {
+fn a_reader_opens_alongside_a_live_writer() {
     let tmp = TempDir::new("ro-vs-rw");
     // Seed, then keep a read-write (exclusive) handle open.
     let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
     seed_checkpointed(&db);
-    // A read-only open cannot take its shared lock against a live writer.
-    match Database::open_readonly(tmp.db(), cfg()) {
-        Err(HostError::Locked { path }) => assert_eq!(path, tmp.db()),
-        other => panic!("expected Locked, got {other:?}"),
-    }
-    // Once the writer drops, the reader opens.
-    drop(db);
+    // A read-only open succeeds against a live writer (cross-process MVCC): it
+    // pins and maps the current published generation.
     let ro = Database::open_readonly(tmp.db(), cfg()).unwrap();
     assert_eq!(ro.stats().facts, 30);
+    // The writer keeps checkpointing while the reader is live; the reader stays
+    // on its pinned generation (snapshot isolation), a fresh open sees more.
+    db.remember(RememberInput::text(500, "after the reader opened"))
+        .unwrap();
+    db.checkpoint(600).unwrap();
+    assert_eq!(ro.stats().facts, 30, "the open reader is pinned");
+    let ro2 = Database::open_readonly(tmp.db(), cfg()).unwrap();
+    assert_eq!(
+        ro2.stats().facts,
+        31,
+        "a fresh reader sees the new checkpoint"
+    );
 }
 
 #[test]
@@ -1050,28 +1087,28 @@ fn scrub_catches_a_flipped_section_byte_on_disk() {
 }
 
 #[test]
-fn scrub_holds_a_shared_lock_for_its_whole_life() {
+fn scrub_pins_its_generation_and_coexists_with_the_writer() {
     let tmp = TempDir::new("scrub-lock");
     {
         let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
         seed_checkpointed(&db);
     }
     let ro = Database::open_readonly(tmp.db(), cfg()).unwrap();
-    let scrub = ro.scrub().unwrap();
+    let snap = snapshot_file(&tmp.db()); // the pinned generation file
+    let mut scrub = ro.scrub().unwrap();
     // Debug is a summary, never the contents.
     assert!(format!("{scrub:?}").contains("Scrub"));
-    // The scrub owns its own shared lock — it survives dropping the handle it
-    // came from, and still excludes an exclusive (read-write) opener.
+    // The scrub pins its own generation — it survives dropping the handle it
+    // came from, and a writer opens and checkpoints alongside it (no Locked).
     drop(ro);
-    match Database::open(tmp.db(), cfg()) {
-        Err(HostError::Locked { path }) => assert_eq!(path, tmp.db()),
-        other => panic!("expected Locked while a scrub is live, got {other:?}"),
-    }
-    // Dropping the scrub releases the lock; the writer opens again.
-    drop(scrub);
     let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
-    db.remember(RememberInput::text(500, "after scrub"))
+    db.remember(RememberInput::text(500, "while a scrub runs"))
         .unwrap();
+    db.checkpoint(600).unwrap();
+    // The pinned generation survives the writer's GC while the scrub holds it.
+    assert!(snap.exists(), "a live scrub pins its generation against GC");
+    // The scrub still completes over its pinned image.
+    assert!(scrub.all(|s| s.is_ok()));
 }
 
 // ---------------------------------------------------------------------------

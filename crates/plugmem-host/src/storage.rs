@@ -52,20 +52,6 @@ pub enum FsyncPolicy {
     OnSnapshot,
 }
 
-/// Which advisory lock a [`FileStorage`] takes on open (specs/13 §2).
-///
-/// `Exclusive` is the writer's lock — one owner, no other handle of either
-/// kind. `Shared` is the reader's lock (used by
-/// [`ReadOnlyDatabase`](crate::ReadOnlyDatabase)): any number of shared
-/// holders coexist, but they mutually exclude every exclusive holder, so a
-/// writer can never modify the file while a reader is live. This is the
-/// safety guarantee the read-only mmap relies on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LockMode {
-    Exclusive,
-    Shared,
-}
-
 /// File-backed [`Storage`] holding an advisory lock on its database.
 #[derive(Debug)]
 pub struct FileStorage {
@@ -84,37 +70,18 @@ pub struct FileStorage {
 }
 
 impl FileStorage {
-    /// Opens (creating as needed) the database files at `base` and takes
-    /// the **exclusive** lock — the read-write owner. One handle of any
-    /// kind at a time.
+    /// Opens (creating as needed) the database at `base` and takes the
+    /// **exclusive writer lock** — one writer at a time. Readers do *not* take
+    /// this lock (they pin a generation file via
+    /// [`pin_current_generation`] instead), so a writer and any number of
+    /// readers coexist across threads or processes (specs/13, the versioned
+    /// MVCC layout).
     ///
     /// # Errors
     ///
-    /// [`HostError::Locked`] when another process (or handle) owns the
-    /// lock; [`HostError::Io`] for filesystem failures.
-    pub fn open(base: impl Into<PathBuf>, fsync: FsyncPolicy) -> Result<Self, HostError> {
-        Self::open_with(base, fsync, LockMode::Exclusive)
-    }
-
-    /// Opens the database files at `base` and takes a **shared** lock — a
-    /// reader. Any number of shared readers coexist; they exclude every
-    /// exclusive writer, so the file cannot change under a live reader.
-    /// Used by [`ReadOnlyDatabase`](crate::ReadOnlyDatabase); the returned
-    /// storage must not be written through (a reader never mutates).
-    ///
-    /// # Errors
-    ///
-    /// [`HostError::Locked`] when an exclusive writer owns the lock;
+    /// [`HostError::Locked`] when another **writer** owns the lock;
     /// [`HostError::Io`] for filesystem failures.
-    pub fn open_shared(base: impl Into<PathBuf>, fsync: FsyncPolicy) -> Result<Self, HostError> {
-        Self::open_with(base, fsync, LockMode::Shared)
-    }
-
-    fn open_with(
-        base: impl Into<PathBuf>,
-        fsync: FsyncPolicy,
-        mode: LockMode,
-    ) -> Result<Self, HostError> {
+    pub fn open(base: impl Into<PathBuf>, fsync: FsyncPolicy) -> Result<Self, HostError> {
         let base = base.into();
         let lock_path = suffixed(&base, "lock");
         let journal_path = suffixed(&base, "journal");
@@ -126,11 +93,7 @@ impl FileStorage {
             .truncate(false)
             .open(&lock_path)
             .map_err(|e| HostError::io(&lock_path, e))?;
-        let acquired = match mode {
-            LockMode::Exclusive => lock.try_lock(),
-            LockMode::Shared => lock.try_lock_shared(),
-        };
-        match acquired {
+        match lock.try_lock() {
             Ok(()) => {}
             Err(std::fs::TryLockError::WouldBlock) => {
                 return Err(HostError::Locked { path: base });
@@ -142,20 +105,11 @@ impl FileStorage {
 
         let current_gen = read_manifest(&base)?.unwrap_or(0);
 
-        // Crash recovery: discard scraps of a checkpoint that never published
-        // (orphan generation files and staging tmps). Only the exclusive owner
-        // does it — a shared reader must not mutate the directory, and the
-        // manifest always names a generation that already exists on disk.
-        if mode == LockMode::Exclusive {
-            cleanup_orphans(
-                &base,
-                if current_gen == 0 {
-                    None
-                } else {
-                    Some(current_gen)
-                },
-            )?;
-        }
+        // Crash recovery + GC: drop unpublished orphan generations and staging
+        // tmps, and reclaim any unpinned superseded generation. Safe with live
+        // readers — reclaim is pin-aware (a reader's shared lock keeps its
+        // generation). Only the writer sweeps.
+        sweep_generations(&base, current_gen)?;
 
         let journal = OpenOptions::new()
             .create(true)
@@ -219,8 +173,8 @@ impl FileStorage {
     }
 
     /// Publishes the staged generation: rename its tmp to the immutable
-    /// `snap.<N+1>`, repoint the manifest, then reclaim the previous
-    /// generation. Call only after [`FileStorage::stage_snapshot`] and after
+    /// `snap.<N+1>`, repoint the manifest, then GC superseded generations
+    /// (pin-aware). Call only after [`FileStorage::stage_snapshot`] and after
     /// dropping any mmap of the old generation.
     pub(crate) fn commit_snapshot(&mut self) -> Result<(), HostError> {
         let next = self.next_gen();
@@ -229,19 +183,11 @@ impl FileStorage {
         std::fs::rename(&tmp, &genp).map_err(|e| HostError::io(&genp, e))?;
         sync_dir(&self.base)?;
         publish_manifest(&self.base, &self.manifest_tmp, next)?;
-        let prev = self.current_gen;
         self.current_gen = next;
-        self.reclaim_previous(prev);
+        // Reclaim every unpinned superseded generation (a reader on an old one
+        // keeps it until it drops). Best-effort — leftovers go on the next pass.
+        let _ = sweep_generations(&self.base, self.current_gen);
         Ok(())
-    }
-
-    /// Reclaims a superseded generation (single-writer layout: nothing else
-    /// maps it once the writer has re-mapped the new one). Best-effort — a
-    /// failed delete just leaves a scrap the next exclusive open sweeps.
-    fn reclaim_previous(&self, generation: u64) {
-        if generation >= 1 {
-            let _ = std::fs::remove_file(gen_path(&self.base, generation));
-        }
     }
 }
 
@@ -377,13 +323,27 @@ fn sync_dir(base: &Path) -> Result<(), HostError> {
     Ok(())
 }
 
-/// Removes crash debris left by an interrupted checkpoint: every `snap.<n>`
-/// (and its `.tmp`) whose generation is not `keep`, plus the manifest tmp. Only
-/// the exclusive (writer) owner calls this — in the single-writer layout the
-/// manifest's generation is the only live snapshot; anything else is a scrap
-/// from a checkpoint that never published. `keep = None` (a fresh database with
-/// no manifest) sweeps every generation file.
-fn cleanup_orphans(base: &Path, keep: Option<u64>) -> Result<(), HostError> {
+/// Reclaims one superseded generation file, but only if nothing pins it. A
+/// reader holds a **shared** lock on the generation file for as long as it maps
+/// it (see [`pin_current_generation`]), so a successful **exclusive** try-lock
+/// proves no reader is using it, and the delete under that lock cannot race a
+/// new pin. Best-effort: a pinned (or, on Windows, an open-mapped) generation is
+/// simply left for a later pass. Never deletes a live reader's snapshot.
+fn try_reclaim_generation(genp: &Path) {
+    if let Ok(f) = File::open(genp)
+        && f.try_lock().is_ok()
+    {
+        let _ = std::fs::remove_file(genp);
+    }
+}
+
+/// Sweeps the generation files around `current`: the current one stays; a
+/// higher number is crash debris from a checkpoint that never published its
+/// manifest (never pinned — delete it); a lower number is a superseded
+/// generation reclaimed only if unpinned (a reader may still map it). Staging
+/// `.tmp`s and the manifest tmp go unconditionally. Called by the exclusive
+/// writer — on open (crash recovery) and after each checkpoint (GC).
+fn sweep_generations(base: &Path, current: u64) -> Result<(), HostError> {
     let dir = base
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -407,18 +367,60 @@ fn cleanup_orphans(base: &Path, keep: Option<u64>) -> Result<(), HostError> {
         let Some(rest) = fname.strip_prefix(&prefix) else {
             continue;
         };
-        let num = rest.strip_suffix(".tmp").unwrap_or(rest);
-        match num.parse::<u64>() {
-            // The live generation's committed file survives; its stale tmp does not.
-            Ok(n) if keep == Some(n) && !rest.ends_with(".tmp") => {}
-            Ok(_) => {
-                let _ = std::fs::remove_file(entry.path());
+        if rest.ends_with(".tmp") {
+            let _ = std::fs::remove_file(entry.path()); // staging scrap
+            continue;
+        }
+        match rest.parse::<u64>() {
+            Ok(n) if n == current => {} // the live generation
+            Ok(n) if n > current => {
+                let _ = std::fs::remove_file(entry.path()); // unpublished orphan
             }
+            Ok(_) => try_reclaim_generation(&entry.path()), // superseded — pin-aware
             Err(_) => {}
         }
     }
     let _ = std::fs::remove_file(suffixed(base, "manifest.tmp"));
     Ok(())
+}
+
+/// Opens and **shared-locks** the current snapshot generation, pinning it
+/// against the writer's GC for as long as the returned [`File`] is held; returns
+/// it with the generation path. `Ok(None)` when there is no published generation
+/// (a fresh database). Readers do not take the writer lock, so a reader and the
+/// writer coexist — this is what makes the cross-process MVCC work.
+///
+/// Retries the open→lock race with the collector: if the manifest names a
+/// generation that GC reclaims in the window between resolving and locking it,
+/// the open (or the post-lock existence recheck) fails and we retry against the
+/// fresh manifest. Once the shared lock is held and the file still exists, GC's
+/// exclusive try-lock must fail, so the pin is stable.
+pub(crate) fn pin_current_generation(base: &Path) -> Result<Option<(File, PathBuf)>, HostError> {
+    loop {
+        let Some(generation) = read_manifest(base)? else {
+            return Ok(None);
+        };
+        let genp = gen_path(base, generation);
+        let file = match File::open(&genp) {
+            Ok(f) => f,
+            // GC reclaimed it between the manifest read and the open — retry.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(HostError::io(&genp, e)),
+        };
+        match file.try_lock_shared() {
+            Ok(()) => {}
+            // A transient exclusive holder (GC probing) — retry.
+            Err(std::fs::TryLockError::WouldBlock) => continue,
+            Err(std::fs::TryLockError::Error(e)) => return Err(HostError::io(&genp, e)),
+        }
+        // Confirm the generation survived the open→lock window. If GC reclaimed
+        // it just before we locked, the path is gone; drop the lock and retry
+        // for the fresh generation. If it exists, our shared lock now blocks
+        // GC's exclusive try-lock, so the pin holds.
+        if genp.exists() {
+            return Ok(Some((file, genp)));
+        }
+    }
 }
 
 impl Storage for FileStorage {
@@ -445,9 +447,8 @@ impl Storage for FileStorage {
         std::fs::rename(&tmp, &genp).map_err(|e| HostError::io(&genp, e))?;
         sync_dir(&self.base)?;
         publish_manifest(&self.base, &self.manifest_tmp, next)?;
-        let prev = self.current_gen;
         self.current_gen = next;
-        self.reclaim_previous(prev);
+        let _ = sweep_generations(&self.base, self.current_gen);
         Ok(())
     }
 

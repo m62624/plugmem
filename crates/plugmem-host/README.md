@@ -117,20 +117,24 @@ detected, dropped and reported.
 
 ## Concurrency model
 
-The engine is single-writer by design, and the host orchestrates that
-honestly instead of hiding it — the SQLite model: **N concurrent readers,
-or one writer, never both at once.**
+The engine is single-writer by design. The host runs a WAL/MVCC-style
+versioned layout, so **one writer and any number of readers run at the same
+time** — across threads *and* processes — without a reader ever blocking the
+writer or seeing a torn image.
 
-- **One writer.** `Database::open` takes an *exclusive* OS advisory lock;
-  a second writer (or a live reader) gets `HostError::Locked` immediately
-  — a typed refusal instead of silent corruption. The lock dies with the
-  process, even on a crash.
-- **Many readers.** `Database::open_readonly` takes a *shared* lock, so
-  any number of read-only handles map the same snapshot at once — across
-  threads or processes. Shared excludes exclusive, so no writer can change
-  the file under a live reader (which is what makes the mmap safe). The
-  readers also share one copy of the file in the OS page cache. To write,
-  drop the readers and open read-write.
+- **One writer.** `Database::open` takes an *exclusive* writer lock; a second
+  writer gets `HostError::Locked` immediately (a typed refusal, not silent
+  corruption). The lock dies with the process, even on a crash. Readers do
+  **not** take this lock, so they never contend with the writer.
+- **Many readers, concurrent with the writer.** A checkpoint never overwrites
+  a live file: it writes a new immutable snapshot *generation* and repoints a
+  tiny manifest. `Database::open_readonly` pins the current generation with a
+  *shared* lock and maps it — so it coexists with a live writer and reads a
+  consistent snapshot "as of the last checkpoint" (it does not see writes made
+  after it opened; reopen to advance). Readers across threads or processes
+  share one copy of a generation in the OS page cache. The writer reclaims a
+  superseded generation only once no reader still pins it, so disk stays
+  bounded by the longest-lived reader.
 - **One process, many threads or agents.** A `Database` is a
   `Clone + Send + Sync` handle; clone it freely. The read verbs
   (`recall`/`get`/`stats`/`export`/`verify`) take a *shared* guard and run

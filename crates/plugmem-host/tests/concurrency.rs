@@ -1,14 +1,19 @@
-//! Special-purpose concurrency invariants (Variant 1): many readers run
-//! against one engine at once — on a live [`Database`] (a writer churning the
-//! file, incl. the checkpoint re-map) and on a shared [`ReadOnlyDatabase`] —
-//! and **never observe a torn (half-applied) fact**.
+//! Special-purpose concurrency invariants: many readers run against one engine
+//! at once and **never observe a torn (half-applied) fact**, and no scenario
+//! deadlocks.
 //!
-//! The guarantee is structural: readers take a shared `RwLock` guard, the
-//! writer an exclusive one, so no reader ever runs while a mutation (or the
-//! snapshot re-map) is in flight. These stress tests guard against a
-//! regression that moves shared mutable state *outside* that lock — then a
-//! reader could splice old and new bytes, which the self-consistency check
-//! below would catch. High iteration + a start barrier make the race likely.
+//! Two layers are covered:
+//! - **In-process (Variant 1):** readers take a shared `RwLock` guard, the
+//!   writer an exclusive one, so no reader runs while a mutation (or the
+//!   snapshot re-map) is in flight.
+//! - **Cross-process (Variant 2):** a live writer advances immutable snapshot
+//!   generations while separate read-only handles pin and map published ones —
+//!   readers are never `Locked`, and the writer's GC never reclaims a pinned
+//!   generation (`external_readers_coexist_with_a_churning_writer`).
+//!
+//! Each fact's text is a self-consistent frame, so a spliced/torn read breaks
+//! the `assert_consistent` check; high iteration + a start barrier make races
+//! likely; a wall-clock deadline turns any hang into a failure.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -105,7 +110,10 @@ fn database_and_readonly_are_send_sync() {
 }
 
 #[test]
-#[cfg_attr(tarpaulin, ignore)] // timing stress: runs under `cargo test`, skipped under coverage
+// Timing stress: RUNS in CI via `cargo test --workspace`; only the separate
+// `cargo tarpaulin` coverage run skips it (ptrace slowdown would time it out
+// without adding coverage). Regressions are still caught by the test job.
+#[cfg_attr(tarpaulin, ignore)]
 fn concurrent_readers_with_a_writer_never_see_a_torn_fact() {
     const WRITES: u64 = 3_000;
     const READERS: usize = 8;
@@ -186,7 +194,10 @@ fn concurrent_readers_with_a_writer_never_see_a_torn_fact() {
 }
 
 #[test]
-#[cfg_attr(tarpaulin, ignore)] // timing stress: runs under `cargo test`, skipped under coverage
+// Timing stress: RUNS in CI via `cargo test --workspace`; only the separate
+// `cargo tarpaulin` coverage run skips it (ptrace slowdown would time it out
+// without adding coverage). Regressions are still caught by the test job.
+#[cfg_attr(tarpaulin, ignore)]
 fn readonly_serves_concurrent_readers_consistently() {
     const FACTS: u64 = 500;
     const READERS: usize = 8;
@@ -242,7 +253,10 @@ fn readonly_serves_concurrent_readers_consistently() {
 }
 
 #[test]
-#[cfg_attr(tarpaulin, ignore)] // timing stress: runs under `cargo test`, skipped under coverage
+// Timing stress: RUNS in CI via `cargo test --workspace`; only the separate
+// `cargo tarpaulin` coverage run skips it (ptrace slowdown would time it out
+// without adding coverage). Regressions are still caught by the test job.
+#[cfg_attr(tarpaulin, ignore)]
 fn mixed_read_write_contention_progresses_without_deadlock() {
     // Many threads each interleave writes, checkpoints and reads on one shared
     // handle. Writes and checkpoints take the exclusive guard, reads the shared
@@ -317,7 +331,10 @@ fn mixed_read_write_contention_progresses_without_deadlock() {
 }
 
 #[test]
-#[cfg_attr(tarpaulin, ignore)] // timing stress: runs under `cargo test`, skipped under coverage
+// Timing stress: RUNS in CI via `cargo test --workspace`; only the separate
+// `cargo tarpaulin` coverage run skips it (ptrace slowdown would time it out
+// without adding coverage). Regressions are still caught by the test job.
+#[cfg_attr(tarpaulin, ignore)]
 fn concurrent_writers_with_checkpoints_never_lose_a_write() {
     // Pure write contention: every thread appends its own disjoint block while
     // some also checkpoint. Writers serialize on the exclusive guard; the exact
@@ -357,6 +374,85 @@ fn concurrent_writers_with_checkpoints_never_lose_a_write() {
             db.stats().facts as u64,
             THREADS * PER,
             "every write from every thread must land exactly once"
+        );
+    });
+}
+
+#[test]
+// Timing stress: RUNS in CI via `cargo test --workspace`; only the separate
+// `cargo tarpaulin` coverage run skips it (ptrace slowdown would time it out
+// without adding coverage). Regressions are still caught by the test job.
+#[cfg_attr(tarpaulin, ignore)]
+fn external_readers_coexist_with_a_churning_writer() {
+    // The cross-process MVCC proof (Variant 2): a live writer advances and
+    // GC-collects snapshot generations while separate read-only handles (a
+    // fresh advisory-lock owner each = a separate process) open and read
+    // concurrently. Readers are never `Locked` by the writer, always pin a
+    // whole published generation, and never observe a torn fact. Opening in a
+    // tight loop against the churn also stresses the pin/GC open race.
+    run_with_deadline(90, "external reader coexistence", || {
+        const READERS: usize = 6;
+        const WRITES: u64 = 400;
+
+        let tmp = TempDir::new("mvcc-coexist");
+        let dbpath = tmp.db();
+        let (db, _) = Database::builder(Config::default())
+            .snapshot_every_ops(0) // explicit checkpoints only
+            .open(&dbpath)
+            .unwrap();
+        // Publish an initial generation so a reader always finds one.
+        db.remember(RememberInput::text(1, &fact_text(0))).unwrap();
+        db.checkpoint(2).unwrap();
+
+        let db = Arc::new(db);
+        let done = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(Barrier::new(READERS + 1));
+
+        let mut handles = Vec::new();
+        for _ in 0..READERS {
+            let dbpath = dbpath.clone();
+            let done = Arc::clone(&done);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                let mut opens = 0u64;
+                while !done.load(Ordering::Acquire) {
+                    // A fresh external read-only handle: it must never be
+                    // refused by the live writer, and every fact it sees is a
+                    // whole, self-consistent frame.
+                    let ro = Database::open_readonly(&dbpath, Config::default())
+                        .expect("a reader is never Locked by the writer");
+                    let out = ro
+                        .recall(RecallQuery {
+                            k: 16,
+                            ..RecallQuery::text(1 << 40, "marker split")
+                        })
+                        .unwrap();
+                    for f in &out.facts {
+                        if let Some(s) = ro.get(f.id) {
+                            assert_consistent(&s.text);
+                        }
+                    }
+                    opens += 1;
+                }
+                opens
+            }));
+        }
+
+        // The writer churns: remember + checkpoint, advancing and GC-ing
+        // generations under the readers.
+        barrier.wait();
+        for v in 1..WRITES {
+            db.remember(RememberInput::text(1_000 + v, &fact_text(v)))
+                .unwrap();
+            db.checkpoint(2_000 + v).unwrap();
+        }
+        done.store(true, Ordering::Release);
+
+        let total: u64 = handles.into_iter().map(|h| h.join().unwrap()).sum();
+        assert!(
+            total > 0,
+            "external readers opened while the writer churned"
         );
     });
 }
