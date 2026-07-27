@@ -113,7 +113,7 @@ fn database_and_readonly_are_send_sync() {
 // Timing stress: RUNS in CI via `cargo test --workspace`; only the separate
 // `cargo tarpaulin` coverage run skips it (ptrace slowdown would time it out
 // without adding coverage). Regressions are still caught by the test job.
-#[cfg_attr(tarpaulin, ignore)]
+#[cfg_attr(any(tarpaulin, valgrind), ignore)]
 fn concurrent_readers_with_a_writer_never_see_a_torn_fact() {
     const WRITES: u64 = 3_000;
     const READERS: usize = 8;
@@ -197,7 +197,7 @@ fn concurrent_readers_with_a_writer_never_see_a_torn_fact() {
 // Timing stress: RUNS in CI via `cargo test --workspace`; only the separate
 // `cargo tarpaulin` coverage run skips it (ptrace slowdown would time it out
 // without adding coverage). Regressions are still caught by the test job.
-#[cfg_attr(tarpaulin, ignore)]
+#[cfg_attr(any(tarpaulin, valgrind), ignore)]
 fn readonly_serves_concurrent_readers_consistently() {
     const FACTS: u64 = 500;
     const READERS: usize = 8;
@@ -256,7 +256,7 @@ fn readonly_serves_concurrent_readers_consistently() {
 // Timing stress: RUNS in CI via `cargo test --workspace`; only the separate
 // `cargo tarpaulin` coverage run skips it (ptrace slowdown would time it out
 // without adding coverage). Regressions are still caught by the test job.
-#[cfg_attr(tarpaulin, ignore)]
+#[cfg_attr(any(tarpaulin, valgrind), ignore)]
 fn mixed_read_write_contention_progresses_without_deadlock() {
     // Many threads each interleave writes, checkpoints and reads on one shared
     // handle. Writes and checkpoints take the exclusive guard, reads the shared
@@ -334,7 +334,7 @@ fn mixed_read_write_contention_progresses_without_deadlock() {
 // Timing stress: RUNS in CI via `cargo test --workspace`; only the separate
 // `cargo tarpaulin` coverage run skips it (ptrace slowdown would time it out
 // without adding coverage). Regressions are still caught by the test job.
-#[cfg_attr(tarpaulin, ignore)]
+#[cfg_attr(any(tarpaulin, valgrind), ignore)]
 fn concurrent_writers_with_checkpoints_never_lose_a_write() {
     // Pure write contention: every thread appends its own disjoint block while
     // some also checkpoint. Writers serialize on the exclusive guard; the exact
@@ -382,7 +382,7 @@ fn concurrent_writers_with_checkpoints_never_lose_a_write() {
 // Timing stress: RUNS in CI via `cargo test --workspace`; only the separate
 // `cargo tarpaulin` coverage run skips it (ptrace slowdown would time it out
 // without adding coverage). Regressions are still caught by the test job.
-#[cfg_attr(tarpaulin, ignore)]
+#[cfg_attr(any(tarpaulin, valgrind), ignore)]
 fn external_readers_coexist_with_a_churning_writer() {
     // The cross-process MVCC proof (Variant 2): a live writer advances and
     // GC-collects snapshot generations while separate read-only handles (a

@@ -117,9 +117,20 @@ jobs:
           puts "OK: name #{name.length}/64, description #{desc.length}/1024"
           RUBY
 
+  # Deep memory-safety audit (MIRI + valgrind) on the RC, invoked as a hard
+  # release gate: `tag` needs it, so no vX.Y.Z tag is created unless the audit
+  # is green. Per-push CI stays fast; the slow audit runs here (and on the
+  # weekly schedule / `ci-hardening` label) — see .github/workflows/hardening.yml.
+  hardening:
+    name: Hardening on RC
+    needs: prepare
+    uses: ./.github/workflows/hardening.yml
+    with:
+      ref: ${{ needs.prepare.outputs.rc_branch }}
+
   tag:
     name: Create release tag
-    needs: [prepare, tests, skill-check]
+    needs: [prepare, tests, skill-check, hardening]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

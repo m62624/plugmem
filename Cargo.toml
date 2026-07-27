@@ -78,11 +78,15 @@ memory-stats = "1.2.0"
 [workspace.lints.rust]
 missing_docs = "deny"
 unsafe_op_in_unsafe_fn = "deny"
-# `cargo-tarpaulin` sets `--cfg=tarpaulin`; declare it so `#[cfg_attr(tarpaulin,
-# ignore)]` on the timing-sensitive concurrency stress tests does not trip the
-# unexpected-cfg lint. Those tests are covered by normal `cargo test`; under
-# tarpaulin's ptrace slowdown they only time out without adding coverage.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin)'] }
+# `cargo-tarpaulin` sets `--cfg=tarpaulin`; the hardening jobs pass
+# `--cfg=valgrind` (valgrind sets no cfg of its own). Declare both so
+# `#[cfg_attr(tarpaulin, ignore)]` / `#[cfg_attr(valgrind, ignore)]` on the
+# timing-sensitive concurrency stress tests do not trip the unexpected-cfg lint.
+# Those tests are covered by normal `cargo test`; under tarpaulin's ptrace or
+# valgrind's ~100x slowdown their wall-clock watchdogs only time out (a false
+# deadlock) without adding coverage. (`miri` is a built-in cfg — no declaration
+# needed.)
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin)', 'cfg(valgrind)'] }
 
 [workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"

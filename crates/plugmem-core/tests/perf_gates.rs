@@ -36,7 +36,10 @@ fn corpus() -> Vec<Vec<(u32, u8)>> {
         .collect()
 }
 
+// Timing gate over a large corpus: meaningless and minutes-slow under the miri
+// interpreter; UB coverage is per-operation, so small tests hit the same code.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn bm25_decode_work_is_bounded() {
     let mut idx = Bm25Index::new(2048, usize::MAX).unwrap();
     for (fact, terms) in corpus().iter().enumerate() {
@@ -64,7 +67,10 @@ fn bm25_decode_work_is_bounded() {
     assert_eq!(df_sum, 1_399, "corpus drifted: Σ df changed");
 }
 
+// 5000-vector pool: minutes under the miri interpreter, no extra UB coverage
+// over the small vector tests.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn vector_rescore_work_is_bounded() {
     // The signature prefilter must cap exact dot products at
     // `max(4·k, 64)` regardless of corpus size — the whole point of the
@@ -101,7 +107,10 @@ fn vector_rescore_work_is_bounded() {
     );
 }
 
+// 2000-node HNSW build: minutes under the miri interpreter, no extra UB
+// coverage over the small graph tests.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn hnsw_search_work_is_bounded() {
     // Graph search must stay sublinear in the corpus: the deterministic
     // corpus fixes the exact distance-evaluation count, and the ceiling

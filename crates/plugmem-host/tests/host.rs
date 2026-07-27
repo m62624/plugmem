@@ -490,6 +490,91 @@ fn gc_reclaims_unpinned_generations_and_a_pin_keeps_one() {
     assert_eq!(generation_count(&tmp.db()), 1);
 }
 
+/// Open file descriptors for this process, via `/proc/self/fd` (Linux). On
+/// other platforms it returns 0, so the fd-growth assertion below is a no-op
+/// there — the generation-count bound still holds everywhere, and valgrind
+/// (Linux) supplies the authoritative heap/mapping verdict.
+#[cfg(target_os = "linux")]
+fn open_fd_count() -> usize {
+    std::fs::read_dir("/proc/self/fd")
+        .map(|d| d.count())
+        .unwrap_or(0)
+}
+#[cfg(not(target_os = "linux"))]
+fn open_fd_count() -> usize {
+    0
+}
+
+/// Leak-growth guard for the Variant 2 mmap/generation machinery.
+///
+/// Many rounds of {writer mutate + checkpoint} interleaved with an external
+/// {reader open → recall → drop} must keep two independent resources bounded
+/// *regardless of round count* — a leak makes either grow without bound:
+///
+/// - **Generations on disk stay bounded**: each checkpoint reclaims the
+///   previous unpinned generation, so a leaked generation would accumulate on
+///   disk round after round.
+/// - **Open fds stay bounded**: every reader pins its generation with a `File`
+///   and mmaps it; a leaked pin or mapping would grow the fd table by one per
+///   reader-open, i.e. linearly in the round count.
+///
+/// Deterministic (no timing/watchdog) so it runs on every PR, and small enough
+/// to run under valgrind — which supplies the authoritative heap verdict that a
+/// constant mmap residency (not a growing leak) is what remains.
+#[test]
+fn readers_and_checkpoints_do_not_leak_across_rounds() {
+    let tmp = TempDir::new("leak-growth");
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    db.remember(RememberInput::text(1, "seed fact")).unwrap();
+    db.checkpoint(2).unwrap();
+
+    // Enough rounds to make any linear leak obvious; overridable so the
+    // valgrind job (≈100x slower) can run fewer — a leak still shows as growing
+    // fds and as per-allocation loss under memcheck regardless of count.
+    let rounds: u64 = std::env::var("PLUGMEM_LEAK_ROUNDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(200);
+    let churn = |db: &Database| {
+        for r in 0..rounds {
+            let now = 100 + r;
+            db.remember(RememberInput::text(now, "a churning fact about tokio"))
+                .unwrap();
+            db.checkpoint(now + 1).unwrap();
+            // External reader pins the current generation, maps it, reads, and
+            // drops — releasing the pin (fd) and unmapping.
+            let ro = Database::open_readonly(tmp.db(), cfg()).unwrap();
+            let _ = ro.recall(RecallQuery::text(now, "tokio")).unwrap();
+        }
+    };
+
+    // Two identical passes: comparing the second delta against the first cancels
+    // any one-time initialization (lazily-built caches, allocator arenas).
+    let fds_start = open_fd_count();
+    churn(&db);
+    let fds_after_first = open_fd_count();
+    churn(&db);
+    let fds_after_second = open_fd_count();
+
+    // Generations never accumulate: readers are dropped each round, so GC
+    // settles the disk to the single current generation.
+    let gens = generation_count(&tmp.db());
+    assert!(
+        gens <= 2,
+        "generations must not accumulate across {rounds} rounds: found {gens}"
+    );
+
+    // A per-reader pin/mapping leak would grow fds by `rounds` each pass; with no
+    // leak the second identical churn adds ~0 over the first.
+    let growth = fds_after_second.saturating_sub(fds_after_first);
+    assert!(
+        growth <= 2,
+        "fd count grew by {growth} over a second identical {rounds}-round churn \
+         (start={fds_start}, after1={fds_after_first}, after2={fds_after_second}) \
+         — a per-reader pin or mapping leak"
+    );
+}
+
 #[test]
 fn a_corrupt_manifest_is_rejected_on_open() {
     let tmp = TempDir::new("bad-manifest");

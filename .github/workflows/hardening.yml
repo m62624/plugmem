@@ -1,0 +1,125 @@
+name: hardening
+
+# Heavy memory-safety audits (MIRI + valgrind). These are slow (minutes each),
+# so they do NOT run on every push. Instead:
+#   - workflow_dispatch : run on demand.
+#   - schedule (weekly) : a heartbeat so the audit can never silently rot even
+#                         if no PR is ever labelled.
+#   - pull_request      : opt-in per PR via the `ci-hardening` label (the jobs
+#                         self-skip when the label is absent — see each `if`).
+#   - workflow_call     : the release orchestrator (release.yml) invokes this on
+#                         the RC branch, making a clean audit a hard release gate.
+#
+# The fast per-PR leak-growth *regression* signal lives elsewhere: the
+# deterministic `readers_and_checkpoints_do_not_leak_across_rounds` test (bounded
+# generations + fds, no valgrind) runs in the normal `cargo test` matrix on every
+# PR. This workflow is the deep, authoritative pass.
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref to checkout"
+        required: false
+        type: string
+  schedule:
+    # Mondays 04:17 UTC. Off the hour to avoid the scheduler's top-of-hour rush.
+    - cron: "17 4 * * 1"
+  pull_request:
+    types: [labeled, synchronize, reopened]
+
+concurrency:
+  group: hardening-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # MIRI — Rust-level UB and aliasing violations (Stacked Borrows), plus
+  # uninitialised reads, on the two no_std crates. MIRI is a deterministic
+  # interpreter and cannot touch mmap, so it never runs on the host.
+  #   - arena carries the workspace's only real `unsafe` (the flat byte arenas):
+  #     this is where MIRI earns its keep, and it is fast (~30 s).
+  #   - core has zero `unsafe`; running it is a cheap regression net that trips
+  #     only if `unsafe` is ever introduced (or a dependency regresses). Its
+  #     timing perf-gates and heavy proptests are `#[cfg_attr(miri, ignore)]` /
+  #     capped via PROPTEST_CASES — UB is per-operation, so small inputs exercise
+  #     the same code the large ones would, at a fraction of the interpreter cost.
+  miri:
+    name: miri (arena + core, no_std unsafe/aliasing)
+    # On a pull_request, run only when the PR carries the `ci-hardening` label.
+    # On dispatch / schedule / workflow_call (release) the event is not
+    # pull_request, so the audit always runs.
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'ci-hardening')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      - name: miri — arena (the crate's unsafe, strict aliasing)
+        run: cargo +nightly miri test -p plugmem-arena
+      - name: miri — core (zero-unsafe regression net, small proptest budget)
+        env:
+          PROPTEST_CASES: "8"
+        run: cargo +nightly miri test -p plugmem-core
+
+  # valgrind (memcheck) — real-execution memory errors and leaks on the host
+  # mmap/generation machinery, which MIRI cannot reach. This is the
+  # authoritative answer to "does the mmap footprint leak, or is it constant?":
+  # memcheck fails on invalid access / use-after-free and on definitely/
+  # indirectly-lost blocks, while a still-mapped generation held by a live reader
+  # is `still reachable` (not a leak) and does not fail the build.
+  #   - libc6-dbg ships the non-stripped ld.so valgrind mandates at startup.
+  #   - RUSTFLAGS=--cfg valgrind skips the wall-clock watchdog stress tests
+  #     (concurrency.rs): under valgrind's ~100x slowdown their deadlines would
+  #     false-trip as deadlocks. The mmap/generation correctness + the
+  #     deterministic leak-growth test still run.
+  #   - PLUGMEM_LEAK_ROUNDS keeps the leak-growth churn bounded so the run stays
+  #     minutes, not tens of minutes, under the interpreter.
+  valgrind:
+    name: valgrind (host mmap + leak-growth)
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'ci-hardening')
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "--cfg valgrind"
+      PLUGMEM_LEAK_ROUNDS: "40"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: System deps (valgrind + non-stripped ld.so)
+        run: sudo apt-get update && sudo apt-get install -y valgrind libc6-dbg
+      - name: cargo-valgrind
+        run: cargo install cargo-valgrind --locked
+      - name: memcheck — host mmap/generation + leak-growth tests
+        run: cargo valgrind test -p plugmem-host --test host
+
+  # Aggregate gate: a single job the release orchestrator (and any branch
+  # protection) can require. Fails if either audit failed or was cancelled;
+  # a legitimately-skipped audit (unlabelled PR) is not a failure.
+  hardening-pass:
+    name: hardening passed
+    if: always()
+    needs: [miri, valgrind]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if an audit failed or was cancelled
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: |
+          echo "A hardening audit failed or was cancelled:"
+          echo "  miri     = ${{ needs.miri.result }}"
+          echo "  valgrind = ${{ needs.valgrind.result }}"
+          exit 1
+      - name: Audits passed (or were skipped on an unlabelled PR)
+        run: echo "miri (arena+core) and valgrind (host) are green or skipped."
