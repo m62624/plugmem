@@ -15,7 +15,7 @@
 mod cli;
 mod config;
 
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -89,6 +89,9 @@ fn run_parsed(cli: Cli, out: &mut impl Write) -> u8 {
     match &cli.command {
         Command::Recover { dst } => return do_recover(&path, dst, &settings, cli.json, out),
         Command::Scrub => return do_scrub(&path, &settings, cli.json, out),
+        // The interactive session opens one writer handle and reads commands
+        // from stdin, so it is dispatched before the per-command open below.
+        Command::Repl => return run_repl(&path, settings, cli.json, io::stdin().lock(), out),
         _ => {}
     }
 
@@ -345,8 +348,8 @@ fn execute(
             Ok(0)
         }
         // Handled in `run_parsed` before the read-write open.
-        Command::Scrub | Command::Recover { .. } => {
-            unreachable!("scrub/recover are dispatched before execute")
+        Command::Scrub | Command::Recover { .. } | Command::Repl => {
+            unreachable!("scrub/recover/repl are dispatched before execute")
         }
     }
 }
@@ -418,6 +421,134 @@ fn do_scrub(path: &Path, settings: &Settings, json: bool, out: &mut impl Write) 
         writeln!(out, "scrub ok: {done}/{total} bytes verified").ok();
     }
     0
+}
+
+/// Parses a single REPL line: the subcommand grammar, with no leading binary
+/// name (the line is `recall tokio`, not `plugmem recall tokio`).
+#[derive(Parser)]
+#[command(no_binary_name = true, name = "plugmem")]
+struct ReplLine {
+    #[command(subcommand)]
+    command: Command,
+}
+
+/// Splits a REPL line into tokens, honoring single/double quotes so
+/// `remember "two words"` is one argument. No escape handling — a quote runs to
+/// its match or the end of the line.
+fn split_line(line: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut has = false;
+    for c in line.chars() {
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                } else {
+                    cur.push(c);
+                }
+            }
+            None if c == '"' || c == '\'' => {
+                quote = Some(c);
+                has = true;
+            }
+            None if c.is_whitespace() => {
+                if has {
+                    tokens.push(std::mem::take(&mut cur));
+                    has = false;
+                }
+            }
+            None => {
+                cur.push(c);
+                has = true;
+            }
+        }
+    }
+    if has {
+        tokens.push(cur);
+    }
+    tokens
+}
+
+/// Runs the interactive session over one open writer handle: read a line, parse
+/// it as a subcommand, run it against the in-memory engine, repeat. The engine
+/// stays resident, so each command is host-speed (no per-command reload). The
+/// session checkpoints on exit, leaving a read-ready file. Prompts and the
+/// banner go to stderr so stdout carries only command output.
+fn run_repl(
+    path: &Path,
+    settings: Settings,
+    json: bool,
+    input: impl BufRead,
+    out: &mut impl Write,
+) -> u8 {
+    let db = match settings.open(path) {
+        Ok(db) => db,
+        Err(HostError::Locked { path }) => return report_locked(&path),
+        Err(e) => return report_err(&CliError::Host(e)),
+    };
+    eprintln!("plugmem repl — one open handle, host speed. `help` for verbs, `exit` to quit.");
+    eprint!("plugmem> ");
+    for line in input.lines() {
+        let Ok(line) = line else { break };
+        let line = line.trim();
+        if line.is_empty() {
+            eprint!("plugmem> ");
+            continue;
+        }
+        if line == "exit" || line == "quit" {
+            break;
+        } else if line == "help" {
+            writeln!(
+                out,
+                "verbs: remember recall revise forget link show stats maintain checkpoint \
+                 verify export import  (scrub/recover stay one-shot)  exit"
+            )
+            .ok();
+        } else {
+            run_repl_line(&db, line, json, out);
+        }
+        eprint!("plugmem> ");
+    }
+    eprintln!();
+    // Leave the database checkpointed (read-ready) for the next opener.
+    match db.checkpoint(now_ms()) {
+        Ok(()) => 0,
+        Err(e) => report_err(&CliError::Host(e)),
+    }
+}
+
+/// Parses and runs one non-meta REPL line, reporting errors to `out` without
+/// ending the session.
+fn run_repl_line(db: &Database, line: &str, json: bool, out: &mut impl Write) {
+    let cmd = match ReplLine::try_parse_from(split_line(line)) {
+        Ok(r) => r.command,
+        // clap's message (usage / unknown command / `--help`) — print, continue.
+        Err(e) => {
+            let _ = writeln!(out, "{e}");
+            return;
+        }
+    };
+    match &cmd {
+        Command::Repl => {
+            let _ = writeln!(out, "already in a repl session");
+        }
+        Command::Scrub | Command::Recover { .. } => {
+            let _ = writeln!(
+                out,
+                "scrub/recover are one-shot commands; run them outside the repl"
+            );
+        }
+        _ => {
+            if let Err(e) = execute(db, &cmd, json, now_ms(), out) {
+                let _ = match &e {
+                    CliError::Usage(m) => writeln!(out, "plugmem: {m}"),
+                    CliError::Host(h) => writeln!(out, "plugmem: {h}"),
+                };
+            }
+        }
+    }
 }
 
 /// Embeds a `recall` command's text query into a vector using the configured
@@ -807,6 +938,45 @@ mod tests {
             embed_recall_query(&mut with_stats, &Command::Stats).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn split_line_honors_quotes_and_whitespace() {
+        assert_eq!(split_line("remember hello"), ["remember", "hello"]);
+        assert_eq!(
+            split_line(r#"remember "two words" --tag x"#),
+            ["remember", "two words", "--tag", "x"]
+        );
+        assert_eq!(split_line("  recall   'a b'  "), ["recall", "a b"]);
+        assert_eq!(split_line(""), Vec::<String>::new());
+        // An empty quoted string is a real (empty) argument.
+        assert_eq!(split_line(r#"remember """#), ["remember", ""]);
+    }
+
+    #[test]
+    fn repl_runs_over_one_handle_and_checkpoints_on_exit() {
+        let (db, tmp) = TempDb::open();
+        let path = tmp.0.join("m.plugmem");
+        drop(db); // release the writer lock so run_repl can open it
+
+        let settings = settings_with(None);
+        // Multi-word text is quoted, same grammar as the one-shot CLI.
+        let script = b"remember \"hello tokio world\"\nrecall tokio\nrevise 0 \"goodbye tokio\"\nbadcmd\nexit\n";
+        let mut out = Vec::new();
+        let code = run_repl(&path, settings, false, &script[..], &mut out);
+        let text = String::from_utf8(out).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(text.contains("remembered fact 0"), "{text}");
+        assert!(text.contains("tokio"), "{text}");
+        // A bad line is reported but does not end the session (revise ran after).
+        assert!(text.contains("unrecognized subcommand"), "{text}");
+
+        // Checkpointed on exit → a fresh read-only open sees the data with a
+        // clean journal. The revise chain leaves two facts: the closed original
+        // and its active successor.
+        let ro = Database::open_readonly(&path, Config::default()).unwrap();
+        assert_eq!(ro.stats().facts, 2, "original + successor after the revise");
     }
 
     /// A throwaway database on a unique temp path; removed on drop.

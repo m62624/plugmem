@@ -323,6 +323,43 @@ fn recall_with_an_embedder_coexists_with_a_live_writer() {
 }
 
 #[test]
+fn repl_session_over_the_binary_runs_and_checkpoints_on_exit() {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let tmp = TempDir::new("repl");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_plugmem-cli"))
+        .arg("--db")
+        .arg(tmp.db())
+        .arg("repl")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"remember \"user likes tokio\"\nrecall tokio\nstats\nexit\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "repl exit: {:?}", out.status);
+    let so = String::from_utf8_lossy(&out.stdout);
+    assert!(so.contains("remembered fact 0"), "stdout={so}");
+    assert!(so.contains("tokio"), "stdout={so}");
+
+    // The session checkpointed on exit → a standalone read-only recall sees the
+    // data with a clean journal (no dirty-journal fallback).
+    let r = plugmem(&tmp.db(), &["recall", "tokio"]);
+    assert!(
+        r.status.success() && stdout(&r).contains("tokio"),
+        "post-repl recall: {}",
+        stdout(&r)
+    );
+}
+
+#[test]
 fn config_file_is_accepted_and_missing_one_is_a_usage_error() {
     let tmp = TempDir::new("config");
     let with_config = |args: &[&str]| {
