@@ -1,0 +1,46 @@
+{
+  "date": "2026-07-27",
+  "commit": "77a0d48",
+  "target": "native x86-64, 13th Gen Intel Core i5-13400F (16 threads), dev desktop",
+  "rustc": "1.96.0 (ac68faa20 2026-05-25)",
+  "purpose": "Pre-optimization baseline for vector search — the reference a later vector optimization (signature-tier layout: signatures resident + int8 in mmap; or a binary HNSW traversal) is measured against. Rerun both after the change; the delta on the SAME machine is what matters (absolute numbers are machine-dependent).",
+  "matrix": {
+    "fill": [2000, 20000, 60000],
+    "dim": [384, 768],
+    "k": 8,
+    "flat_to_hnsw_threshold": 24000,
+    "note": "fill < 24k is searched flat, fill >= 24k through the HNSW graph maintain builds"
+  },
+
+  "speed_us_per_query": {
+    "source": "cargo bench --bench engine -- search_matrix (crates/plugmem-core/benches/engine.rs)",
+    "metric": "Criterion median wall time per recall, microseconds",
+    "d384": { "2000_flat": 88.0, "20000_flat": 259.0, "60000_hnsw": 220.0 },
+    "d768": { "2000_flat": 137.0, "20000_flat": 733.0, "60000_hnsw": 464.0 },
+    "observations": "flat scales linearly with fill; HNSW is sub-linear (60k faster than flat-20k despite 3x the data); dimension roughly doubles cost."
+  },
+
+  "maintain_graph_build_s": {
+    "metric": "one-time HNSW build during maintain, seconds (a maintain cost, not a query cost)",
+    "d384_60000": 142.0,
+    "d768_60000": 259.0,
+    "per_vector_ms": "~2.4 (d384) to ~4.3 (d768)"
+  },
+
+  "recall_quality": {
+    "source": "cargo run --release -p plugmem-core --example recall_quality (crates/plugmem-core/examples/recall_quality.rs)",
+    "metric": "recall@8 vs exact brute-force cosine over the ORIGINAL f32 vectors (ground truth testgen still holds), self-excluded, averaged over 100 evenly-sampled queries; min is the worst single query",
+    "isolation": "w_recency=0 and a vector-only query, so the fused ranking collapses to the pure vector top-k — recall reflects quantization + HNSW alone, not recency re-ranking",
+    "d384": {
+      "2000_flat":  { "mean": 0.853, "min": 0.625 },
+      "20000_flat": { "mean": 0.672, "min": 0.375 },
+      "60000_hnsw": { "mean": 0.539, "min": 0.000 }
+    },
+    "d768": {
+      "2000_flat":  { "mean": 0.854, "min": 0.625 },
+      "20000_flat": { "mean": 0.680, "min": 0.250 },
+      "60000_hnsw": { "mean": 0.414, "min": 0.000 }
+    },
+    "interpretation": "Recall is bounded by the CURRENT design, not a harness bug. Even 'flat' is two-phase: a 1-bit sign-signature Hamming prefilter keeps only the best max(4k,64)=64 candidates, which are then int8-rescored — so a true f32 neighbour missed by the coarse signature is never rescored. The fixed 64-candidate sieve is why flat recall falls as fill grows (64/2000 vs 64/20000). HNSW adds graph-approximation loss on top; min=0.000 is a worst-case query where signature+graph missed all 8. This is the quality a signature-tier / binary-traversal optimization will move — watch whether it drops from these numbers or holds."
+  }
+}
