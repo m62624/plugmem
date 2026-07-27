@@ -1,5 +1,8 @@
 # plugmem-arena
 
+> **Status: pre-release, unpublished.** APIs and the on-disk layouts may change
+> before 0.1.0. `docs.rs` links resolve once the crates are published.
+
 Flat byte-pool data structures: a sharded sorted arena, an append-only
 blob heap, chunked lists, and a string interner. `no_std + alloc`, no
 dependencies, so it runs anywhere Rust compiles — designed for 32-bit

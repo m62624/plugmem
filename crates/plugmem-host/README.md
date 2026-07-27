@@ -1,10 +1,13 @@
 # plugmem-host
 
+> **Status: pre-release, unpublished.** APIs and the on-disk format may change
+> before 0.1.0. `docs.rs` links resolve once the crates are published.
+
 `plugmem-host` is the `std` host layer for the plugmem
-[temporal-memory engine](https://docs.rs/plugmem-core/latest): point it at a file path and go.
-It supplies the things the `no_std` engine deliberately does not own —
-files, locking, and network — so that from this one crate an agent gets
-`remember / recall / revise / forget` backed by durable storage. The
+[temporal-memory engine](https://docs.rs/plugmem-core/latest). It supplies
+what the `no_std` engine does not own — files, locking, and network — so from
+this one crate an agent gets `remember / recall / revise / forget` backed by
+durable storage. The
 retrieval itself (BM25, int8-quantized vectors with
 [HNSW](https://arxiv.org/abs/1603.09320), an entity graph, temporal
 range scans, all fused by rank) lives in the engine; this crate adds:
@@ -46,7 +49,7 @@ time still answer; vectors are an addition, not a requirement.
 
 | You want | Depend on |
 |---|---|
-| point it at a file path and go — durability, locking, read-only mmap, auto-embedding | **this crate** (`std`; re-exports the engine's types) |
+| durability, locking, read-only mmap, auto-embedding over one file path | **this crate** (`std`; re-exports the engine's types) |
 | the engine alone with your own storage (a browser, a wasm host, custom persistence) — BM25/HNSW/graph/time included, no files or network | [`plugmem-core`](https://docs.rs/plugmem-core/latest) (`no_std`) |
 | the flat byte data structures underneath | [`plugmem-arena`](https://docs.rs/plugmem-arena/latest) (`no_std`) |
 | no Rust at all: a CLI, an MCP server for agents, an npm package | `plugmem-cli` / `plugmem-mcp` / `plugmem-wasm` — in progress, not published yet |
@@ -125,11 +128,9 @@ or one writer, never both at once.**
 - **Many readers.** `Database::open_readonly` takes a *shared* lock, so
   any number of read-only handles map the same snapshot at once — across
   threads or processes. Shared excludes exclusive, so no writer can change
-  the file under a live reader (which is exactly what makes the mmap
-  safe). With the zero-copy mmap, the readers also share one copy of the
-  file in the OS page cache — a read-mostly database serves a fan-out of
-  agents cheaply. When you need to write, drop the readers and open
-  read-write.
+  the file under a live reader (which is what makes the mmap safe). The
+  readers also share one copy of the file in the OS page cache. To write,
+  drop the readers and open read-write.
 - **One process, many threads or agents.** A `Database` is a
   `Clone + Send + Sync` handle; clone it freely. The read verbs
   (`recall`/`get`/`stats`/`export`/`verify`) take a *shared* guard and run
@@ -162,41 +163,27 @@ println!("{}", out.rendered);
 # Ok::<(), plugmem_host::HostError>(())
 ```
 
-## Memory: the mmap path, and rebuilds larger than RAM
+## Memory-mapped opens and disk-first rebuilds
 
-This is where the engine's flat-arena design pays off at the OS level, and
-where the recommendation is: **prefer the mmap open, and let the OS manage
-resident memory.** Developer-to-developer, here is what actually happens.
+Both `open` and `open_readonly` memory-map the snapshot; the engine borrows an
+overlay over the mapping rather than reading it into a heap copy. Opening is an
+`mmap` plus a bounds-check regardless of file size; only dereferenced pages
+fault in, and the OS may evict clean ones. Resident memory tracks the working
+set, not the file size.
 
-- **Both opens are zero-copy.** `open` and `open_readonly` memory-map the
-  snapshot and hand the engine a borrowed *overlay* over the mapping — the
-  bytes are never read into a heap copy. Opening a multi-GiB database is a
-  `mmap` plus a bounds-check, regardless of size; only the pages you actually
-  dereference fault in, and the OS is free to evict clean ones under pressure.
-  So resident memory tracks your **working set**, not the file size.
-- **Writes don't break the borrow.** A read-write handle appends new records
-  to a small owned tail; the mmap'd base is never rewritten in place (the
-  append-only structures make this safe without copy-on-write). A checkpoint
-  streams the fresh image to a temp file and atomically renames it — which is
-  also why the writer unmaps before renaming (Windows refuses to rename a file
-  that is still mapped).
-- **Recommendation — build occasionally, read a lot.** For a read-mostly
-  memory served to a fan-out of agents, `open_readonly` is the sweet spot: many
-  shared-lock handles map the *same* snapshot, sharing one copy in the OS page
-  cache. You pay for the file once no matter how many readers. Take a
-  read-write handle only when you actually mutate, then drop back to readers.
-- **Rebuilds don't need the file to fit in RAM.** `maintain` and `recover` run
-  **disk-first**: the engine streams the two large pools (vectors, text)
-  through a temp `Scratch` file this crate provides (a sibling of the database,
-  mmap'd on freeze, deleted on drop), keeping only metadata and the HNSW graph
-  resident. Peak RAM is therefore ∝ **record count**, not content size — so a
-  database well past RAM can still be compacted and salvaged. On bare `no_std`
-  (no files) the engine falls back to the in-RAM rebuild; the host always has
-  the disk-first path.
+A read-write handle appends new records to a small owned tail; the mapped base
+is never rewritten in place (the append-only structures avoid copy-on-write). A
+checkpoint streams the fresh image to a temp file and renames it atomically,
+unmapping first (Windows will not rename a mapped file).
 
-The net picture: one file, embedded, no server — but it opens, serves and even
-rebuilds a database larger than memory, because nothing here ever holds the
-whole image resident.
+Read-only handles take a shared lock and map the same snapshot, so several
+share one copy in the OS page cache. Open read-write only to mutate.
+
+`maintain` and `recover` run disk-first: the two large pools (vectors, text)
+stream through a temp `Scratch` file (a sibling of the database, mapped on
+freeze, deleted on drop), keeping only metadata and the HNSW graph resident.
+Peak RAM is proportional to record count, not content size. On `no_std` (no
+files) the engine uses the in-RAM rebuild instead.
 
 ## Integrity & recovery
 

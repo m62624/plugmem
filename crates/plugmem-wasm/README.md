@@ -1,9 +1,10 @@
 # plugmem-wasm
 
 The WebAssembly build of the [plugmem](https://github.com/m62624/plugmem)
-embedded memory engine, published to npm as `plugmem-wasm`.
+embedded memory engine, to be distributed on npm as `plugmem-wasm`.
 
-**Status: distribution stub.** This release ships the version surface and
+**Status: pre-release, unpublished — distribution stub.** This build ships the
+version surface and
 the companion Agent Skill (`skill()`, stripped for wasm consumers;
 `skillVersion()` always matches `version()`); the engine class —
 `remember / recall / revise / forget / link / maintain` over storage and
@@ -25,7 +26,7 @@ builds and in wasm64 (memory64) builds. See the
 [core README](https://docs.rs/plugmem-core/latest)
 for the engine itself and the Rust-native
 [host layer](https://docs.rs/plugmem-host/latest)
-for the "point at a file and go" experience.
+for the file-backed `std` host.
 
 ## Building from source
 

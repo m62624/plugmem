@@ -1,5 +1,8 @@
 # plugmem-cli
 
+> **Status: pre-release, unpublished.** Commands and output may change before
+> 0.1.0. `docs.rs` links resolve once the crates are published.
+
 `plugmem-cli` is the command-line surface over the plugmem
 [temporal-memory engine](https://docs.rs/plugmem-core/latest) — a thin shell around
 [`plugmem-host`](https://docs.rs/plugmem-host/latest) that lets an agent (or you) keep a memory

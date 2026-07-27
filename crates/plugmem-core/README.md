@@ -1,7 +1,10 @@
 # plugmem-core
 
-`plugmem-core` is an embedded **temporal-memory engine for LLM agents**,
-as a library inside your process — no server, no cloud. An agent talks to
+> **Status: pre-release, unpublished.** APIs and the snapshot format may change
+> before 0.1.0. `docs.rs` links resolve once the crates are published.
+
+`plugmem-core` is an embedded **temporal-memory engine for LLM agents** — a
+library that runs inside the process. An agent talks to
 it in four verbs — `remember / recall / revise / forget` — and it answers
 with a ranked, token-budgeted context block ready to paste into a prompt.
 It keeps a whole database in one snapshot file plus an append-only
