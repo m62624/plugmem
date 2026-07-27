@@ -1,16 +1,41 @@
 # plugmem-host
 
-> **Status: pre-release, unpublished.** APIs and the on-disk format may change
-> before 0.1.0. `docs.rs` links resolve once the crates are published.
-
 `plugmem-host` is the `std` host layer for the plugmem
 [temporal-memory engine](https://docs.rs/plugmem-core/latest). It supplies
 what the `no_std` engine does not own — files, locking, and network — so from
-this one crate an agent gets `remember / recall / revise / forget` backed by
-durable storage. The
-retrieval itself (BM25, int8-quantized vectors with
-[HNSW](https://arxiv.org/abs/1603.09320), an entity graph, temporal
-range scans, all fused by rank) lives in the engine; this crate adds:
+this one crate a Rust program gets `remember / recall / revise / forget` backed
+by durable storage. It re-exports the engine, so **this one crate is all a Rust
+program needs.**
+
+## Which crate do I need?
+
+**Writing Rust and just want a working memory? This is the crate — it has
+everything.** The others are for narrower needs.
+
+| You want | Use | Why |
+|---|---|---|
+| **A memory in a Rust program** — the common case | **`plugmem-host`** (this crate, `std`) | Everything included: files, locking, read-only mmap, HTTP embedders, integrity, cross-process concurrency. One dependency — it re-exports the engine. |
+| A memory in Rust with **no `std`** or **your own storage** (browser, wasm host, custom file layer) | [`plugmem-core`](https://docs.rs/plugmem-core/latest) (`no_std`) | The engine only. You bring the `Storage` trait, the clock, file I/O and embedding — so you also manage when the file opens and how memory loads. |
+| Just the **flat byte-pool containers** | [`plugmem-arena`](https://docs.rs/plugmem-arena/latest) (`no_std`) | The storage substrate, engine-agnostic. |
+| A memory from a **terminal or shell script** | `plugmem-cli` (`plugmem`) | One file, no server; `plugmem repl` keeps the engine open for host speed. |
+| A memory for an **LLM agent** or a **non-Rust program** | `plugmem-mcp` | Long-lived stdio JSON-RPC; language-independent. |
+| A memory in **JavaScript / the browser** | `plugmem-wasm` | The engine compiled to WebAssembly. |
+
+## What recall does
+
+Recall is not a vector lookup — it fuses four sources by reciprocal-rank fusion
+with a recency boost (tags filter; they are not a source):
+
+| Source | Algorithm | What it finds |
+|---|---|---|
+| **Lexical** | [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) (Robertson idf) over a Unicode ([UAX #29](https://unicode.org/reports/tr29/)) tokenizer | exact terms / keyword overlap |
+| **Semantic** | int8-quantized cosine — a flat two-phase scan below a threshold, an [HNSW](https://arxiv.org/abs/1603.09320) graph above | meaning / nearest neighbours |
+| **Graph** | entity graph with typed edges, breadth-first from query anchors | relational knowledge |
+| **Temporal** | range scans over a `recorded_at`-ordered index; bitemporal validity | "what was true *then*", time windows |
+
+## What `plugmem-host` adds
+
+The retrieval above lives in the engine; this crate adds the OS side:
 
 - **File-backed storage** — atomic snapshots (tmp + fsync + rename),
   an append-only journal with a configurable fsync policy, crash
@@ -45,14 +70,7 @@ range scans, all fused by rank) lives in the engine; this crate adds:
 Without an embedder it is fully functional — lexical, tags, graph and
 time still answer; vectors are an addition, not a requirement.
 
-## Which crate do you need?
-
-| You want | Depend on |
-|---|---|
-| durability, locking, read-only mmap, auto-embedding over one file path | **this crate** (`std`; re-exports the engine's types) |
-| the engine alone with your own storage (a browser, a wasm host, custom persistence) — BM25/HNSW/graph/time included, no files or network | [`plugmem-core`](https://docs.rs/plugmem-core/latest) (`no_std`) |
-| the flat byte data structures underneath | [`plugmem-arena`](https://docs.rs/plugmem-arena/latest) (`no_std`) |
-| no Rust at all: a CLI, an MCP server for agents, an npm package | `plugmem-cli` / `plugmem-mcp` / `plugmem-wasm` — in progress, not published yet |
+## Example
 
 ```rust,no_run
 use plugmem_host::{Config, Database, OpenAiCompatEmbedder, RecallQuery, RememberInput};

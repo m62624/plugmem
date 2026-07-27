@@ -1,8 +1,5 @@
 # plugmem-arena
 
-> **Status: pre-release, unpublished.** APIs and the on-disk layouts may change
-> before 0.1.0. `docs.rs` links resolve once the crates are published.
-
 Flat byte-pool data structures: a sharded sorted arena, an append-only
 blob heap, chunked lists, and a string interner. `no_std + alloc`, no
 dependencies, so it runs anywhere Rust compiles — designed for 32-bit
@@ -19,10 +16,18 @@ dictionary. One user is [`plugmem-core`](https://docs.rs/plugmem-core/latest), a
 engine built on top of these four structures, but the crate stands on its
 own; lift it into any project as-is.
 
-**Which crate:** this crate is the storage layer. For the memory engine
-built on it, see [`plugmem-core`](https://docs.rs/plugmem-core/latest) (`no_std`); for the
-file-backed, locking host with embedders, [`plugmem-host`](https://docs.rs/plugmem-host/latest)
-(`std`).
+## Which crate do I need?
+
+This crate is the **storage substrate** — reach for it to build your own
+container. If you want the agent-memory engine, not the raw structures, you
+almost certainly want one of the crates below instead.
+
+| You want | Use | Why |
+|---|---|---|
+| **A memory in a Rust program** — the common case | [`plugmem-host`](https://docs.rs/plugmem-host/latest) (`std`) | The full engine plus files, locking, mmap, HTTP embedders, integrity, concurrency. |
+| The memory engine with **no `std`** or **your own storage** | [`plugmem-core`](https://docs.rs/plugmem-core/latest) (`no_std`) | The engine built on these structures; you bring persistence. |
+| **Flat byte-pool containers** to build your own index/store | **`plugmem-arena`** (this crate) | Engine-agnostic storage: knows nothing about the data it holds. |
+| A memory from a **terminal**, an **LLM agent**, or **JavaScript** | `plugmem-cli` / `plugmem-mcp` / `plugmem-wasm` | The command-line, agent (stdio JSON-RPC) and WebAssembly surfaces. |
 
 ## Design
 

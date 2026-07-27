@@ -1,8 +1,5 @@
 # plugmem-core
 
-> **Status: pre-release, unpublished.** APIs and the snapshot format may change
-> before 0.1.0. `docs.rs` links resolve once the crates are published.
-
 `plugmem-core` is an embedded **temporal-memory engine for LLM agents** — a
 library that runs inside the process. An agent talks to
 it in four verbs — `remember / recall / revise / forget` — and it answers
@@ -12,22 +9,18 @@ journal; storage is flat byte arenas, so the memory image *is* the file
 format (loading is a bounds-check plus adopt, replay is deterministic to
 the byte, and the same file opens on native, wasm32 and wasm64 unchanged).
 
-It is **not** a vector database. A vector is one of four recall sources,
-fused with rank-based scoring:
+It is **not** a vector database. Recall fuses four sources by [reciprocal-rank
+fusion](https://dl.acm.org/doi/10.1145/1571941.1572114) with a recency boost
+(tags filter; they are not a source):
 
-- **Lexical** — [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) with the
-  Robertson idf over a Unicode
-  ([UAX #29](https://unicode.org/reports/tr29/)) tokenizer;
-- **Vector** — symmetric **int8-quantized** cosine search, a flat
-  two-phase scan below a threshold and an
-  [HNSW](https://arxiv.org/abs/1603.09320) graph above it;
-- **Graph** — an entity graph with typed edges, expanded breadth-first
-  from query anchors;
-- **Temporal** — range scans over a `recorded_at`-ordered index;
+| Source | Algorithm | What it finds |
+|---|---|---|
+| **Lexical** | [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) (Robertson idf) over a Unicode ([UAX #29](https://unicode.org/reports/tr29/)) tokenizer | exact terms / keyword overlap |
+| **Semantic** | symmetric int8-quantized cosine — a flat two-phase scan below a threshold, an [HNSW](https://arxiv.org/abs/1603.09320) graph above | meaning / nearest neighbours |
+| **Graph** | entity graph with typed edges, breadth-first from query anchors | relational knowledge |
+| **Temporal** | range scans over a `recorded_at`-ordered index; bitemporal validity | "what was true *then*", time windows |
 
-the four are merged by [reciprocal-rank
-fusion](https://dl.acm.org/doi/10.1145/1571941.1572114) with a recency
-boost (tags act as filters, not a source). On top of that: **bitemporal
+On top of that: **bitemporal
 facts** (`revise`/`forget`, "what was true *then*", revision chains,
 physical erasure), and **conflict surfacing** — a new `remember` returns
 the live facts it may duplicate or contradict, and the engine never merges
@@ -39,14 +32,21 @@ timestamps arrive as parameters, and embeddings are computed by the caller
 — which is what lets the same engine run natively, in `wasm32v1-none`, or
 anywhere else Rust compiles.
 
-## Which crate do you need?
+## Which crate do I need?
 
-| You want | Depend on |
-|---|---|
-| point it at a file and go — OS locking, fsync and auto-snapshot policy, a zero-copy read-only mmap open, automatic embeddings over HTTP (OpenAI/Ollama/LM Studio/vLLM/llama.cpp) | [`plugmem-host`](https://docs.rs/plugmem-host/latest) (`std`; re-exports this engine) |
-| the engine alone with your own storage (a browser, a wasm host, custom persistence), `no_std`, full control | **this crate** |
-| the flat byte structures underneath (sorted page arenas, blob heap, chunk pool, interner) for your own storage project | [`plugmem-arena`](https://docs.rs/plugmem-arena/latest) (`no_std`) |
-| no Rust at all: a CLI, an MCP server for agents, an npm package | `plugmem-cli` / `plugmem-mcp` / `plugmem-wasm` — in progress, not published yet |
+**Most Rust programs want [`plugmem-host`](https://docs.rs/plugmem-host/latest),
+not this crate** — it wraps this engine with files, locking, mmap and embedders,
+so you never manage storage yourself. Reach for `plugmem-core` directly only
+when you need `no_std` or your own persistence.
+
+| You want | Use | Why |
+|---|---|---|
+| **A memory in a Rust program** — the common case | [`plugmem-host`](https://docs.rs/plugmem-host/latest) (`std`) | Everything included: files, locking, read-only mmap, HTTP embedders (OpenAI/Ollama/LM Studio/vLLM/llama.cpp), integrity, concurrency. Re-exports this engine. |
+| A memory in Rust with **no `std`** or **your own storage** (browser, wasm host, custom persistence) | **`plugmem-core`** (this crate) | The engine only. You bring the `Storage` trait, the clock, file I/O and embedding — so you manage when the file opens and how memory loads. |
+| Just the **flat byte-pool containers** (sorted page arenas, blob heap, chunk pool, interner) | [`plugmem-arena`](https://docs.rs/plugmem-arena/latest) (`no_std`) | The storage substrate, engine-agnostic. |
+| A memory from a **terminal or shell script** | `plugmem-cli` (`plugmem`) | One file, no server; `plugmem repl` keeps the engine open for host speed. |
+| A memory for an **LLM agent** or a **non-Rust program** | `plugmem-mcp` | Long-lived stdio JSON-RPC; language-independent. |
+| A memory in **JavaScript / the browser** | `plugmem-wasm` | The engine compiled to WebAssembly. |
 
 ## Who this is for
 

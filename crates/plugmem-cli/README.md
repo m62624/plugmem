@@ -1,36 +1,48 @@
 # plugmem-cli
 
-> **Status: pre-release, unpublished.** Commands and output may change before
-> 0.1.0. `docs.rs` links resolve once the crates are published.
-
 `plugmem-cli` is the command-line surface over the plugmem
 [temporal-memory engine](https://docs.rs/plugmem-core/latest) — a thin shell around
-[`plugmem-host`](https://docs.rs/plugmem-host/latest) that lets an agent (or you) keep a memory
-in a single file from a terminal or a shell script. It parses arguments,
-calls one engine verb, and prints the result: a human report by default,
-`--json` for tooling. No memory logic lives here; retrieval (BM25,
-int8-quantized vectors with [HNSW](https://arxiv.org/abs/1603.09320), an
-entity graph, temporal range scans, fused by rank) is the engine's.
+[`plugmem-host`](https://docs.rs/plugmem-host/latest) that lets you (or an agent's
+launcher) keep a memory in a single file from a terminal or a shell script. Each
+one-shot command parses arguments, calls one engine verb, and prints the result
+(a human report, `--json` for tooling); the interactive `plugmem repl` keeps the
+engine open across commands for host speed. No memory logic lives here.
 
 The installed binary is **`plugmem-cli`**.
 
 ## Install
 
-Until the crates are published, build from the workspace:
+Build from the workspace:
 
 ```sh
 cargo build --release -p plugmem-cli
 # the binary is target/release/plugmem-cli
 ```
 
-## Which crate do you need?
+## Which crate do I need?
 
-| You want | Use |
-|---|---|
-| a memory from the shell or a script — one file, no server | **this binary** |
-| the same, but embedded in a Rust program | [`plugmem-host`](https://docs.rs/plugmem-host/latest) (`std`) |
-| the engine alone, your own storage, `no_std` (browser/wasm) | [`plugmem-core`](https://docs.rs/plugmem-core/latest) |
-| agents over a protocol instead of a shell | `plugmem-mcp` — in progress |
+The CLI is the **human/scripting door**. A Rust program links the library
+instead; an agent or another language comes in over a protocol.
+
+| You want | Use | Why |
+|---|---|---|
+| A memory from a **terminal or shell script** | **`plugmem-cli`** (this binary) | One file, no server; `plugmem repl` keeps the engine open for host speed. |
+| **A memory in a Rust program** — the common case | [`plugmem-host`](https://docs.rs/plugmem-host/latest) (`std`) | The engine plus files, locking, mmap, HTTP embedders, integrity, concurrency. |
+| The engine with **no `std`** or **your own storage** | [`plugmem-core`](https://docs.rs/plugmem-core/latest) (`no_std`) | Engine only; you bring persistence. |
+| A memory for an **LLM agent** or a **non-Rust program** | `plugmem-mcp` | Long-lived stdio JSON-RPC; language-independent. |
+| A memory in **JavaScript / the browser** | `plugmem-wasm` | The engine compiled to WebAssembly. |
+
+## What recall does
+
+Recall fuses four sources by reciprocal-rank fusion with a recency boost (tags
+filter; they are not a source):
+
+| Source | Algorithm | What it finds |
+|---|---|---|
+| **Lexical** | [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) (Robertson idf) over a Unicode ([UAX #29](https://unicode.org/reports/tr29/)) tokenizer | exact terms / keyword overlap |
+| **Semantic** | int8-quantized cosine — flat two-phase below a threshold, an [HNSW](https://arxiv.org/abs/1603.09320) graph above | meaning / nearest neighbours |
+| **Graph** | entity graph with typed edges, breadth-first from query anchors | relational knowledge |
+| **Temporal** | range scans over a `recorded_at`-ordered index; bitemporal validity | "what was true *then*", time windows |
 
 ## Usage
 

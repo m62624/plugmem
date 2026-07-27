@@ -3,13 +3,24 @@
 The WebAssembly build of the [plugmem](https://github.com/m62624/plugmem)
 embedded memory engine, to be distributed on npm as `plugmem-wasm`.
 
-**Status: pre-release, unpublished — distribution stub.** This build ships the
-version surface and
+**Status: distribution stub.** This build ships the version surface and
 the companion Agent Skill (`skill()`, stripped for wasm consumers;
 `skillVersion()` always matches `version()`); the engine class —
 `remember / recall / revise / forget / link / maintain` over storage and
 embedder callbacks (specs/06) — lands in an upcoming release and will
 extend the module without breaking the current exports.
+
+## Which crate do I need?
+
+This crate is the **JavaScript / browser door**. A Rust program uses the
+library directly instead.
+
+| You want | Use | Why |
+|---|---|---|
+| A memory in **JavaScript / the browser** | **`plugmem-wasm`** (this package) | The engine compiled to WebAssembly; the snapshot file is portable to and from native. |
+| **A memory in a Rust program** — the common case | [`plugmem-host`](https://docs.rs/plugmem-host/latest) (`std`) | The engine plus files, locking, mmap, HTTP embedders, integrity, concurrency. |
+| The engine with **no `std`** or **your own storage** | [`plugmem-core`](https://docs.rs/plugmem-core/latest) (`no_std`) | Engine only; you bring persistence. |
+| A memory from a **terminal** or for an **LLM agent** | `plugmem-cli` / `plugmem-mcp` | The command-line and agent (stdio JSON-RPC) surfaces. |
 
 ```js
 const plugmem = require("plugmem-wasm");

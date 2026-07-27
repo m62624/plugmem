@@ -25,29 +25,47 @@ fusion; tags act as filters. What plugmem is actually about:
   zero-allocation recall after warm-up, one file, no server; built and
   tested on `wasm32v1-none` and a real 32-bit wasm runtime in CI.
 
-**Status: early development.** The design is settled (see `specs/`) and the
-storage, engine and host layers are built and tested; the snapshot format
-is not frozen (pre-1.0).
-
 ## Which crate do I need?
 
-- **An embedded database** — `plugmem-core`. The engine itself: data model,
-  indexes, recall, snapshot/journal. `no_std + alloc`, no I/O, no clock, no
-  threads. Bring your own storage (a browser, a wasm host, your own file
-  layer) through a small `Storage` trait.
-- **The "point it at a file" experience** — `plugmem-host`. Adds the OS
-  side (`std`): a file-backed store with an exclusive lock, fsync and
-  auto-snapshot policy, a read-only mmap open, and embedding providers over
-  HTTP. Re-exports the engine, so this crate alone is enough.
+**If you write Rust and just want a working memory, use
+[`plugmem-host`](crates/plugmem-host) — it has everything.** The other crates
+are for narrower needs.
+
+| You want | Use | Why |
+|---|---|---|
+| **A memory in a Rust program** — the common case | **[`plugmem-host`](crates/plugmem-host)** (`std`) | Everything included: files, locking, read-only mmap, HTTP embedders, integrity, cross-process concurrency. One dependency — it re-exports the engine. |
+| A memory in Rust with **no `std`** or **your own storage** (browser, wasm host, custom file layer) | [`plugmem-core`](crates/plugmem-core) (`no_std`) | The engine only. You bring the `Storage` trait, the clock, file I/O and embedding — so you also manage when the file opens and how memory loads. |
+| Just the **flat byte-pool containers**, to build your own index/store | [`plugmem-arena`](crates/plugmem-arena) (`no_std`) | The storage substrate, engine-agnostic. |
+| A memory from a **terminal or shell script** | [`plugmem-cli`](crates/plugmem-cli) (`plugmem`) | One file, no server; `plugmem repl` keeps the engine open for host speed. |
+| A memory for an **LLM agent** or a **non-Rust program** | `plugmem-mcp` | Long-lived stdio JSON-RPC; language-independent. |
+| A memory in **JavaScript / the browser** | [`plugmem-wasm`](crates/plugmem-wasm) | The engine compiled to WebAssembly. |
+
+Rust programs use the library (`host`, or `core` for specialists). Other
+languages and agents come in through `mcp` (or `wasm` for JS) — not the CLI,
+which is the human/scripting door.
 
 | Crate | What it is | State |
 |---|---|---|
 | [`plugmem-arena`](crates/plugmem-arena) | flat byte-pool storage structures (`no_std`, wasm-first) | done: tested, measured |
 | [`plugmem-core`](crates/plugmem-core) | the engine: data model, indexes, recall, snapshots (`no_std`) | done |
 | [`plugmem-host`](crates/plugmem-host) | OS glue: files, locking, mmap read-only, embedder clients (`std`) | done |
+| [`plugmem-cli`](crates/plugmem-cli) | command-line surface, one-shot + interactive `repl` | done |
 | [`plugmem-wasm`](crates/plugmem-wasm) | wasm bindings for non-Rust hosts | in progress |
-| `plugmem-cli` / `plugmem-mcp` | command-line and MCP surfaces | in progress |
+| `plugmem-mcp` | MCP server (stdio JSON-RPC) for agents | in progress |
 | `plugmem-testgen` | deterministic corpus generator for tests and benches | done |
+
+## What recall does
+
+Recall is not a vector lookup — it fuses four sources with
+[reciprocal-rank fusion](https://dl.acm.org/doi/10.1145/1571941.1572114) and a
+recency boost (tags filter; they are not a source):
+
+| Source | Algorithm | What it finds |
+|---|---|---|
+| **Lexical** | [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) (Robertson idf) over a Unicode ([UAX #29](https://unicode.org/reports/tr29/)) tokenizer | exact terms / keyword overlap |
+| **Semantic** | int8-quantized cosine — a flat two-phase scan below a threshold, an [HNSW](https://arxiv.org/abs/1603.09320) graph above | meaning / nearest neighbours |
+| **Graph** | entity graph with typed edges, breadth-first from query anchors | relational knowledge |
+| **Temporal** | range scans over a `recorded_at`-ordered index; bitemporal validity | "what was true *then*", time windows |
 
 ## Principles
 
