@@ -293,6 +293,15 @@ fn execute(
             }
             Ok(0)
         }
+        Command::Checkpoint => {
+            db.checkpoint(now)?;
+            if json {
+                writeln!(out, "{}", json!({ "ok": true })).ok();
+            } else {
+                writeln!(out, "checkpointed: journal flushed to snapshot").ok();
+            }
+            Ok(0)
+        }
         Command::Verify => {
             // A clean image returns Ok; corruption is a typed error the caller
             // maps to exit 2.
@@ -1251,6 +1260,57 @@ mod tests {
             command: Command::Stats,
         };
         assert!(load_settings(&cli).is_err());
+    }
+
+    #[test]
+    fn checkpoint_command_flushes_the_journal_and_enables_the_readonly_path() {
+        let scratch = Scratch::new("checkpoint-cmd");
+        let path = scratch.0.join("m.plugmem");
+
+        // A remember through the read-write path leaves a dirty journal.
+        let remember = Cli {
+            db: Some(path.clone()),
+            config: None,
+            json: false,
+            command: Command::Remember {
+                text: "hello tokio".into(),
+                entity: None,
+                tags: Vec::new(),
+                links: Vec::new(),
+                valid_from: None,
+            },
+        };
+        assert_eq!(run_parsed(remember, &mut Vec::new()), 0);
+
+        // The new command: human shape.
+        let checkpoint = |json| Cli {
+            db: Some(path.clone()),
+            config: None,
+            json,
+            command: Command::Checkpoint,
+        };
+        let mut buf = Vec::new();
+        assert_eq!(run_parsed(checkpoint(false), &mut buf), 0);
+        assert!(String::from_utf8(buf).unwrap().contains("checkpointed"));
+
+        // json shape.
+        let mut buf = Vec::new();
+        assert_eq!(run_parsed(checkpoint(true), &mut buf), 0);
+        let v: serde_json::Value =
+            serde_json::from_str(String::from_utf8(buf).unwrap().trim()).unwrap();
+        assert_eq!(v["ok"], true);
+
+        // The journal is now clean, so scrub (a shared-lock, read-only open)
+        // succeeds — it would fail `NeedsCheckpoint` on a dirty journal.
+        let scrub = Cli {
+            db: Some(path),
+            config: None,
+            json: false,
+            command: Command::Scrub,
+        };
+        let mut buf = Vec::new();
+        assert_eq!(run_parsed(scrub, &mut buf), 0);
+        assert!(String::from_utf8(buf).unwrap().contains("scrub ok"));
     }
 
     #[test]

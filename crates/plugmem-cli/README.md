@@ -49,6 +49,7 @@ engine keeps no clock, so `now` comes from the system clock at each call.
 | `show <ID>` | one fact's full card — text, both time axes, state |
 | `stats` | engine size counters |
 | `maintain` | purge tombstones, compact, build HNSW past the threshold (disk-first) |
+| `checkpoint` | flush the journal into a fresh snapshot and clear it (leaves the database checkpointed) |
 | `verify` | check content integrity (text UTF-8, vector↔fact consistency); exit 2 on damage |
 | `scrub` | check the snapshot's byte-level container checksums; exit 2 on the first damaged section |
 | `recover <DST>` | salvage a content-corrupt database into a clean `DST`; the source (`--db`) is left untouched |
@@ -61,7 +62,7 @@ the whole file is not loaded) — falling back to a normal open if the
 journal is un-checkpointed. `recall` uses that fast path only when no
 embedder is configured, because embedding the query needs the read-write
 handle. `scrub` also takes the shared mmap open, so it needs a checkpointed
-database — run `maintain` first if the journal is dirty.
+database — run `checkpoint` (or `maintain`) first if the journal is dirty.
 
 ### Examples
 
@@ -91,7 +92,7 @@ plugmem-cli --db other.plugmem import backup.jsonl
 
 # Integrity & recovery (exit 2 on corruption — scriptable as a gate):
 plugmem-cli verify                       # content consistency
-plugmem-cli maintain && plugmem-cli scrub  # byte-level container checksums
+plugmem-cli checkpoint && plugmem-cli scrub  # flush journal, then byte-level checksums
 plugmem-cli recover agent.recovered.plugmem   # salvage into a clean copy
 ```
 

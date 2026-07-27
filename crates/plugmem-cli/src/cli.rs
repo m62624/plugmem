@@ -37,8 +37,8 @@ pub(crate) struct Cli {
 /// The `--help` long description.
 const LONG_ABOUT: &str = "\
 A local memory an agent talks to in four verbs — remember / recall / revise / forget — \
-plus link / show / stats / maintain / export / import, and integrity: verify / scrub / \
-recover. Recall fuses lexical (BM25), vector, entity-graph and temporal evidence into one \
+plus link / show / stats / maintain / checkpoint / export / import, and integrity: verify / \
+scrub / recover. Recall fuses lexical (BM25), vector, entity-graph and temporal evidence into one \
 ranked, token-budgeted block. One database is a single snapshot file plus a journal; point \
 --db at it (default ./plugmem.db, or $PLUGMEM_DB). Human output by default, --json for \
 tooling. Exit code: 0 ok, 1 not found / database locked, 2 usage / runtime error / \
@@ -131,6 +131,10 @@ pub(crate) enum Command {
     Stats,
     /// Run a maintenance pass now (purge tombstones, compact, build HNSW).
     Maintain,
+    /// Flush the journal into a fresh snapshot now and clear it. Leaves the
+    /// database checkpointed, so the read-only path (`scrub`, and any
+    /// shared-lock open) can proceed without a dirty-journal `NeedsCheckpoint`.
+    Checkpoint,
     /// Check content integrity (text UTF-8, vector↔fact consistency) — the
     /// on-demand equivalent of SQLite's `integrity_check`. Exit 2 on damage.
     Verify,
