@@ -396,6 +396,85 @@ fn bench_hnsw(c: &mut Criterion) {
     g.finish();
 }
 
+fn bench_search_matrix(c: &mut Criterion) {
+    use criterion::BenchmarkId;
+    use plugmem_core::{Config, MemStorage, Memory, RecallQuery, RecallResult};
+    use plugmem_testgen::{Gen, GenOp, Profile, apply};
+
+    // Baseline sweep for vector search across **fill** (how many memories) and
+    // **difficulty** (embedding dimension), at the default k = 8. This fixes
+    // the current numbers so a later vector optimization — a signature-tier
+    // layout (signatures resident, int8 in mmap) or a binary HNSW traversal —
+    // can be measured against a committed reference instead of memory.
+    //
+    // Fill straddles the flat/HNSW split (specs default flat_to_hnsw = 24k):
+    // 2k and 20k stay flat (exact int8 rescoring over all candidates), 60k is
+    // searched through the graph that `maintain` builds. The one-time build
+    // cost and the resolved mode are printed to stderr (a maintain cost, not a
+    // query cost). Difficulty is the dimension: 384 and 768 are the common
+    // embedding sizes; the per-vector stride roughly doubles between them.
+    let mut g = c.benchmark_group("search_matrix");
+    g.sample_size(20);
+    const FILLS: [usize; 3] = [2_000, 20_000, 60_000];
+    const DIMS: [usize; 2] = [384, 768];
+
+    for &dim in &DIMS {
+        for &fill in &FILLS {
+            let profile = Profile {
+                dim,
+                w_revise: 0,
+                w_forget: 0,
+                w_link: 0,
+                ..Profile::default()
+            };
+            let seed = 0x5EC0_0000_0000_0000 ^ (fill as u64) ^ ((dim as u64) << 40);
+            let ops = Gen::new(seed, profile).ops(fill);
+            let mut cfg = Config::default();
+            cfg.dim = dim;
+            let mut mem = Memory::new(cfg).unwrap();
+            let mut store = MemStorage::new();
+            for op in &ops {
+                apply(&mut mem, &mut store, op).unwrap();
+            }
+            let now = last_now(&ops) + 1;
+            // Past the threshold this builds the graph; below it search stays
+            // flat and maintain is a cheap no-op for the vector index.
+            let t0 = std::time::Instant::now();
+            mem.maintain(&mut store, now).unwrap();
+            let mode = if fill >= 24_000 { "hnsw" } else { "flat" };
+            eprintln!(
+                "search_matrix: fill={fill} dim={dim} mode={mode} maintain={:?}",
+                t0.elapsed()
+            );
+            // A real corpus member as the query: genuine near neighbors to rank.
+            let query = ops
+                .iter()
+                .find_map(|op| match op {
+                    GenOp::Remember {
+                        vector: Some(v), ..
+                    } => Some(v.clone()),
+                    _ => None,
+                })
+                .expect("every remember carries a vector at dim > 0");
+            let mut out = RecallResult::default();
+            let q = RecallQuery {
+                vector: Some(&query),
+                k: 8,
+                text: None,
+                ..RecallQuery::text(now, "")
+            };
+            g.throughput(Throughput::Elements(1));
+            g.bench_function(BenchmarkId::new(format!("d{dim}"), fill), |b| {
+                b.iter(|| {
+                    mem.recall_into(black_box(q), &mut out).unwrap();
+                    out.facts.len()
+                });
+            });
+        }
+    }
+    g.finish();
+}
+
 fn bench_scrub(c: &mut Criterion) {
     use plugmem_core::snapshot::Snapshot;
     use plugmem_core::{Config, MemStorage, Memory, RememberInput};
@@ -446,6 +525,7 @@ criterion_group!(
     bench_recall,
     bench_vec,
     bench_hnsw,
+    bench_search_matrix,
     bench_scrub
 );
 criterion_main!(benches);
