@@ -10,6 +10,9 @@
 
 use napi_derive::napi;
 
+/// The `Plugmem` class — the napi mirror of `plugmem-host`'s `Database`.
+mod db;
+
 /// The companion skill, embedded so a consumer can persist it next to the
 /// engine without a second download. Single source of truth: the repo-root
 /// `skill/SKILL.md`.

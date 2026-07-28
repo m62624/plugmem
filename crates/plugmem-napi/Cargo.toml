@@ -16,8 +16,16 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-napi = { workspace = true }
+# The engine, embedded as-is (mmap, MVCC, locking, embedder). serde: results
+# serialize straight to JS objects. config: the shared settings loader (used
+# from N2 on for the embedder/engine config).
+plugmem-host = { workspace = true, features = ["serde", "config"] }
+# serde-json: lets `#[napi]` accept a JS object as `serde_json::Value` and
+# return one, so the wrapper reuses the MCP arg-extraction/render path verbatim.
+napi = { workspace = true, features = ["serde-json"] }
 napi-derive = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [build-dependencies]
 napi-build = { workspace = true }
