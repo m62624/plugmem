@@ -495,6 +495,26 @@ fn remember_many_is_durable_after_reopen() {
 }
 
 #[test]
+fn export_each_streams_the_same_facts_as_export() {
+    let tmp = TempDir::new("export-each");
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    db.remember(RememberInput::text(1, "alpha")).unwrap();
+    db.remember(RememberInput::text(2, "beta")).unwrap();
+    db.revise(FactId(1), RememberInput::text(3, "alpha prime"))
+        .unwrap(); // closes id 1, opens a successor — export skips the closed one
+
+    let mut streamed = Vec::new();
+    db.export_each(|f| streamed.push(f.text.clone()));
+    let mut collected: Vec<_> = db.export().into_iter().map(|f| f.text).collect();
+    streamed.sort();
+    collected.sort();
+    assert_eq!(
+        streamed, collected,
+        "export_each visits exactly export()'s facts"
+    );
+}
+
+#[test]
 fn embedder_transport_and_shape_errors_are_typed() {
     // A refused connection is a typed Embed error.
     let mut refused = OpenAiCompatEmbedder::new("http://127.0.0.1:1/v1", "m", 4);

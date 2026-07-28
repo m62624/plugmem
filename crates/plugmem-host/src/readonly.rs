@@ -259,9 +259,17 @@ impl ReadOnlyDatabase {
     }
 
     /// Dumps the currently-open facts for a human-readable backup
-    /// (specs/06). See [`ExportedFact`](crate::ExportedFact).
+    /// (specs/06). See [`ExportedFact`](crate::ExportedFact). Collects the whole
+    /// set; for a large database prefer [`export_each`](Self::export_each).
     pub fn export(&self) -> Vec<crate::db::ExportedFact> {
         self.with_mem(crate::db::export_facts)
+    }
+
+    /// Streams the currently-open facts, calling `f` once per fact under the map
+    /// — the whole dump is never materialized (the zero-copy analog of
+    /// [`Database::export_each`](crate::Database::export_each)).
+    pub fn export_each(&self, f: impl FnMut(crate::db::ExportedFact)) {
+        self.with_mem(|mem| crate::db::export_facts_each(mem, f));
     }
 
     /// The database base path.

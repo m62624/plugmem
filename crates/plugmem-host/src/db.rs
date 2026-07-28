@@ -198,13 +198,14 @@ pub struct RecoverReport {
     pub dropped_vector: usize,
 }
 
-/// Dumps the currently-open facts (skipping closed revisions and
-/// tombstones), resolving each subject name and tag string. Shared by the
-/// read-write and read-only handles.
-pub(crate) fn export_facts(mem: &Memory) -> Vec<ExportedFact> {
+/// Visits the currently-open facts (skipping closed revisions and tombstones),
+/// resolving each subject name and tag string, calling `f` once per fact. The
+/// streaming core of export: a caller that writes each fact out (CLI `export`)
+/// never materializes the whole dump, so a huge database exports without a RAM
+/// spike. Shared by the read-write and read-only handles.
+pub(crate) fn export_facts_each(mem: &Memory, mut f: impl FnMut(ExportedFact)) {
     use plugmem_core::{EntityId, FactId, VALID_TO_OPEN};
     let next = mem.stats().next_fact;
-    let mut out = Vec::new();
     let mut terms = Vec::new();
     for i in 0..next {
         let id = FactId(i);
@@ -221,7 +222,7 @@ pub(crate) fn export_facts(mem: &Memory) -> Vec<ExportedFact> {
         terms.clear();
         mem.tags_of(id, &mut terms);
         let tags = terms.iter().map(|t| mem.term(*t).to_string()).collect();
-        out.push(ExportedFact {
+        f(ExportedFact {
             text: view.text.to_string(),
             entity,
             tags,
@@ -229,6 +230,13 @@ pub(crate) fn export_facts(mem: &Memory) -> Vec<ExportedFact> {
             valid_from: view.record.valid_from,
         });
     }
+}
+
+/// Collects the currently-open facts into a `Vec` (the owning form of
+/// [`export_facts_each`]). Used where the whole dump is wanted in memory.
+pub(crate) fn export_facts(mem: &Memory) -> Vec<ExportedFact> {
+    let mut out = Vec::new();
+    export_facts_each(mem, |e| out.push(e));
     out
 }
 
@@ -695,9 +703,18 @@ impl Database {
     }
 
     /// Dumps the currently-open facts for a human-readable backup
-    /// (specs/06). See [`ExportedFact`].
+    /// (specs/06). See [`ExportedFact`]. Collects the whole set; for a large
+    /// database prefer [`export_each`](Self::export_each), which streams.
     pub fn export(&self) -> Vec<ExportedFact> {
         self.read().engine.read(export_facts)
+    }
+
+    /// Streams the currently-open facts, calling `f` once per fact under the
+    /// read guard — the whole dump is never materialized, so a huge database
+    /// exports without a RAM spike (CLI `export` writes each line straight out).
+    /// See [`ExportedFact`].
+    pub fn export_each(&self, f: impl FnMut(ExportedFact)) {
+        self.read().engine.read(|mem| export_facts_each(mem, f));
     }
 
     /// Runs a maintenance pass now (purge, compaction, HNSW build past the

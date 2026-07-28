@@ -229,7 +229,7 @@ fn execute_ro(
             0
         }
         Command::Export => {
-            render_export(&ro.export(), json, out);
+            ro.export_each(|f| write_export_line(out, &f));
             0
         }
         // A clean image returns Ok; corruption is a typed error mapped to exit 2.
@@ -328,7 +328,7 @@ fn execute(
             Ok(0)
         }
         Command::Export => {
-            render_export(&db.export(), json, out);
+            db.export_each(|f| write_export_line(out, &f));
             Ok(0)
         }
         Command::Maintain => {
@@ -891,22 +891,29 @@ fn render_stats(s: &Stats, json: bool, out: &mut impl Write) {
     }
 }
 
-/// Renders exported facts as JSONL (one object per line) — the same shape
-/// with or without `--json` (JSONL is already machine-readable).
+/// Writes one exported fact as a JSONL line. The unit of the streaming export
+/// — the same shape with or without `--json` (JSONL is already machine-readable).
+fn write_export_line(out: &mut impl Write, f: &ExportedFact) {
+    writeln!(
+        out,
+        "{}",
+        json!({
+            "text": f.text,
+            "entity": f.entity,
+            "tags": f.tags,
+            "recorded_at": f.recorded_at,
+            "valid_from": f.valid_from,
+        })
+    )
+    .ok();
+}
+
+/// Renders a whole slice of exported facts as JSONL (test helper — the runtime
+/// path streams via [`write_export_line`]).
+#[cfg(test)]
 fn render_export(facts: &[ExportedFact], _json: bool, out: &mut impl Write) {
     for f in facts {
-        writeln!(
-            out,
-            "{}",
-            json!({
-                "text": f.text,
-                "entity": f.entity,
-                "tags": f.tags,
-                "recorded_at": f.recorded_at,
-                "valid_from": f.valid_from,
-            })
-        )
-        .ok();
+        write_export_line(out, f);
     }
 }
 
