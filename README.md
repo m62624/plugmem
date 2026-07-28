@@ -25,6 +25,19 @@ fusion; tags act as filters. What plugmem is actually about:
   zero-allocation recall after warm-up, one file, no server; built and
   tested on `wasm32v1-none` and a real 32-bit wasm runtime in CI.
 
+**Where it fits — and where it doesn't.** plugmem is for the memory of a
+*local agent* or an *embedded system*: one process that remembers and recalls
+on the order of thousands to hundreds of thousands of facts, in a single file,
+with nothing to run. It is deliberately **not** a large-scale vector database —
+if you need approximate-nearest-neighbour search over tens of millions of
+embeddings, sharded across a cluster or behind a managed API, reach for a
+dedicated one ([Qdrant](https://qdrant.tech), [Milvus](https://milvus.io),
+[Weaviate](https://weaviate.io), [Pinecone](https://www.pinecone.io),
+[pgvector](https://github.com/pgvector/pgvector)). plugmem trades that scale
+for zero infrastructure, recall that fuses keyword + meaning + relationships +
+time (not vectors alone), and correctness over time — the shape an agent's
+memory actually needs.
+
 ## Which crate do I need?
 
 **If you write Rust and just want a working memory, use
@@ -66,6 +79,126 @@ recency boost (tags filter; they are not a source):
 | **Semantic** | int8-quantized cosine — a flat two-phase scan below a threshold, an [HNSW](https://arxiv.org/abs/1603.09320) graph above | meaning / nearest neighbours |
 | **Graph** | entity graph with typed edges, breadth-first from query anchors | relational knowledge |
 | **Temporal** | range scans over a `recorded_at`-ordered index; bitemporal validity | "what was true *then*", time windows |
+
+## Install
+
+Two binaries — the `plugmem-cli` CLI (crate `plugmem-cli`) and the `plugmem-mcp`
+server (crate `plugmem-mcp`) — built for **Linux, Windows and macOS (x64 &
+arm64)** on every tagged release.
+
+**Pick the one method that's convenient — you don't need more than one.** They all
+install the *same* binaries. Quick guide:
+
+| If you… | Use |
+|---|---|
+| are on macOS / Linux with Homebrew | **Homebrew** |
+| don't want a Rust toolchain | **installer script**, or the Windows **`.msi`** |
+| want managed install/uninstall on Windows | **`.msi`** |
+| have `cargo` and want a cross-platform install | **`cargo binstall`** |
+| want to compile it yourself | **from source** |
+
+### Homebrew (macOS / Linux)
+
+From the [`m62624/homebrew-plugmem`](https://github.com/m62624/homebrew-plugmem)
+tap; `brew upgrade` / `brew uninstall` then manage it like any formula:
+
+```console
+$ brew install m62624/plugmem/plugmem-cli     # the `plugmem-cli` CLI
+$ brew install m62624/plugmem/plugmem-mcp     # the `plugmem-mcp` server
+```
+
+### Installer scripts (no Rust toolchain)
+
+Each binary has its own script on the
+[Releases page](https://github.com/m62624/plugmem/releases); `latest` always
+points at the newest tag.
+
+```console
+# Linux / macOS  (POSIX sh)
+$ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/m62624/plugmem/releases/latest/download/plugmem-cli-installer.sh | sh
+$ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/m62624/plugmem/releases/latest/download/plugmem-mcp-installer.sh | sh
+```
+
+### Windows `.msi`
+
+Download `plugmem-cli-*.msi` or `plugmem-mcp-*.msi` from the
+[Releases page](https://github.com/m62624/plugmem/releases). Double-click to
+install; it registers the app in **"Add or remove programs"**, so upgrades and
+uninstalls go through the normal Windows UI.
+
+### Windows PowerShell script (alternative to `.msi`)
+
+If you prefer a script over a GUI installer:
+
+```powershell
+> powershell -ExecutionPolicy Bypass -c "irm https://github.com/m62624/plugmem/releases/latest/download/plugmem-cli-installer.ps1 | iex"
+> powershell -ExecutionPolicy Bypass -c "irm https://github.com/m62624/plugmem/releases/latest/download/plugmem-mcp-installer.ps1 | iex"
+```
+
+### `cargo binstall`
+
+[cargo-binstall](https://github.com/cargo-bins/cargo-binstall) downloads the
+prebuilt binary instead of compiling. It reads the release's cargo-dist
+manifest, so it just works on every OS/arch above — no extra config:
+
+```console
+$ cargo binstall plugmem-cli     # the `plugmem-cli` binary
+$ cargo binstall plugmem-mcp     # the `plugmem-mcp` binary
+```
+
+### From source
+
+Needs a Rust toolchain; compiles locally and works on any platform Rust targets.
+Both crates are published to crates.io, so you can build straight from there:
+
+```console
+$ cargo install plugmem-cli     # the `plugmem-cli` binary
+$ cargo install plugmem-mcp     # the `plugmem-mcp` binary
+```
+
+…or from a local checkout of this repo:
+
+```console
+$ cargo install --path crates/plugmem-cli
+$ cargo install --path crates/plugmem-mcp
+```
+
+### Uninstall
+
+**Installed with `cargo binstall` / `cargo install`** (either resolves to cargo's
+own install tracking, so plain `cargo uninstall` works):
+
+```console
+$ cargo uninstall plugmem-cli      # removes the `plugmem-cli` binary
+$ cargo uninstall plugmem-mcp
+```
+
+**Installed with Homebrew:** `brew uninstall plugmem-cli plugmem-mcp`.
+
+**Installed from a Windows `.msi`:** uninstall from **"Add or remove programs"**
+(or Settings → Apps), exactly like any other Windows app.
+
+**Installed with the shell/PowerShell scripts:** cargo-dist does not ship an
+uninstaller, so remove the binaries and their install receipts by hand. By default
+the binaries land in `~/.cargo/bin` (note: `cargo uninstall` won't touch these —
+cargo didn't track them), and a receipt is written per app.
+
+```console
+# Linux / macOS
+$ rm -f  ~/.cargo/bin/plugmem-cli ~/.cargo/bin/plugmem-mcp
+$ rm -rf ~/.config/plugmem-cli ~/.config/plugmem-mcp     # install receipts
+```
+
+```powershell
+# Windows (PowerShell)
+> Remove-Item "$env:USERPROFILE\.cargo\bin\plugmem-cli.exe","$env:USERPROFILE\.cargo\bin\plugmem-mcp.exe" -ErrorAction SilentlyContinue
+> Remove-Item "$env:LOCALAPPDATA\plugmem-cli","$env:LOCALAPPDATA\plugmem-mcp" -Recurse -ErrorAction SilentlyContinue
+```
+
+If you pointed the installer somewhere else (`PLUGMEM_CLI_INSTALL_DIR` /
+`PLUGMEM_MCP_INSTALL_DIR`, or `CARGO_DIST_FORCE_INSTALL_DIR`), delete from that
+directory instead. The installer may also have added the bin dir to your `PATH` —
+prune that line from your shell profile if nothing else uses it.
 
 ## Principles
 

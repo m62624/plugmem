@@ -9,6 +9,77 @@ engine stays resident for the process's lifetime, so every call is host speed.
 
 The installed binary is **`plugmem-mcp`**.
 
+## Install
+
+Prebuilt for **Linux, Windows and macOS (x64 & arm64)** on every tagged release.
+**Pick one method — you don't need more than one; they install the same
+`plugmem-mcp` binary.**
+
+### Homebrew (macOS / Linux)
+
+From the [`m62624/homebrew-plugmem`](https://github.com/m62624/homebrew-plugmem)
+tap; `brew upgrade` / `brew uninstall` then manage it like any formula:
+
+```console
+$ brew install m62624/plugmem/plugmem-mcp
+```
+
+### Installer script (no Rust toolchain)
+
+`latest` always points at the newest tag on the
+[Releases page](https://github.com/m62624/plugmem/releases):
+
+```console
+# Linux / macOS  (POSIX sh)
+$ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/m62624/plugmem/releases/latest/download/plugmem-mcp-installer.sh | sh
+```
+
+```powershell
+# Windows (PowerShell) — alternative to the .msi
+> powershell -ExecutionPolicy Bypass -c "irm https://github.com/m62624/plugmem/releases/latest/download/plugmem-mcp-installer.ps1 | iex"
+```
+
+### Windows `.msi`
+
+Download `plugmem-mcp-*.msi` from the
+[Releases page](https://github.com/m62624/plugmem/releases). Double-click to
+install; it registers in **"Add or remove programs"** for normal upgrades and
+uninstalls.
+
+### `cargo binstall`
+
+[cargo-binstall](https://github.com/cargo-bins/cargo-binstall) downloads the
+prebuilt binary instead of compiling — it just works on every OS/arch above:
+
+```console
+$ cargo binstall plugmem-mcp
+```
+
+### From source
+
+Needs a Rust toolchain. From crates.io:
+
+```console
+$ cargo install plugmem-mcp
+```
+
+…or from a local checkout of this repo:
+
+```console
+$ cargo install --path crates/plugmem-mcp
+# or, to build without installing:
+$ cargo build --release -p plugmem-mcp    # binary at target/release/plugmem-mcp
+```
+
+### Uninstall
+
+`cargo uninstall plugmem-mcp` (for `cargo install`/`binstall`);
+`brew uninstall plugmem-mcp` (Homebrew); "Add or remove programs" (`.msi`). The
+shell/PowerShell installers ship no uninstaller — remove `~/.cargo/bin/plugmem-mcp`
+and `~/.config/plugmem-mcp` (Windows: `%USERPROFILE%\.cargo\bin\plugmem-mcp.exe`
+and `%LOCALAPPDATA%\plugmem-mcp`) by hand. See the
+[workspace README](https://github.com/m62624/plugmem#install) for the full matrix.
+
 ## Which door is this? (read before reaching for MCP)
 
 plugmem is **embedded-first, like SQLite** — the fastest, simplest path is to
