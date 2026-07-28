@@ -64,12 +64,16 @@ stdio JSON-RPC. Инструменты (схемы зеркалят CLI/ядро
 между запросами (не фоновый поток: проверка после каждого вызова).
 SKILL.md встроен `include_str!` и отдаётся инструментом `plugmem_skill`.
 
-## WASM / npm (`plugmem-wasm`)
+## Node addon / npm (`plugmem-napi`)
 
-Крейт: `crate-type = ["cdylib", "rlib"]`, publish = false (идёт в npm),
-wasm-opt `-Oz`, target `wasm32-unknown-unknown` + проверка ядра под
-`wasm32v1-none`. Сборка npm-пакета — скрипт `scripts/build-npm.mjs`
-(паттерн elenchus): wasm-pack + ручная обвязка `npm/index.js` + `index.d.ts`.
+**Реализовано как нативный napi-аддон, не wasm** (решение 2026-07-29): host
+компилируется как есть (настоящий mmap/MVCC/локи, нет RAM-разбухания и лимита
+4 ГиБ). Крейт: `crate-type = ["cdylib", "rlib"]`, publish = false (идёт в npm
+мета-пакетом `plugmem` + platform-пакеты). Класс `Plugmem` зеркалит host
+`Database` 1:1; входы/выходы — `napi(object)` → TS-интерфейсы; тяжёлые verb'ы
+(`maintain`/`checkpoint`) async на libuv. Актуальный контракт — в README крейта
+и `src/db.rs`. Ниже — исходный wasm-набросок JS-Storage-моста, оставлен как
+история дизайна (в napi он не нужен — host сам делает файловый I/O):
 
 JS-контракт (все callbacks синхронные — ядро синхронно; async-обвязка поверх —
 дело хоста):

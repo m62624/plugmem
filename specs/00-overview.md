@@ -48,7 +48,7 @@ WASM здесь — формат переносимости ядра, **не** �
 | `plugmem-host` | std | Нативный хост-слой: `FileStorage`, trait `Embedder` + реализации (ollama, openai-compat, null; local — за feature). |
 | `plugmem-cli` | std | Бинарник `plugmem-cli`: команды поверх core + host. |
 | `plugmem-mcp` | std | MCP-сервер (stdio JSON-RPC) поверх core + host; skill встроен `include_str!`. |
-| `plugmem-wasm` | — | cdylib+rlib bridge: Storage/Embedder через JS-callbacks; npm-пакет с TS-типами. |
+| `plugmem-napi` | std | Нативный Node-аддон (napi-rs) поверх host; класс `Plugmem` зеркалит `Database`; npm-пакет `plugmem` с TS-типами. `publish = false`. |
 | `plugmem-testgen` | std | Внутренний: генератор синтетических корпусов для тестов и бенчей. `publish = false`. |
 
 Edition 2024, лицензия MIT, версии всех крейтов синхронизированы через

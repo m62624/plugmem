@@ -5,8 +5,7 @@ short **facts** — with a subject entity, tags, an optional embedding and
 two time axes — and answers a query with a ranked, token-budgeted block
 ready to paste into a prompt. It runs in-process and keeps a whole database
 in one snapshot file plus an append-only journal — no server, no daemon. The
-core is `no_std`, so the same engine runs natively, in WebAssembly and in the
-browser.
+core is `no_std`, so the same engine runs natively and in WebAssembly.
 
 It is **not** a vector database. A vector is one of four recall sources —
 lexical (BM25), vector, entity graph and time — fused with reciprocal-rank
@@ -50,11 +49,11 @@ are for narrower needs.
 | Just the **flat byte-pool containers**, to build your own index/store | [`plugmem-arena`](crates/plugmem-arena) (`no_std`) | The storage substrate, engine-agnostic. |
 | A memory from a **terminal or shell script** | [`plugmem-cli`](crates/plugmem-cli) (`plugmem`) | One file, no server; `plugmem repl` keeps the engine open for host speed. |
 | A memory for an **LLM agent** or a **non-Rust program** | [`plugmem-mcp`](crates/plugmem-mcp) | Long-lived stdio JSON-RPC; language-independent. **Don't** front your own Rust with it — embed `host` instead. |
-| A memory in **JavaScript / the browser** | [`plugmem-wasm`](crates/plugmem-wasm) | The engine compiled to WebAssembly. |
+| A memory in **JavaScript / TypeScript** (Node) | [`plugmem-napi`](crates/plugmem-napi) | The engine as a native Node addon (napi-rs), in-process and typed for TS. On npm as `plugmem`. |
 
 Rust programs use the library (`host`, or `core` for specialists) — embedded
 in-process, like linking SQLite. Other languages and agents come in through
-`mcp` (or `wasm` for JS) — not the CLI, which is the human/scripting door.
+`mcp` (or `napi` for Node/TS) — not the CLI, which is the human/scripting door.
 
 | Crate | What it is | State |
 |---|---|---|
@@ -62,7 +61,7 @@ in-process, like linking SQLite. Other languages and agents come in through
 | [`plugmem-core`](crates/plugmem-core) | the engine: data model, indexes, recall, snapshots (`no_std`) | done |
 | [`plugmem-host`](crates/plugmem-host) | OS glue: files, locking, mmap read-only, embedder clients (`std`) | done |
 | [`plugmem-cli`](crates/plugmem-cli) | command-line surface, one-shot + interactive `repl` | done |
-| [`plugmem-wasm`](crates/plugmem-wasm) | wasm bindings for non-Rust hosts | in progress |
+| [`plugmem-napi`](crates/plugmem-napi) | native Node.js addon (napi-rs), on npm as `plugmem` | done |
 | [`plugmem-mcp`](crates/plugmem-mcp) | MCP server (stdio JSON-RPC) for agents | done |
 | `plugmem-testgen` | deterministic corpus generator for tests and benches | done |
 

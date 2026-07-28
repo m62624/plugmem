@@ -17,7 +17,7 @@ plugmem/
 │   ├── plugmem-host/        ← std lib
 │   ├── plugmem-cli/         ← bin "plugmem"
 │   ├── plugmem-mcp/         ← bin "plugmem-mcp"
-│   ├── plugmem-wasm/        ← cdylib+rlib, publish = false (уходит в npm)
+│   ├── plugmem-napi/        ← cdylib+rlib, publish = false (нативный Node-аддон, уходит в npm)
 │   └── plugmem-testgen/     ← std lib, publish = false (внутренний)
 ├── reference/opaque-v1/     ← первая тестовая версия арены (референс)
 └── specs/
@@ -61,9 +61,9 @@ no_std-срез.
 
 ## Прочее
 
-- `plugmem-wasm`: `crate-type = ["cdylib", "rlib"]` (rlib — чтобы нативный
-  `cargo test` гонял логику обвязки), метаданные wasm-pack с `wasm-opt -Oz`
-  (бюджет размера — `specs/07`).
+- `plugmem-napi`: `crate-type = ["cdylib", "rlib"]` (rlib — чтобы нативный
+  `cargo test` гонял логику обвязки, напр. skill-гейт), собирается через
+  `@napi-rs/cli` в `.node`-аддон; npm — мета-пакет `plugmem` + platform-пакеты.
 - `[profile.dist]`, cargo-dist-метаданные и CI появляются на этапе 5 —
   осознанно не сейчас.
 - Новый крейт в workspace = запись в `members` + наследование всех полей +

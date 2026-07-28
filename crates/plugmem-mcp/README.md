@@ -90,7 +90,7 @@ link the engine into your process, not to talk to a server.
 | **an agent, or a program in another language** (Python, Node, Go…) that wants a memory | **`plugmem-mcp`** (this binary) | Spawn the process, speak JSON-RPC on its stdin/stdout. Language-independent; the memory stays resident. |
 | **writing Rust** | [`plugmem-host`](https://docs.rs/plugmem-host/latest) — embed it as a dependency | The engine *in your process*, like linking SQLite. Maximum speed, no pipe, no second process. **Don't** front your own Rust with MCP. |
 | a person at a **terminal or shell script** | [`plugmem-cli`](https://docs.rs/plugmem-cli/latest) | The human/scripting door. **Not** the door for programmatic or cross-language access — that's MCP. |
-| **JavaScript / the browser** | `plugmem-wasm` | The engine compiled to WebAssembly, in-process. |
+| **JavaScript / TypeScript** (Node) | `plugmem-napi` | The engine as a native Node addon (napi-rs), in-process; on npm as `plugmem`. |
 
 So: **another language → MCP; Rust → embed the host lib; a human → the CLI.**
 The MCP server's main consumer is the agent itself. And whichever door you use,

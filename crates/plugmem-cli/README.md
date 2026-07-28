@@ -92,7 +92,7 @@ instead; an agent or another language comes in over a protocol.
 | **A memory in a Rust program** — the common case | [`plugmem-host`](https://docs.rs/plugmem-host/latest) (`std`) | The engine plus files, locking, mmap, HTTP embedders, integrity, concurrency. |
 | The engine with **no `std`** or **your own storage** | [`plugmem-core`](https://docs.rs/plugmem-core/latest) (`no_std`) | Engine only; you bring persistence. |
 | A memory for an **LLM agent** or a **non-Rust program** | `plugmem-mcp` | Long-lived stdio JSON-RPC; language-independent — the door for programmatic / cross-language access (the CLI is the human one). |
-| A memory in **JavaScript / the browser** | `plugmem-wasm` | The engine compiled to WebAssembly. |
+| A memory in **JavaScript / TypeScript** (Node) | `plugmem-napi` | The engine as a native Node addon (napi-rs), in-process; on npm as `plugmem`. |
 
 ## What recall does
 

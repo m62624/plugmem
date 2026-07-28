@@ -58,12 +58,12 @@
    существует, несёт корректный маркер `<!-- skill-version -->` и оба маркера
    `<!-- wasm-strip:begin/end -->`, frontmatter в лимитах Agent Skills
    (name ≤ 64, description ≤ 1024). **Равенство** маркера с версией
-   проверяется дважды в других местах: юнит-тестом plugmem-wasm на каждом
+   проверяется дважды в других местах: юнит-тестом plugmem-napi на каждом
    `cargo test` (скилл встроен `include_str!`) и релизным гейтом
    `skill-check` против версии, которую режет релиз.
-6. **wasm-npm** (боевой, 2026-07-20): wasm-pack сборка + сборка пакета
-   `scripts/build-npm.mjs` + smoke `node --test` — ровно то, что публикует
-   релиз.
+6. **napi-npm** (боевой): `napi build` (host-таргет) + smoke `node --test` —
+   ровно то, что публикует релиз (полная матрица платформ — в release.yml,
+   `napi-build`/`publish-napi`).
 7. **dist-plan**: `dist plan` на закреплённой версии.
 8. **ci-pass** — агрегатор. В branch protection required-чеком ставится
    **только он** («CI passed»): состав джобов меняется без правки
@@ -145,11 +145,11 @@ testgen, README core/host, wasm-классы ёмкости (specs/14), CI/CD (�
    зеркалят ядро), `plugmem_skill` отдаёт встроенный `include_str!`
    SKILL.md; авто-maintain по политике между запросами (без фоновых
    потоков). Сценарные тесты JSON-RPC сессий.
-3. **plugmem-wasm — движковый контракт** (обвязка уже готова,
-   2026-07-20): пакетирование (`scripts/build-npm.mjs`), Node-вход
-   `npm/index.js` + `index.d.ts`, smoke-тест и публикация — боевые;
-   сейчас пакет честно экспортирует только `version/about/skill/
-   skillFull/skillVersion` (стаб задокументирован в README крейта).
+3. **plugmem-napi — нативный Node-аддон** (сделано): класс `Plugmem`
+   зеркалит host `Database` 1:1 (writer + read-only + `close`),
+   типизированные входы/выходы (`napi(object)` → TS-интерфейсы),
+   async `maintain`/`checkpoint` на libuv; npm мета + platform-пакеты,
+   OIDC-публикация. (Заменил снятый wasm-набросок.)
    Осталось: класс `Plugmem` (Storage/Embedder через JS-callbacks,
    контракт specs/06) — добавляется в `src/lib.rs` + `npm/index.*`, тесты
    в `test/smoke.test.mjs`; конвейер не трогать. Учесть specs/14 §4:
