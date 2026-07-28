@@ -3,8 +3,13 @@
 //! server's tools. Descriptions come from [`crate::messages`]; result types
 //! serialize straight to JSON via serde (the host `serde` feature); envelopes
 //! from [`crate::rpc`].
+//!
+//! Input types (`RememberInput`/`RecallQuery`/`LinkInput`) borrow `&str`, so the
+//! handlers own the parsed `String`/`Vec` in scope and lend slices into the
+//! call. A [`HostError`] becomes a tool-level error (`isError`) so the model
+//! reads it; missing `params` is the JSON-RPC `-32602`.
 
-use plugmem_host::Database;
+use plugmem_host::{Database, FactId, HostError, LinkInput, RecallQuery, RememberInput};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -12,58 +17,38 @@ use crate::{messages, rpc};
 
 /// The tool names, shared by each definition and the `tools/call` dispatcher so
 /// the advertised name and the routed name can never drift apart.
+const REMEMBER: &str = "plugmem_remember";
+const RECALL: &str = "plugmem_recall";
+const REVISE: &str = "plugmem_revise";
+const FORGET: &str = "plugmem_forget";
+const LINK: &str = "plugmem_link";
+const SHOW: &str = "plugmem_show";
 const STATS: &str = "plugmem_stats";
+const EXPORT: &str = "plugmem_export";
+const MAINTAIN: &str = "plugmem_maintain";
+const CHECKPOINT: &str = "plugmem_checkpoint";
+const VERIFY: &str = "plugmem_verify";
 const VERSION: &str = "plugmem_version";
 const ABOUT: &str = "plugmem_about";
 
-/// Every tool definition, in the order `tools/list` advertises them.
+/// Every tool definition, in the order `tools/list` advertises them: the write
+/// verbs, then the read verbs, then the operational verbs, then meta.
 pub fn definitions() -> Vec<Value> {
-    vec![stats_def(), version_def(), about_def()]
-}
-
-/// A no-argument tool definition: a name, a description, and an empty input
-/// schema. Shared by the tools that take no parameters.
-fn simple_def(name: &str, description: &str) -> Value {
-    json!({
-        "name": name,
-        "description": description,
-        "inputSchema": { "type": "object", "properties": {} }
-    })
-}
-
-/// A read-tool definition that takes only the shared `format` argument.
-fn format_def(name: &str, description: &str) -> Value {
-    json!({
-        "name": name,
-        "description": description,
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "format": {
-                    "type": "string",
-                    "enum": ["human", "json"],
-                    "description": messages::ARG_FORMAT
-                }
-            }
-        }
-    })
-}
-
-fn stats_def() -> Value {
-    format_def(STATS, messages::STATS_TOOL)
-}
-
-/// `plugmem_version` — the MCP analog of `plugmem-cli --version`, so a model can
-/// read the running version (it cannot see `initialize`'s `serverInfo.version`)
-/// and compare it to the version its skill targets.
-fn version_def() -> Value {
-    simple_def(VERSION, messages::VERSION_TOOL)
-}
-
-/// `plugmem_about` — a pointer to the companion skill for agents that reached
-/// this server without it. No version here; that is `plugmem_version`.
-fn about_def() -> Value {
-    simple_def(ABOUT, messages::ABOUT_TOOL)
+    vec![
+        remember_def(),
+        recall_def(),
+        revise_def(),
+        forget_def(),
+        link_def(),
+        show_def(),
+        stats_def(),
+        export_def(),
+        maintain_def(),
+        checkpoint_def(),
+        verify_def(),
+        version_def(),
+        about_def(),
+    ]
 }
 
 /// Execute a `tools/call`: route by tool name, then hand off. A missing `params`
@@ -76,12 +61,375 @@ pub fn call(db: &Database, id: Value, params: Option<&Value>) -> Value {
     let args = params.get("arguments");
 
     match name {
+        REMEMBER => remember(db, id, args, None),
+        RECALL => recall(db, id, args),
+        REVISE => revise(db, id, args),
+        FORGET => forget(db, id, args),
+        LINK => link(db, id, args),
+        SHOW => show(db, id, args),
+        STATS => rpc::tool_result(id, render(&db.stats(), format_arg(args)), false),
+        EXPORT => rpc::tool_result(id, render(&db.export(), format_arg(args)), false),
+        MAINTAIN => match db.maintain(now_ms()) {
+            Ok(report) => rpc::tool_result(id, render(&report, format_arg(args)), false),
+            Err(e) => tool_error(id, &e),
+        },
+        CHECKPOINT => match db.checkpoint(now_ms()) {
+            Ok(()) => rpc::tool_result(id, render(&json!({ "ok": true }), format_arg(args)), false),
+            Err(e) => tool_error(id, &e),
+        },
+        VERIFY => match db.verify() {
+            Ok(()) => rpc::tool_result(id, render(&json!({ "ok": true }), format_arg(args)), false),
+            Err(e) => tool_error(id, &e),
+        },
         VERSION => rpc::tool_result(id, format!("plugmem {}", env!("CARGO_PKG_VERSION")), false),
         ABOUT => rpc::tool_result(id, messages::ABOUT_TOOL.to_string(), false),
-        STATS => rpc::tool_result(id, render(&db.stats(), format_arg(args)), false),
         other => rpc::tool_result(id, format!("unknown tool: {other}"), true),
     }
 }
+
+// ── Write verbs ───────────────────────────────────────────────────────────
+
+/// `plugmem_remember` / `plugmem_revise` body (revise passes `Some(target)`):
+/// build the borrowed [`RememberInput`] from owned args and dispatch. The host
+/// embeds the text outside its lock, so the tool only passes text.
+fn remember(db: &Database, id: Value, args: Option<&Value>, revise: Option<FactId>) -> Value {
+    let format = format_arg(args);
+    let Some(text) = arg_str(args, "text") else {
+        return rpc::tool_result(id, "missing required `text`".into(), true);
+    };
+    let tags = arg_str_vec(args, "tags");
+    let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
+    let links = arg_links(args);
+    let link_refs: Vec<(&str, &str)> = links
+        .iter()
+        .map(|(r, e)| (r.as_str(), e.as_str()))
+        .collect();
+    let input = RememberInput {
+        entity: arg_str(args, "entity"),
+        tags: &tag_refs,
+        links: &link_refs,
+        valid_from: arg_u64(args, "valid_from"),
+        ..RememberInput::text(now_ms(), text)
+    };
+    let res = match revise {
+        Some(target) => db.revise(target, input),
+        None => db.remember(input),
+    };
+    match res {
+        Ok(outcome) => rpc::tool_result(id, render(&outcome, format), false),
+        Err(e) => tool_error(id, &e),
+    }
+}
+
+fn revise(db: &Database, id: Value, args: Option<&Value>) -> Value {
+    let Some(target) = arg_u64(args, "id") else {
+        return rpc::tool_result(id, "missing required `id`".into(), true);
+    };
+    remember(db, id, args, Some(FactId(target as u32)))
+}
+
+fn forget(db: &Database, id: Value, args: Option<&Value>) -> Value {
+    let Some(fid) = arg_u64(args, "id") else {
+        return rpc::tool_result(id, "missing required `id`".into(), true);
+    };
+    match db.forget(now_ms(), FactId(fid as u32)) {
+        Ok(fresh) => rpc::tool_result(
+            id,
+            render(&json!({ "id": fid, "forgotten": fresh }), format_arg(args)),
+            false,
+        ),
+        Err(e) => tool_error(id, &e),
+    }
+}
+
+fn link(db: &Database, id: Value, args: Option<&Value>) -> Value {
+    let (Some(src), Some(rel), Some(dst)) = (
+        arg_str(args, "src"),
+        arg_str(args, "rel"),
+        arg_str(args, "dst"),
+    ) else {
+        return rpc::tool_result(id, "link needs `src`, `rel` and `dst`".into(), true);
+    };
+    match db.link(LinkInput {
+        now: now_ms(),
+        src,
+        rel,
+        dst,
+        provenance: None,
+    }) {
+        Ok(()) => rpc::tool_result(
+            id,
+            render(
+                &json!({ "src": src, "rel": rel, "dst": dst }),
+                format_arg(args),
+            ),
+            false,
+        ),
+        Err(e) => tool_error(id, &e),
+    }
+}
+
+// ── Read verbs ────────────────────────────────────────────────────────────
+
+/// `plugmem_recall`: `format:"human"` returns the engine's prompt-ready block;
+/// `"json"` (default) returns the structured facts + edges. The host embeds the
+/// text query inside `recall` (outside the lock), so the tool passes no vector.
+fn recall(db: &Database, id: Value, args: Option<&Value>) -> Value {
+    let format = format_arg(args);
+    let tags = arg_str_vec(args, "tags");
+    let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
+    let entities = arg_str_vec(args, "entities");
+    let ent_refs: Vec<&str> = entities.iter().map(String::as_str).collect();
+    let q = RecallQuery {
+        now: now_ms(),
+        text: arg_str(args, "query"),
+        vector: None,
+        tags: &tag_refs,
+        entities: &ent_refs,
+        as_of: arg_u64(args, "as_of"),
+        range: arg_range(args),
+        k: arg_u64(args, "k").unwrap_or(0) as usize,
+        token_budget: None,
+        include_closed: arg_bool(args, "closed"),
+        ef: None,
+    };
+    match db.recall(q) {
+        // Human = the rendered block; json = the structured result.
+        Ok(res) if format == "human" => rpc::tool_result(id, res.rendered, false),
+        Ok(res) => rpc::tool_result(id, render(&res, "json"), false),
+        Err(e) => tool_error(id, &e),
+    }
+}
+
+fn show(db: &Database, id: Value, args: Option<&Value>) -> Value {
+    let Some(fid) = arg_u64(args, "id") else {
+        return rpc::tool_result(id, "missing required `id`".into(), true);
+    };
+    match db.get(FactId(fid as u32)) {
+        Some(snap) => rpc::tool_result(id, render(&snap, format_arg(args)), false),
+        None => rpc::tool_result(id, format!("fact {fid} does not exist"), true),
+    }
+}
+
+// ── Definitions ───────────────────────────────────────────────────────────
+
+fn remember_def() -> Value {
+    remember_like(REMEMBER, messages::REMEMBER_TOOL, false)
+}
+
+fn revise_def() -> Value {
+    remember_like(REVISE, messages::REVISE_TOOL, true)
+}
+
+/// The shared remember/revise schema; `with_id` adds the required `id`.
+fn remember_like(name: &str, description: &str, with_id: bool) -> Value {
+    let mut props = json!({
+        "text": { "type": "string", "description": messages::ARG_TEXT },
+        "entity": { "type": "string", "description": messages::ARG_ENTITY },
+        "tags": { "type": "array", "items": { "type": "string" }, "description": messages::ARG_TAGS },
+        "links": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "rel": { "type": "string" },
+                    "entity": { "type": "string" }
+                },
+                "required": ["rel", "entity"]
+            },
+            "description": messages::ARG_LINKS
+        },
+        "valid_from": { "type": "integer", "minimum": 0, "description": messages::ARG_VALID_FROM },
+        "format": format_prop()
+    });
+    let mut required = vec![json!("text")];
+    if with_id {
+        props["id"] = json!({ "type": "integer", "minimum": 0, "description": messages::ARG_ID });
+        required.push(json!("id"));
+    }
+    json!({
+        "name": name,
+        "description": description,
+        "inputSchema": { "type": "object", "properties": props, "required": required }
+    })
+}
+
+fn recall_def() -> Value {
+    json!({
+        "name": RECALL,
+        "description": messages::RECALL_TOOL,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": messages::ARG_QUERY },
+                "tags": { "type": "array", "items": { "type": "string" }, "description": messages::ARG_TAGS },
+                "entities": { "type": "array", "items": { "type": "string" }, "description": messages::ARG_ENTITIES },
+                "as_of": { "type": "integer", "minimum": 0, "description": messages::ARG_AS_OF },
+                "range": {
+                    "type": "array",
+                    "items": { "type": "integer", "minimum": 0 },
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "description": messages::ARG_RANGE
+                },
+                "k": { "type": "integer", "minimum": 0, "description": messages::ARG_K },
+                "closed": { "type": "boolean", "description": messages::ARG_CLOSED },
+                "format": format_prop()
+            }
+        }
+    })
+}
+
+fn forget_def() -> Value {
+    id_only_def(FORGET, messages::FORGET_TOOL)
+}
+
+fn show_def() -> Value {
+    id_only_def(SHOW, messages::SHOW_TOOL)
+}
+
+/// A tool whose only argument is a required `id` (+ the shared `format`).
+fn id_only_def(name: &str, description: &str) -> Value {
+    json!({
+        "name": name,
+        "description": description,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": { "type": "integer", "minimum": 0, "description": messages::ARG_ID },
+                "format": format_prop()
+            },
+            "required": ["id"]
+        }
+    })
+}
+
+fn link_def() -> Value {
+    json!({
+        "name": LINK,
+        "description": messages::LINK_TOOL,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "src": { "type": "string", "description": messages::ARG_SRC },
+                "rel": { "type": "string", "description": messages::ARG_REL },
+                "dst": { "type": "string", "description": messages::ARG_DST },
+                "format": format_prop()
+            },
+            "required": ["src", "rel", "dst"]
+        }
+    })
+}
+
+fn stats_def() -> Value {
+    format_only_def(STATS, messages::STATS_TOOL)
+}
+
+fn export_def() -> Value {
+    format_only_def(EXPORT, messages::EXPORT_TOOL)
+}
+
+fn maintain_def() -> Value {
+    format_only_def(MAINTAIN, messages::MAINTAIN_TOOL)
+}
+
+fn checkpoint_def() -> Value {
+    format_only_def(CHECKPOINT, messages::CHECKPOINT_TOOL)
+}
+
+fn verify_def() -> Value {
+    format_only_def(VERIFY, messages::VERIFY_TOOL)
+}
+
+fn version_def() -> Value {
+    simple_def(VERSION, messages::VERSION_TOOL)
+}
+
+fn about_def() -> Value {
+    simple_def(ABOUT, messages::ABOUT_TOOL)
+}
+
+/// A no-argument tool definition (an empty input schema).
+fn simple_def(name: &str, description: &str) -> Value {
+    json!({
+        "name": name,
+        "description": description,
+        "inputSchema": { "type": "object", "properties": {} }
+    })
+}
+
+/// A tool definition whose only argument is the shared `format`.
+fn format_only_def(name: &str, description: &str) -> Value {
+    json!({
+        "name": name,
+        "description": description,
+        "inputSchema": { "type": "object", "properties": { "format": format_prop() } }
+    })
+}
+
+/// The shared `format` argument schema.
+fn format_prop() -> Value {
+    json!({
+        "type": "string",
+        "enum": ["human", "json"],
+        "description": messages::ARG_FORMAT
+    })
+}
+
+// ── Argument extraction ───────────────────────────────────────────────────
+
+fn arg_str<'a>(args: Option<&'a Value>, key: &str) -> Option<&'a str> {
+    args.and_then(|a| a.get(key)).and_then(Value::as_str)
+}
+
+fn arg_u64(args: Option<&Value>, key: &str) -> Option<u64> {
+    args.and_then(|a| a.get(key)).and_then(Value::as_u64)
+}
+
+fn arg_bool(args: Option<&Value>, key: &str) -> bool {
+    args.and_then(|a| a.get(key))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// A string array argument (non-string entries skipped), or empty.
+fn arg_str_vec(args: Option<&Value>, key: &str) -> Vec<String> {
+    args.and_then(|a| a.get(key))
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The `links` argument: `[{ "rel", "entity" }]` → owned `(rel, entity)` pairs
+/// (entries missing either field are skipped).
+fn arg_links(args: Option<&Value>) -> Vec<(String, String)> {
+    args.and_then(|a| a.get("links"))
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| {
+                    let rel = v.get("rel").and_then(Value::as_str)?;
+                    let entity = v.get("entity").and_then(Value::as_str)?;
+                    Some((rel.to_string(), entity.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The `range` argument as `[from, to)`, accepting a `[from, to]` array.
+fn arg_range(args: Option<&Value>) -> Option<(u64, u64)> {
+    let arr = args
+        .and_then(|a| a.get("range"))
+        .and_then(Value::as_array)?;
+    Some((arr.first()?.as_u64()?, arr.get(1)?.as_u64()?))
+}
+
+// ── Rendering ─────────────────────────────────────────────────────────────
 
 /// The `format` argument of a tool call, defaulting to `"json"`.
 fn format_arg(args: Option<&Value>) -> &str {
@@ -99,4 +447,17 @@ fn render<T: Serialize>(value: &T, format: &str) -> String {
         serde_json::to_string(value)
     };
     out.unwrap_or_else(|e| format!("serialization error: {e}"))
+}
+
+/// A host error as a tool-level error result (the model reads and reacts).
+fn tool_error(id: Value, e: &HostError) -> Value {
+    rpc::tool_result(id, e.to_string(), true)
+}
+
+/// Wall-clock now in unix milliseconds (the engine keeps no clock).
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }

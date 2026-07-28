@@ -62,10 +62,21 @@ fn initialize_list_and_stats() {
     assert_eq!(resps.len(), 3, "the notification must not get a reply");
     assert_eq!(resps[0]["result"]["serverInfo"]["name"], "plugmem");
     assert_eq!(resps[0]["result"]["protocolVersion"], "2024-11-05");
-    // The three v1 tools are advertised, in order.
-    assert_eq!(resps[1]["result"]["tools"][0]["name"], "plugmem_stats");
-    assert_eq!(resps[1]["result"]["tools"][1]["name"], "plugmem_version");
-    assert_eq!(resps[1]["result"]["tools"][2]["name"], "plugmem_about");
+    // The verb surface is advertised: write verbs first, meta last.
+    let tools: Vec<&str> = resps[1]["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(tools[0], "plugmem_remember");
+    assert_eq!(tools.last(), Some(&"plugmem_about"));
+    for expected in ["plugmem_recall", "plugmem_stats", "plugmem_version"] {
+        assert!(
+            tools.contains(&expected),
+            "missing tool {expected} in {tools:?}"
+        );
+    }
 
     // stats returns machine JSON with the size counters; a fresh db has 0 facts.
     let text = resps[2]["result"]["content"][0]["text"].as_str().unwrap();
@@ -127,6 +138,113 @@ fn unknown_method_is_a_jsonrpc_error_and_unknown_tool_is_a_tool_error() {
     assert_eq!(resps[1]["result"]["isError"], true);
     // Missing params → JSON-RPC error -32602.
     assert_eq!(resps[2]["error"]["code"], -32602);
+}
+
+#[test]
+fn writer_verbs_round_trip() {
+    let db = temp_db("writer");
+    let resps = roundtrip(
+        &db,
+        &[
+            // remember a fact with an entity and a tag → id 0
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"plugmem_remember","arguments":{"text":"prefers tokio","entity":"user","tags":["pref"]}}}"#,
+            // recall it (json) — should surface the fact
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"plugmem_recall","arguments":{"query":"runtime tokio"}}}"#,
+            // show fact 0
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"plugmem_show","arguments":{"id":0}}}"#,
+            // revise fact 0
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"plugmem_revise","arguments":{"id":0,"text":"prefers async-std","entity":"user"}}}"#,
+            // link two entities
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"plugmem_link","arguments":{"src":"user","rel":"works_at","dst":"acme"}}}"#,
+            // export the open facts
+            r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"plugmem_export","arguments":{}}}"#,
+            // operational verbs
+            r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"plugmem_maintain","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"plugmem_checkpoint","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"plugmem_verify","arguments":{}}}"#,
+            // forget the (revised) successor fact 1
+            r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"plugmem_forget","arguments":{"id":1}}}"#,
+        ],
+    );
+
+    // remember → id 0, no error.
+    let remembered: Value =
+        serde_json::from_str(resps[0]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(remembered["id"], 0);
+    assert_eq!(resps[0]["result"]["isError"], false);
+
+    // recall → structured result carrying fact 0.
+    let recalled: Value =
+        serde_json::from_str(resps[1]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(
+        recalled["facts"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false),
+        "recall should surface the fact: {recalled}"
+    );
+
+    // show fact 0 → its text.
+    let shown = resps[2]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(shown.contains("prefers tokio"), "show: {shown}");
+
+    // revise → the successor id (1), no error.
+    let revised: Value =
+        serde_json::from_str(resps[3]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(revised["id"], 1);
+
+    // link ok.
+    assert_eq!(resps[4]["result"]["isError"], false);
+
+    // export → a JSON array of the open facts (>=1).
+    let exported: Value =
+        serde_json::from_str(resps[5]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(exported.as_array().map(|a| !a.is_empty()).unwrap_or(false));
+
+    // maintain/checkpoint/verify all succeed.
+    assert_eq!(resps[6]["result"]["isError"], false);
+    assert_eq!(resps[7]["result"]["isError"], false);
+    assert_eq!(resps[8]["result"]["isError"], false);
+
+    // forget the live successor → forgotten: true.
+    let forgotten: Value =
+        serde_json::from_str(resps[9]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(forgotten["forgotten"], true);
+}
+
+#[test]
+fn recall_human_format_is_the_prompt_block() {
+    let db = temp_db("recall-human");
+    let resps = roundtrip(
+        &db,
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"plugmem_remember","arguments":{"text":"the sky is blue","entity":"sky"}}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"plugmem_recall","arguments":{"query":"sky colour","format":"human"}}}"#,
+        ],
+    );
+    // The human block carries the fact id marker `[f0]` (the prompt-ready text),
+    // not a JSON object.
+    let block = resps[1]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        block.contains("[f0]"),
+        "human recall should be the block: {block}"
+    );
+}
+
+#[test]
+fn missing_required_argument_is_a_tool_error() {
+    let db = temp_db("missing-arg");
+    let resps = roundtrip(
+        &db,
+        &[
+            // remember without text
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"plugmem_remember","arguments":{"entity":"x"}}}"#,
+            // show a non-existent fact
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"plugmem_show","arguments":{"id":999}}}"#,
+        ],
+    );
+    assert_eq!(resps[0]["result"]["isError"], true);
+    assert_eq!(resps[1]["result"]["isError"], true);
 }
 
 #[test]

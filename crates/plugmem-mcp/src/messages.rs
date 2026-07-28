@@ -37,3 +37,78 @@ facts over time, then recalls the relevant ones for a prompt by fusing lexical (
 `[fN]` id on each recalled line is how you address a fact in `plugmem_revise`/`plugmem_forget`. \
 For the full verb loop and worked examples, load the matching plugmem skill or see the project: \
 https://github.com/m62624/plugmem";
+
+// ── Writer tools ──────────────────────────────────────────────────────────
+
+/// `plugmem_remember` tool description.
+pub const REMEMBER_TOOL: &str = "Store a fact in the memory. Returns the new fact's id plus any \
+similar or potentially-conflicting live facts (the engine never revises on its own — you judge: \
+`plugmem_revise`, keep both, or `plugmem_forget`). Time is the server's wall clock.";
+
+/// `plugmem_recall` tool description.
+pub const RECALL_TOOL: &str = "Recall the most relevant facts for a query as a ranked, \
+token-budgeted block, fusing lexical (BM25), semantic (vector), graph and temporal evidence. \
+`format:\"human\"` returns the prompt-ready block; `\"json\"` (default) returns the structured \
+facts + edges. Each fact carries its id — the `[fN]` you pass to revise/forget/show.";
+
+/// `plugmem_revise` tool description.
+pub const REVISE_TOOL: &str = "Revise fact `id`: close the old fact and record its successor with \
+the new text/flags. Use this to correct a fact while keeping the bitemporal history (a later \
+`plugmem_recall --as-of` still sees the old value). Same arguments as remember, plus `id`.";
+
+/// `plugmem_forget` tool description.
+pub const FORGET_TOOL: &str = "Tombstone fact `id` (physically purged at the next \
+`plugmem_maintain`). Returns whether the fact was live. Idempotent: forgetting an already-gone \
+fact is not an error.";
+
+/// `plugmem_link` tool description.
+pub const LINK_TOOL: &str = "Upsert a typed edge `src -rel-> dst` between two entities (created \
+lazily). Edges feed the graph recall source. Time is the server's wall clock.";
+
+/// `plugmem_show` tool description.
+pub const SHOW_TOOL: &str = "Return one fact's full card by id — text, both time axes \
+(recorded_at, valid_from/valid_to) and state. A missing id is a tool error.";
+
+/// `plugmem_export` tool description.
+pub const EXPORT_TOOL: &str = "Dump every currently-open fact as a JSON array (text, entity, tags, \
+recorded_at, valid_from). The counterpart of the CLI's JSONL export; useful for backup or \
+inspection.";
+
+/// `plugmem_maintain` tool description.
+pub const MAINTAIN_TOOL: &str = "Purge tombstoned facts, compact storage, and build the vector \
+index past its threshold. Returns a report (purged count, bytes before/after). Time is the \
+server's wall clock.";
+
+/// `plugmem_checkpoint` tool description.
+pub const CHECKPOINT_TOOL: &str = "Flush the journal into a fresh snapshot and clear it, leaving \
+the database checkpointed (read-ready for other processes). Returns ok.";
+
+/// `plugmem_verify` tool description.
+pub const VERIFY_TOOL: &str = "Check content integrity (fact text is valid UTF-8, the vector↔fact \
+mapping is consistent). A tool error on damage; ok otherwise.";
+
+// ── Argument descriptions ─────────────────────────────────────────────────
+
+pub const ARG_TEXT: &str = "The fact text to store (required). One clear statement.";
+pub const ARG_ENTITY: &str = "Subject entity name the fact is about (created lazily on first \
+mention). Optional.";
+pub const ARG_TAGS: &str = "Verbatim tag strings (≤ 32). In recall they filter (a fact must carry \
+all of them); they are not a ranking source.";
+pub const ARG_LINKS: &str = "Typed edges from this fact's subject entity, as an array of \
+{ \"rel\": \"...\", \"entity\": \"...\" } (≤ 16). Optional.";
+pub const ARG_VALID_FROM: &str =
+    "Validity start, unix milliseconds (the truth axis). Defaults to now.";
+pub const ARG_QUERY: &str = "Free-text query for the lexical/semantic sources. Optional — a recall \
+can filter by tags/entities/time alone.";
+pub const ARG_ENTITIES: &str = "Entity anchors for the graph source (relational expansion).";
+pub const ARG_AS_OF: &str =
+    "Validity instant, unix milliseconds — recall what was true *then*. Defaults to now.";
+pub const ARG_RANGE: &str = "`recorded_at` window as [from, to) in unix milliseconds (the knowledge \
+axis) for the temporal source.";
+pub const ARG_K: &str = "Max facts to return (0 or omitted = 8; hard ceiling 64).";
+pub const ARG_CLOSED: &str =
+    "Include closed revisions too (whole chains, marked by intervals). Default false.";
+pub const ARG_ID: &str = "The fact id (as printed by remember, or the `[fN]` in a recall block).";
+pub const ARG_SRC: &str = "Source entity name (created lazily).";
+pub const ARG_REL: &str = "Relation term, verbatim (e.g. \"works_at\").";
+pub const ARG_DST: &str = "Destination entity name (created lazily).";
