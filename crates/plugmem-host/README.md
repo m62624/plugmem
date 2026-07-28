@@ -91,6 +91,13 @@ let (db, _report) = Database::builder(cfg)
 // quantized and indexed:
 db.remember(RememberInput::text(1_784_000_000_000, "prefers tokio"))?;
 
+// Bulk load: the whole batch is embedded in one round-trip and the
+// journal is fsynced once (not per fact) — the write path for `import`:
+db.remember_many(vec![
+    RememberInput::text(1_784_000_050_000, "uses pinned versions"),
+    RememberInput::text(1_784_000_060_000, "lives in Berlin"),
+])?;
+
 // The query text is embedded too; recall fuses lexical, vector, graph
 // and temporal evidence into one ranked, token-budgeted block:
 let out = db.recall(RecallQuery::text(1_784_000_100_000, "which runtime?"))?;

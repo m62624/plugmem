@@ -111,9 +111,10 @@ plugmem-cli recall "old runtime note"   # → - [f3] prefers deno …
 plugmem-cli forget 3                     # the 3 from [f3]
 plugmem-cli maintain
 
-# Human-readable backup and restore:
+# Human-readable backup and restore. export streams line by line; import
+# streams the file back in batches (one embed round-trip + one fsync each):
 plugmem-cli export > backup.jsonl
-plugmem-cli --db other.plugmem import backup.jsonl
+plugmem-cli --db other.plugmem import backup.jsonl --batch 256
 
 # Integrity & recovery (exit 2 on corruption — scriptable as a gate):
 plugmem-cli verify                       # content consistency
