@@ -10,9 +10,6 @@
 #     separate process; tarpaulin's ptrace engine cannot attribute a
 #     subprocess's executed lines back to source, so their src/ would always
 #     read ~0% despite being covered. Excluding them keeps the number honest.
-#   * crates/plugmem-wasm/* — the cdylib bridge runs inside a wasm runtime
-#     (Node smoke tests), outside tarpaulin's reach; its pure logic is kept
-#     thin by design (specs/06) and exercised via the rlib where possible.
 #   * crates/*/tests/* — we measure the code under test, not the tests.
 #
 # Coverage mandate (specs/07): 100% of *executable* lines for plugmem-arena
@@ -33,7 +30,6 @@ output-dir = "coverage"
 exclude-files = [
     "crates/plugmem-cli/src/main.rs",
     "crates/plugmem-mcp/*",
-    "crates/plugmem-wasm/*",
     "crates/*/tests/*",
     # The cross-runtime reproduction stand and its runner: measurement
     # tooling, not the library under test. The stand is exercised by

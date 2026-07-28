@@ -248,50 +248,6 @@ jobs:
       - name: Publish all workspace crates
         run: cargo publish --workspace --locked
 
-  # Publish the wasm/npm package over OIDC trusted publishing (no NPM_TOKEN).
-  # NOTE: the *first* publish of a new package name cannot use OIDC (the
-  # trusted publisher is configured on the package page, which does not exist
-  # yet) — do that one manually/locally with an npm token, then configure
-  # trusted publishing; this job handles every release after that.
-  # `prepare`'s `cargo set-version --workspace` already bumped the wasm crate
-  # to the release version, so the published npm version tracks the workspace.
-  publish-npm:
-    name: Publish npm package
-    needs: [prepare, tag, dist]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.prepare.outputs.tag }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
-      - name: Use latest npm (trusted publishing needs a recent CLI)
-        run: npm install -g npm@latest
-      - name: Install wasm-pack
-        run: npm install -g wasm-pack
-      - name: Build and assemble the npm package
-        working-directory: crates/plugmem-wasm
-        run: node scripts/build-npm.mjs
-      - name: Publish (skip if this version already exists)
-        working-directory: crates/plugmem-wasm/pkg
-        run: |
-          NAME="$(node -p "require('./package.json').name")"
-          VERSION="$(node -p "require('./package.json').version")"
-          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
-            echo "Skipping $NAME@$VERSION — already published on npm."
-          else
-            npm publish --access public
-          fi
-
   sync:
     name: Sync PR to main
     needs: [prepare, dist, publish-crates]

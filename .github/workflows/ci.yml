@@ -224,9 +224,7 @@ jobs:
   # Structural skill gate, first thing on every PR: skill/SKILL.md must exist,
   # carry a well-formed `<!-- skill-version -->` marker and fit the Agent
   # Skills frontmatter limits. Version EQUALITY with the workspace is enforced
-  # twice elsewhere: on every `cargo test` (a plugmem-wasm unit test embeds the
-  # skill and compares the marker to the crate version) and at release time
-  # against the version being cut (release.yml `skill-check`).
+  # at release time against the version being cut (release.yml `skill-check`).
   skill-lint:
     name: skill structure
     runs-on: ubuntu-latest
@@ -264,31 +262,6 @@ jobs:
           puts "OK: name #{name.length}/64, description #{desc.length}/1024"
           RUBY
 
-  # Build the npm/wasm package the way a release does (wasm-pack + assemble) and
-  # smoke-test it through Node, so the published artifact can never silently rot.
-  wasm-npm:
-    name: wasm npm build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.ref || github.ref }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 22
-      - name: Install wasm-pack
-        run: npm install -g wasm-pack
-      - name: Build and assemble the npm package
-        working-directory: crates/plugmem-wasm
-        run: node scripts/build-npm.mjs
-      - name: Test the package through Node
-        working-directory: crates/plugmem-wasm
-        run: node --test test/smoke.test.mjs
-
   dist-plan:
     name: cargo-dist plan
     runs-on: ubuntu-latest
@@ -311,7 +284,7 @@ jobs:
   ci-pass:
     name: CI passed
     if: always()
-    needs: [check, no_std, wasm-suite, wasm-equivalence, skill-lint, wasm-npm, dist-plan]
+    needs: [check, no_std, wasm-suite, wasm-equivalence, skill-lint, dist-plan]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any required job did not succeed
@@ -323,8 +296,7 @@ jobs:
           echo "  wasm-suite       = ${{ needs.wasm-suite.result }}"
           echo "  wasm-equivalence = ${{ needs.wasm-equivalence.result }}"
           echo "  skill-lint       = ${{ needs.skill-lint.result }}"
-          echo "  wasm-npm         = ${{ needs.wasm-npm.result }}"
           echo "  dist-plan        = ${{ needs.dist-plan.result }}"
           exit 1
       - name: All required jobs passed
-        run: echo "lint + test (3 OSes × feature matrix), no_std, wasm suite (wasmtime+wasmer), cross-target equivalence, skill, npm and dist-plan are green."
+        run: echo "lint + test (3 OSes × feature matrix), no_std, wasm suite (wasmtime+wasmer), cross-target equivalence, skill and dist-plan are green."

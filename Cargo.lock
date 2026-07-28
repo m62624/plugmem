@@ -1162,15 +1162,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "plugmem-wasm"
-version = "0.1.0"
-dependencies = [
- "js-sys",
- "plugmem-core",
- "wasm-bindgen",
-]
-
-[[package]]
 name = "plugmem-wasm-probe"
 version = "0.1.0"
 dependencies = [
