@@ -1,32 +1,38 @@
-//! The `Plugmem` class: a 1:1 napi mirror of plugmem-host's [`Database`].
+//! The `Plugmem` class: a 1:1 napi mirror of plugmem-host's [`Database`] (and,
+//! in read-only mode, [`ReadOnlyDatabase`]).
 //!
 //! Every method wraps the identically-named host verb — the engine logic is
 //! 100% `plugmem-host`; this layer only marshals arguments and results across
 //! the Node boundary. Inputs are typed `#[napi(object)]` structs so napi emits
 //! precise TypeScript interfaces (autocomplete in a TS host like Pi); results
-//! come back as native JS objects (host result types serialize through serde).
-//! A [`HostError`] becomes a thrown JS `Error`; the clock is the system clock,
-//! read per call (the engine keeps none), exactly as the MCP server does.
+//! come back as the typed mirrors in [`crate::types`]. A [`HostError`] becomes a
+//! thrown JS `Error`; the clock is the system clock, read per call (the engine
+//! keeps none), exactly as the MCP server does.
 //!
-//! N1 covers the writer verbs. Read-only mode and async offloading land in the
-//! next milestones.
+//! Opened `readOnly`, the instance observes another process's writer over a
+//! shared snapshot: the read verbs answer, the write verbs throw, and the two
+//! freshness verbs (`generation`/`refresh`) become available. Async offloading
+//! lands in the next milestone.
 
 use napi::{Error, Result};
 use napi_derive::napi;
-use plugmem_host::{Config, Database, FactId, HostError, LinkInput, RecallQuery, RememberInput};
+use plugmem_host::{
+    Config, Database, FactId, HostError, LinkInput, ReadOnlyDatabase, RecallQuery, RememberInput,
+};
 
 use crate::types::{
     self, ExportedFact, FactSnapshot, MaintainReport, RecallResult, RememberOutcome, Stats,
 };
 
-/// Options for [`Plugmem::new`]. `dim` is the embedding width (0 = vectors off,
-/// the default); the embedder and the rest of the engine config arrive with the
-/// shared settings loader in a later milestone.
+/// Options for [`Plugmem::new`].
 #[napi(object)]
 #[derive(Default)]
 pub struct OpenOptions {
     /// Embedding dimension (`Config::dim`). Omit or 0 to keep vectors off.
     pub dim: Option<u32>,
+    /// Open read-only over another process's writer (requires a checkpointed
+    /// database). The write verbs then throw; `generation`/`refresh` appear.
+    pub read_only: Option<bool>,
 }
 
 /// One typed edge on a remembered fact: `entity` gains relation `rel`.
@@ -85,38 +91,61 @@ pub struct LinkArgs {
     pub dst: String,
 }
 
-/// A read-write memory over one plugmem file — the napi mirror of
-/// [`plugmem_host::Database`]. Construct it, then call the verbs.
+/// The open handle behind a [`Plugmem`]: a read-write writer, or a read-only
+/// observer of another process's writer. `Reader` is boxed — a
+/// [`ReadOnlyDatabase`] owns a memory map and is far larger than the writer's
+/// `Arc` handle, so boxing keeps the two variants close in size.
+enum Handle {
+    Writer(Database),
+    Reader(Box<ReadOnlyDatabase>),
+}
+
+/// A memory over one plugmem file — the napi mirror of [`plugmem_host::Database`]
+/// (writer) or [`plugmem_host::ReadOnlyDatabase`] (with `{ readOnly: true }`).
+/// Construct it, call the verbs, and `close()` it to release the file when done.
 #[napi]
 pub struct Plugmem {
-    db: Database,
+    /// `None` once `close()`d — every verb then throws "memory is closed".
+    handle: Option<Handle>,
 }
 
 #[napi]
 impl Plugmem {
     /// Opens (or creates) the memory at `path`.
     ///
-    /// @throws if the file is locked by another writer, or on a config/IO error.
+    /// @throws if the file is locked by another writer, if `readOnly` is set on a
+    /// database with no published snapshot, or on a config/IO error.
     #[napi(constructor)]
     pub fn new(path: String, options: Option<OpenOptions>) -> Result<Self> {
+        let options = options.unwrap_or_default();
         let mut cfg = Config::default();
-        if let Some(dim) = options.and_then(|o| o.dim) {
+        if let Some(dim) = options.dim {
             cfg.dim = dim as usize;
         }
-        let (db, _report) = Database::open(path, cfg).map_err(to_napi_err)?;
-        Ok(Self { db })
+        let handle = if options.read_only.unwrap_or(false) {
+            let ro = Database::open_readonly(path.as_str(), cfg).map_err(to_napi_err)?;
+            Handle::Reader(Box::new(ro))
+        } else {
+            let (db, _report) = Database::open(path.as_str(), cfg).map_err(to_napi_err)?;
+            Handle::Writer(db)
+        };
+        Ok(Self {
+            handle: Some(handle),
+        })
     }
 
     /// Stores a fact; returns its id plus similar/conflicting live facts.
+    /// @throws in read-only mode.
     #[napi]
     pub fn remember(&self, args: RememberArgs) -> Result<RememberOutcome> {
-        do_remember(&self.db, &args, None)
+        do_remember(self.writer()?, &args, None)
     }
 
     /// Closes fact `id` and records `args` as its successor; returns the outcome.
+    /// @throws in read-only mode.
     #[napi]
     pub fn revise(&self, id: u32, args: RememberArgs) -> Result<RememberOutcome> {
-        do_remember(&self.db, &args, Some(FactId(id)))
+        do_remember(self.writer()?, &args, Some(FactId(id)))
     }
 
     /// Ranked, fused recall. Returns the structured result (its `rendered` field
@@ -143,20 +172,27 @@ impl Plugmem {
             include_closed: args.closed.unwrap_or(false),
             ef: None,
         };
-        types::to_typed(&self.db.recall(q).map_err(to_napi_err)?)
+        let res = match self.handle()? {
+            Handle::Writer(db) => db.recall(q),
+            Handle::Reader(db) => db.recall(q),
+        }
+        .map_err(to_napi_err)?;
+        types::to_typed(&res)
     }
 
     /// Tombstones fact `id` (physically purged at the next `maintain`). Returns
-    /// whether it was a live fact.
+    /// whether it was a live fact. @throws in read-only mode.
     #[napi]
     pub fn forget(&self, id: u32) -> Result<bool> {
-        self.db.forget(now_ms(), FactId(id)).map_err(to_napi_err)
+        self.writer()?
+            .forget(now_ms(), FactId(id))
+            .map_err(to_napi_err)
     }
 
-    /// Upserts a typed edge `src -rel-> dst`.
+    /// Upserts a typed edge `src -rel-> dst`. @throws in read-only mode.
     #[napi]
     pub fn link(&self, args: LinkArgs) -> Result<()> {
-        self.db
+        self.writer()?
             .link(LinkInput {
                 now: now_ms(),
                 src: &args.src,
@@ -170,7 +206,11 @@ impl Plugmem {
     /// One fact's full card by `id`, or `null` if unknown/tombstoned.
     #[napi]
     pub fn get(&self, id: u32) -> Result<Option<FactSnapshot>> {
-        match self.db.get(FactId(id)) {
+        let snap = match self.handle()? {
+            Handle::Writer(db) => db.get(FactId(id)),
+            Handle::Reader(db) => db.get(FactId(id)),
+        };
+        match snap {
             Some(snap) => Ok(Some(types::to_typed(&snap)?)),
             None => Ok(None),
         }
@@ -179,32 +219,97 @@ impl Plugmem {
     /// Engine size counters.
     #[napi]
     pub fn stats(&self) -> Result<Stats> {
-        types::to_typed(&self.db.stats())
+        let stats = match self.handle()? {
+            Handle::Writer(db) => db.stats(),
+            Handle::Reader(db) => db.stats(),
+        };
+        types::to_typed(&stats)
     }
 
     /// Every currently-open fact, as an array (id-free, import-ready).
     #[napi]
     pub fn export(&self) -> Result<Vec<ExportedFact>> {
-        types::to_typed(&self.db.export())
-    }
-
-    /// Purges tombstones, compacts, and builds the vector index; returns the
-    /// before/after report.
-    #[napi]
-    pub fn maintain(&self) -> Result<MaintainReport> {
-        types::to_typed(&self.db.maintain(now_ms()).map_err(to_napi_err)?)
-    }
-
-    /// Flushes the journal into a fresh snapshot.
-    #[napi]
-    pub fn checkpoint(&self) -> Result<()> {
-        self.db.checkpoint(now_ms()).map_err(to_napi_err)
+        let facts = match self.handle()? {
+            Handle::Writer(db) => db.export(),
+            Handle::Reader(db) => db.export(),
+        };
+        types::to_typed(&facts)
     }
 
     /// Content-integrity check; throws on the first inconsistency found.
     #[napi]
     pub fn verify(&self) -> Result<()> {
-        self.db.verify().map_err(to_napi_err)
+        match self.handle()? {
+            Handle::Writer(db) => db.verify(),
+            Handle::Reader(db) => db.verify(),
+        }
+        .map_err(to_napi_err)
+    }
+
+    /// Purges tombstones, compacts, and builds the vector index; returns the
+    /// before/after report. @throws in read-only mode.
+    #[napi]
+    pub fn maintain(&self) -> Result<MaintainReport> {
+        types::to_typed(&self.writer()?.maintain(now_ms()).map_err(to_napi_err)?)
+    }
+
+    /// Flushes the journal into a fresh snapshot. @throws in read-only mode.
+    #[napi]
+    pub fn checkpoint(&self) -> Result<()> {
+        self.writer()?.checkpoint(now_ms()).map_err(to_napi_err)
+    }
+
+    /// The pinned snapshot generation (read-only mode only).
+    /// @throws on a writer.
+    #[napi]
+    pub fn generation(&self) -> Result<f64> {
+        Ok(self.reader()?.generation() as f64)
+    }
+
+    /// Advance to the writer's latest published checkpoint (read-only mode only);
+    /// returns whether a newer generation was adopted. @throws on a writer.
+    #[napi]
+    pub fn refresh(&mut self) -> Result<bool> {
+        match self.handle_mut()? {
+            Handle::Reader(db) => db.refresh().map_err(to_napi_err),
+            Handle::Writer(_) => Err(writer_only_error("refresh")),
+        }
+    }
+
+    /// Releases the file and its lock. Every verb afterwards throws; calling it
+    /// again is a no-op. (The handle is also released when the object is GC'd,
+    /// but `close()` makes the moment explicit — e.g. before a read-only reopen.)
+    #[napi]
+    pub fn close(&mut self) {
+        self.handle = None;
+    }
+
+    // ── internals ─────────────────────────────────────────────────────────
+
+    /// The open handle, or a "closed" error.
+    fn handle(&self) -> Result<&Handle> {
+        self.handle.as_ref().ok_or_else(closed_error)
+    }
+
+    /// The open handle by exclusive reference (for `refresh`), or "closed".
+    fn handle_mut(&mut self) -> Result<&mut Handle> {
+        self.handle.as_mut().ok_or_else(closed_error)
+    }
+
+    /// The writer handle, or a read-only / closed error.
+    fn writer(&self) -> Result<&Database> {
+        match self.handle()? {
+            Handle::Writer(db) => Ok(db),
+            Handle::Reader(_) => Err(read_only_error()),
+        }
+    }
+
+    /// The read-only handle, or a writer / closed error.
+    fn reader(&self) -> Result<&ReadOnlyDatabase> {
+        match self.handle()? {
+            Handle::Reader(db) => Ok(&**db),
+            Handle::Writer(_) => Err(writer_only_error("generation")),
+        }
     }
 }
 
@@ -251,6 +356,21 @@ fn str_refs(v: &Option<Vec<String>>) -> Vec<&str> {
 /// A host error as a thrown JS `Error` (the message is the host's own text).
 fn to_napi_err(e: HostError) -> Error {
     Error::from_reason(e.to_string())
+}
+
+/// The error a write verb throws on a read-only handle.
+fn read_only_error() -> Error {
+    Error::from_reason("this memory is open read-only; writes are refused")
+}
+
+/// The error a read-only-only verb (`generation`/`refresh`) throws on a writer.
+fn writer_only_error(verb: &str) -> Error {
+    Error::from_reason(format!("`{verb}` is only available in read-only mode"))
+}
+
+/// The error every verb throws after `close()`.
+fn closed_error() -> Error {
+    Error::from_reason("this memory is closed")
 }
 
 /// Wall-clock now in unix milliseconds (the engine keeps no clock).
