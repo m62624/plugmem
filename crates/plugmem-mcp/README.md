@@ -1,0 +1,168 @@
+# plugmem-mcp
+
+`plugmem-mcp` is the [Model Context Protocol](https://modelcontextprotocol.io)
+server over the plugmem [temporal-memory engine](https://docs.rs/plugmem-core/latest)
+— a thin, long-lived shell around
+[`plugmem-host`](https://docs.rs/plugmem-host/latest) that exposes a memory to
+**AI agents and any non-Rust program** as MCP tools over stdio JSON-RPC. The
+engine stays resident for the process's lifetime, so every call is host speed.
+
+The installed binary is **`plugmem-mcp`**.
+
+## Which door is this? (read before reaching for MCP)
+
+plugmem is **embedded-first, like SQLite** — the fastest, simplest path is to
+link the engine into your process, not to talk to a server.
+
+| You are… | Use | Why |
+|---|---|---|
+| **an agent, or a program in another language** (Python, Node, Go…) that wants a memory | **`plugmem-mcp`** (this binary) | Spawn the process, speak JSON-RPC on its stdin/stdout. Language-independent; the memory stays resident. |
+| **writing Rust** | [`plugmem-host`](https://docs.rs/plugmem-host/latest) — embed it as a dependency | The engine *in your process*, like linking SQLite. Maximum speed, no pipe, no second process. **Don't** front your own Rust with MCP. |
+| a person at a **terminal or shell script** | [`plugmem-cli`](https://docs.rs/plugmem-cli/latest) | The human/scripting door. **Not** the door for programmatic or cross-language access — that's MCP. |
+| **JavaScript / the browser** | `plugmem-wasm` | The engine compiled to WebAssembly, in-process. |
+
+So: **another language → MCP; Rust → embed the host lib; a human → the CLI.**
+The MCP server's main consumer is the agent itself. And whichever door you use,
+you are tending *your own* memory file — plugmem keeps no server of its own.
+
+## What is (and isn't) MCP here
+
+- A **sidecar process, not a daemon.** The host (Claude Desktop, an IDE, an
+  agent runner) *spawns* `plugmem-mcp` and talks to it over stdin/stdout. It
+  listens on no port and serves **one memory file** for its lifetime. When the
+  host goes away, so does the sidecar.
+- **Many readers / many languages = many processes**, coordinated by plugmem's
+  file-level MVCC (immutable snapshot generations + an advisory writer lock),
+  *not* one network server. There is deliberately no network mode: that would
+  add ports, auth and a connection pool for no embedded-use benefit.
+- **No tokio.** The engine is CPU-bound (microseconds over an mmap) and its one
+  I/O wait — the embedder HTTP call — is blocking and runs *outside* the engine
+  lock. Concurrency is OS threads: one reader thread feeds a worker pool.
+
+## What recall does
+
+Recall fuses four sources by reciprocal-rank fusion with a recency boost (tags
+filter; they are not a source):
+
+| Source | Algorithm | What it finds |
+|---|---|---|
+| **Lexical** | [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) over a Unicode ([UAX #29](https://unicode.org/reports/tr29/)) tokenizer | exact terms / keyword overlap |
+| **Semantic** | int8-quantized cosine — flat below a threshold, an [HNSW](https://arxiv.org/abs/1603.09320) graph above | meaning / nearest neighbours |
+| **Graph** | entity graph with typed edges, breadth-first from query anchors | relational knowledge |
+| **Temporal** | range scans over a `recorded_at`-ordered index; bitemporal validity | "what was true *then*", time windows |
+
+## Tools
+
+Every tool is named `plugmem_*` (so it never collides with another server's
+tools) and takes an optional `format` argument: `"json"` (default) returns
+compact machine JSON; `"human"` pretty-prints it (and, for `plugmem_recall`,
+returns the engine's prompt-ready block instead of the structured result).
+Result payloads ride in the MCP `content[].text` field; a tool-level failure
+sets `isError: true` so the model can read and react to it.
+
+**Writer mode** (default — a read-write memory of its own):
+
+| tool | what it does |
+|---|---|
+| `plugmem_remember` | store a fact (`text`, optional `entity`, `tags[]`, `links[]` of `{rel, entity}`, `valid_from`); returns the id + similar/conflicting facts |
+| `plugmem_recall` | ranked, token-budgeted recall (`query`, `tags[]`, `entities[]`, `as_of`, `range [from,to]`, `k`, `closed`) |
+| `plugmem_revise` | close fact `id`, record the successor (same args as remember + `id`) |
+| `plugmem_forget` | tombstone fact `id` (purged at the next maintain) |
+| `plugmem_link` | upsert a typed edge `src -rel-> dst` |
+| `plugmem_show` | one fact's full card by `id` |
+| `plugmem_stats` | engine size counters |
+| `plugmem_export` | every open fact as a JSON array |
+| `plugmem_maintain` | purge tombstones, compact, build the vector index |
+| `plugmem_checkpoint` | flush the journal into a fresh snapshot |
+| `plugmem_verify` | content-integrity check |
+| `plugmem_version` / `plugmem_about` | the running version; a pointer to the plugmem skill |
+
+**Read-only mode** (`--read-only` — observe another process's writer over a
+shared snapshot): `plugmem_recall`, `plugmem_show`, `plugmem_stats`,
+`plugmem_export`, `plugmem_verify`, plus `plugmem_generation` (the pinned
+snapshot generation) and `plugmem_refresh` (advance to the writer's latest
+published checkpoint). Write tools are refused with a tool-level error.
+
+The **fact id** on each `plugmem_recall` line (the `[fN]` in the human block, or
+the `"id"` field in JSON) is how you address a fact in `plugmem_revise`,
+`plugmem_forget` and `plugmem_show` — the usual "recall, then act" flow.
+
+## Usage
+
+The host spawns the binary and wires its arguments once, in its MCP config:
+
+```text
+plugmem-mcp [--db PATH] [--config PATH] [--read-only] [--workers N]
+```
+
+- `--db` — the memory file (else `$PLUGMEM_DB`, else `./plugmem.db`).
+- `--config` — a `config.toml` (else `$PLUGMEM_CONFIG`, else the XDG default).
+- `--read-only` — observe another process's writer (requires a checkpointed
+  database).
+- `--workers N` — worker threads (else `[server].workers`, else half the cores).
+
+A Claude Desktop / MCP-client config entry looks like:
+
+```json
+{
+  "mcpServers": {
+    "plugmem": {
+      "command": "plugmem-mcp",
+      "args": ["--db", "/home/me/agent.plugmem"]
+    }
+  }
+}
+```
+
+A failure to start (bad config, or the file already locked by another writer) is
+reported to stderr with a non-zero exit, so the spawning host sees the server
+did not come up.
+
+## Concurrency
+
+One reader thread pulls stdin lines into a channel; a pool of worker threads
+drains it, dispatches, and writes replies under a single stdout lock (so lines
+never interleave). Each worker holds a cheap handle — a writer clones the
+`Database` (an `Arc` around the engine's `RwLock`), a reader shares one snapshot
+(its own `RwLock` for concurrent reads, a `Mutex` for the embedder) — so
+independent requests overlap, with the embedder's HTTP call outside the engine
+lock. Replies carry their JSON-RPC `id`, so a client correlates them regardless
+of completion order.
+
+The pool defaults to `max(1, available_parallelism() / 2)` — half the machine's
+cores, leaving room for the agent, the OS and a local embedder rather than
+monopolizing the box. Override it with `[server].workers` or `--workers`.
+
+## Configuration
+
+Optional `config.toml`, found by `--config PATH`, then `$PLUGMEM_CONFIG`, then
+`$XDG_CONFIG_HOME/plugmem/config.toml` (all optional). The engine, embedder and
+maintenance sections are the **same** shared loader the CLI uses; MCP adds one
+`[server]` section.
+
+```toml
+[server]
+workers = 4            # worker threads (default: half the cores)
+
+[engine]
+dim = 768              # embedding size (0 = vectors off)
+
+[embedder]             # default: none — lexical/tags/graph/time still work
+kind = "ollama"        # ollama | openai | lmstudio | vllm | llamacpp | none
+url = "http://localhost:11434/v1"
+model = "nomic-embed-text"
+api_key_env = "OPENAI_API_KEY"
+
+[maintenance]
+snapshot_every_ops = 1024
+maintain_every_forgets = 100
+```
+
+The embedder unlocks the **vector** recall source; with `kind = "none"` (the
+default) recall still answers from lexical, tag, graph and temporal evidence.
+One OpenAI-compatible client covers Ollama, OpenAI, LM Studio, vLLM and
+llama.cpp-server. `$PLUGMEM_EMBEDDER` overrides `[embedder].kind`.
+
+## License
+
+MIT.

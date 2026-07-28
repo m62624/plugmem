@@ -45,7 +45,7 @@ when you need `no_std` or your own persistence.
 | A memory in Rust with **no `std`** or **your own storage** (browser, wasm host, custom persistence) | **`plugmem-core`** (this crate) | The engine only. You bring the `Storage` trait, the clock, file I/O and embedding — so you manage when the file opens and how memory loads. |
 | Just the **flat byte-pool containers** (sorted page arenas, blob heap, chunk pool, interner) | [`plugmem-arena`](https://docs.rs/plugmem-arena/latest) (`no_std`) | The storage substrate, engine-agnostic. |
 | A memory from a **terminal or shell script** | `plugmem-cli` (`plugmem`) | One file, no server; `plugmem repl` keeps the engine open for host speed. |
-| A memory for an **LLM agent** or a **non-Rust program** | `plugmem-mcp` | Long-lived stdio JSON-RPC; language-independent. |
+| A memory for an **LLM agent** or a **non-Rust program** | `plugmem-mcp` | Long-lived stdio JSON-RPC; language-independent. In Rust, embed the host lib instead. |
 | A memory in **JavaScript / the browser** | `plugmem-wasm` | The engine compiled to WebAssembly. |
 
 ## Who this is for

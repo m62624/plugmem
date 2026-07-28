@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "plugmem MCP server (stdio JSON-RPC)."
+readme = "README.md"
 keywords = ["plugmem", "mcp", "memory", "llm", "ai"]
 categories = ["command-line-utilities", "api-bindings", "database"]
 
