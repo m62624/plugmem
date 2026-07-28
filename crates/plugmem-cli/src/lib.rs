@@ -23,24 +23,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::Parser;
 use plugmem_host::{
     Database, ExportedFact, FactId, HostError, LinkInput, ReadOnlyDatabase, RecallQuery,
-    RecallResult, RememberInput, RememberOutcome, Stats, VALID_TO_OPEN,
+    RecallResult, RememberInput, RememberOutcome, Settings, Stats, VALID_TO_OPEN,
 };
 use serde_json::json;
 
 use crate::cli::{Cli, Command};
-use crate::config::{Settings, load_settings};
+use crate::config::read_batch_size;
 
 /// Environment variable naming the database file (below the `--db` flag).
 pub(crate) const ENV_DB: &str = "PLUGMEM_DB";
-/// Environment variable naming the config file (below the `--config` flag).
-pub(crate) const ENV_CONFIG: &str = "PLUGMEM_CONFIG";
-/// Environment variable selecting the embedder kind (above the config file).
-pub(crate) const ENV_EMBEDDER: &str = "PLUGMEM_EMBEDDER";
 /// Default database file when neither flag nor env is given.
 pub(crate) const DEFAULT_DB: &str = "plugmem.db";
-/// The app's config subdirectory and file, under `$XDG_CONFIG_HOME`.
-pub(crate) const CONFIG_DIR: &str = "plugmem";
-pub(crate) const CONFIG_FILE: &str = "config.toml";
 
 /// A failure before or during a command: a runtime engine/host error, or a
 /// usage error (a malformed argument the parser could not catch).
@@ -77,9 +70,17 @@ pub fn run() -> ExitCode {
 /// (`0` ok, `1` soft miss / locked, `2` error). Errors go to stderr.
 fn run_parsed(cli: Cli, out: &mut impl Write) -> u8 {
     let path = resolve_db_path(cli.db.as_deref());
-    let mut settings = match load_settings(&cli) {
+    // Read config.toml once: the shared loader builds engine/embedder/
+    // maintenance settings; the CLI reads its own `[maintenance].batch_size`
+    // from the same table (used by `import` below).
+    let table = match plugmem_host::read_config(cli.config.as_deref()) {
+        Ok(t) => t,
+        Err(e) => return report_err(&e.into()),
+    };
+    let cfg_batch_size = read_batch_size(table.as_ref());
+    let mut settings = match Settings::from_table(table.as_ref()) {
         Ok(s) => s,
-        Err(e) => return report_err(&e),
+        Err(e) => return report_err(&e.into()),
     };
 
     // `recover` is a standalone salvage on file paths — it opens the source
@@ -135,9 +136,8 @@ fn run_parsed(cli: Cli, out: &mut impl Write) -> u8 {
         }
     }
 
-    // Read the config batch size before `open` consumes `settings` (Import uses
-    // it below; the `--batch` flag still wins over it).
-    let cfg_batch_size = settings.maintenance.batch_size;
+    // `cfg_batch_size` was read from the config table above (before `open`
+    // consumes `settings`); the `--batch` flag still wins over it.
     let db = match settings.open(&path) {
         Ok(db) => db,
         Err(HostError::Locked { path }) => return report_locked(&path),
@@ -1121,11 +1121,13 @@ mod tests {
         }
     }
 
-    fn settings_with(embedder: Option<Box<dyn plugmem_host::Embedder>>) -> crate::config::Settings {
-        crate::config::Settings {
+    fn settings_with(embedder: Option<Box<dyn plugmem_host::Embedder>>) -> Settings {
+        Settings {
             config: Config::default(),
             embedder,
-            maintenance: crate::config::Maintenance::default(),
+            snapshot_every_ops: None,
+            snapshot_journal_bytes: None,
+            maintain_every_forgets: None,
         }
     }
 
@@ -1891,32 +1893,27 @@ mod tests {
     }
 
     #[test]
-    fn load_settings_reads_the_config_file() {
+    fn config_table_feeds_settings_and_the_cli_batch_size() {
+        // The CLI reads config.toml once (host `read_config`), builds the
+        // shared `Settings`, and pulls its own `batch_size` from the same
+        // table — the exact flow of `run_parsed`.
         let scratch = Scratch::new("settings");
         let cfgfile = scratch.0.join("config.toml");
         std::fs::write(
             &cfgfile,
-            "[engine]\ndim = 512\n[embedder]\nkind = \"none\"\n[maintenance]\nsnapshot_every_ops = 64\n",
+            "[engine]\ndim = 512\n[embedder]\nkind = \"none\"\n\
+             [maintenance]\nsnapshot_every_ops = 64\nbatch_size = 200\n",
         )
         .unwrap();
-        let cli = Cli {
-            db: None,
-            config: Some(cfgfile),
-            json: false,
-            command: Command::Stats,
-        };
-        let s = load_settings(&cli).unwrap();
+        let table = plugmem_host::read_config(Some(&cfgfile)).unwrap();
+        let s = Settings::from_table(table.as_ref()).unwrap();
         assert_eq!(s.config.dim, 512);
         assert!(s.embedder.is_none());
-        assert_eq!(s.maintenance.snapshot_every_ops, Some(64));
-        // an explicit --config that does not exist is a usage error
-        let cli = Cli {
-            db: None,
-            config: Some(scratch.0.join("nope.toml")),
-            json: false,
-            command: Command::Stats,
-        };
-        assert!(load_settings(&cli).is_err());
+        assert_eq!(s.snapshot_every_ops, Some(64));
+        assert_eq!(read_batch_size(table.as_ref()), Some(200));
+
+        // An explicit --config that does not exist is a usage error.
+        assert!(plugmem_host::read_config(Some(&scratch.0.join("nope.toml"))).is_err());
     }
 
     #[test]

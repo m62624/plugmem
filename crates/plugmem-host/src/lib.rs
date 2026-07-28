@@ -24,12 +24,16 @@ mod db;
 mod embedder;
 mod error;
 mod readonly;
+#[cfg(feature = "config")]
+mod settings;
 mod storage;
 
 pub use db::{Database, DatabaseBuilder, ExportedFact, FactSnapshot, RecoverReport};
 pub use embedder::{Embedder, NullEmbedder, OpenAiCompatEmbedder};
 pub use error::HostError;
 pub use readonly::{ReadOnlyDatabase, Scrub};
+#[cfg(feature = "config")]
+pub use settings::{Settings, SettingsError, read_config};
 pub use storage::{FileScratch, FileStorage, FsyncPolicy};
 
 // The engine types a host caller works with, re-exported so simple

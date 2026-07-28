@@ -28,12 +28,15 @@ path = "src/main.rs"
 [dependencies]
 # The CLI is a thin shell over the host, which re-exports every engine type
 # it needs (FactId, RecallQuery, …), so `plugmem-core` is not a direct dep.
-plugmem-host = { workspace = true }
+# `config` pulls the shared Settings loader (config.toml → engine/embedder/
+# maintenance); the CLI adds only its own `[maintenance].batch_size`.
+plugmem-host = { workspace = true, features = ["config"] }
 clap = { workspace = true }
 serde_json = { workspace = true }
-# The config file (config.toml). `toml::Table` parses via FromStr — no
-# serde derive needed.
-toml = "0.8"
+# The config file (config.toml): the CLI reads its own `batch_size` key from
+# the shared `plugmem_host::read_config` table. `toml::Table` parses via
+# FromStr — no serde derive needed.
+toml = { workspace = true }
 
 [lints]
 workspace = true
