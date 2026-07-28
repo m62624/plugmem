@@ -24,6 +24,7 @@ coverage:
 ignore:
   - "crates/plugmem-cli/src/main.rs"
   - "crates/plugmem-mcp"
+  - "crates/plugmem-napi"
   - "tools"
 
 comment:

@@ -10,6 +10,10 @@
 #     separate process; tarpaulin's ptrace engine cannot attribute a
 #     subprocess's executed lines back to source, so their src/ would always
 #     read ~0% despite being covered. Excluding them keeps the number honest.
+#   * crates/plugmem-napi/* — the `#[napi]` surface only runs when loaded as a
+#     `.node` addon inside a Node process (exercised by the JS smoke/verb tests
+#     in __test__/), which tarpaulin cannot attribute; the pure wrapper logic
+#     (e.g. the skill-version gate) is still covered by this crate's cargo tests.
 #   * crates/*/tests/* — we measure the code under test, not the tests.
 #
 # Coverage mandate (specs/07): 100% of *executable* lines for plugmem-arena
@@ -30,6 +34,7 @@ output-dir = "coverage"
 exclude-files = [
     "crates/plugmem-cli/src/main.rs",
     "crates/plugmem-mcp/*",
+    "crates/plugmem-napi/*",
     "crates/*/tests/*",
     # The cross-runtime reproduction stand and its runner: measurement
     # tooling, not the library under test. The stand is exercised by

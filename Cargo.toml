@@ -6,6 +6,7 @@ members = [
     "crates/plugmem-host",
     "crates/plugmem-cli",
     "crates/plugmem-mcp",
+    "crates/plugmem-napi",
     "crates/plugmem-testgen",
     "tools/bench-matrix",
     "tools/bench-charts",
@@ -59,6 +60,13 @@ serde_json = "1.0.150"
 # config.toml parsing, shared by the host `config` loader and the CLI. Parse
 # only — `toml::Table` via FromStr; no serializer needed.
 toml = { version = "0.8", default-features = false, features = ["parse"] }
+
+# Native Node.js addon (plugmem-napi): napi-rs bindings over plugmem-host.
+# Node-API version pinned to 8 (Node 12.22+/14.17+/16+; we build for 26). No
+# `async`/`tokio_rt` features — concurrency rides the libuv threadpool, not tokio.
+napi = { version = "2.16", default-features = false, features = ["napi8"] }
+napi-derive = "2.16"
+napi-build = "2.1"
 
 # Dev dependencies
 proptest = "1.11.0"

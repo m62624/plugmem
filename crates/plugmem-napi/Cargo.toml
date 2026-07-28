@@ -1,0 +1,30 @@
+[package]
+name = "plugmem-napi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Native Node.js addon (napi-rs) for the plugmem engine: plugmem-host exposed in-process to Node/Deno/Bun; published to npm as `plugmem`."
+# Published to npm (via @napi-rs/cli), not to crates.io.
+publish = false
+
+[lib]
+# cdylib: the `.node` addon. rlib: so native `cargo test` can exercise the
+# pure wrapper logic (e.g. the skill-version gate) without a Node runtime.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+napi = { workspace = true }
+napi-derive = { workspace = true }
+
+[build-dependencies]
+napi-build = { workspace = true }
+
+[lints]
+workspace = true
+
+# A native addon shipped to npm, not a cargo-dist binary — excluded from releases.
+[package.metadata.dist]
+dist = false
