@@ -323,6 +323,56 @@ fn recall_with_an_embedder_coexists_with_a_live_writer() {
 }
 
 #[test]
+fn import_streams_the_file_in_batches_one_http_each() {
+    let dim = 8;
+    // 5 facts imported with --batch 2 → ceil(5/2) = 3 embedder round-trips
+    // (batches of 2, 2, 1). The mock is told to serve exactly 3; `join` at the
+    // end proves it neither hung waiting for a 4th nor was hit by an extra.
+    let (url, server) = spawn_mock_embedder(dim, 3);
+    let tmp = TempDir::new("import-chunk");
+
+    let config = tmp.0.join("config.toml");
+    std::fs::write(
+        &config,
+        format!("[engine]\ndim = {dim}\n\n[embedder]\nkind = \"openai\"\nurl = \"{url}\"\nmodel = \"mock\"\n"),
+    )
+    .unwrap();
+
+    let facts = tmp.0.join("facts.jsonl");
+    let mut jsonl = String::new();
+    for i in 0..5 {
+        jsonl.push_str(&format!("{{\"text\":\"fact number {i}\"}}\n"));
+    }
+    std::fs::write(&facts, &jsonl).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_plugmem-cli"))
+        .arg("--db")
+        .arg(tmp.db())
+        .arg("--config")
+        .arg(&config)
+        .arg("import")
+        .arg(&facts)
+        .arg("--batch")
+        .arg("2")
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout(&out).contains("imported 5 facts"),
+        "{}",
+        stdout(&out)
+    );
+    // Exactly three round-trips were made.
+    server.join().unwrap();
+}
+
+#[test]
 fn repl_session_over_the_binary_runs_and_checkpoints_on_exit() {
     use std::io::Write as _;
     use std::process::Stdio;

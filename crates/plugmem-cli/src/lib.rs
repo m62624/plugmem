@@ -135,11 +135,36 @@ fn run_parsed(cli: Cli, out: &mut impl Write) -> u8 {
         }
     }
 
+    // Read the config batch size before `open` consumes `settings` (Import uses
+    // it below; the `--batch` flag still wins over it).
+    let cfg_batch_size = settings.maintenance.batch_size;
     let db = match settings.open(&path) {
         Ok(db) => db,
         Err(HostError::Locked { path }) => return report_locked(&path),
         Err(e) => return report_err(&CliError::Host(e)),
     };
+    // Import is dispatched here, not in `execute`: its batch size comes from the
+    // `--batch` flag or `[maintenance].batch_size` (flag > config > default).
+    if let Command::Import { file, batch } = &cli.command {
+        let batch_size = batch
+            .or(cfg_batch_size.map(|n| n as usize))
+            .unwrap_or(DEFAULT_IMPORT_BATCH)
+            .max(1);
+        return match do_import(&db, now_ms(), file, batch_size, out) {
+            Ok(n) => {
+                if cli.json {
+                    writeln!(out, "{}", json!({ "imported": n })).ok();
+                } else {
+                    writeln!(out, "imported {n} facts").ok();
+                }
+                0
+            }
+            Err(e) => {
+                let _ = out.flush();
+                report_err(&e)
+            }
+        };
+    }
     match execute(&db, &cli.command, cli.json, now_ms(), out) {
         Ok(code) => code,
         Err(e) => {
@@ -148,6 +173,10 @@ fn run_parsed(cli: Cli, out: &mut impl Write) -> u8 {
         }
     }
 }
+
+/// Default facts-per-batch for `import` when neither `--batch` nor
+/// `[maintenance].batch_size` is set — safe for provider batch limits.
+const DEFAULT_IMPORT_BATCH: usize = 128;
 
 /// Prints an error to stderr and returns its exit code (`2`).
 fn report_err(e: &CliError) -> u8 {
@@ -302,15 +331,6 @@ fn execute(
             render_export(&db.export(), json, out);
             Ok(0)
         }
-        Command::Import { file } => {
-            let n = do_import(db, now, file, out)?;
-            if json {
-                writeln!(out, "{}", json!({ "imported": n })).ok();
-            } else {
-                writeln!(out, "imported {n} facts").ok();
-            }
-            Ok(0)
-        }
         Command::Maintain => {
             let report = db.maintain(now)?;
             if json {
@@ -354,9 +374,12 @@ fn execute(
             }
             Ok(0)
         }
-        // Handled in `run_parsed` before the read-write open.
-        Command::Scrub | Command::Recover { .. } | Command::Repl { .. } => {
-            unreachable!("scrub/recover/repl are dispatched before execute")
+        // Handled in `run_parsed` (Import needs `settings` for its batch size).
+        Command::Scrub
+        | Command::Recover { .. }
+        | Command::Repl { .. }
+        | Command::Import { .. } => {
+            unreachable!("scrub/recover/repl/import are dispatched before execute")
         }
     }
 }
@@ -887,47 +910,99 @@ fn render_export(facts: &[ExportedFact], _json: bool, out: &mut impl Write) {
     }
 }
 
-/// Loads facts from a JSONL file (as written by `export`), re-`remember`ing
-/// each. Returns the count imported. A malformed line is a usage error.
+/// Loads facts from a JSONL file (as written by `export`) in **streamed
+/// batches** of `batch_size`: the file is read line-by-line (memory bounded to
+/// a batch, not the whole file), and each full batch is one
+/// [`remember_many`](Database::remember_many) — one embedder round-trip and one
+/// journal fsync, instead of per fact. Returns the count imported. A malformed
+/// line is a usage error naming its 1-based number.
 fn do_import(
     db: &Database,
     now: u64,
     file: &std::path::Path,
+    batch_size: usize,
     _out: &mut impl Write,
 ) -> Result<usize, CliError> {
-    let text = std::fs::read_to_string(file)
+    let f = std::fs::File::open(file)
         .map_err(|e| CliError::Usage(format!("reading {}: {e}", file.display())))?;
+    let reader = io::BufReader::new(f);
     let mut count = 0usize;
-    for (i, line) in text.lines().enumerate() {
+    let mut batch: Vec<ParsedFact> = Vec::with_capacity(batch_size);
+    for (i, line) in reader.lines().enumerate() {
+        let line = line.map_err(|e| CliError::Usage(format!("line {}: {e}", i + 1)))?;
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let v: serde_json::Value = serde_json::from_str(line)
-            .map_err(|e| CliError::Usage(format!("line {}: {e}", i + 1)))?;
-        let fact_text = v["text"]
-            .as_str()
-            .ok_or_else(|| CliError::Usage(format!("line {}: missing string \"text\"", i + 1)))?;
-        let entity = v["entity"].as_str();
-        let tags: Vec<String> = v["tags"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|t| t.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
-        let valid_from = v["valid_from"].as_u64();
-        db.remember(RememberInput {
-            entity,
-            tags: &tag_refs,
-            valid_from,
-            ..RememberInput::text(now, fact_text)
-        })?;
-        count += 1;
+        batch.push(parse_import_line(line, i + 1)?);
+        if batch.len() >= batch_size {
+            count += flush_import_batch(db, now, &batch)?;
+            batch.clear();
+        }
     }
+    count += flush_import_batch(db, now, &batch)?;
     Ok(count)
+}
+
+/// One parsed JSONL fact, owned so a whole batch can be buffered before its
+/// `remember_many`.
+struct ParsedFact {
+    text: String,
+    entity: Option<String>,
+    tags: Vec<String>,
+    valid_from: Option<u64>,
+}
+
+/// Parses one JSONL line into an owned fact. Bad JSON, or a missing/non-string
+/// `text`, is a usage error naming the 1-based line.
+fn parse_import_line(line: &str, lineno: usize) -> Result<ParsedFact, CliError> {
+    let v: serde_json::Value =
+        serde_json::from_str(line).map_err(|e| CliError::Usage(format!("line {lineno}: {e}")))?;
+    let text = v["text"]
+        .as_str()
+        .ok_or_else(|| CliError::Usage(format!("line {lineno}: missing string \"text\"")))?
+        .to_string();
+    let entity = v["entity"].as_str().map(String::from);
+    let tags = v["tags"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|t| t.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let valid_from = v["valid_from"].as_u64();
+    Ok(ParsedFact {
+        text,
+        entity,
+        tags,
+        valid_from,
+    })
+}
+
+/// Writes one batch of parsed facts via `remember_many` (one embed round-trip,
+/// one fsync). Returns how many were written; an empty batch is a no-op.
+fn flush_import_batch(db: &Database, now: u64, batch: &[ParsedFact]) -> Result<usize, CliError> {
+    if batch.is_empty() {
+        return Ok(0);
+    }
+    // Per-fact `&[&str]` tag slices must outlive the `remember_many` call.
+    let tag_refs: Vec<Vec<&str>> = batch
+        .iter()
+        .map(|p| p.tags.iter().map(String::as_str).collect())
+        .collect();
+    let inputs: Vec<RememberInput> = batch
+        .iter()
+        .zip(&tag_refs)
+        .map(|(p, tags)| RememberInput {
+            entity: p.entity.as_deref(),
+            tags,
+            valid_from: p.valid_from,
+            ..RememberInput::text(now, &p.text)
+        })
+        .collect();
+    db.remember_many(inputs)?;
+    Ok(batch.len())
 }
 
 /// Shared `remember`/`revise` body: build the input and dispatch.
@@ -1716,7 +1791,7 @@ mod tests {
 
         // Import into a fresh B.
         let (b, _tb) = TempDb::open();
-        let n = do_import(&b, 9_000, &file, &mut Vec::new()).unwrap();
+        let n = do_import(&b, 9_000, &file, 128, &mut Vec::new()).unwrap();
 
         // Both sides, compared as sets keyed by the preserved fields.
         let key = |f: &ExportedFact| {
@@ -1771,15 +1846,41 @@ mod tests {
             "{\"text\":\"from jsonl\",\"entity\":\"user\",\"tags\":[\"x\"],\"valid_from\":42}\n\n{\"text\":\"second\"}\n",
         )
         .unwrap();
-        let (code, out) = run_cmd(&db, &Command::Import { file: good }, false, 9_000);
-        assert_eq!(code, 0);
-        assert!(out.contains("imported 2 facts"), "{out}");
+        // A tiny batch size exercises the streaming/chunking path (two batches).
+        let n = do_import(&db, 9_000, &good, 1, &mut Vec::new()).unwrap();
+        assert_eq!(n, 2, "both facts imported, blank line skipped");
 
         let bad = scratch.0.join("bad.jsonl");
         std::fs::write(&bad, "not json at all\n").unwrap();
-        let mut buf = Vec::new();
-        let err = execute(&db, &Command::Import { file: bad }, false, 9_000, &mut buf).unwrap_err();
+        let err = do_import(&db, 9_000, &bad, 128, &mut Vec::new()).unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn import_batch_size_does_not_change_the_result() {
+        // The chunk size is a performance knob only: importing the same file with
+        // batch 1 and batch 100 yields the identical fact set.
+        let scratch = Scratch::new("import-batch");
+        let file = scratch.0.join("facts.jsonl");
+        let mut jsonl = String::new();
+        for i in 0..5 {
+            jsonl.push_str(&format!("{{\"text\":\"fact number {i}\"}}\n"));
+        }
+        std::fs::write(&file, &jsonl).unwrap();
+
+        let (a, _ta) = TempDb::open();
+        let (b, _tb) = TempDb::open();
+        let na = do_import(&a, 9_000, &file, 1, &mut Vec::new()).unwrap();
+        let nb = do_import(&b, 9_000, &file, 100, &mut Vec::new()).unwrap();
+
+        assert_eq!(na, 5);
+        assert_eq!(nb, 5);
+        let texts = |db: &Database| {
+            let mut t: Vec<_> = db.export().into_iter().map(|f| f.text).collect();
+            t.sort();
+            t
+        };
+        assert_eq!(texts(&a), texts(&b), "batch size must not change the facts");
     }
 
     #[test]

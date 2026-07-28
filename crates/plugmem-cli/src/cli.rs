@@ -163,6 +163,12 @@ pub(crate) enum Command {
     Import {
         /// The JSONL file to read.
         file: PathBuf,
+        /// Facts per batch write: one embedder round-trip and one journal
+        /// fsync per batch, instead of per fact. The file is streamed in
+        /// batches of this size (bounded memory / bounded HTTP body). Default
+        /// 128; also settable via `[maintenance].batch_size`. Flag > config.
+        #[arg(long, value_name = "N")]
+        batch: Option<usize>,
     },
     /// Interactive session: open the database once and run commands from stdin
     /// (one per line, same grammar as the subcommands), keeping the engine in

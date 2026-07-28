@@ -44,6 +44,8 @@ pub(crate) struct Maintenance {
     pub(crate) snapshot_every_ops: Option<u64>,
     pub(crate) snapshot_journal_bytes: Option<u64>,
     pub(crate) maintain_every_forgets: Option<u64>,
+    /// Facts per batch for `import` (not an engine knob — read by the CLI).
+    pub(crate) batch_size: Option<u64>,
 }
 
 impl Maintenance {
@@ -62,6 +64,9 @@ impl Maintenance {
         }
         if let Some(v) = u(t, "maintain_every_forgets") {
             self.maintain_every_forgets = Some(v);
+        }
+        if let Some(v) = u(t, "batch_size") {
+            self.batch_size = Some(v);
         }
     }
 }
@@ -310,6 +315,7 @@ maintain_every_forgets = 3
                 snapshot_every_ops: Some(4),
                 snapshot_journal_bytes: Some(4096),
                 maintain_every_forgets: Some(2),
+                batch_size: None,
             },
         };
         let db = settings.open(&tmp.0.join("m.plugmem")).unwrap();

@@ -69,7 +69,7 @@ engine keeps no clock, so `now` comes from the system clock at each call.
 | `scrub` | check the snapshot's byte-level container checksums; exit 2 on the first damaged section |
 | `recover <DST>` | salvage a content-corrupt database into a clean `DST`; the source (`--db`) is left untouched |
 | `export` | dump the currently-open facts as JSONL (one per line) to stdout |
-| `import <FILE>` | load facts from a JSONL file (as written by `export`) |
+| `import <FILE> [--batch N]` | load facts from a JSONL file (as written by `export`), streamed in batches — one embed round-trip and one fsync per batch |
 
 **Fact ids.** A fact's id is how you address it in `forget`, `revise`, and
 `show`. `remember` prints it on store (`remembered fact 3`), and `recall`
@@ -187,7 +187,14 @@ api_key_env = "OPENAI_API_KEY"   # env var holding the bearer token (openai)
 snapshot_every_ops = 1024
 snapshot_journal_bytes = 4194304
 maintain_every_forgets = 100     # optional auto-purge
+batch_size = 128                 # facts per `import` batch (--batch overrides)
 ```
+
+`import` streams the file in batches of `batch_size` (default 128; `--batch N`
+overrides it): each batch is a single embedder round-trip and a single journal
+fsync, so a bulk load with an embedder makes one HTTP call per batch instead of
+one per fact, and the file is never fully read into memory. Larger batches mean
+fewer round-trips but a bigger request body and more memory per batch.
 
 The embedder is what unlocks the **vector** recall source: with `kind =
 "none"` (the default) `remember`/`recall` still answer from lexical, tag,
