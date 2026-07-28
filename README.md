@@ -3,10 +3,10 @@
 Temporal memory for LLM agents, as an embeddable library. plugmem stores
 short **facts** — with a subject entity, tags, an optional embedding and
 two time axes — and answers a query with a ranked, token-budgeted block
-ready to paste into a prompt. It runs in-process, keeps a whole database
-in one snapshot file plus an append-only journal, and needs no server and
-no disk of its own — the same engine runs on native, in WebAssembly, and
-in the browser.
+ready to paste into a prompt. It runs in-process and keeps a whole database
+in one snapshot file plus an append-only journal — no server, no daemon. The
+core is `no_std`, so the same engine runs natively, in WebAssembly and in the
+browser.
 
 It is **not** a vector database. A vector is one of four recall sources —
 lexical (BM25), vector, entity graph and time — fused with reciprocal-rank
@@ -25,18 +25,17 @@ fusion; tags act as filters. What plugmem is actually about:
   zero-allocation recall after warm-up, one file, no server; built and
   tested on `wasm32v1-none` and a real 32-bit wasm runtime in CI.
 
-**Where it fits — and where it doesn't.** plugmem is for the memory of a
-*local agent* or an *embedded system*: one process that remembers and recalls
-on the order of thousands to hundreds of thousands of facts, in a single file,
-with nothing to run. It is deliberately **not** a large-scale vector database —
-if you need approximate-nearest-neighbour search over tens of millions of
-embeddings, sharded across a cluster or behind a managed API, reach for a
-dedicated one ([Qdrant](https://qdrant.tech), [Milvus](https://milvus.io),
+**Where it fits — and where it doesn't.** plugmem holds the memory of a local
+agent or an embedded system: one process, one file, nothing to run. It targets a
+single machine — up to a few million facts (the flat storage layer is
+benchmarked to a million entries, recall to a hundred-thousand-op corpus) — not
+a distributed vector store. For nearest-neighbour search over tens of millions
+of embeddings, sharded across a cluster or behind a managed API, use a dedicated
+one ([Qdrant](https://qdrant.tech), [Milvus](https://milvus.io),
 [Weaviate](https://weaviate.io), [Pinecone](https://www.pinecone.io),
-[pgvector](https://github.com/pgvector/pgvector)). plugmem trades that scale
-for zero infrastructure, recall that fuses keyword + meaning + relationships +
-time (not vectors alone), and correctness over time — the shape an agent's
-memory actually needs.
+[pgvector](https://github.com/pgvector/pgvector)). plugmem trades that scale for
+zero infrastructure and recall that combines keyword, meaning, relationships and
+time, not vectors alone.
 
 ## Which crate do I need?
 
