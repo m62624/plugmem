@@ -87,6 +87,14 @@ The **fact id** on each `plugmem_recall` line (the `[fN]` in the human block, or
 the `"id"` field in JSON) is how you address a fact in `plugmem_revise`,
 `plugmem_forget` and `plugmem_show` — the usual "recall, then act" flow.
 
+**No `import` tool — that's the CLI's job.** `plugmem_export` returns the facts
+inline (no file needed), but bulk-**loading** from a `backup.jsonl` means reading
+a file *on the server's disk* — which a sandboxed or remote server can't see.
+So restoring/migrating a memory from a file is done with
+[`plugmem-cli import`](https://docs.rs/plugmem-cli/latest) (it has the disk, and
+streams the file in batches), not over MCP. An agent doesn't bulk-load anyway —
+it remembers facts one at a time with `plugmem_remember` as the conversation goes.
+
 ## Usage
 
 The host spawns the binary and wires its arguments once, in its MCP config:

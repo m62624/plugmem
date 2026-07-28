@@ -64,6 +64,11 @@ const ABOUT: &str = "plugmem_about";
 
 /// Every tool definition, in the order `tools/list` advertises them: the write
 /// verbs, then the read verbs, then the operational verbs, then meta.
+///
+/// There is deliberately no `import` tool: bulk-loading from a `backup.jsonl`
+/// reads a file on the server's disk, which a sandboxed/remote server can't see
+/// — restoring from a file is `plugmem-cli import` (it has the disk and streams
+/// in batches). `export` needs no file (facts ride in the reply). See the README.
 pub fn definitions() -> Vec<Value> {
     vec![
         remember_def(),
