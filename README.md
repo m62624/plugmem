@@ -200,19 +200,19 @@ If you pointed the installer somewhere else (`PLUGMEM_CLI_INSTALL_DIR` /
 directory instead. The installer may also have added the bin dir to your `PATH` —
 prune that line from your shell profile if nothing else uses it.
 
-## Principles
+## Design
 
-- **Fast is a number.** Every performance claim has a benchmark in-repo;
-  cross-runtime results (native / wasmtime / wasmer) reproduce with one
+- **Benchmarked, not asserted.** Performance claims have a benchmark in the
+  repo; the cross-runtime suite (native, wasmtime, wasmer) reproduces with one
   command.
-- **The memory image is the file format.** State lives in flat byte pools;
-  a snapshot is a `memcpy`, loading is validation plus adoption, and the
-  same file opens byte-identically on native, wasm32 and wasm64.
-- **Embedded first.** Single-threaded `no_std + alloc` core; OS concerns
-  stay in the thin `plugmem-host` layer.
-- **Untrusted input never panics.** Arbitrary bytes can produce any typed
-  `Error`, never a panic or UB; after a load every stored id is
-  range-checked.
+- **In-memory state is the on-disk format.** State lives in flat byte pools, so
+  a snapshot is a `memcpy` and loading is validation plus adoption; a file
+  opens byte-identically on native, wasm32 and wasm64.
+- **`no_std` core, OS in the host.** The engine is a single-threaded
+  `no_std + alloc` crate; files, mmap, locking and HTTP live only in the thin
+  `plugmem-host` layer.
+- **Corrupt input is a typed error, not a crash.** Arbitrary bytes yield some
+  `Error`, never a panic or UB; every stored id is range-checked after a load.
 
 ## License
 
