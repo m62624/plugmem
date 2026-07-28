@@ -461,6 +461,40 @@ fn remember_many_is_fail_fast_on_a_bad_input() {
 }
 
 #[test]
+fn remember_many_is_durable_after_reopen() {
+    // Batch mode defers the per-record fsync to one `sync_journal` at the end.
+    // With no checkpoint, durability rests entirely on that final sync: a reopen
+    // must replay all facts from the journal. (EachOp is the default policy.)
+    let dim = 4;
+    let mut config = cfg();
+    config.dim = dim;
+    let tmp = TempDir::new("batch-durable");
+    {
+        let (db, _) = Database::builder(config.clone())
+            .embedder(Box::new(CountingEmbedder::new(dim)))
+            .open(tmp.db())
+            .unwrap();
+        db.remember_many(vec![
+            RememberInput::text(1, "durable one"),
+            RememberInput::text(2, "durable two"),
+            RememberInput::text(3, "durable three"),
+        ])
+        .unwrap();
+        // No checkpoint here — only the batch's single sync_journal.
+    } // drop releases the writer lock; the journal stays on disk.
+
+    let (db2, _) = Database::builder(config)
+        .embedder(Box::new(CountingEmbedder::new(dim)))
+        .open(tmp.db())
+        .unwrap();
+    assert_eq!(
+        db2.stats().facts,
+        3,
+        "the batch survived via one sync_journal"
+    );
+}
+
+#[test]
 fn embedder_transport_and_shape_errors_are_typed() {
     // A refused connection is a typed Embed error.
     let mut refused = OpenAiCompatEmbedder::new("http://127.0.0.1:1/v1", "m", 4);

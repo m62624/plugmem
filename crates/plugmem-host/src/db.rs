@@ -572,9 +572,13 @@ impl Database {
         };
 
         let mut st = self.write();
+        // Batch mode: journal appends skip their per-record fsync; one
+        // `sync_journal` at the end makes the whole batch durable at once.
+        st.store.set_batch(true);
         let mut out = Vec::with_capacity(inputs.len());
         let mut cursor = 0usize; // into `embedded`, over vector-less inputs in order
         let mut latest = 0u64;
+        let mut failed = None;
         for input in inputs {
             latest = latest.max(input.now);
             let vector = if input.vector.is_some() {
@@ -588,7 +592,21 @@ impl Database {
             };
             let input = RememberInput { vector, ..input };
             let State { engine, store, .. } = &mut *st;
-            out.push(engine.with(store, |mem, store| mem.remember(store, input))?);
+            match engine.with(store, |mem, store| mem.remember(store, input)) {
+                Ok(o) => out.push(o),
+                Err(e) => {
+                    failed = Some(HostError::from(e));
+                    break;
+                }
+            }
+        }
+        // Always leave batch mode and fsync — this is the batch's durability
+        // point. On fail-fast it makes the facts written before the error durable
+        // (they stay, exactly like separate remembers).
+        st.store.set_batch(false);
+        st.store.sync_journal()?;
+        if let Some(e) = failed {
+            return Err(e);
         }
         // One policy pass for the whole batch. The op counter advances by one per
         // batch; the journal-bytes threshold still fires on a large batch, so a

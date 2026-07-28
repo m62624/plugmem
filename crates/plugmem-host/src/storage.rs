@@ -67,6 +67,10 @@ pub struct FileStorage {
     /// The journal in append mode, kept open across appends.
     journal: File,
     fsync: FsyncPolicy,
+    /// While `true`, `append_journal` skips its per-record fsync so a bulk write
+    /// amortizes durability into one [`sync_journal`](Self::sync_journal) at the
+    /// end (see [`set_batch`](Self::set_batch)). Only meaningful under `EachOp`.
+    batch: bool,
 }
 
 impl FileStorage {
@@ -125,7 +129,30 @@ impl FileStorage {
             _lock: lock,
             journal,
             fsync,
+            batch: false,
         })
+    }
+
+    /// Enters (`true`) or leaves (`false`) **batch mode**. While on,
+    /// [`append_journal`](plugmem_core::Storage::append_journal) writes each
+    /// record **without** its per-record fsync, so a bulk write (`remember_many`)
+    /// amortizes durability into a single [`sync_journal`](Self::sync_journal) at
+    /// the end. Only affects the `EachOp` policy — `OnSnapshot` never fsyncs per
+    /// record anyway. The caller must pair `set_batch(true)` with a final
+    /// `set_batch(false)` + `sync_journal`, even on error, so a later single
+    /// write is durable again.
+    pub(crate) fn set_batch(&mut self, on: bool) {
+        self.batch = on;
+    }
+
+    /// Fsyncs the journal now — the durability point for records appended in
+    /// batch mode. Idempotent (a plain `sync_data`), so calling it after a
+    /// partially-written batch makes exactly the records that reached the file
+    /// durable.
+    pub(crate) fn sync_journal(&mut self) -> Result<(), HostError> {
+        self.journal
+            .sync_data()
+            .map_err(|e| HostError::io(&self.journal_path, e))
     }
 
     /// The database base path.
@@ -466,7 +493,9 @@ impl Storage for FileStorage {
         self.journal
             .write_all(entry)
             .map_err(|e| HostError::io(&self.journal_path, e))?;
-        if self.fsync == FsyncPolicy::EachOp {
+        // In batch mode the fsync is deferred to one `sync_journal` at the end
+        // of the batch (durability amortized across the whole bulk write).
+        if self.fsync == FsyncPolicy::EachOp && !self.batch {
             self.journal
                 .sync_data()
                 .map_err(|e| HostError::io(&self.journal_path, e))?;
