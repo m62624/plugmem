@@ -35,9 +35,10 @@ you are tending *your own* memory file — plugmem keeps no server of its own.
   file-level MVCC (immutable snapshot generations + an advisory writer lock),
   *not* one network server. There is deliberately no network mode: that would
   add ports, auth and a connection pool for no embedded-use benefit.
-- **No tokio.** The engine is CPU-bound (microseconds over an mmap) and its one
-  I/O wait — the embedder HTTP call — is blocking and runs *outside* the engine
-  lock. Concurrency is OS threads: one reader thread feeds a worker pool.
+- **Concurrent, on plain threads.** Independent requests run in parallel on a
+  small worker pool; the only thing a request ever waits on is the embedder's
+  HTTP call, kept off the shared lock. No async runtime — the engine's work is
+  in-memory and fast, so threads are the whole story (see [Concurrency](#concurrency)).
 
 ## What recall does
 
