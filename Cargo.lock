@@ -1147,9 +1147,11 @@ dependencies = [
 name = "plugmem-mcp"
 version = "0.1.0"
 dependencies = [
- "plugmem-core",
+ "clap",
  "plugmem-host",
+ "serde",
  "serde_json",
+ "toml",
 ]
 
 [[package]]

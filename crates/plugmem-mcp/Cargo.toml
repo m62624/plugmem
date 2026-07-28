@@ -16,10 +16,19 @@ path-guid = "154F9E0B-8C1E-4E0F-813A-15BB8FD4D290"
 license = false
 eula = false
 
+[[bin]]
+name = "plugmem-mcp"
+path = "src/main.rs"
+
 [dependencies]
-plugmem-core = { workspace = true }
-plugmem-host = { workspace = true }
+# `serde` serializes result types straight to JSON; `config` shares the CLI's
+# config.toml loader (Settings).
+plugmem-host = { workspace = true, features = ["serde", "config"] }
+serde = { workspace = true }
 serde_json = { workspace = true }
+clap = { workspace = true }
+# The server reads its own `[server].workers` key from the shared config table.
+toml = { workspace = true }
 
 [lints]
 workspace = true
