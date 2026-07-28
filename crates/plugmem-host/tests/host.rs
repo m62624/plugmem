@@ -846,6 +846,45 @@ fn a_reader_opens_alongside_a_live_writer() {
 }
 
 #[test]
+fn refresh_advances_a_reader_to_a_new_generation() {
+    let tmp = TempDir::new("ro-refresh");
+    // Seed and publish a first generation, then keep the writer open.
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    seed_checkpointed(&db);
+
+    let mut ro = Database::open_readonly(tmp.db(), cfg()).unwrap();
+    let gen0 = ro.generation();
+    assert_eq!(ro.stats().facts, 30);
+
+    // Nothing new published yet: refresh is a no-op, cheap and false, and the
+    // handle stays exactly where it was.
+    assert!(!ro.refresh().unwrap(), "no new generation → no advance");
+    assert_eq!(ro.generation(), gen0);
+    assert_eq!(ro.stats().facts, 30);
+
+    // The writer publishes a newer generation.
+    db.remember(RememberInput::text(500, "after the reader opened"))
+        .unwrap();
+    db.checkpoint(600).unwrap();
+
+    // Before refresh the reader is still pinned to its point in time.
+    assert_eq!(ro.stats().facts, 30, "pinned until refreshed");
+    assert_eq!(ro.generation(), gen0);
+
+    // refresh advances it: true, a strictly higher generation, and the new fact
+    // is now visible.
+    assert!(ro.refresh().unwrap(), "a newer generation → advance");
+    assert!(ro.generation() > gen0, "generation is monotonic");
+    assert_eq!(ro.stats().facts, 31, "the refreshed reader sees the write");
+
+    // A second refresh with nothing newer is again a false no-op.
+    let gen1 = ro.generation();
+    assert!(!ro.refresh().unwrap());
+    assert_eq!(ro.generation(), gen1);
+    assert_eq!(ro.stats().facts, 31);
+}
+
+#[test]
 fn journal_survives_repeated_clears() {
     // Regression guard for the Windows `clear_journal` bug: an append
     // handle cannot be truncated with `set_len` on Windows (FILE_WRITE_DATA

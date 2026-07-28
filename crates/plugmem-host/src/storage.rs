@@ -273,7 +273,7 @@ fn gen_tmp_path(base: &Path, n: u64) -> PathBuf {
 /// Reads and validates the manifest at `base`. `Ok(None)` when it is absent (a
 /// fresh database); `Err(Corrupt)` when it is present but malformed; `Err(Io)`
 /// on a real filesystem failure. The returned generation is always ≥ 1.
-fn read_manifest(base: &Path) -> Result<Option<u64>, HostError> {
+pub(crate) fn read_manifest(base: &Path) -> Result<Option<u64>, HostError> {
     let bytes = match std::fs::read(base) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -386,16 +386,22 @@ fn sweep_generations(base: &Path, current: u64) -> Result<(), HostError> {
 
 /// Opens and **shared-locks** the current snapshot generation, pinning it
 /// against the writer's GC for as long as the returned [`File`] is held; returns
-/// it with the generation path. `Ok(None)` when there is no published generation
-/// (a fresh database). Readers do not take the writer lock, so a reader and the
-/// writer coexist — this is what makes the cross-process MVCC work.
+/// it with the generation path and the generation number it pinned. `Ok(None)`
+/// when there is no published generation (a fresh database). Readers do not take
+/// the writer lock, so a reader and the writer coexist — this is what makes the
+/// cross-process MVCC work.
 ///
 /// Retries the open→lock race with the collector: if the manifest names a
 /// generation that GC reclaims in the window between resolving and locking it,
 /// the open (or the post-lock existence recheck) fails and we retry against the
 /// fresh manifest. Once the shared lock is held and the file still exists, GC's
-/// exclusive try-lock must fail, so the pin is stable.
-pub(crate) fn pin_current_generation(base: &Path) -> Result<Option<(File, PathBuf)>, HostError> {
+/// exclusive try-lock must fail, so the pin is stable. The returned number is the
+/// generation actually pinned, which a caller can compare against a stale one to
+/// tell whether the writer has published a newer snapshot (see
+/// [`ReadOnlyDatabase::refresh`](crate::ReadOnlyDatabase::refresh)).
+pub(crate) fn pin_current_generation(
+    base: &Path,
+) -> Result<Option<(File, PathBuf, u64)>, HostError> {
     loop {
         let Some(generation) = read_manifest(base)? else {
             return Ok(None);
@@ -418,7 +424,7 @@ pub(crate) fn pin_current_generation(base: &Path) -> Result<Option<(File, PathBu
         // for the fresh generation. If it exists, our shared lock now blocks
         // GC's exclusive try-lock, so the pin holds.
         if genp.exists() {
-            return Ok(Some((file, genp)));
+            return Ok(Some((file, genp, generation)));
         }
     }
 }
