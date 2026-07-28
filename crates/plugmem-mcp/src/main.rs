@@ -129,3 +129,23 @@ fn default_workers() -> usize {
         .map(|n| (n.get() / 2).max(1))
         .unwrap_or(1)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workers_from_config_else_default() {
+        let table: toml::Table = "[server]\nworkers = 3\n".parse().unwrap();
+        assert_eq!(resolve_workers(Some(&table)), 3);
+
+        // No `[server]` / no table / non-positive → the default (>= 1).
+        let empty: toml::Table = "[engine]\ndim = 8\n".parse().unwrap();
+        assert!(resolve_workers(Some(&empty)) >= 1);
+        assert!(resolve_workers(None) >= 1);
+        let zero: toml::Table = "[server]\nworkers = 0\n".parse().unwrap();
+        assert!(resolve_workers(Some(&zero)) >= 1);
+
+        assert!(default_workers() >= 1);
+    }
+}

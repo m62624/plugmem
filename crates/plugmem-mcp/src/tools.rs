@@ -629,3 +629,394 @@ fn now_ms() -> u64 {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use plugmem_host::{Config, Database};
+
+    /// A unique temp directory; removed on drop.
+    struct TempDir(std::path::PathBuf);
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "plugmem-mcp-{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            TempDir(dir)
+        }
+        fn db(&self) -> std::path::PathBuf {
+            self.0.join("m.plugmem")
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A tool-call `params` object.
+    fn params(name: &str, args: Value) -> Value {
+        json!({ "name": name, "arguments": args })
+    }
+
+    /// The `text` field of a tool-call result envelope.
+    fn text(v: &Value) -> String {
+        v["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn is_error(v: &Value) -> bool {
+        v["result"]["isError"].as_bool().unwrap()
+    }
+
+    #[test]
+    fn arg_extractors_read_their_shapes() {
+        let a = json!({
+            "s": "hi", "n": 7, "b": true,
+            "list": ["x", 1, "y"],
+            "links": [{"rel": "r", "entity": "e"}, {"rel": "only"}],
+            "range": [10, 20]
+        });
+        let a = Some(&a);
+        assert_eq!(arg_str(a, "s"), Some("hi"));
+        assert_eq!(arg_str(a, "missing"), None);
+        assert_eq!(arg_u64(a, "n"), Some(7));
+        assert!(arg_bool(a, "b"));
+        assert!(!arg_bool(a, "missing"));
+        assert_eq!(arg_str_vec(a, "list"), vec!["x", "y"]); // non-strings skipped
+        assert_eq!(arg_links(a), vec![("r".to_string(), "e".to_string())]); // partial skipped
+        assert_eq!(arg_range(a), Some((10, 20)));
+        assert_eq!(arg_range(None), None);
+        assert_eq!(format_arg(a), "json");
+        assert_eq!(format_arg(Some(&json!({"format": "human"}))), "human");
+        assert_eq!(id_arg(Some(&json!({"id": 3}))), 3);
+        assert_eq!(id_arg(None), 0);
+    }
+
+    #[test]
+    fn render_json_vs_human() {
+        let v = json!({ "a": 1 });
+        assert_eq!(render(&v, "json"), "{\"a\":1}");
+        assert!(render(&v, "human").contains('\n'));
+    }
+
+    #[test]
+    fn definitions_cover_both_modes() {
+        let names = |defs: Vec<Value>| -> Vec<String> {
+            defs.iter()
+                .map(|d| d["name"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let w = names(definitions());
+        assert_eq!(w[0], REMEMBER);
+        assert!(w.iter().any(|n| n == MAINTAIN) && w.iter().any(|n| n == CHECKPOINT));
+        let ro = names(definitions_ro());
+        assert!(ro.iter().any(|n| n == REFRESH) && ro.iter().any(|n| n == GENERATION));
+        assert!(!ro.iter().any(|n| n == REMEMBER)); // no write verbs
+    }
+
+    #[test]
+    fn writer_call_dispatches_every_verb() {
+        let tmp = TempDir::new("call");
+        let (db, _) = Database::open(tmp.db(), Config::default()).unwrap();
+
+        // missing params → JSON-RPC error; unknown tool → tool error.
+        assert_eq!(call(&db, json!(1), None)["error"]["code"], -32602);
+        assert!(is_error(&call(
+            &db,
+            json!(1),
+            Some(&params("plugmem_nope", json!({})))
+        )));
+
+        // remember → id 0.
+        let r = call(
+            &db,
+            json!(1),
+            Some(&params(
+                "plugmem_remember",
+                json!({"text": "prefers tokio", "entity": "user", "tags": ["pref"], "links": [{"rel":"at","entity":"acme"}]}),
+            )),
+        );
+        assert!(!is_error(&r));
+        let outcome: Value = serde_json::from_str(&text(&r)).unwrap();
+        assert_eq!(outcome["id"], 0);
+        // remember without text → tool error.
+        assert!(is_error(&call(
+            &db,
+            json!(1),
+            Some(&params("plugmem_remember", json!({})))
+        )));
+
+        // recall json + human.
+        let rj = call(
+            &db,
+            json!(2),
+            Some(&params("plugmem_recall", json!({"query": "tokio"}))),
+        );
+        assert!(serde_json::from_str::<Value>(&text(&rj)).unwrap()["facts"].is_array());
+        let rh = call(
+            &db,
+            json!(2),
+            Some(&params(
+                "plugmem_recall",
+                json!({"query": "tokio", "format": "human"}),
+            )),
+        );
+        assert!(text(&rh).contains("[f0]"));
+
+        // show existing / missing.
+        assert!(
+            text(&call(
+                &db,
+                json!(3),
+                Some(&params("plugmem_show", json!({"id": 0})))
+            ))
+            .contains("prefers tokio")
+        );
+        assert!(is_error(&call(
+            &db,
+            json!(3),
+            Some(&params("plugmem_show", json!({"id": 999})))
+        )));
+        assert!(is_error(&call(
+            &db,
+            json!(3),
+            Some(&params("plugmem_show", json!({})))
+        ))); // no id
+
+        // revise (id 0 → successor 1) / revise without id.
+        let rv = call(
+            &db,
+            json!(4),
+            Some(&params(
+                "plugmem_revise",
+                json!({"id": 0, "text": "prefers async-std"}),
+            )),
+        );
+        assert_eq!(serde_json::from_str::<Value>(&text(&rv)).unwrap()["id"], 1);
+        assert!(is_error(&call(
+            &db,
+            json!(4),
+            Some(&params("plugmem_revise", json!({"text": "x"})))
+        )));
+
+        // link (ok / missing field).
+        assert!(!is_error(&call(
+            &db,
+            json!(5),
+            Some(&params(
+                "plugmem_link",
+                json!({"src": "user", "rel": "works_at", "dst": "acme"})
+            ))
+        )));
+        assert!(is_error(&call(
+            &db,
+            json!(5),
+            Some(&params("plugmem_link", json!({"src": "user"})))
+        )));
+
+        // stats / export / maintain / checkpoint / verify.
+        assert!(
+            serde_json::from_str::<Value>(&text(&call(
+                &db,
+                json!(6),
+                Some(&params("plugmem_stats", json!({})))
+            )))
+            .unwrap()["facts"]
+                .is_number()
+        );
+        assert!(
+            serde_json::from_str::<Value>(&text(&call(
+                &db,
+                json!(7),
+                Some(&params("plugmem_export", json!({})))
+            )))
+            .unwrap()
+            .is_array()
+        );
+        assert!(!is_error(&call(
+            &db,
+            json!(8),
+            Some(&params("plugmem_maintain", json!({})))
+        )));
+        assert!(!is_error(&call(
+            &db,
+            json!(9),
+            Some(&params("plugmem_checkpoint", json!({})))
+        )));
+        assert!(!is_error(&call(
+            &db,
+            json!(10),
+            Some(&params("plugmem_verify", json!({})))
+        )));
+
+        // forget the live successor.
+        let f = call(
+            &db,
+            json!(11),
+            Some(&params("plugmem_forget", json!({"id": 1}))),
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&text(&f)).unwrap()["forgotten"],
+            true
+        );
+        assert!(is_error(&call(
+            &db,
+            json!(11),
+            Some(&params("plugmem_forget", json!({})))
+        ))); // no id
+
+        // meta.
+        assert!(
+            text(&call(
+                &db,
+                json!(12),
+                Some(&params("plugmem_version", json!({})))
+            ))
+            .contains("plugmem")
+        );
+        assert!(
+            text(&call(
+                &db,
+                json!(13),
+                Some(&params("plugmem_about", json!({})))
+            ))
+            .contains("skill")
+        );
+    }
+
+    #[test]
+    fn read_only_call_dispatches_and_refuses_writes() {
+        let tmp = TempDir::new("call-ro");
+        // A writer stores + checkpoints, then is dropped so a read-only open sees
+        // a published snapshot.
+        {
+            let (db, _) = Database::open(tmp.db(), Config::default()).unwrap();
+            call(
+                &db,
+                json!(1),
+                Some(&params(
+                    "plugmem_remember",
+                    json!({"text": "the sky is blue", "entity": "sky"}),
+                )),
+            );
+            db.checkpoint(now_ms()).unwrap();
+        }
+        let ro = Database::open_readonly(tmp.db(), Config::default()).unwrap();
+        let reader = ReaderShared::new(ro, None);
+
+        // missing params / unknown tool.
+        assert_eq!(call_ro(&reader, json!(1), None)["error"]["code"], -32602);
+        assert!(is_error(&call_ro(
+            &reader,
+            json!(1),
+            Some(&params("plugmem_nope", json!({})))
+        )));
+
+        // read verbs.
+        assert!(
+            serde_json::from_str::<Value>(&text(&call_ro(
+                &reader,
+                json!(2),
+                Some(&params("plugmem_recall", json!({"query": "sky"})))
+            )))
+            .unwrap()["facts"]
+                .is_array()
+        );
+        assert!(
+            text(&call_ro(
+                &reader,
+                json!(3),
+                Some(&params("plugmem_show", json!({"id": 0})))
+            ))
+            .contains("sky")
+        );
+        assert!(is_error(&call_ro(
+            &reader,
+            json!(3),
+            Some(&params("plugmem_show", json!({"id": 999})))
+        ))); // missing
+        assert_eq!(
+            serde_json::from_str::<Value>(&text(&call_ro(
+                &reader,
+                json!(4),
+                Some(&params("plugmem_stats", json!({})))
+            )))
+            .unwrap()["facts"],
+            1
+        );
+        assert!(
+            serde_json::from_str::<Value>(&text(&call_ro(
+                &reader,
+                json!(5),
+                Some(&params("plugmem_export", json!({})))
+            )))
+            .unwrap()
+            .is_array()
+        );
+        assert!(!is_error(&call_ro(
+            &reader,
+            json!(6),
+            Some(&params("plugmem_verify", json!({})))
+        )));
+
+        // freshness meta.
+        assert!(
+            serde_json::from_str::<Value>(&text(&call_ro(
+                &reader,
+                json!(7),
+                Some(&params("plugmem_generation", json!({})))
+            )))
+            .unwrap()["generation"]
+                .is_number()
+        );
+        let rf = call_ro(
+            &reader,
+            json!(8),
+            Some(&params("plugmem_refresh", json!({}))),
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&text(&rf)).unwrap()["refreshed"],
+            false
+        );
+
+        // meta + every write verb refused.
+        assert!(
+            text(&call_ro(
+                &reader,
+                json!(9),
+                Some(&params("plugmem_version", json!({})))
+            ))
+            .contains("plugmem")
+        );
+        assert!(
+            text(&call_ro(
+                &reader,
+                json!(10),
+                Some(&params("plugmem_about", json!({})))
+            ))
+            .contains("skill")
+        );
+        for verb in [
+            "plugmem_remember",
+            "plugmem_revise",
+            "plugmem_forget",
+            "plugmem_link",
+            "plugmem_maintain",
+            "plugmem_checkpoint",
+        ] {
+            assert!(
+                is_error(&call_ro(&reader, json!(11), Some(&params(verb, json!({}))))),
+                "{verb} must be refused"
+            );
+        }
+    }
+}

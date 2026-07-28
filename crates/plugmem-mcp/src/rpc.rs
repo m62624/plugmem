@@ -148,3 +148,78 @@ pub fn tool_result(id: Value, text: String, is_error: bool) -> Value {
         json!({ "content": [{ "type": "text", "text": text }], "isError": is_error }),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use plugmem_host::{Config, Database};
+
+    fn writer() -> Shared {
+        let dir = std::env::temp_dir().join(format!(
+            "plugmem-mcp-rpc-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (db, _) = Database::open(dir.join("m.plugmem"), Config::default()).unwrap();
+        Shared::Writer(db)
+    }
+
+    fn req(s: &str) -> Value {
+        serde_json::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn handle_dispatches_the_protocol_methods() {
+        let s = writer();
+
+        // initialize → serverInfo + protocol version.
+        let init = handle(&s, &req(r#"{"id":1,"method":"initialize"}"#)).unwrap();
+        assert_eq!(init["result"]["serverInfo"]["name"], "plugmem");
+        assert_eq!(init["result"]["protocolVersion"], "2024-11-05");
+
+        // ping → empty result.
+        assert!(handle(&s, &req(r#"{"id":2,"method":"ping"}"#)).unwrap()["result"].is_object());
+
+        // tools/list → the writer set.
+        let list = handle(&s, &req(r#"{"id":3,"method":"tools/list"}"#)).unwrap();
+        assert_eq!(list["result"]["tools"][0]["name"], "plugmem_remember");
+
+        // tools/call → stats.
+        let call = handle(
+            &s,
+            &req(r#"{"id":4,"method":"tools/call","params":{"name":"plugmem_stats","arguments":{}}}"#),
+        )
+        .unwrap();
+        assert_eq!(call["result"]["isError"], false);
+
+        // notification (no id) → no reply.
+        assert!(handle(&s, &req(r#"{"method":"notifications/initialized"}"#)).is_none());
+        // a request for an unknown method → -32601; the same as a notification → none.
+        assert_eq!(
+            handle(&s, &req(r#"{"id":5,"method":"nope"}"#)).unwrap()["error"]["code"],
+            -32601
+        );
+        assert!(handle(&s, &req(r#"{"method":"nope"}"#)).is_none());
+        // a message with no method at all → none.
+        assert!(handle(&s, &req(r#"{"id":6}"#)).is_none());
+    }
+
+    #[test]
+    fn envelopes_have_the_jsonrpc_shape() {
+        let ok = result(json!(1), json!({"a": 1}));
+        assert_eq!(ok["jsonrpc"], "2.0");
+        assert_eq!(ok["result"]["a"], 1);
+
+        let err = error(json!(2), -32602, "boom");
+        assert_eq!(err["error"]["code"], -32602);
+        assert_eq!(err["error"]["message"], "boom");
+
+        let tr = tool_result(json!(3), "hi".into(), true);
+        assert_eq!(tr["result"]["content"][0]["text"], "hi");
+        assert_eq!(tr["result"]["isError"], true);
+    }
+}
