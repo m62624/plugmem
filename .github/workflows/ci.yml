@@ -262,6 +262,33 @@ jobs:
           puts "OK: name #{name.length}/64, description #{desc.length}/1024"
           RUBY
 
+  # Build the native Node addon for the host platform and smoke-test it through
+  # Node, so the published addon can never silently rot. The full cross-platform
+  # build + publish lives in release.yml (`napi-build` / `publish-napi`).
+  napi-npm:
+    name: napi npm build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/plugmem-napi
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "crates/plugmem-napi"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Install dependencies (@napi-rs/cli)
+        run: npm ci
+      - name: Build the addon
+        run: napi build --platform --release
+      - name: Test through Node
+        run: npm test
+
   dist-plan:
     name: cargo-dist plan
     runs-on: ubuntu-latest
@@ -284,7 +311,7 @@ jobs:
   ci-pass:
     name: CI passed
     if: always()
-    needs: [check, no_std, wasm-suite, wasm-equivalence, skill-lint, dist-plan]
+    needs: [check, no_std, wasm-suite, wasm-equivalence, skill-lint, napi-npm, dist-plan]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any required job did not succeed
@@ -296,7 +323,8 @@ jobs:
           echo "  wasm-suite       = ${{ needs.wasm-suite.result }}"
           echo "  wasm-equivalence = ${{ needs.wasm-equivalence.result }}"
           echo "  skill-lint       = ${{ needs.skill-lint.result }}"
+          echo "  napi-npm         = ${{ needs.napi-npm.result }}"
           echo "  dist-plan        = ${{ needs.dist-plan.result }}"
           exit 1
       - name: All required jobs passed
-        run: echo "lint + test (3 OSes × feature matrix), no_std, wasm suite (wasmtime+wasmer), cross-target equivalence, skill and dist-plan are green."
+        run: echo "lint + test (3 OSes × feature matrix), no_std, wasm suite (wasmtime+wasmer), cross-target equivalence, skill, napi npm and dist-plan are green."

@@ -1,0 +1,23 @@
+{
+  "name": "plugmem-darwin-x64",
+  "version": "0.1.0",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "plugmem.darwin-x64.node",
+  "files": [
+    "plugmem.darwin-x64.node"
+  ],
+  "description": "Native Node.js addon for plugmem: an embedded long-term memory engine for LLM agents (remember / recall / revise / forget over one local file).",
+  "license": "MIT",
+  "engines": {
+    "node": ">= 16"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/m62624/plugmem.git"
+  }
+}

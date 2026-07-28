@@ -231,7 +231,7 @@ jobs:
   # <crate>` / `cargo binstall <crate>` resolve by name. `cargo publish
   # --workspace` publishes every member in dependency order (arena -> core ->
   # host -> cli -> mcp) and waits for the index between crates; members with
-  # `publish = false` (wasm, testgen, tools) are skipped automatically. The
+  # `publish = false` (napi, testgen, tools) are skipped automatically. The
   # libraries' `dist = false` only affects cargo-dist, not crates.io.
   publish-crates:
     name: Publish to crates.io
@@ -247,6 +247,97 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Publish all workspace crates
         run: cargo publish --workspace --locked
+
+  # Build the native Node addon for every target, one job per platform (native
+  # runners; aarch64-linux cross-links with zig). Each uploads its `.node`; the
+  # `publish-napi` job below assembles and publishes them. Mirrors the six
+  # cargo-dist targets, so `npm i plugmem` covers the same platforms as the CLI.
+  napi-build:
+    name: napi build (${{ matrix.target }})
+    needs: [prepare, tag]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, host: ubuntu-22.04, zig: false }
+          - { target: aarch64-unknown-linux-gnu, host: ubuntu-22.04, zig: true }
+          - { target: x86_64-apple-darwin, host: macos-13, zig: false }
+          - { target: aarch64-apple-darwin, host: macos-14, zig: false }
+          - { target: x86_64-pc-windows-msvc, host: windows-2022, zig: false }
+          - { target: aarch64-pc-windows-msvc, host: windows-2022, zig: false }
+    runs-on: ${{ matrix.host }}
+    defaults:
+      run:
+        working-directory: crates/plugmem-napi
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "crates/plugmem-napi"
+      - name: Install dependencies (@napi-rs/cli)
+        run: npm ci
+      - name: Build the addon
+        run: napi build --platform --release --target ${{ matrix.target }} ${{ matrix.zig && '--zig' || '' }}
+      - name: Upload the built addon
+        uses: actions/upload-artifact@v4
+        with:
+          name: napi-${{ matrix.target }}
+          path: crates/plugmem-napi/*.node
+          if-no-files-found: error
+
+  # Assemble the per-platform packages and publish over OIDC trusted publishing
+  # (no NPM_TOKEN), in parallel with `publish-crates` and only after `dist`.
+  # NOTE: OIDC trusted publishing is configured *per package* on npmjs.org — the
+  # meta `plugmem` and each `plugmem-<platform>` package. The *first* publish of
+  # each cannot use OIDC (the trusted publisher is set on a package page that
+  # does not exist yet): do those once by hand with an npm token, then configure
+  # trusted publishing, and this job handles every release after that.
+  publish-napi:
+    name: Publish npm packages
+    needs: [prepare, tag, dist, napi-build]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: crates/plugmem-napi
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Use latest npm (trusted publishing needs a recent CLI)
+        run: npm install -g npm@latest
+      - name: Install dependencies (@napi-rs/cli)
+        run: npm ci
+      - name: Download every platform addon
+        uses: actions/download-artifact@v4
+        with:
+          path: crates/plugmem-napi/artifacts
+          pattern: napi-*
+          merge-multiple: true
+      - name: Sync the npm package versions to the release version
+        run: napi version
+      - name: Move each addon into its platform package
+        run: napi artifacts --dir artifacts
+      - name: Publish platform packages + meta (skip versions already published)
+        # `napi prepublish` wires the meta's optionalDependencies and publishes
+        # each platform package; then the meta itself. Both go over OIDC.
+        run: |
+          napi prepublish -t npm --skip-gh-release
+          npm publish --access public || echo "meta already published — skipping"
 
   sync:
     name: Sync PR to main

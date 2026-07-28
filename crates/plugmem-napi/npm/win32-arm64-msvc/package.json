@@ -1,0 +1,23 @@
+{
+  "name": "plugmem-win32-arm64-msvc",
+  "version": "0.1.0",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "main": "plugmem.win32-arm64-msvc.node",
+  "files": [
+    "plugmem.win32-arm64-msvc.node"
+  ],
+  "description": "Native Node.js addon for plugmem: an embedded long-term memory engine for LLM agents (remember / recall / revise / forget over one local file).",
+  "license": "MIT",
+  "engines": {
+    "node": ">= 16"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/m62624/plugmem.git"
+  }
+}
