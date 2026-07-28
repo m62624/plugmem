@@ -438,6 +438,26 @@ impl Database {
         Ok(Some(vs.remove(0)))
     }
 
+    /// Embeds a whole batch of texts in a **single** embedder call — outside the
+    /// lock, like [`embed_one`](Self::embed_one). `Ok(None)` when no embedder is
+    /// configured or `dim == 0`; otherwise a vector aligned one-to-one with
+    /// `texts` (the provider contract, checked by [`OpenAiCompatEmbedder`]). An
+    /// empty `texts` yields an empty vector without a round-trip. This is the one
+    /// HTTP that [`remember_many`](Self::remember_many) makes for a bulk write.
+    fn embed_many(&self, texts: &[&str]) -> Result<Option<Vec<Vec<f32>>>, HostError> {
+        let Some(embedder) = &self.inner.embedder else {
+            return Ok(None);
+        };
+        let mut embedder = embedder.lock().unwrap_or_else(|e| e.into_inner());
+        if embedder.dim() == 0 {
+            return Ok(None);
+        }
+        if texts.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        Ok(Some(embedder.embed(texts)?))
+    }
+
     /// Writes a full snapshot and re-maps the fresh file (specs/16 §9).
     ///
     /// Materializes the borrowed base + overlay into an owned buffer, drops
@@ -511,6 +531,69 @@ impl Database {
         let State { engine, store, .. } = &mut *st;
         let out = engine.with(store, |mem, store| mem.remember(store, input))?;
         self.after_mutation(&mut st, input.now)?;
+        Ok(out)
+    }
+
+    /// Remembers a **batch** of facts in one shot — the bulk-write path (CLI
+    /// `import`). Equivalent to [`remember`](Self::remember) on each input in
+    /// order, but far cheaper for a batch: the texts that need embedding are
+    /// embedded together in **one** embedder round-trip (outside the lock), and
+    /// all facts are written under **one** write-guard with **one** post-mutation
+    /// policy pass — instead of N HTTP calls and N critical sections.
+    ///
+    /// Inputs that already carry a `vector` are not re-embedded. **Chunking is
+    /// the caller's job**: this writes the whole slice it is given, so a caller
+    /// that needs bounded memory / a bounded HTTP body passes fixed-size batches
+    /// (CLI `import` streams the file in `--batch`-sized slices).
+    ///
+    /// **Fail-fast:** the first engine error returns `Err`; the facts written
+    /// before it stay written (exactly as separate `remember`s — the journal
+    /// replay is idempotent, so a retried bulk load is safe). Returns one
+    /// [`RememberOutcome`] per input, in order.
+    pub fn remember_many(
+        &self,
+        inputs: Vec<RememberInput<'_>>,
+    ) -> Result<Vec<RememberOutcome>, HostError> {
+        if inputs.is_empty() {
+            return Ok(Vec::new());
+        }
+        // One embedder round-trip for every vector-less input's text, outside the
+        // lock. `to_embed` is the vector-less inputs in order, so its result maps
+        // back onto them by a running cursor below.
+        let to_embed: Vec<&str> = inputs
+            .iter()
+            .filter(|i| i.vector.is_none())
+            .map(|i| i.text)
+            .collect();
+        let embedded = if to_embed.is_empty() {
+            None
+        } else {
+            self.embed_many(&to_embed)?
+        };
+
+        let mut st = self.write();
+        let mut out = Vec::with_capacity(inputs.len());
+        let mut cursor = 0usize; // into `embedded`, over vector-less inputs in order
+        let mut latest = 0u64;
+        for input in inputs {
+            latest = latest.max(input.now);
+            let vector = if input.vector.is_some() {
+                input.vector
+            } else if let Some(embedded) = &embedded {
+                let v = embedded[cursor].as_slice();
+                cursor += 1;
+                Some(v)
+            } else {
+                None // no embedder — lexical/structural only, as single remember
+            };
+            let input = RememberInput { vector, ..input };
+            let State { engine, store, .. } = &mut *st;
+            out.push(engine.with(store, |mem, store| mem.remember(store, input))?);
+        }
+        // One policy pass for the whole batch. The op counter advances by one per
+        // batch; the journal-bytes threshold still fires on a large batch, so a
+        // snapshot is not starved (specs/13 §3).
+        self.after_mutation(&mut st, latest)?;
         Ok(out)
     }
 

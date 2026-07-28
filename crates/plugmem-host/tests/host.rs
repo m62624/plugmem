@@ -289,6 +289,177 @@ fn auto_embedding_end_to_end() {
     server.join().unwrap();
 }
 
+/// An in-process embedder that counts calls and texts, so a test can prove a
+/// batch of K texts costs **one** embed call (not K). Deterministic vectors
+/// (slot 0 = text length) keep recall reproducible.
+struct CountingEmbedder {
+    dim: usize,
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    texts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl CountingEmbedder {
+    fn new(dim: usize) -> Self {
+        Self {
+            dim,
+            calls: Default::default(),
+            texts: Default::default(),
+        }
+    }
+}
+
+impl Embedder for CountingEmbedder {
+    fn dim(&self) -> usize {
+        self.dim
+    }
+
+    fn embed(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>, HostError> {
+        use std::sync::atomic::Ordering;
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.texts.fetch_add(texts.len(), Ordering::SeqCst);
+        Ok(texts
+            .iter()
+            .map(|t| {
+                let mut v = vec![0.0f32; self.dim];
+                v[0] = t.len() as f32;
+                v
+            })
+            .collect())
+    }
+}
+
+#[test]
+fn remember_many_embeds_the_whole_batch_in_one_call() {
+    use std::sync::atomic::Ordering;
+    let dim = 8;
+    let emb = CountingEmbedder::new(dim);
+    let (calls, texts) = (emb.calls.clone(), emb.texts.clone());
+    let tmp = TempDir::new("batch-embed");
+    let mut config = cfg();
+    config.dim = dim;
+    let (db, _) = Database::builder(config)
+        .embedder(Box::new(emb))
+        .open(tmp.db())
+        .unwrap();
+
+    let outs = db
+        .remember_many(vec![
+            RememberInput::text(1, "first fact"),
+            RememberInput::text(2, "second fact longer"),
+            RememberInput::text(3, "third"),
+        ])
+        .unwrap();
+
+    assert_eq!(outs.len(), 3);
+    assert_eq!(db.stats().facts, 3);
+    // The whole batch is ONE embed call over three texts — not three calls.
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "one round-trip for the batch"
+    );
+    assert_eq!(texts.load(Ordering::SeqCst), 3, "all three texts in it");
+}
+
+#[test]
+fn remember_many_matches_single_remembers() {
+    let dim = 8;
+    let mut config = cfg();
+    config.dim = dim;
+
+    let tmp = TempDir::new("batch-eq");
+    let (db, _) = Database::builder(config.clone())
+        .embedder(Box::new(CountingEmbedder::new(dim)))
+        .open(tmp.db())
+        .unwrap();
+    db.remember_many(vec![
+        RememberInput::text(1, "alpha runtime tokio"),
+        RememberInput::text(2, "beta lives berlin"),
+    ])
+    .unwrap();
+
+    // A twin database written one at a time.
+    let tmp2 = TempDir::new("batch-eq2");
+    let (db2, _) = Database::builder(config)
+        .embedder(Box::new(CountingEmbedder::new(dim)))
+        .open(tmp2.db())
+        .unwrap();
+    db2.remember(RememberInput::text(1, "alpha runtime tokio"))
+        .unwrap();
+    db2.remember(RememberInput::text(2, "beta lives berlin"))
+        .unwrap();
+
+    assert_eq!(db.stats().facts, db2.stats().facts);
+    let q = RecallQuery {
+        k: 5,
+        ..RecallQuery::text(9, "runtime")
+    };
+    let batch_ids: Vec<_> = db.recall(q).unwrap().facts.iter().map(|f| f.id).collect();
+    let single_ids: Vec<_> = db2.recall(q).unwrap().facts.iter().map(|f| f.id).collect();
+    assert_eq!(batch_ids, single_ids, "batch and singles agree");
+}
+
+#[test]
+fn remember_many_skips_inputs_that_already_have_a_vector() {
+    use std::sync::atomic::Ordering;
+    let dim = 4;
+    let emb = CountingEmbedder::new(dim);
+    let texts = emb.texts.clone();
+    let tmp = TempDir::new("batch-skip");
+    let mut config = cfg();
+    config.dim = dim;
+    let (db, _) = Database::builder(config)
+        .embedder(Box::new(emb))
+        .open(tmp.db())
+        .unwrap();
+
+    let v = vec![1.0f32; dim];
+    let with_vec = RememberInput {
+        vector: Some(&v),
+        ..RememberInput::text(1, "has a vector already")
+    };
+    db.remember_many(vec![RememberInput::text(2, "needs embedding"), with_vec])
+        .unwrap();
+
+    // Only the vector-less input's text reached the embedder.
+    assert_eq!(texts.load(Ordering::SeqCst), 1);
+    assert_eq!(db.stats().facts, 2);
+}
+
+#[test]
+fn remember_many_empty_is_a_noop() {
+    let tmp = TempDir::new("batch-empty");
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    assert!(db.remember_many(vec![]).unwrap().is_empty());
+    assert_eq!(db.stats().facts, 0);
+}
+
+#[test]
+fn remember_many_is_fail_fast_on_a_bad_input() {
+    let dim = 4;
+    let tmp = TempDir::new("batch-fail");
+    let mut config = cfg();
+    config.dim = dim;
+    let (db, _) = Database::builder(config)
+        .embedder(Box::new(CountingEmbedder::new(dim)))
+        .open(tmp.db())
+        .unwrap();
+
+    // A wrong-dimension vector fails the engine; the good fact before it stays.
+    let bad = vec![1.0f32; dim + 1];
+    let bad_in = RememberInput {
+        vector: Some(&bad),
+        ..RememberInput::text(2, "bad vector")
+    };
+    let r = db.remember_many(vec![RememberInput::text(1, "good"), bad_in]);
+    assert!(r.is_err(), "wrong-dimension vector → Err");
+    assert_eq!(
+        db.stats().facts,
+        1,
+        "fail-fast: the good fact before it stayed"
+    );
+}
+
 #[test]
 fn embedder_transport_and_shape_errors_are_typed() {
     // A refused connection is a typed Embed error.
