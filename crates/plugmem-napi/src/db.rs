@@ -14,8 +14,10 @@
 use napi::{Error, Result};
 use napi_derive::napi;
 use plugmem_host::{Config, Database, FactId, HostError, LinkInput, RecallQuery, RememberInput};
-use serde::Serialize;
-use serde_json::Value;
+
+use crate::types::{
+    self, ExportedFact, FactSnapshot, MaintainReport, RecallResult, RememberOutcome, Stats,
+};
 
 /// Options for [`Plugmem::new`]. `dim` is the embedding width (0 = vectors off,
 /// the default); the embedder and the rest of the engine config arrive with the
@@ -107,20 +109,20 @@ impl Plugmem {
 
     /// Stores a fact; returns its id plus similar/conflicting live facts.
     #[napi]
-    pub fn remember(&self, args: RememberArgs) -> Result<Value> {
+    pub fn remember(&self, args: RememberArgs) -> Result<RememberOutcome> {
         do_remember(&self.db, &args, None)
     }
 
     /// Closes fact `id` and records `args` as its successor; returns the outcome.
     #[napi]
-    pub fn revise(&self, id: u32, args: RememberArgs) -> Result<Value> {
+    pub fn revise(&self, id: u32, args: RememberArgs) -> Result<RememberOutcome> {
         do_remember(&self.db, &args, Some(FactId(id)))
     }
 
     /// Ranked, fused recall. Returns the structured result (its `rendered` field
     /// is the prompt-ready block; `facts`/`edges` are the structured hits).
     #[napi]
-    pub fn recall(&self, args: Option<RecallArgs>) -> Result<Value> {
+    pub fn recall(&self, args: Option<RecallArgs>) -> Result<RecallResult> {
         let args = args.unwrap_or_default();
         let tags = str_refs(&args.tags);
         let entities = str_refs(&args.entities);
@@ -141,7 +143,7 @@ impl Plugmem {
             include_closed: args.closed.unwrap_or(false),
             ef: None,
         };
-        to_value(&self.db.recall(q).map_err(to_napi_err)?)
+        types::to_typed(&self.db.recall(q).map_err(to_napi_err)?)
     }
 
     /// Tombstones fact `id` (physically purged at the next `maintain`). Returns
@@ -167,30 +169,30 @@ impl Plugmem {
 
     /// One fact's full card by `id`, or `null` if unknown/tombstoned.
     #[napi]
-    pub fn get(&self, id: u32) -> Result<Option<Value>> {
+    pub fn get(&self, id: u32) -> Result<Option<FactSnapshot>> {
         match self.db.get(FactId(id)) {
-            Some(snap) => Ok(Some(to_value(&snap)?)),
+            Some(snap) => Ok(Some(types::to_typed(&snap)?)),
             None => Ok(None),
         }
     }
 
     /// Engine size counters.
     #[napi]
-    pub fn stats(&self) -> Result<Value> {
-        to_value(&self.db.stats())
+    pub fn stats(&self) -> Result<Stats> {
+        types::to_typed(&self.db.stats())
     }
 
     /// Every currently-open fact, as an array (id-free, import-ready).
     #[napi]
-    pub fn export(&self) -> Result<Value> {
-        to_value(&self.db.export())
+    pub fn export(&self) -> Result<Vec<ExportedFact>> {
+        types::to_typed(&self.db.export())
     }
 
     /// Purges tombstones, compacts, and builds the vector index; returns the
     /// before/after report.
     #[napi]
-    pub fn maintain(&self) -> Result<Value> {
-        to_value(&self.db.maintain(now_ms()).map_err(to_napi_err)?)
+    pub fn maintain(&self) -> Result<MaintainReport> {
+        types::to_typed(&self.db.maintain(now_ms()).map_err(to_napi_err)?)
     }
 
     /// Flushes the journal into a fresh snapshot.
@@ -209,7 +211,11 @@ impl Plugmem {
 /// `remember`/`revise` body (revise passes `Some(target)`): build the borrowed
 /// [`RememberInput`] from the owned args and dispatch. The host embeds the text
 /// outside its lock, so the wrapper passes only text.
-fn do_remember(db: &Database, args: &RememberArgs, revise: Option<FactId>) -> Result<Value> {
+fn do_remember(
+    db: &Database,
+    args: &RememberArgs,
+    revise: Option<FactId>,
+) -> Result<RememberOutcome> {
     let tags = str_refs(&args.tags);
     let links: Vec<(&str, &str)> = args
         .links
@@ -230,7 +236,7 @@ fn do_remember(db: &Database, args: &RememberArgs, revise: Option<FactId>) -> Re
         None => db.remember(input),
     }
     .map_err(to_napi_err)?;
-    to_value(&outcome)
+    types::to_typed(&outcome)
 }
 
 /// Borrow an optional `Vec<String>` as `&[&str]` (empty when absent).
@@ -240,11 +246,6 @@ fn str_refs(v: &Option<Vec<String>>) -> Vec<&str> {
         .iter()
         .map(String::as_str)
         .collect()
-}
-
-/// Serialize a host result to a native JS value via serde.
-fn to_value(v: &impl Serialize) -> Result<Value> {
-    serde_json::to_value(v).map_err(|e| Error::from_reason(format!("serialization error: {e}")))
 }
 
 /// A host error as a thrown JS `Error` (the message is the host's own text).

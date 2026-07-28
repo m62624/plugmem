@@ -75,6 +75,38 @@ test("stats / export / maintain / checkpoint / verify", () => {
   });
 });
 
+test("typed outputs are fully populated (serde round-trip + camelCase)", () => {
+  withDb((db) => {
+    const out = db.remember({ text: "prefers tokio", entity: "user" });
+    assert.equal(typeof out.id, "number");
+    assert.ok(Array.isArray(out.similar));
+
+    const res = db.recall({ query: "tokio" });
+    assert.equal(typeof res.truncated, "boolean");
+    assert.equal(typeof res.rendered, "string");
+    const f = res.facts[0];
+    assert.equal(typeof f.id, "number");
+    assert.equal(typeof f.score, "number");
+    assert.equal(typeof f.recordedAt, "number"); // camelCase from recorded_at
+    assert.equal(typeof f.validFrom, "number");
+
+    const card = db.get(0);
+    assert.equal(typeof card.text, "string");
+    assert.equal(typeof card.record.id, "number");
+    assert.equal(typeof card.record.recordedAt, "number");
+    assert.equal(typeof card.record.flags, "number");
+
+    const s = db.stats();
+    for (const key of ["facts", "entities", "terms", "edges", "vectors", "nextFact", "nextEntity", "poolBytes"]) {
+      assert.equal(typeof s[key], "number", `stats.${key}`);
+    }
+
+    const m = db.maintain();
+    assert.equal(typeof m.purged, "number");
+    assert.equal(typeof m.bytesBefore, "number");
+  });
+});
+
 test("a missing required arg throws, not crashes", () => {
   withDb((db) => {
     // `text` is required by the RememberArgs interface; napi rejects the call.
