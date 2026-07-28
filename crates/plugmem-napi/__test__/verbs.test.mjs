@@ -62,21 +62,29 @@ test("link upserts a typed edge", () => {
   });
 });
 
-test("stats / export / maintain / checkpoint / verify", () => {
-  withDb((db) => {
+test("stats / export / maintain / checkpoint / verify", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-"));
+  try {
+    const db = new Plugmem(join(dir, "m.plugmem"));
     db.remember({ text: "one", entity: "a" });
     db.remember({ text: "two", entity: "b" });
 
     assert.equal(db.stats().facts, 2);
     assert.equal(db.export().length, 2);
-    assert.ok(typeof db.maintain().purged === "number");
-    assert.doesNotThrow(() => db.checkpoint());
+    // maintain / checkpoint are async (libuv worker): they return Promises.
+    const report = await db.maintain();
+    assert.equal(typeof report.purged, "number");
+    await assert.doesNotReject(db.checkpoint());
     assert.doesNotThrow(() => db.verify());
-  });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
-test("typed outputs are fully populated (serde round-trip + camelCase)", () => {
-  withDb((db) => {
+test("typed outputs are fully populated (serde round-trip + camelCase)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-"));
+  try {
+    const db = new Plugmem(join(dir, "m.plugmem"));
     const out = db.remember({ text: "prefers tokio", entity: "user" });
     assert.equal(typeof out.id, "number");
     assert.ok(Array.isArray(out.similar));
@@ -101,10 +109,33 @@ test("typed outputs are fully populated (serde round-trip + camelCase)", () => {
       assert.equal(typeof s[key], "number", `stats.${key}`);
     }
 
-    const m = db.maintain();
+    const m = await db.maintain();
     assert.equal(typeof m.purged, "number");
     assert.equal(typeof m.bytesBefore, "number");
-  });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("maintain/checkpoint are async and don't block the event loop", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-"));
+  try {
+    const db = new Plugmem(join(dir, "m.plugmem"));
+    db.remember({ text: "one" });
+
+    const p = db.maintain();
+    assert.ok(p instanceof Promise);
+    // The libuv worker runs the pass; the event loop stays free to tick.
+    let ticked = false;
+    setImmediate(() => (ticked = true));
+    const report = await p;
+    assert.equal(typeof report.bytesAfter, "number");
+    assert.ok(ticked, "event loop advanced while maintain ran");
+
+    assert.equal(await db.checkpoint(), undefined); // Promise<void>
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("a missing required arg throws, not crashes", () => {

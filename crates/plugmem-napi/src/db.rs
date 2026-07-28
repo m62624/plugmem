@@ -14,7 +14,8 @@
 //! freshness verbs (`generation`/`refresh`) become available. Async offloading
 //! lands in the next milestone.
 
-use napi::{Error, Result};
+use napi::bindgen_prelude::AsyncTask;
+use napi::{Env, Error, Result, Task};
 use napi_derive::napi;
 use plugmem_host::{
     Config, Database, FactId, HostError, LinkInput, ReadOnlyDatabase, RecallQuery, RememberInput,
@@ -246,17 +247,27 @@ impl Plugmem {
         .map_err(to_napi_err)
     }
 
-    /// Purges tombstones, compacts, and builds the vector index; returns the
-    /// before/after report. @throws in read-only mode.
-    #[napi]
-    pub fn maintain(&self) -> Result<MaintainReport> {
-        types::to_typed(&self.writer()?.maintain(now_ms()).map_err(to_napi_err)?)
+    /// Purges tombstones, compacts, and builds the vector index; resolves with
+    /// the before/after report. **Async** (returns a `Promise`): the pass does
+    /// disk I/O (compaction, HNSW build), so it runs on a libuv worker thread and
+    /// never blocks the event loop. @throws synchronously in read-only mode.
+    #[napi(ts_return_type = "Promise<MaintainReport>")]
+    pub fn maintain(&self) -> Result<AsyncTask<MaintainTask>> {
+        Ok(AsyncTask::new(MaintainTask {
+            db: self.writer()?.clone(),
+            now: now_ms(),
+        }))
     }
 
-    /// Flushes the journal into a fresh snapshot. @throws in read-only mode.
-    #[napi]
-    pub fn checkpoint(&self) -> Result<()> {
-        self.writer()?.checkpoint(now_ms()).map_err(to_napi_err)
+    /// Flushes the journal into a fresh snapshot. **Async** (returns a `Promise`):
+    /// it writes and fsyncs a snapshot file, so it runs on a libuv worker thread.
+    /// @throws synchronously in read-only mode.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn checkpoint(&self) -> Result<AsyncTask<CheckpointTask>> {
+        Ok(AsyncTask::new(CheckpointTask {
+            db: self.writer()?.clone(),
+            now: now_ms(),
+        }))
     }
 
     /// The pinned snapshot generation (read-only mode only).
@@ -310,6 +321,47 @@ impl Plugmem {
             Handle::Reader(db) => Ok(&**db),
             Handle::Writer(_) => Err(writer_only_error("generation")),
         }
+    }
+}
+
+/// The libuv-thread body of [`Plugmem::maintain`]: holds a cloned `Database`
+/// handle (cheap — an `Arc`) and the call-time clock, runs the pass off the main
+/// thread, and resolves with the typed report.
+pub struct MaintainTask {
+    db: Database,
+    now: u64,
+}
+
+impl Task for MaintainTask {
+    type Output = plugmem_host::MaintainReport;
+    type JsValue = MaintainReport;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.db.maintain(self.now).map_err(to_napi_err)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        types::to_typed(&output)
+    }
+}
+
+/// The libuv-thread body of [`Plugmem::checkpoint`] — writes and fsyncs a fresh
+/// snapshot off the main thread.
+pub struct CheckpointTask {
+    db: Database,
+    now: u64,
+}
+
+impl Task for CheckpointTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.db.checkpoint(self.now).map_err(to_napi_err)
+    }
+
+    fn resolve(&mut self, _env: Env, (): Self::Output) -> Result<Self::JsValue> {
+        Ok(())
     }
 }
 

@@ -12,21 +12,21 @@ const require = createRequire(import.meta.url);
 const { Plugmem } = require("../index.js");
 
 /** A throwaway directory (kept across a writer close + read-only reopen). */
-function withDir(fn) {
+async function withDir(fn) {
   const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-ro-"));
   try {
-    fn(join(dir, "m.plugmem"));
+    await fn(join(dir, "m.plugmem"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-test("read-only observes a writer's checkpointed snapshot", () => {
-  withDir((path) => {
+test("read-only observes a writer's checkpointed snapshot", async () => {
+  await withDir(async (path) => {
     // Writer stores + checkpoints (clears the journal) + closes (drops the lock).
     const w = new Plugmem(path);
     w.remember({ text: "the sky is blue", entity: "sky" });
-    w.checkpoint();
+    await w.checkpoint(); // async — must finish before close/reopen
     w.close();
 
     // Read-only open over the published snapshot.
@@ -55,8 +55,8 @@ test("read-only observes a writer's checkpointed snapshot", () => {
   });
 });
 
-test("generation/refresh are read-only-only; verbs throw after close", () => {
-  withDir((path) => {
+test("generation/refresh are read-only-only; verbs throw after close", async () => {
+  await withDir((path) => {
     const w = new Plugmem(path);
     assert.throws(() => w.generation(), /read-only mode/);
     assert.throws(() => w.refresh(), /read-only mode/);
