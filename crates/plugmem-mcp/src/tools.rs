@@ -9,6 +9,8 @@
 //! call. A [`HostError`] becomes a tool-level error (`isError`) so the model
 //! reads it; missing `params` is the JSON-RPC `-32602`.
 
+use std::sync::{Mutex, RwLock};
+
 use plugmem_host::{
     Database, Embedder, FactId, HostError, LinkInput, ReadOnlyDatabase, RecallQuery, RememberInput,
 };
@@ -17,15 +19,28 @@ use serde_json::{Value, json};
 
 use crate::{messages, rpc};
 
-/// Read-only server state: a shared-mmap snapshot of another process's writer,
-/// plus the embedder (if configured) used to embed a `recall` query — the
-/// read-only `recall` does not auto-embed, so the server does it, mirroring the
-/// CLI's read-only path. `refresh` mutates `db`, so this is held by `&mut`.
-pub struct ReaderState {
-    /// The pinned snapshot handle.
-    pub db: ReadOnlyDatabase,
-    /// The embedder for `recall` query text (`None` = lexical/graph/time only).
-    pub embedder: Option<Box<dyn Embedder>>,
+/// Read-only server state, shared across worker threads (behind an `Arc`): a
+/// shared-mmap snapshot of another process's writer, plus the embedder (if
+/// configured) used to embed a `recall` query — the read-only `recall` does not
+/// auto-embed, so the server does it, mirroring the CLI's read-only path.
+///
+/// The snapshot is behind a `RwLock`: read verbs take the read guard and run
+/// concurrently; `refresh` (rare) takes the write guard to re-map. The embedder
+/// is behind its own `Mutex`, so embeds serialize (as in the host) without
+/// holding the snapshot lock during the HTTP call.
+pub struct ReaderShared {
+    db: RwLock<ReadOnlyDatabase>,
+    embedder: Mutex<Option<Box<dyn Embedder>>>,
+}
+
+impl ReaderShared {
+    /// Wrap a read-only handle and its optional embedder for sharing.
+    pub fn new(db: ReadOnlyDatabase, embedder: Option<Box<dyn Embedder>>) -> Self {
+        Self {
+            db: RwLock::new(db),
+            embedder: Mutex::new(embedder),
+        }
+    }
 }
 
 const GENERATION: &str = "plugmem_generation";
@@ -122,8 +137,9 @@ pub fn definitions_ro() -> Vec<Value> {
 }
 
 /// Execute a `tools/call` against a read-only server: read verbs + freshness;
-/// a write verb is refused with a tool-level error.
-pub fn call_ro(reader: &mut ReaderState, id: Value, params: Option<&Value>) -> Value {
+/// a write verb is refused with a tool-level error. Read verbs take the snapshot
+/// read guard (concurrent); `refresh` takes the write guard.
+pub fn call_ro(reader: &ReaderShared, id: Value, params: Option<&Value>) -> Value {
     let Some(params) = params else {
         return rpc::error(id, -32602, "missing params");
     };
@@ -132,35 +148,50 @@ pub fn call_ro(reader: &mut ReaderState, id: Value, params: Option<&Value>) -> V
 
     match name {
         RECALL => recall_ro(reader, id, args),
-        SHOW => match reader.db.get(FactId(id_arg(args))) {
-            Some(snap) => rpc::tool_result(id, render(&snap, format_arg(args)), false),
-            None => rpc::tool_result(id, format!("fact {} does not exist", id_arg(args)), true),
-        },
-        STATS => rpc::tool_result(id, render(&reader.db.stats(), format_arg(args)), false),
-        EXPORT => rpc::tool_result(id, render(&reader.db.export(), format_arg(args)), false),
-        VERIFY => match reader.db.verify() {
+        SHOW => {
+            let db = reader.db.read().expect("snapshot lock");
+            match db.get(FactId(id_arg(args))) {
+                Some(snap) => rpc::tool_result(id, render(&snap, format_arg(args)), false),
+                None => rpc::tool_result(id, format!("fact {} does not exist", id_arg(args)), true),
+            }
+        }
+        STATS => {
+            let stats = reader.db.read().expect("snapshot lock").stats();
+            rpc::tool_result(id, render(&stats, format_arg(args)), false)
+        }
+        EXPORT => {
+            let facts = reader.db.read().expect("snapshot lock").export();
+            rpc::tool_result(id, render(&facts, format_arg(args)), false)
+        }
+        VERIFY => match reader.db.read().expect("snapshot lock").verify() {
             Ok(()) => rpc::tool_result(id, render(&json!({ "ok": true }), format_arg(args)), false),
             Err(e) => tool_error(id, &e),
         },
-        GENERATION => rpc::tool_result(
-            id,
-            render(
-                &json!({ "generation": reader.db.generation() }),
-                format_arg(args),
-            ),
-            false,
-        ),
-        REFRESH => match reader.db.refresh() {
-            Ok(moved) => rpc::tool_result(
+        GENERATION => {
+            let generation = reader.db.read().expect("snapshot lock").generation();
+            rpc::tool_result(
                 id,
-                render(
-                    &json!({ "refreshed": moved, "generation": reader.db.generation() }),
-                    format_arg(args),
-                ),
+                render(&json!({ "generation": generation }), format_arg(args)),
                 false,
-            ),
-            Err(e) => tool_error(id, &e),
-        },
+            )
+        }
+        REFRESH => {
+            let mut db = reader.db.write().expect("snapshot lock");
+            match db.refresh() {
+                Ok(moved) => {
+                    let generation = db.generation();
+                    rpc::tool_result(
+                        id,
+                        render(
+                            &json!({ "refreshed": moved, "generation": generation }),
+                            format_arg(args),
+                        ),
+                        false,
+                    )
+                }
+                Err(e) => tool_error(id, &e),
+            }
+        }
         VERSION => rpc::tool_result(id, format!("plugmem {}", env!("CARGO_PKG_VERSION")), false),
         ABOUT => rpc::tool_result(id, messages::ABOUT_TOOL.to_string(), false),
         // A known write verb, or anything else: refused in read-only mode.
@@ -173,17 +204,25 @@ pub fn call_ro(reader: &mut ReaderState, id: Value, params: Option<&Value>) -> V
 
 /// Read-only `recall`: embed the query text with the server's embedder (if any)
 /// before searching — the read-only handle carries no embedder and does not
-/// auto-embed. Lexical/graph/time still answer without one.
-fn recall_ro(reader: &mut ReaderState, id: Value, args: Option<&Value>) -> Value {
+/// auto-embed. Lexical/graph/time still answer without one. The embed (its
+/// slow HTTP) runs under the embedder `Mutex`, not the snapshot lock; the
+/// search then takes the snapshot read guard.
+fn recall_ro(reader: &ReaderShared, id: Value, args: Option<&Value>) -> Value {
     let format = format_arg(args);
     let query = arg_str(args, "query").map(String::from);
-    // Embed the query text (outside any lock) into an owned vector, if we can.
-    let vector = match (&mut reader.embedder, query.as_deref()) {
-        (Some(embedder), Some(text)) => match embedder.embed(&[text]) {
-            Ok(mut v) => v.pop(),
-            Err(e) => return tool_error(id, &e),
-        },
-        _ => None,
+    // Embed the query text into an owned vector, if we can (embedder Mutex only).
+    let vector = match query.as_deref() {
+        Some(text) => {
+            let mut embedder = reader.embedder.lock().expect("embedder lock");
+            match embedder.as_mut() {
+                Some(e) => match e.embed(&[text]) {
+                    Ok(mut v) => v.pop(),
+                    Err(e) => return tool_error(id, &e),
+                },
+                None => None,
+            }
+        }
+        None => None,
     };
     let tags = arg_str_vec(args, "tags");
     let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
@@ -202,7 +241,8 @@ fn recall_ro(reader: &mut ReaderState, id: Value, args: Option<&Value>) -> Value
         include_closed: arg_bool(args, "closed"),
         ef: None,
     };
-    match reader.db.recall(q) {
+    let db = reader.db.read().expect("snapshot lock");
+    match db.recall(q) {
         Ok(res) if format == "human" => rpc::tool_result(id, res.rendered, false),
         Ok(res) => rpc::tool_result(id, render(&res, "json"), false),
         Err(e) => tool_error(id, &e),

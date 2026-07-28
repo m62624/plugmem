@@ -1,7 +1,7 @@
 //! Black-box tests of the MCP server: drive it over stdio JSON-RPC and check
 //! replies. Each test opens a fresh memory file under `CARGO_TARGET_TMPDIR`.
 
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -28,7 +28,50 @@ fn roundtrip(db: &PathBuf, requests: &[&str]) -> Vec<Value> {
 }
 
 /// Like [`roundtrip`], with extra binary arguments (e.g. `--read-only`).
+///
+/// **Synchronous**: send one request, await its reply, then the next — the
+/// behavior of a real MCP client. This keeps a causal chain (remember → recall)
+/// deterministic no matter how many workers the pool has (only one request is
+/// ever in flight). A notification (no `id`) gets no reply, so none is awaited.
 fn roundtrip_args(db: &PathBuf, extra: &[&str], requests: &[&str]) -> Vec<Value> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_plugmem-mcp"))
+        .arg("--db")
+        .arg(db)
+        .args(extra)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn plugmem-mcp");
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    let mut replies = Vec::new();
+    for r in requests {
+        writeln!(stdin, "{r}").unwrap();
+        stdin.flush().unwrap();
+        // A request carries an `id`; a notification does not (no reply to await).
+        let is_request = serde_json::from_str::<Value>(r)
+            .map(|v| v.get("id").is_some())
+            .unwrap_or(false);
+        if is_request {
+            let mut line = String::new();
+            stdout.read_line(&mut line).unwrap();
+            replies.push(serde_json::from_str(line.trim()).unwrap());
+        }
+    }
+    drop(stdin); // EOF → server exits
+    let _ = child.wait();
+    replies
+}
+
+/// Send every request at once (pipelined), then read all replies and index them
+/// by `id`. Exercises the worker pool: independent requests may complete in any
+/// order, so a positional read would be wrong — reply correlation is by `id`.
+fn pipelined_by_id(
+    db: &PathBuf,
+    extra: &[&str],
+    requests: &[&str],
+) -> std::collections::HashMap<u64, Value> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_plugmem-mcp"))
         .arg("--db")
         .arg(db)
@@ -48,7 +91,8 @@ fn roundtrip_args(db: &PathBuf, extra: &[&str], requests: &[&str]) -> Vec<Value>
         .unwrap()
         .lines()
         .filter(|l| !l.trim().is_empty())
-        .map(|l| serde_json::from_str(l).unwrap())
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .map(|v| (v["id"].as_u64().unwrap(), v))
         .collect()
 }
 
@@ -328,6 +372,49 @@ fn read_only_serves_reads_and_refuses_writes() {
 
     // the write verb is refused as a tool-level error.
     assert_eq!(r[5]["result"]["isError"], true);
+}
+
+#[test]
+fn worker_pool_answers_every_pipelined_request() {
+    let db = temp_db("pool");
+    // Fire many independent read-only requests at once with several workers; the
+    // pool may answer in any order, but every id must get exactly one correct
+    // reply and no line may be interleaved/garbled (Mutex<Stdout>).
+    let mut reqs: Vec<String> = Vec::new();
+    for i in 1..=20u64 {
+        let verb = if i % 2 == 0 {
+            "plugmem_stats"
+        } else {
+            "plugmem_version"
+        };
+        reqs.push(format!(
+            r#"{{"jsonrpc":"2.0","id":{i},"method":"tools/call","params":{{"name":"{verb}","arguments":{{}}}}}}"#
+        ));
+    }
+    let req_refs: Vec<&str> = reqs.iter().map(String::as_str).collect();
+    let replies = pipelined_by_id(&db, &["--workers", "4"], &req_refs);
+
+    assert_eq!(
+        replies.len(),
+        20,
+        "every request must be answered exactly once"
+    );
+    for i in 1..=20u64 {
+        let reply = replies
+            .get(&i)
+            .unwrap_or_else(|| panic!("no reply for id {i}"));
+        assert_eq!(reply["result"]["isError"], false, "id {i}: {reply}");
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        if i % 2 == 0 {
+            // stats → valid JSON with the counters.
+            assert!(
+                serde_json::from_str::<Value>(text).is_ok(),
+                "id {i} stats: {text}"
+            );
+        } else {
+            assert!(text.contains("plugmem"), "id {i} version: {text}");
+        }
+    }
 }
 
 #[test]

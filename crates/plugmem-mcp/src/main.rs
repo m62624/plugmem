@@ -23,6 +23,7 @@ mod tools;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use clap::Parser;
 
@@ -46,6 +47,10 @@ struct Args {
     /// are refused. Requires a checkpointed database.
     #[arg(long)]
     read_only: bool,
+    /// Worker threads for concurrent requests (else `[server].workers`, else
+    /// half the available cores, at least 1).
+    #[arg(long)]
+    workers: Option<usize>,
 }
 
 fn main() -> ExitCode {
@@ -55,11 +60,22 @@ fn main() -> ExitCode {
         .or_else(|| std::env::var_os(ENV_DB).map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from(DEFAULT_DB));
 
-    // Resolve the engine settings from config.toml + environment, then open the
-    // single writer handle for the server's lifetime. A failure here (a bad
-    // config, or the file already locked by another writer) is fatal: report to
-    // stderr and exit, so the spawning host sees the server did not start.
-    let settings = match plugmem_host::Settings::load(args.config.as_deref()) {
+    // Read config.toml once: the shared loader builds the engine settings; the
+    // server reads its own `[server].workers` from the same table. A failure
+    // here (a bad config, or the file already locked by another writer) is
+    // fatal: report to stderr and exit, so the spawning host sees the server
+    // did not start.
+    let table = match plugmem_host::read_config(args.config.as_deref()) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("plugmem-mcp: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let workers = args
+        .workers
+        .unwrap_or_else(|| resolve_workers(table.as_ref()));
+    let settings = match plugmem_host::Settings::from_table(table.as_ref()) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("plugmem-mcp: {e}");
@@ -70,10 +86,10 @@ fn main() -> ExitCode {
     // Read-only: open a shared snapshot of another process's writer and keep the
     // embedder to embed recall queries (the read-only handle has none). Default:
     // open the single writer handle, consuming the settings (embedder included).
-    let server = if args.read_only {
+    let shared = if args.read_only {
         let embedder = settings.embedder;
         match plugmem_host::Database::open_readonly(&path, settings.config) {
-            Ok(db) => rpc::Server::Reader(Box::new(tools::ReaderState { db, embedder })),
+            Ok(db) => rpc::Shared::Reader(Arc::new(tools::ReaderShared::new(db, embedder))),
             Err(e) => {
                 eprintln!("plugmem-mcp: {}: {e}", path.display());
                 return ExitCode::from(2);
@@ -81,7 +97,7 @@ fn main() -> ExitCode {
         }
     } else {
         match settings.open(&path) {
-            Ok(db) => rpc::Server::Writer(db),
+            Ok(db) => rpc::Shared::Writer(db),
             Err(e) => {
                 eprintln!("plugmem-mcp: {}: {e}", path.display());
                 return ExitCode::from(2);
@@ -89,6 +105,27 @@ fn main() -> ExitCode {
         }
     };
 
-    rpc::serve(server);
+    rpc::serve(shared, workers);
     ExitCode::SUCCESS
+}
+
+/// The worker count: `[server].workers` if a positive integer, else half the
+/// available parallelism (at least 1) — leaving cores for the agent, the OS and
+/// a local embedder rather than monopolizing the machine.
+fn resolve_workers(table: Option<&toml::Table>) -> usize {
+    table
+        .and_then(|t| t.get("server"))
+        .and_then(toml::Value::as_table)
+        .and_then(|s| s.get("workers"))
+        .and_then(toml::Value::as_integer)
+        .filter(|n| *n > 0)
+        .map(|n| n as usize)
+        .unwrap_or_else(default_workers)
+}
+
+/// Half the available cores, at least 1.
+fn default_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| (n.get() / 2).max(1))
+        .unwrap_or(1)
 }
