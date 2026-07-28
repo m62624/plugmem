@@ -89,9 +89,16 @@ fn run_parsed(cli: Cli, out: &mut impl Write) -> u8 {
     match &cli.command {
         Command::Recover { dst } => return do_recover(&path, dst, &settings, cli.json, out),
         Command::Scrub => return do_scrub(&path, &settings, cli.json, out),
-        // The interactive session opens one writer handle and reads commands
-        // from stdin, so it is dispatched before the per-command open below.
-        Command::Repl => return run_repl(&path, settings, cli.json, io::stdin().lock(), out),
+        // The interactive session opens one handle and reads commands from
+        // stdin, so it is dispatched before the per-command open below. The
+        // read-only variant observes another process's writer over a shared
+        // mmap; the default variant opens the single writer handle.
+        Command::Repl { read_only: true } => {
+            return run_repl_ro(&path, settings, cli.json, io::stdin().lock(), out);
+        }
+        Command::Repl { read_only: false } => {
+            return run_repl(&path, settings, cli.json, io::stdin().lock(), out);
+        }
         _ => {}
     }
 
@@ -348,7 +355,7 @@ fn execute(
             Ok(0)
         }
         // Handled in `run_parsed` before the read-write open.
-        Command::Scrub | Command::Recover { .. } | Command::Repl => {
+        Command::Scrub | Command::Recover { .. } | Command::Repl { .. } => {
             unreachable!("scrub/recover/repl are dispatched before execute")
         }
     }
@@ -531,7 +538,7 @@ fn run_repl_line(db: &Database, line: &str, json: bool, out: &mut impl Write) {
         }
     };
     match &cmd {
-        Command::Repl => {
+        Command::Repl { .. } => {
             let _ = writeln!(out, "already in a repl session");
         }
         Command::Scrub | Command::Recover { .. } => {
@@ -549,6 +556,137 @@ fn run_repl_line(db: &Database, line: &str, json: bool, out: &mut impl Write) {
             }
         }
     }
+}
+
+/// Runs the interactive session **read-only** over one open
+/// [`ReadOnlyDatabase`] (a shared, zero-copy mmap): it observes another
+/// process's writer at the generation it opened on. Only the read verbs run;
+/// writes and one-shot commands are refused. Two extra meta-verbs make the
+/// cross-process freshness observable by hand — `generation` prints the pinned
+/// snapshot number, and `refresh` advances to the writer's latest published
+/// checkpoint (see [`ReadOnlyDatabase::refresh`](plugmem_host::ReadOnlyDatabase::refresh)).
+///
+/// These two verbs exist **only** in this mode. A normal (writer) `repl` and
+/// any one-shot command already see the freshest data — read-your-writes over
+/// the overlay, or a fresh open per command — so there is nothing to refresh
+/// there. This session never writes: it does not checkpoint on exit.
+fn run_repl_ro(
+    path: &Path,
+    mut settings: Settings,
+    json: bool,
+    input: impl BufRead,
+    out: &mut impl Write,
+) -> u8 {
+    let mut ro = match Database::open_readonly(path, settings.config.clone()) {
+        Ok(ro) => ro,
+        Err(HostError::Locked { path }) => return report_locked(&path),
+        // A dirty (un-checkpointed) journal, a fresh database with no published
+        // generation, or a corrupt image — surfaced as a typed error.
+        Err(e) => return report_err(&CliError::Host(e)),
+    };
+    eprintln!(
+        "plugmem repl --read-only — observing generation {} of another process's writer. \
+         `help` for verbs, `refresh`/`generation` for cross-process freshness, `exit` to quit.",
+        ro.generation()
+    );
+    eprint!("plugmem(ro)> ");
+    for line in input.lines() {
+        let Ok(line) = line else { break };
+        let line = line.trim();
+        if line.is_empty() {
+            eprint!("plugmem(ro)> ");
+            continue;
+        }
+        match line {
+            "exit" | "quit" => break,
+            "help" => {
+                writeln!(
+                    out,
+                    "read verbs: recall show stats export verify  \
+                     freshness: generation refresh  exit  \
+                     (writes and scrub/recover are refused in a read-only session)"
+                )
+                .ok();
+            }
+            // Freshness meta-verbs — only meaningful for a read-only observer of
+            // another process's writer (a writer repl sees its own writes at once).
+            "generation" => {
+                let g = ro.generation();
+                if json {
+                    writeln!(out, "{}", json!({ "generation": g })).ok();
+                } else {
+                    writeln!(out, "generation {g}").ok();
+                }
+            }
+            "refresh" => match ro.refresh() {
+                Ok(advanced) => {
+                    let g = ro.generation();
+                    if json {
+                        writeln!(out, "{}", json!({ "advanced": advanced, "generation": g })).ok();
+                    } else if advanced {
+                        writeln!(out, "refreshed → generation {g}").ok();
+                    } else {
+                        writeln!(out, "already current → generation {g}").ok();
+                    }
+                }
+                Err(e) => {
+                    writeln!(out, "plugmem: {e}").ok();
+                }
+            },
+            _ => run_repl_ro_line(&ro, &mut settings, line, json, out),
+        }
+        eprint!("plugmem(ro)> ");
+    }
+    eprintln!();
+    // Read-only: nothing to checkpoint, the writer owns the file.
+    0
+}
+
+/// Parses and runs one non-meta line of a read-only repl, refusing anything but
+/// the read verbs (writes/one-shot are not available without the writer lock).
+fn run_repl_ro_line(
+    ro: &ReadOnlyDatabase,
+    settings: &mut Settings,
+    line: &str,
+    json: bool,
+    out: &mut impl Write,
+) {
+    let cmd = match ReplLine::try_parse_from(split_line(line)) {
+        Ok(r) => r.command,
+        Err(e) => {
+            let _ = writeln!(out, "{e}");
+            return;
+        }
+    };
+    let readable = matches!(
+        &cmd,
+        Command::Show { .. }
+            | Command::Stats
+            | Command::Export
+            | Command::Verify
+            | Command::Recall { .. }
+    );
+    if !readable {
+        let _ = writeln!(
+            out,
+            "read-only session: only recall/show/stats/export/verify run \
+             (plus refresh/generation); writes and one-shot commands need a writer handle"
+        );
+        return;
+    }
+    // Embed a text recall query up front, exactly like the one-shot read-only
+    // path — the read-only handle carries no embedder of its own.
+    let recall_vector = match embed_recall_query(settings, &cmd) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = match &e {
+                CliError::Usage(m) => writeln!(out, "plugmem: {m}"),
+                CliError::Host(h) => writeln!(out, "plugmem: {h}"),
+            };
+            return;
+        }
+    };
+    let _ = execute_ro(ro, &cmd, recall_vector.as_deref(), json, out);
 }
 
 /// Embeds a `recall` command's text query into a vector using the configured
@@ -977,6 +1115,122 @@ mod tests {
         // and its active successor.
         let ro = Database::open_readonly(&path, Config::default()).unwrap();
         assert_eq!(ro.stats().facts, 2, "original + successor after the revise");
+    }
+
+    #[test]
+    fn read_only_repl_observes_a_writer_reports_freshness_and_refuses_writes() {
+        let (db, tmp) = TempDb::open();
+        let path = tmp.0.join("m.plugmem");
+        // Seed and publish generation 1, then keep the writer open and live —
+        // the read-only repl observes it cross-process (Variant 2 MVCC).
+        let mut sink = Vec::new();
+        execute(
+            &db,
+            &remember("seed fact tokio", None, &[]),
+            false,
+            1_000,
+            &mut sink,
+        )
+        .unwrap();
+        db.checkpoint(1_001).unwrap();
+
+        let settings = settings_with(None);
+        // A read verb, both freshness verbs, and a write (must be refused).
+        let script = b"generation\nstats\nrefresh\nremember \"nope\"\nexit\n";
+        let mut out = Vec::new();
+        let code = run_repl_ro(&path, settings, false, &script[..], &mut out);
+        let text = String::from_utf8(out).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(text.contains("generation 1"), "generation verb: {text}");
+        assert!(text.contains("fact"), "stats ran: {text}");
+        // The writer published nothing after the reader opened, so refresh is a
+        // no-op that stays on generation 1.
+        assert!(
+            text.contains("already current → generation 1"),
+            "refresh no-op: {text}"
+        );
+        // A write verb is refused without ending the session (exit still ran).
+        assert!(text.contains("read-only session"), "write refused: {text}");
+
+        // The read-only session never wrote: the writer is still on generation 1
+        // with its single seeded fact, untouched by the repl.
+        assert_eq!(db.stats().facts, 1);
+    }
+
+    #[test]
+    fn read_only_repl_refresh_advances_after_the_writer_checkpoints() {
+        let (db, tmp) = TempDb::open();
+        let path = tmp.0.join("m.plugmem");
+        let mut sink = Vec::new();
+        execute(&db, &remember("first", None, &[]), false, 1_000, &mut sink).unwrap();
+        db.checkpoint(1_001).unwrap();
+
+        // A reader hook that publishes a *new* generation the first time the repl
+        // pulls a line, so the subsequent `refresh` deterministically advances —
+        // exercising the "refreshed" branch without a background thread.
+        struct HookOnFirstRead<'a> {
+            script: std::io::Cursor<&'a [u8]>,
+            db: &'a Database,
+            fired: bool,
+        }
+        impl std::io::Read for HookOnFirstRead<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if !self.fired {
+                    self.fired = true;
+                    // Publish generation 2 before the first command is read, so
+                    // the reader (opened on gen 1) sees something newer.
+                    let mut s = Vec::new();
+                    execute(
+                        self.db,
+                        &remember("second", None, &[]),
+                        false,
+                        2_000,
+                        &mut s,
+                    )
+                    .unwrap();
+                    self.db.checkpoint(2_001).unwrap();
+                }
+                self.script.read(buf)
+            }
+        }
+        let reader = std::io::BufReader::new(HookOnFirstRead {
+            script: std::io::Cursor::new(b"refresh\nstats\nexit\n" as &[u8]),
+            db: &db,
+            fired: false,
+        });
+
+        let mut out = Vec::new();
+        let code = run_repl_ro(&path, settings_with(None), false, reader, &mut out);
+        let text = String::from_utf8(out).unwrap();
+
+        assert_eq!(code, 0);
+        // Opened on gen 1, the writer published gen 2, refresh advanced onto it.
+        assert!(text.contains("refreshed → generation 2"), "advance: {text}");
+        // And the advanced reader now sees the writer's second fact.
+        assert!(text.contains("fact"), "stats after refresh: {text}");
+        assert_eq!(db.stats().facts, 2);
+    }
+
+    #[test]
+    fn read_only_repl_freshness_verbs_emit_json() {
+        let (db, tmp) = TempDb::open();
+        let path = tmp.0.join("m.plugmem");
+        let mut sink = Vec::new();
+        execute(&db, &remember("j", None, &[]), false, 1_000, &mut sink).unwrap();
+        db.checkpoint(1_001).unwrap();
+
+        let script = b"generation\nrefresh\nexit\n";
+        let mut out = Vec::new();
+        let code = run_repl_ro(&path, settings_with(None), true, &script[..], &mut out);
+        let text = String::from_utf8(out).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(
+            text.contains(r#""generation":1"#),
+            "generation json: {text}"
+        );
+        assert!(text.contains(r#""advanced":false"#), "refresh json: {text}");
     }
 
     /// A throwaway database on a unique temp path; removed on drop.

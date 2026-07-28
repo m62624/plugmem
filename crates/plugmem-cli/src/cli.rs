@@ -165,5 +165,17 @@ pub(crate) enum Command {
     /// memory for native (host) speed instead of reloading per command. Type
     /// `help` for the verb list, `exit`/`quit` (or EOF) to leave; the session
     /// checkpoints on exit. `scrub`/`recover` stay one-shot.
-    Repl,
+    Repl {
+        /// Observe another process's database read-only (a shared, zero-copy
+        /// mmap) instead of opening read-write. Only the read verbs run
+        /// (recall/show/stats/export/verify), plus two cross-process freshness
+        /// verbs: `refresh` (advance to the writer's latest checkpoint) and
+        /// `generation` (the pinned snapshot number). Those two exist ONLY for
+        /// this mode — a normal writer repl and every one-shot command already
+        /// see the newest data (read-your-writes, or a fresh open), so they are
+        /// neither needed nor offered there. Requires a checkpointed database
+        /// and does not write (no checkpoint on exit).
+        #[arg(long)]
+        read_only: bool,
+    },
 }

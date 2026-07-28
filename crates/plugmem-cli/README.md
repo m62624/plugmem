@@ -111,6 +111,50 @@ plugmem-cli checkpoint && plugmem-cli scrub  # flush journal, then byte-level ch
 plugmem-cli recover agent.recovered.plugmem   # salvage into a clean copy
 ```
 
+## Interactive mode (`repl`)
+
+`plugmem repl` opens the database **once** and runs commands from stdin (one
+per line, the same subcommand grammar), keeping the engine resident so each
+command is host speed instead of a per-command reload. `help` lists the verbs,
+`exit`/`quit` (or EOF) leaves, and the session checkpoints on exit. This is the
+read-write session: it holds the writer lock and sees its own writes instantly
+(read-your-writes), so there is never anything to "refresh".
+
+```text
+$ plugmem-cli repl
+plugmem> remember "prefers tokio"
+plugmem> recall runtime
+plugmem> exit
+```
+
+`plugmem repl --read-only` is a **separate, observe-only** session for watching
+a database that **another process** is writing. It opens a shared, zero-copy
+mmap over the last published snapshot (it does not take the writer lock and does
+not write), so only the read verbs run — `recall`, `show`, `stats`, `export`,
+`verify`. It adds two cross-process freshness verbs:
+
+| verb | what it does |
+|---|---|
+| `generation` | print the snapshot generation this session is pinned to (a number that a writer's checkpoint bumps) |
+| `refresh` | advance to the writer's latest published checkpoint, if any — prints `refreshed → generation N` or `already current → generation N` |
+
+**These two verbs exist only in `--read-only`.** A normal (writer) `repl` and
+every one-shot command already see the newest data — read-your-writes, or a
+fresh open per command — so refreshing there is meaningless and is not offered.
+`--read-only` requires a checkpointed database (an un-checkpointed writer is
+refused): run `checkpoint` in the writing process first.
+
+```text
+$ plugmem-cli repl --read-only        # in a second terminal, while a writer runs
+plugmem(ro)> generation
+generation 7
+plugmem(ro)> recall runtime           # answers as of generation 7
+plugmem(ro)> refresh                   # the writer has checkpointed since
+refreshed → generation 9
+plugmem(ro)> recall runtime           # now answers as of generation 9
+plugmem(ro)> exit
+```
+
 ## Configuration
 
 Optional `config.toml`, found by `--config PATH`, then `$PLUGMEM_CONFIG`,
