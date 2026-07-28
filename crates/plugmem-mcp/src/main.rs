@@ -41,6 +41,11 @@ struct Args {
     /// config.toml path (else $PLUGMEM_CONFIG, else the XDG default).
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Observe-only: open a shared snapshot of another process's writer. Serves
+    /// the read verbs plus `plugmem_generation`/`plugmem_refresh`; write verbs
+    /// are refused. Requires a checkpointed database.
+    #[arg(long)]
+    read_only: bool,
 }
 
 fn main() -> ExitCode {
@@ -61,14 +66,29 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let db = match settings.open(&path) {
-        Ok(db) => db,
-        Err(e) => {
-            eprintln!("plugmem-mcp: {}: {e}", path.display());
-            return ExitCode::from(2);
+
+    // Read-only: open a shared snapshot of another process's writer and keep the
+    // embedder to embed recall queries (the read-only handle has none). Default:
+    // open the single writer handle, consuming the settings (embedder included).
+    let server = if args.read_only {
+        let embedder = settings.embedder;
+        match plugmem_host::Database::open_readonly(&path, settings.config) {
+            Ok(db) => rpc::Server::Reader(Box::new(tools::ReaderState { db, embedder })),
+            Err(e) => {
+                eprintln!("plugmem-mcp: {}: {e}", path.display());
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        match settings.open(&path) {
+            Ok(db) => rpc::Server::Writer(db),
+            Err(e) => {
+                eprintln!("plugmem-mcp: {}: {e}", path.display());
+                return ExitCode::from(2);
+            }
         }
     };
 
-    rpc::serve(&db);
+    rpc::serve(server);
     ExitCode::SUCCESS
 }

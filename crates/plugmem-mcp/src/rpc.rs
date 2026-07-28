@@ -11,12 +11,26 @@ use std::io::{self, BufRead, Write};
 use plugmem_host::Database;
 use serde_json::{Value, json};
 
+use crate::tools::ReaderState;
 use crate::{messages, tools};
+
+/// What the server was opened as: a read-write writer over its own file, or a
+/// read-only observer of another process's writer (a shared mmap over the last
+/// published snapshot). The mode picks the advertised tool set and the
+/// dispatch; `refresh` mutates the reader, so the backend is held by `&mut`.
+pub enum Server {
+    /// Read-write: the full verb surface.
+    Writer(Database),
+    /// Read-only: read verbs + `refresh`/`generation`; write verbs are refused.
+    /// Boxed — a `ReadOnlyDatabase` (mmap + borrowed view) is far larger than the
+    /// `Arc` a writer holds, and there is exactly one `Server` per process.
+    Reader(Box<ReaderState>),
+}
 
 /// Read newline-delimited requests from stdin and write replies to stdout,
 /// flushing each. Blank and non-JSON lines are skipped; notifications (no `id`)
 /// get no reply. Runs until stdin closes.
-pub fn serve(db: &Database) {
+pub fn serve(mut server: Server) {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -29,7 +43,7 @@ pub fn serve(db: &Database) {
         let Ok(req) = serde_json::from_str::<Value>(&line) else {
             continue; // ignore non-JSON lines
         };
-        if let Some(response) = handle(db, &req) {
+        if let Some(response) = handle(&mut server, &req) {
             let _ = writeln!(out, "{response}");
             let _ = out.flush();
         }
@@ -38,7 +52,7 @@ pub fn serve(db: &Database) {
 
 /// Dispatch one JSON-RPC request. Returns `None` for notifications (no `id`) and
 /// for anything that should not produce a reply.
-fn handle(db: &Database, req: &Value) -> Option<Value> {
+fn handle(server: &mut Server, req: &Value) -> Option<Value> {
     let method = req.get("method")?.as_str()?;
     let id = req.get("id").cloned(); // absent ⇒ notification ⇒ no reply
 
@@ -55,8 +69,21 @@ fn handle(db: &Database, req: &Value) -> Option<Value> {
         }),
         "notifications/initialized" => None,
         "ping" => id.map(|id| result(id, json!({}))),
-        "tools/list" => id.map(|id| result(id, json!({ "tools": tools::definitions() }))),
-        "tools/call" => id.map(|id| tools::call(db, id, req.get("params"))),
+        "tools/list" => id.map(|id| {
+            let tools = match server {
+                Server::Writer(_) => tools::definitions(),
+                Server::Reader(_) => tools::definitions_ro(),
+            };
+            result(id, json!({ "tools": tools }))
+        }),
+        "tools/call" => id.map(|id| {
+            let params = req.get("params");
+            match server {
+                Server::Writer(db) => tools::call(db, id, params),
+                // `reader` is `&mut Box<ReaderState>`; deref to `&mut ReaderState`.
+                Server::Reader(reader) => tools::call_ro(reader, id, params),
+            }
+        }),
         // Unknown method: error only for requests (notifications are ignored).
         _ => id.map(|id| error(id, -32601, "method not found")),
     }

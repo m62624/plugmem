@@ -24,9 +24,15 @@ fn temp_db(tag: &str) -> PathBuf {
 
 /// Feed each request line to a server opened on `db`, return the parsed replies.
 fn roundtrip(db: &PathBuf, requests: &[&str]) -> Vec<Value> {
+    roundtrip_args(db, &[], requests)
+}
+
+/// Like [`roundtrip`], with extra binary arguments (e.g. `--read-only`).
+fn roundtrip_args(db: &PathBuf, extra: &[&str], requests: &[&str]) -> Vec<Value> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_plugmem-mcp"))
         .arg("--db")
         .arg(db)
+        .args(extra)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -245,6 +251,83 @@ fn missing_required_argument_is_a_tool_error() {
     );
     assert_eq!(resps[0]["result"]["isError"], true);
     assert_eq!(resps[1]["result"]["isError"], true);
+}
+
+#[test]
+fn read_only_serves_reads_and_refuses_writes() {
+    let db = temp_db("ro");
+    // A writer process stores a fact and checkpoints (so a read-only open has a
+    // published snapshot), then exits when its stdin closes.
+    let w = roundtrip(
+        &db,
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"plugmem_remember","arguments":{"text":"prefers tokio","entity":"user"}}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"plugmem_checkpoint","arguments":{}}}"#,
+        ],
+    );
+    assert_eq!(
+        w[1]["result"]["isError"], false,
+        "checkpoint should succeed"
+    );
+
+    // A separate read-only process observes that snapshot.
+    let r = roundtrip_args(
+        &db,
+        &["--read-only"],
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"plugmem_stats","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"plugmem_recall","arguments":{"query":"tokio"}}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"plugmem_generation","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"plugmem_refresh","arguments":{}}}"#,
+            // a write verb must be refused
+            r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"plugmem_remember","arguments":{"text":"nope"}}}"#,
+        ],
+    );
+
+    // The advertised set is read-only: refresh is offered, remember is not.
+    let tools: Vec<&str> = r[0]["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(tools.contains(&"plugmem_refresh"), "ro tools: {tools:?}");
+    assert!(tools.contains(&"plugmem_generation"), "ro tools: {tools:?}");
+    assert!(
+        !tools.contains(&"plugmem_remember"),
+        "ro must not offer writes: {tools:?}"
+    );
+
+    // stats sees the checkpointed fact.
+    let stats: Value =
+        serde_json::from_str(r[1]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(stats["facts"], 1);
+
+    // recall (lexical, no embedder) surfaces it.
+    let recalled: Value =
+        serde_json::from_str(r[2]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(
+        recalled["facts"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false),
+        "ro recall should find the fact: {recalled}"
+    );
+
+    // generation is a number; refresh reports current generation, nothing newer.
+    let generation: Value =
+        serde_json::from_str(r[3]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(generation["generation"].is_number());
+    let refreshed: Value =
+        serde_json::from_str(r[4]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        refreshed["refreshed"], false,
+        "nothing published since open"
+    );
+
+    // the write verb is refused as a tool-level error.
+    assert_eq!(r[5]["result"]["isError"], true);
 }
 
 #[test]

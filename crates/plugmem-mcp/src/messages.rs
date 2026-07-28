@@ -112,3 +112,19 @@ pub const ARG_ID: &str = "The fact id (as printed by remember, or the `[fN]` in 
 pub const ARG_SRC: &str = "Source entity name (created lazily).";
 pub const ARG_REL: &str = "Relation term, verbatim (e.g. \"works_at\").";
 pub const ARG_DST: &str = "Destination entity name (created lazily).";
+
+// ── Read-only mode: freshness meta ────────────────────────────────────────
+
+/// `plugmem_generation` tool description (read-only mode only).
+pub const GENERATION_TOOL: &str = "Return the snapshot generation this read-only session is pinned \
+to (a number a writer's checkpoint bumps). A read-only session is frozen at its generation until \
+you `plugmem_refresh`.";
+
+/// `plugmem_refresh` tool description (read-only mode only).
+pub const REFRESH_TOOL: &str = "Advance this read-only session to the writer's latest published \
+checkpoint, if any. Returns whether it moved and the current generation. Cheap: a 24-byte manifest \
+read, re-mapping only when the generation grew.";
+
+/// Prefix of the tool-error text when a write verb is called in read-only mode.
+pub const READ_ONLY_REFUSAL: &str = "read-only server: this tool is not available (start the server \
+without --read-only to write)";

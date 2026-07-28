@@ -9,11 +9,27 @@
 //! call. A [`HostError`] becomes a tool-level error (`isError`) so the model
 //! reads it; missing `params` is the JSON-RPC `-32602`.
 
-use plugmem_host::{Database, FactId, HostError, LinkInput, RecallQuery, RememberInput};
+use plugmem_host::{
+    Database, Embedder, FactId, HostError, LinkInput, ReadOnlyDatabase, RecallQuery, RememberInput,
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::{messages, rpc};
+
+/// Read-only server state: a shared-mmap snapshot of another process's writer,
+/// plus the embedder (if configured) used to embed a `recall` query — the
+/// read-only `recall` does not auto-embed, so the server does it, mirroring the
+/// CLI's read-only path. `refresh` mutates `db`, so this is held by `&mut`.
+pub struct ReaderState {
+    /// The pinned snapshot handle.
+    pub db: ReadOnlyDatabase,
+    /// The embedder for `recall` query text (`None` = lexical/graph/time only).
+    pub embedder: Option<Box<dyn Embedder>>,
+}
+
+const GENERATION: &str = "plugmem_generation";
+const REFRESH: &str = "plugmem_refresh";
 
 /// The tool names, shared by each definition and the `tools/call` dispatcher so
 /// the advertised name and the routed name can never drift apart.
@@ -85,6 +101,118 @@ pub fn call(db: &Database, id: Value, params: Option<&Value>) -> Value {
         ABOUT => rpc::tool_result(id, messages::ABOUT_TOOL.to_string(), false),
         other => rpc::tool_result(id, format!("unknown tool: {other}"), true),
     }
+}
+
+// ── Read-only mode ────────────────────────────────────────────────────────
+
+/// Tool definitions a read-only server advertises: the read verbs, the two
+/// freshness verbs, and meta. No write verbs.
+pub fn definitions_ro() -> Vec<Value> {
+    vec![
+        recall_def(),
+        show_def(),
+        stats_def(),
+        export_def(),
+        verify_def(),
+        format_only_def(GENERATION, messages::GENERATION_TOOL),
+        format_only_def(REFRESH, messages::REFRESH_TOOL),
+        version_def(),
+        about_def(),
+    ]
+}
+
+/// Execute a `tools/call` against a read-only server: read verbs + freshness;
+/// a write verb is refused with a tool-level error.
+pub fn call_ro(reader: &mut ReaderState, id: Value, params: Option<&Value>) -> Value {
+    let Some(params) = params else {
+        return rpc::error(id, -32602, "missing params");
+    };
+    let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+    let args = params.get("arguments");
+
+    match name {
+        RECALL => recall_ro(reader, id, args),
+        SHOW => match reader.db.get(FactId(id_arg(args))) {
+            Some(snap) => rpc::tool_result(id, render(&snap, format_arg(args)), false),
+            None => rpc::tool_result(id, format!("fact {} does not exist", id_arg(args)), true),
+        },
+        STATS => rpc::tool_result(id, render(&reader.db.stats(), format_arg(args)), false),
+        EXPORT => rpc::tool_result(id, render(&reader.db.export(), format_arg(args)), false),
+        VERIFY => match reader.db.verify() {
+            Ok(()) => rpc::tool_result(id, render(&json!({ "ok": true }), format_arg(args)), false),
+            Err(e) => tool_error(id, &e),
+        },
+        GENERATION => rpc::tool_result(
+            id,
+            render(
+                &json!({ "generation": reader.db.generation() }),
+                format_arg(args),
+            ),
+            false,
+        ),
+        REFRESH => match reader.db.refresh() {
+            Ok(moved) => rpc::tool_result(
+                id,
+                render(
+                    &json!({ "refreshed": moved, "generation": reader.db.generation() }),
+                    format_arg(args),
+                ),
+                false,
+            ),
+            Err(e) => tool_error(id, &e),
+        },
+        VERSION => rpc::tool_result(id, format!("plugmem {}", env!("CARGO_PKG_VERSION")), false),
+        ABOUT => rpc::tool_result(id, messages::ABOUT_TOOL.to_string(), false),
+        // A known write verb, or anything else: refused in read-only mode.
+        REMEMBER | REVISE | FORGET | LINK | MAINTAIN | CHECKPOINT => {
+            rpc::tool_result(id, messages::READ_ONLY_REFUSAL.into(), true)
+        }
+        other => rpc::tool_result(id, format!("unknown tool: {other}"), true),
+    }
+}
+
+/// Read-only `recall`: embed the query text with the server's embedder (if any)
+/// before searching — the read-only handle carries no embedder and does not
+/// auto-embed. Lexical/graph/time still answer without one.
+fn recall_ro(reader: &mut ReaderState, id: Value, args: Option<&Value>) -> Value {
+    let format = format_arg(args);
+    let query = arg_str(args, "query").map(String::from);
+    // Embed the query text (outside any lock) into an owned vector, if we can.
+    let vector = match (&mut reader.embedder, query.as_deref()) {
+        (Some(embedder), Some(text)) => match embedder.embed(&[text]) {
+            Ok(mut v) => v.pop(),
+            Err(e) => return tool_error(id, &e),
+        },
+        _ => None,
+    };
+    let tags = arg_str_vec(args, "tags");
+    let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
+    let entities = arg_str_vec(args, "entities");
+    let ent_refs: Vec<&str> = entities.iter().map(String::as_str).collect();
+    let q = RecallQuery {
+        now: now_ms(),
+        text: query.as_deref(),
+        vector: vector.as_deref(),
+        tags: &tag_refs,
+        entities: &ent_refs,
+        as_of: arg_u64(args, "as_of"),
+        range: arg_range(args),
+        k: arg_u64(args, "k").unwrap_or(0) as usize,
+        token_budget: None,
+        include_closed: arg_bool(args, "closed"),
+        ef: None,
+    };
+    match reader.db.recall(q) {
+        Ok(res) if format == "human" => rpc::tool_result(id, res.rendered, false),
+        Ok(res) => rpc::tool_result(id, render(&res, "json"), false),
+        Err(e) => tool_error(id, &e),
+    }
+}
+
+/// The `id` argument as a `u32` fact id (0 when absent — a `show`/`get` of a
+/// non-existent fact is a clean "does not exist").
+fn id_arg(args: Option<&Value>) -> u32 {
+    arg_u64(args, "id").unwrap_or(0) as u32
 }
 
 // ── Write verbs ───────────────────────────────────────────────────────────
