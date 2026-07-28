@@ -71,7 +71,10 @@ pub(crate) enum Command {
         #[arg(long = "valid-from", value_name = "TS")]
         valid_from: Option<u64>,
     },
-    /// Retrieve a ranked, token-budgeted block; sources compose.
+    /// Retrieve a ranked, token-budgeted block; sources compose. Each line is
+    /// `- [fN] text …`, where `N` is the fact's id — pass it to `forget`,
+    /// `revise`, or `show` (e.g. `[f3]` → `forget 3`). `--json` carries the
+    /// same id as a plain `"id"` field.
     Recall {
         /// Free-text query for the lexical/vector sources.
         query: Option<String>,
@@ -111,7 +114,8 @@ pub(crate) enum Command {
     },
     /// Tombstone a fact (physically purged at the next `maintain`).
     Forget {
-        /// The fact id to forget.
+        /// The fact id to forget — the `N` from a `recall` line `[fN]`, a
+        /// `show`, or a `remember`/`revise` confirmation.
         id: u32,
     },
     /// Upsert a typed edge between two entities.

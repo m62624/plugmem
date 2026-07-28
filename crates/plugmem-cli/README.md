@@ -57,7 +57,7 @@ engine keeps no clock, so `now` comes from the system clock at each call.
 | command | what it does |
 |---|---|
 | `remember <TEXT> [--entity E] [--tag T]… [--link REL:ENTITY]… [--valid-from TS]` | store a fact; prints its id and any similar/conflicting facts |
-| `recall [QUERY] [--tag T]… [--entity E]… [--as-of TS] [--range FROM TO] [-k N] [--closed]` | ranked, token-budgeted block; sources compose |
+| `recall [QUERY] [--tag T]… [--entity E]… [--as-of TS] [--range FROM TO] [-k N] [--closed]` | ranked, token-budgeted block; sources compose. Each line is `- [fN] text …` — `N` is the fact's id (see below) |
 | `revise <ID> <TEXT> [same flags as remember]` | close the old fact, record the successor |
 | `forget <ID>` | tombstone a fact (purged physically at the next `maintain`) |
 | `link <SRC> <REL> <DST>` | upsert a typed edge between entities |
@@ -70,6 +70,14 @@ engine keeps no clock, so `now` comes from the system clock at each call.
 | `recover <DST>` | salvage a content-corrupt database into a clean `DST`; the source (`--db`) is left untouched |
 | `export` | dump the currently-open facts as JSONL (one per line) to stdout |
 | `import <FILE>` | load facts from a JSONL file (as written by `export`) |
+
+**Fact ids.** A fact's id is how you address it in `forget`, `revise`, and
+`show`. `remember` prints it on store (`remembered fact 3`), and `recall`
+carries it on every line: the human block renders each fact as `- [fN] text …`
+where `N` is the id (so `[f3]` → `forget 3`), and `--json` exposes the same
+value as a plain `"id"` field on each fact. You don't guess an id — you read it
+back from a `recall` (or `show`), then act on it, the usual "find, then change"
+flow.
 
 Read-only commands (`recall`, `show`, `stats`, `export`) open the snapshot
 **zero-copy over an mmap** (a shared lock, so several may run at once and
@@ -97,8 +105,10 @@ plugmem-cli recall "lives" --entity user --as-of 1700000000000   # → Moscow
 plugmem-cli --json recall "runtime" --tag pref
 plugmem-cli --json stats
 
-# Reclaim space held by forgotten facts:
-plugmem-cli forget 3
+# Reclaim space held by forgotten facts. `recall` shows the id as `[fN]`;
+# use that N to forget, then compact:
+plugmem-cli recall "old runtime note"   # → - [f3] prefers deno … 
+plugmem-cli forget 3                     # the 3 from [f3]
 plugmem-cli maintain
 
 # Human-readable backup and restore:
