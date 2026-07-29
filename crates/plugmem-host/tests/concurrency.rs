@@ -87,6 +87,15 @@ fn _assert_send_sync<T: Send + Sync>() {}
 /// whole test binary; a panic inside is re-raised. This turns "no deadlock"
 /// from an implicit belief into a checked property.
 fn run_with_deadline(secs: u64, label: &str, body: impl FnOnce() + Send + 'static) {
+    // The `secs` budget is calibrated for an *optimized* run on a fast machine.
+    // CI runs `cargo test` unoptimized (`debug_assertions` on) on shared runners
+    // that are several times slower again — the same body that finishes in tens
+    // of seconds here would blow a 60/90s budget there, which is a slow build on
+    // slow hardware, not a hang. So scale the budget up in debug; release keeps
+    // the tight bound for local runs. The shape is unchanged either way: a worker
+    // thread signals completion and a real deadlock still trips the deadline (it
+    // just waits longer before doing so), so the no-deadlock property still holds.
+    let secs = if cfg!(debug_assertions) { secs * 8 } else { secs };
     let (tx, rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
         body();

@@ -285,7 +285,11 @@ jobs:
       - name: Install dependencies (@napi-rs/cli)
         run: npm ci
       - name: Build the addon
-        run: napi build --platform --release
+        # `@napi-rs/cli` is a *local* devDependency (installed by `npm ci` into
+        # node_modules/.bin), not global — invoke it through `npx` so the bare
+        # `napi` binary resolves. A plain `napi build` fails with "command not
+        # found" because node_modules/.bin is not on PATH outside an npm script.
+        run: npx napi build --platform --release
       - name: Test through Node
         run: npm test
 

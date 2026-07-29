@@ -285,7 +285,9 @@ jobs:
       - name: Install dependencies (@napi-rs/cli)
         run: npm ci
       - name: Build the addon
-        run: napi build --platform --release --target ${{ matrix.target }} ${{ matrix.zig && '--zig' || '' }}
+        # `@napi-rs/cli` is a *local* devDependency (installed by `npm ci`), so
+        # invoke it through `npx`; a bare `napi` is not on PATH (see ci.yml).
+        run: npx napi build --platform --release --target ${{ matrix.target }} ${{ matrix.zig && '--zig' || '' }}
       - name: Upload the built addon
         uses: actions/upload-artifact@v4
         with:
