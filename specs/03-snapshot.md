@@ -1,196 +1,173 @@
-# 03 — снапшот, журнал, trait Storage
+# 03 — Snapshot, journal, the Storage trait
 
-> Персистентность = «образ памяти + журнал операций». Ядро не знает, где
-> лежат байты: все контакты с миром — через `Storage`. Нативные обёртки дают
-> файлы, wasm-обвязка — callbacks хоста.
+Persistence is "an image of memory plus a journal of operations". The core does not
+know where the bytes live: every contact with the world goes through `Storage`. The
+native wrappers provide files; a wasm host provides callbacks.
 
-## Модель персистентности
+## Persistence model
 
-- **Снапшот** — полный образ состояния движка: конкатенация секций арен
-  (см. контракты в `01`), выровненных по 64 Б, с заголовком и таблицей секций.
-  Загрузка: один буфер в памяти → валидация метаданных → структуры оборачивают
-  свои срезы. Ни парсинга, ни аллокаций по-элементно.
-- **Журнал** — append-only лог мутирующих операций после снапшота. Даёт
-  durability без переписывания образа на каждый remember.
-- Загрузка = снапшот + реплей журнала. `snapshot()` = сериализовать текущее
-  состояние → `write_snapshot` → `clear_journal`. Политику «когда снапшотить»
-  задаёт обёртка (например: журнал > 4 МБ или > 1000 записей, или явная команда).
+- **Snapshot** — a full image of engine state: the arena sections (see the contracts
+  in `01-arena.md`) concatenated, 64 B aligned, with a header and a section table. A
+  load is one in-memory buffer → metadata validation → the structures wrap their own
+  slices. No parsing, no per-element allocation.
+- **Journal** — an append-only log of the mutating operations since the snapshot,
+  giving durability without rewriting the image on every remember.
+- A load is snapshot + journal replay. `snapshot()` = serialize the current state →
+  `write_snapshot` → `clear_journal`. When to snapshot is a wrapper policy (e.g.
+  journal > 4 MB or > 1000 entries, or an explicit command).
 
-## Trait Storage (no_std)
+## The Storage trait (no_std)
 
 ```rust
 pub trait Storage {
     type Error: core::fmt::Debug;
-    /// None — базы ещё нет (первый запуск).
+    /// None — no database yet (first run).
     fn read_snapshot(&mut self) -> Result<Option<Vec<u8>>, Self::Error>;
-    /// Атомарная замена образа (tmp + rename у файловой реализации).
+    /// Atomic image replacement (tmp + rename in the file implementation).
     fn write_snapshot(&mut self, bytes: &[u8]) -> Result<(), Self::Error>;
-    /// Все байты журнала (пусто — норм).
+    /// All journal bytes (empty is fine).
     fn read_journal(&mut self) -> Result<Vec<u8>, Self::Error>;
-    /// Дозапись одной записи журнала (durability-точка операции).
+    /// Append one journal entry (the operation's durability point).
     fn append_journal(&mut self, entry: &[u8]) -> Result<(), Self::Error>;
     fn clear_journal(&mut self) -> Result<(), Self::Error>;
 }
 ```
 
-Ядро вызывает `append_journal` синхронно в конце каждой мутирующей операции.
-fsync-политика — дело реализации (`FileStorage`: `fsync_each` /
-`fsync_snapshot_only` в конфиге обёртки; default — each: durability дороже
-микросекунд, объёмы записи мизерные).
+The core calls `append_journal` synchronously at the end of each mutating operation.
+The fsync policy is the implementation's business (`FileStorage`: `fsync_each` /
+`fsync_snapshot_only`; default each — durability beats microseconds and the write
+volumes are tiny). Implementations: `plugmem-host::FileStorage` (two files,
+`<name>.plugmem` + `<name>.journal`), `plugmem-core::MemStorage` (tests, ephemeral
+databases), and a wasm bridge to JS callbacks (see `07-wrappers.md`).
 
-Реализации: `plugmem-host::FileStorage` (два файла: `<name>.plugmem`,
-`<name>.journal`), `plugmem-core::MemStorage` (тесты, эфемерные базы),
-wasm-bridge → JS-callbacks (см. `06-wrappers.md`).
+**Locking: one database, one process.** On open `FileStorage` takes an exclusive
+advisory lock (flock/LockFileEx on a lock file beside the database) and holds it for
+the handle's lifetime. A second writer gets `Error::Locked` ("database is locked by
+another process") with no wait. Read-only handles instead take a *shared* lock, so
+N readers OR one writer (the SQLite model; see the read-only path below and
+`06-host.md`).
 
-**Блокировка (решено): одна база — один процесс.** `FileStorage` при открытии
-берёт эксклюзивный advisory-lock (flock/LockFileEx на lock-файле рядом с базой)
-и держит его всё время жизни. Второй процесс получает `Error::Locked` с
-внятным сообщением («database is locked by another process»), без ожидания.
-Кооперативные схемы (retry, многопроцессный журнал) — осознанно вне v1.
+## Snapshot format
 
-## Формат снапшота
-
-> **Статус: реализовано 2026-07-18** (контейнер — `plugmem-core::snapshot`,
-> `dump_*`/`load` каждой структуры — в `plugmem-arena`; журнальный framing и
-> `Storage`/`MemStorage` — раньше в тот же день). Точная байтовая раскладка —
-> в rustdoc модуля; отличия от черновика ниже, всё в сторону ужесточения:
->
-> 1. `file_xxh3` считается по **всему файлу с обнулённым полем хеша** (в
->    черновике — только после поля, что оставляло `flags` под защитой одной
->    лишь валидации значений). Тест-матрица: любой битфлип любого байта
->    файла → типизированная ошибка.
-> 2. Раскладка строго **каноническая**: секции подряд в порядке таблицы, все
->    паддинги нулевые, хвостовых байтов нет; dump → load → dump побайтово
->    идентичен (тест на каждую структуру и на контейнер).
-> 3. Неинициализированные хвосты страниц арены и переиспользованные чанки
->    ChunkPool при dump зануляются (канонично + нет утечки старых данных;
->    miri подтверждает, что dump не читает неинициализированное).
-> 4. Худшая валидация, которую структура не может сделать сама, явно
->    задокументирована: циклы в цепочках ChunkPool, принадлежащих хэндлам
->    владельца, проверяет движок при своей загрузке (общий visited-bitmap);
->    размещение записей таблицы интернера не перепроверяется (это стоило бы
->    полного rebuild) — некорректная таблица не даёт UB/паники, только
->    дубликаты id, случайная порча ловится чек-суммами.
-> 5. Индекс BlobHeap хранит только длины (офсеты выводимы из смежности) —
->    меньше избыточности, меньше валидации.
-
-Всё little-endian, кроме ключей внутри слотов арен (те BE — это данные, формат
-их не интерпретирует).
+Everything is little-endian except the keys inside arena slots (those are BE — they
+are data the format does not interpret).
 
 ```
-Header (64 Б):
+Header (64 B):
   magic       u32   = 0x504C_474D ("PLGM")
-  version     u16   = 1            // формат, не версия крейта
-  flags       u16   // бит 0: есть векторная секция; резерв
+  version     u16   = 1            // the format, not the crate version
+  flags       u16   // bit 0: a vector section is present; reserved
   section_cnt u16
   reserved    [u8; 6]
-  config_len  u32   // длина Config-блока
-  file_xxh3   u64   // хеш всего файла после этого поля (опционально: 0 = нет)
-  created_at  u64   // информационно
-  engine_ver  [u8; 24] // semver-строка, информационно
+  config_len  u32   // length of the Config block
+  file_xxh3   u64   // hash of the whole file with this field zeroed (0 = none)
+  created_at  u64   // informational
+  engine_ver  [u8; 24] // semver string, informational
 
-Config-блок: бинарная фиксированная структура (см. 05-api.md: dim,
-  quantization, shards каждой арены, max_*, hnsw-параметры, rrf/recency,
-  db_uuid — идентичность лайнеджа базы, добавлена 2026-07-19,
-  ENCODED_LEN = 188). Всё, что влияет на интерпретацию байтов, живёт здесь.
+Config block: a fixed binary struct (see 05-api.md: dim, quantization, per-arena
+  shards, max_*, hnsw params, rrf/recency, db_uuid — the database lineage id;
+  ENCODED_LEN = 188). Everything that changes how bytes are interpreted lives here.
 
-Таблица секций: section_cnt × 24 Б:
-  kind   u16   // enum: ArenaFactsPool=1, ArenaFactsMeta=2, ... Blobs, Interner,
-               // Postings, Temporal, EdgesOut, EdgesIn, Vectors, Sigs, Hnsw...
+Section table: section_cnt x 32 B:
+  kind   u16   // enum: ArenaFactsPool, ArenaFactsMeta, Blobs, Interner, Postings,
+               // Temporal, EdgesOut, EdgesIn, Vectors, Sigs, Hnsw, Metas...
   align  u16   // = 64
-  offset u64   // от начала файла, кратен 64
+  offset u64   // from file start, multiple of 64
   len    u64
-  (+ xxh3 u64 секции — да, поэтому 32 Б; итог: запись 32 Б)
+  xxh3   u64   // per-section hash
 
-Секции: подряд, каждая выровнена на 64.
+Sections: contiguous, each 64-aligned.
 ```
 
-Правила:
+The container hash covers the **whole file with the hash field zeroed** (so `flags`
+and everything else is under the checksum, not just value-validation). The layout is
+strictly **canonical**: sections in table order, all padding zero, no trailing bytes,
+so dump → load → dump is byte-identical (tested per structure and for the container).
+Uninitialized page tails and reused ChunkPool chunks are zeroed on dump (canonical +
+no stale-data leak; miri confirms dump never reads uninitialized memory).
 
-1. Неизвестный `kind` при чтении → ошибка `UnsupportedSection` (формат v1 не
-   обещает forward-compat; см. миграции ниже).
-2. Отсутствие ожидаемой секции (по конфигу) → `Corrupt`.
-3. `len`/`offset` каждой секции bounds-checked против размера буфера **до**
-   любого доступа; пересечения секций запрещены (проверка сортировкой).
+Rules:
 
-## Валидация недоверенного входа
+1. An unknown `kind` on read → `UnsupportedSection` (v1 promises no forward-compat;
+   see migrations).
+2. A section expected by config but missing → `Corrupt`.
+3. Each section's `len`/`offset` is bounds-checked against the buffer **before** any
+   access; overlapping sections are rejected (checked by sorting).
 
-Снапшот может прийти откуда угодно (wasm-хост, чужой файл). Контракт загрузчика:
+## Validating untrusted input
 
-- **никогда** не паниковать и не UB на любых байтах: только `Err(LoadError)`;
-- стоимость валидации O(метаданные), не O(данные): заголовок, таблица секций,
-  метаданные арен (циклы цепочек, границы, counts), хэндлы ChunkPool;
-  содержимое слотов не проверяется — оно семантически валидируется на
-  уровне ядра лениво (битый BlobId даст типизированную ошибку при обращении);
-- **открытие по умолчанию доверяет файлу** (trust/sparse, модель SQLite, specs/16
-  §9 веха G): контейнерный xxh3 при open **не** читается, поэтому большая база
-  открывается sparse. Целостность — по требованию: `scrub()` — байтовая (per-section
-  + file_hash xxh3, резюмируемо), `verify()` — контентная (текст UTF-8, fact↔slot
-  биекция). (`fast_load` удалён — это был флаг для этого до вехи G.);
-- fuzz-таргет загрузчика обязателен (см. `07-performance.md`).
+A snapshot can come from anywhere (a wasm host, a foreign file). The loader contract:
 
-## Журнал
+- **never** panic or UB on any bytes — only `Err(LoadError)`;
+- validation cost is O(metadata), not O(data): header, section table, arena metadata
+  (chain cycles, bounds, counts), ChunkPool handles; slot *contents* are not checked
+  and are validated lazily at the core level (a bad BlobId gives a typed error on
+  access);
+- **open trusts the file by default** (the SQLite model): the container xxh3 is not
+  read on open, so a large database opens sparse. Integrity is on demand: `scrub()` is
+  byte-level (per-section + file_hash xxh3, resumable), `verify()` is content-level
+  (text UTF-8, fact↔slot bijection, metadata well-formedness);
+- a loader fuzz target is mandatory (see `08-performance.md`).
 
-Запись:
+## Journal
+
+An entry:
 
 ```
 [len u32][xxh3_32 u32][op u8][payload ...]   // len = 1 + payload
 ```
 
-Опы (payload — компактный бинарный формат, строки как len-prefixed UTF-8):
+Ops (payload is a compact binary format, strings as length-prefixed UTF-8):
 
 | op | payload |
 |---|---|
-| 1 Remember | now, valid_from?, entity?, text, tags[], links[], vector?(i8+scale уже квантованный — квантизация до журнала, детерминизм), assigned FactId |
-| 2 Revise | now, target FactId, + поля Remember, assigned FactId |
+| 1 Remember | now, valid_from?, entity?, text, tags[], links[], metadata[], vector? (already i8-quantized — quantization happens before the journal, for determinism), assigned FactId |
+| 2 Revise | now, target FactId, + the Remember fields, assigned FactId |
 | 3 Forget | now, FactId |
 | 4 Link | now, src entity, rel, dst entity, provenance? |
-| 5 Maintain | now (маркер: после него реплей знает, что purge был) |
+| 5 Maintain | now (a marker: replay after it knows a purge happened) |
 
-Реплей: строго последовательный, ID в записях — авторитетные (assigned при
-исполнении), поэтому реплей детерминирован и идемпотентен относительно
-повторного применения хвоста (записи с id ≤ текущего максимума
-пропускаются). Битая хвостовая запись (обрыв записи при падении) — журнал
-обрезается по последней валидной записи с предупреждением в отчёте загрузки;
-битая **не**-хвостовая — `Corrupt`.
+Replay is strictly sequential; the ids in entries are authoritative (assigned at
+execution), so replay is deterministic and idempotent on re-applying the tail
+(entries with id ≤ the current max are skipped). A torn tail entry (a crash
+mid-write) truncates the journal at the last valid entry with a warning in the load
+report; a torn **non**-tail entry is `Corrupt`.
 
-## Версионирование и миграции
+## Read-only mmap (zero-copy)
 
-- `version` в заголовке = версия формата. Минорные релизы движка формат не
-  меняют.
-- Изменение формата = version+1 + явный мигратор: `load_v(N) → построить
-  состояние → dump_v(N+1)`. Никакого чтения «и так, и так» в основном пути.
-- CLI получает команду `plugmem-cli migrate` (см. `06`); библиотечный пользователь —
-  функцию `migrate(bytes) -> Result<Vec<u8>>` в отдельном модуле (feature
-  `migrate`, чтобы не тащить старые загрузчики в wasm по умолчанию).
-- Первые релизы до 1.0: формат замораживается с первого публичного тега;
-  до него ломать можно.
+A read-only open maps the file and borrows the large pool sections instead of copying
+them, so the OS pages in only what is actually touched — an 8 GiB database no longer
+needs 8 GiB of RAM to open. The mechanism is one change in arena: each big `pool` is a
+`Cow<'a, [u8]>` (which lives in `alloc::borrow`, so **arena stays no_std with zero new
+dependencies**). The owned path (`new`/`open`/write/journal/snapshot/maintain) is
+`Cow::Owned` and byte-for-byte unchanged (`Memory<'static>`); the borrowed path
+(`open_readonly`) is `Cow::Borrowed(&mmap[..])` with mutation forbidden at the handle.
+Only content-sized pools are borrowed (arena pages, blob pools, chunk pools, vector
+slots); small metadata (page indices, tables) rebuilds owned, cheaply. `memmap2` is
+the one new dependency and lives **only in plugmem-host**. The reader pins and maps
+the current published generation and needs no journal, which is snapshot isolation —
+it sees state as of the last checkpoint. Cross-process coexistence with a live writer
+is in `06-host.md`.
 
-## mmap-путь (заложено, не реализуется в v1)
+## Versioning and migrations
 
-Выравнивание 64 и разделение «pool-секции / метаданные» позволяют в будущем
-нативному read-only пути мапить файл и не копировать pool'ы (запросы прямо по
-mmap). Требование к коду сейчас: структуры арен работают поверх `&[u8]`-срезов,
-владение буфером — снаружи (`Cow`-семантика: read-only срезы до первой
-мутации, мутация = copy-on-write подъём в owned). V1 реализует только owned.
+- `version` in the header is the format version; minor engine releases do not change
+  the format.
+- A format change = version+1 plus an explicit migrator (`load_v(N)` → build state →
+  `dump_v(N+1)`); no dual-read in the main path. The CLI gets a `migrate` command; a
+  library user gets `migrate(bytes) -> Result<Vec<u8>>` behind a `migrate` feature so
+  old loaders are not pulled into wasm by default.
+- Before 1.0 the format may break freely; it freezes at the first public tag.
 
-## План тестов
+## Test plan
 
-- Roundtrip: dump → load → dump — вторые байты идентичны первым (канонический
-  формат, тест на детерминизм).
-- Golden-файлы: зафиксированные снапшоты в testdata; загрузка каждого будущего
-  билда (ловим случайную поломку формата).
-- Повреждения: систематическая порча каждого поля заголовка/таблицы/метаданных
-  (bitflip-матрица) → всегда `Err`, никогда паника; + fuzz.
-- Журнал: падение «между append'ами» (обрыв на каждом байте хвостовой записи) →
-  загрузка с обрезкой; реплей после снапшота эквивалентен прямому исполнению
-  (property: случайные op-последовательности, сравнение состояний).
-- Storage-контракт: общий test-suite, прогоняемый по MemStorage и FileStorage
-  (одни и те же сценарии через trait).
-
-## Открытые вопросы
-
-- Компрессия секций (lz4) для холодных больших баз: против неё — усложнение
-  zero-copy; решение отложено до реальных жалоб на размер файла.
-- Инкрементальные снапшоты (только грязные секции): v2, формат позволяет
-  (таблица секций), пока YAGNI.
+- Roundtrip: dump → load → dump — the second bytes equal the first (canonical format,
+  a determinism test).
+- Golden files: pinned snapshots in testdata; every future build loads each (catches
+  an accidental format break).
+- Corruption: systematic damage to each header/table/metadata field (a bitflip
+  matrix) → always `Err`, never a panic; plus fuzz.
+- Journal: a crash "between appends" (a break at each byte of the tail entry) →
+  load with truncation; replay after a snapshot equals direct execution (property:
+  random op sequences, compare states).
+- Storage contract: one test suite run over both MemStorage and FileStorage.

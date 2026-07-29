@@ -1,32 +1,36 @@
-# 05 — публичный API ядра
+# 05 — The core public API
 
-> `plugmem-core`: типы, глаголы, Config, ошибки, контракт Embedder-слоя.
-> API синхронный (однопоточное ядро), `no_std + alloc`. Все `now` — u64
-> unix-миллисекунды от хоста.
+`plugmem-core`: types, verbs, Config, errors, the Embedder contract. The API is
+synchronous (a single-threaded core), `no_std + alloc`. Every `now` is a u64 unix
+millisecond timestamp from the host.
 
-## Точка входа
+## Entry point
 
 ```rust
-pub struct Memory { /* арены, индексы, конфиг, скретчи */ }
+pub struct Memory<'a> { /* arenas, indexes, config, scratch */ }
 
-impl Memory {
-    /// Новая пустая база.
-    pub fn new(cfg: Config) -> Result<Self, Error>;
-    /// Подъём: снапшот + реплей журнала из Storage. None-снапшот => new(cfg).
-    pub fn open<S: Storage>(store: &mut S, cfg: Config) -> Result<(Self, OpenReport), Error>;
-    /// Подъём из готовых байтов (wasm-путь: хост уже принёс blob + журнал).
+impl<'a> Memory<'a> {
+    /// A new empty database.
+    pub fn new(cfg: Config) -> Result<Memory<'static>, Error>;
+    /// Load: snapshot + journal replay from Storage. A None snapshot => new(cfg).
+    pub fn open<S: Storage>(store: &mut S, cfg: Config)
+        -> Result<(Memory<'static>, OpenReport), Error>;
+    /// Load from ready bytes (the wasm path: the host already fetched blob + journal).
     pub fn from_bytes(snapshot: Option<&[u8]>, journal: &[u8], cfg: Config)
-        -> Result<(Self, OpenReport), Error>;
+        -> Result<(Memory<'static>, OpenReport), Error>;
+    /// Load borrowing the mapped bytes (the read-only mmap path; see 03-snapshot.md).
+    pub fn from_bytes_borrowed(snapshot: &'a [u8], cfg: Config)
+        -> Result<(Memory<'a>, OpenReport), Error>;
 
     pub fn remember<S: Storage>(&mut self, s: &mut S, input: RememberInput<'_>)
         -> Result<RememberOutcome, Error>;
-    /// Импорт/массовая запись: журналируется как последовательность Remember;
-    /// similar-детекция отключаема флагом (skip_similar) для скорости импорта.
+    /// Bulk write: journaled as a sequence of Remember; similar-detection is
+    /// skippable (skip_similar) for import speed.
     pub fn remember_batch<S: Storage>(&mut self, s: &mut S,
         inputs: &[RememberInput<'_>], skip_similar: bool)
         -> Result<Vec<RememberOutcome>, Error>;
-    /// &self — весь мутабельный скретч у вызывающего (RecallScratch), поэтому
-    /// много читателей могут recall'ить один движок одновременно.
+    /// &self — all mutable scratch is caller-owned (RecallScratch), so many
+    /// readers can recall one engine at once.
     pub fn recall(&self, q: RecallQuery<'_>) -> Result<RecallResult, Error>;
     pub fn recall_into(&self, q: RecallQuery<'_>, s: &mut RecallScratch,
         out: &mut RecallResult) -> Result<(), Error>;
@@ -35,72 +39,69 @@ impl Memory {
     pub fn forget<S: Storage>(&mut self, s: &mut S, now: u64, id: FactId) -> Result<bool, Error>;
     pub fn link<S: Storage>(&mut self, s: &mut S, input: LinkInput<'_>) -> Result<(), Error>;
 
-    /// Вся обслуживающая работа. Явно, никаких фонов.
+    /// All upkeep. Explicit, no background.
     pub fn maintain<S: Storage>(&mut self, s: &mut S, now: u64) -> Result<MaintainReport, Error>;
-    /// Полный образ + очистка журнала.
+    /// Full image + journal clear.
     pub fn snapshot<S: Storage>(&mut self, s: &mut S, now: u64) -> Result<(), Error>;
-    /// Образ в байты (wasm-путь; журнал чистит хост).
+    /// Image to bytes (the wasm path; the host clears the journal).
     pub fn snapshot_bytes(&self, now: u64) -> Vec<u8>;
 
-    /// Реализовано 2026-07-19: Stats { facts, entities, terms, edges,
-    /// vectors, next_fact, next_entity, pool_bytes }, #[non_exhaustive]
-    /// (db_uuid и HNSW-поля доклеятся без слома).
-    pub fn stats(&self) -> Stats;
+    pub fn stats(&self) -> Stats;   // #[non_exhaustive]
     pub fn get(&self, id: FactId) -> Option<FactView<'_>>;
-    /// Метаданные факта в буфер вызывающего, в каноничном (возрастающем) порядке;
-    /// толерантно к битым байтам (скрывает, не паникует). host собирает из пар
-    /// `BTreeMap`, CLI/MCP/napi — объект (`Record<string,string>`), тот же порядок.
+    /// A fact's metadata into the caller's buffer, in canonical (ascending) order;
+    /// tolerant of bad bytes (hides, never panics). The host collects a BTreeMap,
+    /// CLI/MCP/napi an object (Record<string,string>), same order.
     pub fn metadata_of(&self, id: FactId, out: &mut Vec<(&str, &str)>) -> bool;
-    /// &mut self — нормализация имени использует скретч токенизатора.
+    /// &mut self — name normalization uses the tokenizer scratch.
     pub fn entity(&mut self, name: &str) -> Option<EntityId>;
 }
 ```
 
-`recall` принимает `&self`: данные он не меняет, а все мутабельные буферы
-(term/score-векторы, fusion-мапа, **собственный токенизатор и name-буфер**)
-вынесены в caller-owned `RecallScratch`. Это и есть ключ к конкурентному чтению —
-N читателей recall'ят один движок параллельно, каждый со своим `RecallScratch`
-(на native-хосте host держит по одному на поток). `recall` — удобная обёртка,
-заводящая скретч и результат сама; горячий цикл владеет `RecallScratch` и зовёт
-`recall_into` ради zero-alloc. Синхронизация (`RwLock`/thread-local) живёт в
-host, ядро остаётся `no_std` и берёт лишь явный `&mut RecallScratch`.
+`recall` takes `&self`: it mutates no data, and all mutable buffers (term/score
+vectors, the fusion map, its **own tokenizer and name buffer**) are in a caller-owned
+`RecallScratch`. This is the key to concurrent reads — N readers recall one engine in
+parallel, each with its own `RecallScratch` (on the native host, one per thread).
+`recall` is the convenience wrapper that makes the scratch and result itself; a hot
+loop owns a `RecallScratch` and calls `recall_into` for zero-alloc. Synchronization
+(`RwLock`/thread-local) lives in the host; the core stays `no_std` and takes only an
+explicit `&mut RecallScratch`. The `'a` lifetime is `'static` for every owned
+constructor; only `from_bytes_borrowed` ties it to the mapped buffer.
 
-## Входы/выходы
+## Inputs / outputs
 
 ```rust
 pub struct RememberInput<'a> {
     pub now: u64,
-    pub text: &'a str,                       // ≤ cfg.max_text
-    pub entity: Option<&'a str>,             // субъект; создаётся лениво
-    pub tags: &'a [&'a str],                 // ≤ 32
-    pub links: &'a [(&'a str, &'a str)],     // (rel, target_entity), ≤ 16; рёбра entity→target
-    pub vector: Option<&'a [f32]>,           // len == cfg.dim; квантуется внутри
+    pub text: &'a str,                       // <= cfg.max_text
+    pub entity: Option<&'a str>,             // subject; created lazily
+    pub tags: &'a [&'a str],                 // <= 32
+    pub links: &'a [(&'a str, &'a str)],     // (rel, target_entity), <= 16; edges subject->target
+    pub vector: Option<&'a [f32]>,           // len == cfg.dim; quantized internally
     pub valid_from: Option<u64>,             // default now
-    pub metadata: Option<&'a [(&'a str, &'a str)]>, // ключ→значение, любой порядок; движок
-                                             // канонизирует (сорт+дедуп) и хранит опаково
+    pub metadata: Option<&'a [(&'a str, &'a str)]>, // key->value, any order; the engine
+                                             // canonicalizes (sort+dedup) and stores it opaquely
 }
 
 pub struct RememberOutcome {
     pub id: FactId,
     pub entity: Option<EntityId>,
-    /// Подсказки агенту: похожие/потенциально конфликтующие живые факты.
-    /// Движок НИКОГДА не ревизит сам — решение за агентом.
-    pub similar: Vec<Similar>,               // ≤ 8, по убыванию score
+    /// Hints to the agent: similar / potentially conflicting live facts.
+    /// The engine NEVER revises on its own — the agent decides.
+    pub similar: Vec<Similar>,               // <= 8, descending score
 }
 pub struct Similar {
     pub id: FactId,
     pub score: f32,
-    pub reason: SimilarReason,               // LexicalOverlap | VectorCosine (реализация)
+    pub reason: SimilarReason,               // LexicalOverlap | VectorCosine
 }
 ```
 
-Детекция similar (дёшево, из уже готовых индексов): живые факты той же
-сущности (∩ пересечение термов > 0.5 по Жаккару на топ-термах) ∪ векторные
-соседи с cos > 0.85 (порог в Config). Это ключ к Graphiti-классу поведения
-без LLM внутри: движок находит, агент решает (`revise` / оставить оба /
-`forget`). Полная детекция (включая векторную) входит в бюджет remember
-≤ 500 мкс (решено; см. `07`) — на фоне вызова эмбеддера движок всё равно
-невидим.
+Similar detection (cheap, from the ready indexes): live facts of the same entity
+(term overlap > 0.5 Jaccard on top terms) ∪ vector neighbours with cos > 0.85
+(threshold in Config). This is the key to Graphiti-class behavior with no LLM inside:
+the engine finds, the agent decides (`revise` / keep both / `forget`). Full detection
+(vector included) fits the remember budget ≤ 500 µs — against an embedder call the
+engine is invisible anyway.
 
 ```rust
 pub struct RecallQuery<'a> {
@@ -110,8 +111,8 @@ pub struct RecallQuery<'a> {
     pub tags: &'a [&'a str],
     pub entities: &'a [&'a str],
     pub as_of: Option<u64>,                  // default now
-    pub range: Option<(u64, u64)>,           // окно recorded_at (эпизодика)
-    pub k: usize,                            // default 8, ≤ 64
+    pub range: Option<(u64, u64)>,           // recorded_at window (episodic)
+    pub k: usize,                            // default 8, <= 64
     pub token_budget: Option<usize>,         // default 512
     pub include_closed: bool,
     pub ef: Option<usize>,                   // HNSW ef_search override
@@ -120,136 +121,116 @@ pub struct RecallQuery<'a> {
 pub struct RecallResult {
     pub facts: Vec<RecalledFact>,            // id, score, sources bitmask, text-ref,
                                              // recorded_at, valid interval, entity, tags
-    pub edges: Vec<RecalledEdge>,            // рёбра, пройденные графовым источником
-    pub rendered: String,                    // готовый блок для промпта
-    pub truncated: bool,                     // упёрлись в бюджет
+    pub edges: Vec<RecalledEdge>,            // edges traversed by the graph source
+    pub rendered: String,                    // a ready block for the prompt
+    pub truncated: bool,                     // hit the budget
 }
 ```
 
-### Формат `rendered` (контракт, фиксируется тестами)
+### The `rendered` format (a contract, pinned by tests)
 
 ```
 ## memory
-- [f42] user: предпочитает tokio (2025-11; active) #pref
-- [f17] user: жил в Москве (2023-01 → 2025-06; closed) #location
-- links: user —works_on→ plugmem
+- [f42] user: prefers tokio (2025-11; active) #pref
+- [f17] user: lived in Moscow (2023-01 -> 2025-06; closed) #location
+- links: user -works_on-> plugmem
 ```
 
-Однострочные записи, стабильный порядок (по score), ISO-даты по месяцу,
-маркеры `active`/`closed` (вывод — English, как весь машинный текст), id
-для последующих revise/forget агентом. Пустой результат → пустая строка
-(не «ничего не найдено» — не тратим токены).
+One line per record, stable order (by score), ISO month dates, `active`/`closed`
+markers, the id for a later revise/forget. An empty result → an empty string (not
+"nothing found" — don't spend tokens).
 
-## Config (полный, с дефолтами)
+## Config (full, with defaults)
 
-| Поле | Default | Прим. |
+| Field | Default | Note |
 |---|---|---|
-| `dim` | 0 | 0 = векторный слой выключен |
-| `max_bytes` | 2 ГиБ | суммарный потолок пулов |
-| `max_text` | 4096 | байт |
-| `max_blob` | 64 КиБ | |
-| `shards_facts / entities / edges / temporal / postings` | 1024 / 256 / 512 / 512 / 2048 | степени 2 |
+| `dim` | 0 | 0 = vector layer off |
+| `max_bytes` | 2 GiB | total pool ceiling |
+| `max_text` | 4096 | bytes |
+| `max_blob` | 64 KiB | |
+| `shards_facts / entities / edges / temporal / postings` | 1024 / 256 / 512 / 512 / 2048 | powers of 2 |
 | `bm25_k1 / b` | 1.2 / 0.75 | |
 | `rrf_k` | 60 | |
-| `w_bm25 / w_vec / w_graph / w_time` | 1.0 | веса RRF |
+| `w_bm25 / w_vec / w_graph / w_time` | 1.0 | RRF weights |
 | `w_recency / half_life_days` | 0.25 / 180 | |
 | `graph_depth / graph_decay` | 2 / 0.5 | |
 | `similar_cos / similar_jaccard` | 0.85 / 0.5 | |
 | `hnsw_m / m0 / ef_construction / ef_search` | 16 / 32 / 200 / 64 | |
-| `flat_to_hnsw` | 24_000 | порог, уточняется бенчем |
-| `db_uuid` | 0 | u128, идентичность лайнеджа базы: минтует хост при создании, 0 = безымянная; при open 0 принимает сохранённый, ненулевой обязан совпасть (`ConfigMismatch`); печатается в `stats()` |
+| `flat_to_hnsw` | 24_000 | threshold, tuned by a bench |
+| `db_uuid` | 0 | u128 database lineage id: host-minted at creation, 0 = unnamed; on open 0 adopts the stored one, nonzero must match (`ConfigMismatch`); printed in `stats()` |
 
-> **Целостность — не конфиг.** `fast_load` удалён (specs/16 §9 веха G): открытие
-> по умолчанию доверяет файлу (trust/sparse, модель SQLite) и не чек-суммит образ.
-> Байтовая целостность — по требованию через `scrub()` (резюмируемо), контентная —
-> через `verify()`.
+**Integrity is not config.** Open trusts the file by default (trust/sparse, the SQLite
+model) and does not checksum the image. Byte integrity is on demand via `scrub()`
+(resumable); content integrity via `verify()`. Config is stored in the snapshot; on
+`open` the given config is checked — incompatible fields (dim, shards) against a
+non-empty database are `Error::ConfigMismatch` (changing dim = reindexing, a separate
+CLI utility).
 
-Config сохраняется в снапшоте; при `open` заданный конфиг сверяется:
-несовместимые поля (dim, shards) при непустой базе → `Error::ConfigMismatch`
-(смена dim = реиндексация, отдельная утилита в CLI v2).
-
-## Ошибки
+## Errors
 
 ```rust
-#[non_exhaustive]                   // варианты доклеиваются вместе с этапами
+#[non_exhaustive]
 pub enum Error {
     CapacityExceeded { what: &'static str },
     TooLarge { what: &'static str, len: usize, max: usize },
     DimMismatch { got: usize, want: usize },
     NotFound(FactId),
-    AlreadyClosed(FactId),          // revise поверх closed
-    ConfigMismatch(&'static str),   // невалидный Config или несовместимость с базой
-    Corrupt(&'static str),          // снапшот/журнал
-    UnsupportedVersion(u16),        // снапшот неизвестной версии формата
-    Invalid(&'static str),          // структурное нарушение входа не по размеру
-                                    // (link без субъекта, пустой тег, имя без
-                                    // индексируемых символов)
-    Storage(String),               // debug-рендер ошибки Storage (ядро остаётся
-                                    // generic и Clone; исходную ошибку логирует обёртка)
-    Arena(plugmem_arena::Error),   // #[from] — ошибка нижнего слоя арены с контекстом
+    AlreadyClosed(FactId),          // revise over a closed fact
+    ConfigMismatch(&'static str),   // invalid Config or incompatible with the database
+    Corrupt(&'static str),          // snapshot/journal
+    UnsupportedVersion(u16),        // a snapshot of an unknown format version
+    Invalid(&'static str),          // a structural input violation not about size
+    Storage(String),               // debug-render of a Storage error (the core stays
+                                    // generic and Clone; the wrapper logs the source)
+    Arena(plugmem_arena::Error),   // #[from]
 }
 ```
 
-Все поля — как в `crate::error` (реализовано); enum `#[non_exhaustive]`,
-выводит `Debug + Clone + PartialEq + Eq` и `thiserror::Error` (у каждого
-варианта — `#[error(...)]`-сообщение). Паника в ядре = баг по определению
-(фиксируется fuzz'ом и review-политикой).
+The enum is `#[non_exhaustive]`, derives `Debug + Clone + PartialEq + Eq` and
+`thiserror::Error`. A panic in the core is a bug by definition (pinned by fuzz and the
+review policy).
 
-## Семантика глаголов — сводка
+## Verb semantics — summary
 
-| Глагол | Журнал | Эффект |
+| Verb | Journal | Effect |
 |---|---|---|
-| remember | да | новый открытый факт + индексы + similar-подсказки |
-| revise | да | закрыть target (valid_to = new.valid_from), новый факт с revises=target |
-| forget | да | tombstone немедленно (recall не видит), физика — в maintain |
-| link | да | ребро (upsert по (src,rel,dst)) |
-| recall | нет | чистый запрос |
-| maintain | да (маркер) | **v2**: физическое удаление tombstone-записей (id сжигаются, см. specs/12 §7-bis), пересборка сателлитов, пересчёт статистик; вливание vector-хвоста в HNSW — этап 6 |
-| snapshot | сброс | полный образ + clear_journal |
+| remember | yes | a new open fact + indexes + similar hints |
+| revise | yes | close target (valid_to = new.valid_from), a new fact with revises=target |
+| forget | yes | tombstone immediately (recall hides it), physical purge in maintain |
+| link | yes | an edge (upsert by (src,rel,dst)) |
+| recall | no | a pure query |
+| maintain | yes (marker) | physical deletion of tombstoned records (ids burned; see 02-data-model.md), satellite rebuild, stat recompute, folding the vector tail into HNSW |
+| snapshot | clears | full image + clear_journal |
 
-`maintain` — единственное место, где стоимость O(база); все остальные глаголы —
-микросекундные (бюджеты в `07`). Обёртки зовут его по своим политикам
-(CLI — команда + авто после N операций; MCP — в idle; wasm — решает хост).
+`maintain` is the only place with O(database) cost; every other verb is microseconds
+(budgets in `08-performance.md`). Wrappers call it on their own policy (CLI — a command
+plus auto after N ops; MCP — when idle; wasm — the host decides).
 
-## Слой Embedder (`plugmem-host`, std)
+## The Embedder layer (`plugmem-host`, std)
 
 ```rust
 pub trait Embedder {
     fn dim(&self) -> usize;
-    /// Батч — обязателен в сигнатуре: провайдеры сильно дешевле батчами.
+    /// Batch is in the signature on purpose: providers are far cheaper batched.
     fn embed(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError>;
 }
 ```
 
-Реализации v1 (**реализовано 2026-07-20**, specs/13): `OpenAiCompatEmbedder`
-(`/v1/embeddings` — покрывает и Ollama через его совместимый эндпоинт;
-отдельный `OllamaEmbedder` снят с плана как дубликат того же JSON) и
-`NullEmbedder` (dim 0). HTTP-клиент — `ureq`; сигнатура ошибок — единый
-`HostError` слоя (вместо отдельного `EmbedError`).
+Implementations: `OpenAiCompatEmbedder` (`/v1/embeddings` — also covers Ollama via its
+compatible endpoint) and `NullEmbedder` (dim 0). The HTTP client is `ureq`; errors
+flow through the host's `HostError`. A built-in local embedder is a v1.1 item behind a
+`local-embed` feature (target: a quantized `multilingual-e5-small`, CPU or GPU by
+choice) — the core is untouched, the Embedder contract is ready.
 
-**Встроенный локальный эмбеддер — v1.1 (решено).** Ориентир: feature-флаг
-`local-embed`, модель — квантованный `multilingual-e5-small`, backend —
-**CPU или GPU по выбору пользователя** (кейс: VRAM занят LLM — эмбеддинги
-считает CPU). Кандидат-рантайм — candle (чистый Rust); финальный выбор — при
-реализации v1.1, ядро это не затрагивает (Embedder-контракт уже готов).
+The wrapper calls `embed` before `remember`/`recall` (if an embedder is configured) and
+puts the vector in the input; the core does not know about Embedder. On wasm the JS
+wrapper does the same through a host callback (see `07-wrappers.md`).
 
-Правило связки: обёртка сама вызывает `embed` перед `remember`/`recall`
-(если эмбеддер сконфигурирован) и кладёт вектор в input. Ядро про Embedder
-не знает. В wasm то же самое делает JS-объвязка через callback хоста
-(см. `06`).
+## Test plan
 
-## План тестов
-
-- Контрактные тесты каждого глагола (таблицы из `02` + сценарии similar).
-- `rendered` — golden-тесты (формат = контракт).
-- Ошибки: каждый вариант Error достижим тестом.
-- Zero-alloc recall: счётчик-аллокатор в тест-харнессе, 0 аллокаций на
-  эталонном recall после прогрева (см. `07`).
-- Embedder-реализации: против локального мок-HTTP (не сеть в CI).
-
-## Открытые вопросы
-
-- ~~Пакетный `remember_batch`~~ — решено: в v1, сигнатура выше.
-- `recall`-объяснимость — решено для v1: `RecalledFact.sources` (bitmask
-  источников) + топ-3 совпавших терма при лексическом матче; расширенный
-  `why` — по нуждам SKILL.md после обкатки.
+- Contract tests per verb (the tables from `02-data-model.md` plus similar scenarios).
+- `rendered` — golden tests (the format is a contract).
+- Errors: each Error variant is reachable by a test.
+- Zero-alloc recall: a counting allocator in the test harness, 0 allocations on a
+  reference recall after warm-up (see `08-performance.md`).
+- Embedder implementations: against a local mock HTTP (no network in CI).
