@@ -1,4 +1,4 @@
-//! Zero-copy borrowed-load tests (specs/16): every structure can rebuild
+//! Zero-copy borrowed-load tests: every structure can rebuild
 //! itself borrowing its pool from a longer-lived buffer (a memory-mapped
 //! snapshot in production) instead of copying it. Each test asserts the
 //! borrowed structure is observably identical to the owned one and dumps

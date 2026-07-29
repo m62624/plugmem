@@ -1,4 +1,4 @@
-//! Per-fact metadata (specs/02, specs/05): a small key→value map stored as one
+//! Per-fact metadata: a small key→value map stored as one
 //! canonical blob. Covers the single-order guarantee, journal/snapshot
 //! determinism, compaction, and deferred content validation.
 

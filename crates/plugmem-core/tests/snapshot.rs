@@ -1,4 +1,4 @@
-//! Snapshot container tests (specs/03 test plan): canonical roundtrip,
+//! Snapshot container tests (test plan): canonical roundtrip,
 //! build determinism, the full bitflip matrix (every byte, two bits — caught
 //! by the structural parse or the on-demand scrub, never a panic, never a
 //! silent wrong read), the truncation sweep, scrub semantics, and the Config
@@ -82,7 +82,7 @@ fn every_bitflip_is_caught_by_parse_or_scrub() {
             b[at] ^= bit;
             // No flip passes unnoticed: the structural parse rejects layout
             // damage, and the on-demand scrub catches every content/checksum
-            // flip via the per-section and whole-file xxh3 (specs/16 §9).
+            // flip via the per-section and whole-file xxh3.
             match Snapshot::parse(&b) {
                 Err(_) => {}
                 Ok(snap) => {
@@ -147,7 +147,7 @@ fn structural_gates_reachable_only_by_crafting() {
 
     // A wrong (nonzero) file hash with all section checksums intact: the
     // structural parse accepts it (checksums are not verified at parse), and
-    // the scrub reports it (specs/16 §9).
+    // the scrub reports it.
     let mut b = bytes.clone();
     b[20..28].copy_from_slice(&1u64.to_le_bytes());
     Snapshot::parse(&b).unwrap();
@@ -179,7 +179,7 @@ fn version_and_magic_gates() {
 fn scrub_catches_content_flips_that_parse_accepts() {
     let bytes = sample();
     // A byte inside section 2's payload (0xC7 filler): parse accepts it (no
-    // checksum at parse), the scrub reports the section mismatch (specs/16 §9).
+    // checksum at parse), the scrub reports the section mismatch.
     let at = bytes.iter().position(|&b| b == 0xC7).unwrap();
     let mut b = bytes.clone();
     b[at] ^= 0xFF;

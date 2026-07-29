@@ -1,4 +1,4 @@
-//! Journal record framing (specs/03).
+//! Journal record framing.
 //!
 //! The journal is an append-only sequence of framed records:
 //!
@@ -45,7 +45,7 @@ const HEADER: usize = U32_BYTES + U32_BYTES;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct JournalEntry<'a> {
-    /// Operation tag (engine-defined; see specs/03 op table).
+    /// Operation tag (engine-defined op table).
     pub op: u8,
     /// The operation's binary payload.
     pub payload: &'a [u8],
@@ -84,12 +84,12 @@ pub fn encode_entry(out: &mut Vec<u8>, op: u8, payload: &[u8]) {
     out[check_pos..check_pos + U32_BYTES].copy_from_slice(&check.to_le_bytes());
 }
 
-/// One decoded engine operation (specs/03 op table). `Revise` is
+/// One decoded engine operation (op table). `Revise` is
 /// `Remember` with `revises` set — the two share a payload, only the op
 /// byte differs.
 ///
 /// Not `Eq`: the raw `f32` vector rides along so replay can re-quantize
-/// it deterministically (specs/04 §5), and `f32` is only `PartialEq`.
+/// it deterministically, and `f32` is only `PartialEq`.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum Op<'a> {

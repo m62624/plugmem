@@ -1,5 +1,5 @@
 //! Snapshot composition: the engine's state as container sections and the
-//! validated load path (specs/03).
+//! validated load path.
 //!
 //! Saving concatenates every structure's canonical dump into the
 //! [`snapshot`](crate::snapshot) container. Loading is the untrusted-input
@@ -99,7 +99,7 @@ type SectionFn<'f> = dyn FnMut(u16, &[&[u8]]) -> Result<(), Error> + 'f;
 /// everything `maintain` recompacts. Bundled behind references so one emit path
 /// serves both the live engine (`self`'s own structures, [`Memory::sections`])
 /// and the disk-first rebuild (freshly rebuilt metadata + graph, with the two
-/// big pools borrowing a `Scratch`, specs/16 §9). The ride-through structures —
+/// big pools borrowing a `Scratch`). The ride-through structures —
 /// the interner, the by-name index, the edges, and the id counters — are read
 /// straight from `self` in [`Memory::emit_sections_from`]; `maintain` never
 /// touches them, so they are the same on both paths.
@@ -166,7 +166,7 @@ impl<'a, const TF: bool> PostingStore<'a, TF> {
 
     /// Zero-copy sibling of [`PostingStore::load_sections`]: the handle
     /// arena pool and the chunk pool borrow their mmap'd sections
-    /// (specs/16). Same validation; the lifetime ties the store to `hp`
+    /// Same validation; the lifetime ties the store to `hp`
     /// and `cp`.
     pub(crate) fn load_sections_borrowed(
         shards: usize,
@@ -274,7 +274,7 @@ impl<'a> Bm25Index<'a> {
     }
 
     /// Zero-copy sibling of [`Bm25Index::load_from`]: the postings and
-    /// doc-length pools borrow their mmap'd sections (specs/16).
+    /// doc-length pools borrow their mmap'd sections.
     fn load_from_borrowed(snap: &Snapshot<'a>, cfg: &Config) -> Result<Self, Error> {
         let postings = PostingStore::<true>::load_sections_borrowed(
             cfg.shards_postings,
@@ -433,7 +433,7 @@ impl<'a> Memory<'a> {
     }
 
     /// Streams the whole engine into snapshot-container bytes through `sink`,
-    /// never materializing the full image (specs/16 §9): a first pass computes
+    /// never materializing the full image: a first pass computes
     /// each section's length and checksum, the header+table prefix is written,
     /// then a second pass streams the section bodies (the dominant vector pool
     /// straight from its borrowed pieces) while a running hash accumulates the
@@ -450,7 +450,7 @@ impl<'a> Memory<'a> {
     /// The snapshot writer over an explicit [`Sections`] source — the shared
     /// core of [`Memory::write_snapshot_to`] (which passes `self`'s own
     /// sections) and the disk-first rebuild (which passes freshly rebuilt
-    /// metadata with the big pools borrowing a `Scratch`, specs/16 §9). Since
+    /// metadata with the big pools borrowing a `Scratch`). Since
     /// both drive the *same* emit, the disk-first output is byte-identical to a
     /// snapshot taken after an in-RAM `maintain`.
     pub(crate) fn write_snapshot_with(
@@ -531,7 +531,7 @@ impl<'a> Memory<'a> {
         out
     }
 
-    /// Writes a full snapshot and clears the journal (specs/05).
+    /// Writes a full snapshot and clears the journal.
     pub fn snapshot<S: crate::storage::Storage>(
         &mut self,
         store: &mut S,
@@ -656,7 +656,7 @@ impl<'a> Memory<'a> {
     /// pools (arenas, blob heaps, chunk pools, term dictionary, vectors,
     /// upper HNSW lists) *borrow* their sections straight out of `bytes`
     /// (an mmap'd snapshot), so opening an 8 GiB database residents only
-    /// the pages actually touched (specs/16). Small metadata is still
+    /// the pages actually touched. Small metadata is still
     /// rebuilt owned. The lifetime ties the engine to `bytes`; the handle
     /// is read-only, so copy-on-write never fires.
     pub(super) fn load_snapshot_borrowed(bytes: &'a [u8], cfg: Config) -> Result<Self, Error> {
@@ -801,7 +801,7 @@ impl<'a> Memory<'a> {
     /// counters, checks they cover the record counts, and range-validates
     /// references. Deliberately does **not** scan the large byte pools —
     /// stored-text UTF-8 and the vector fact↔slot bijection are deferred to
-    /// [`Memory::verify`] (specs/16 §9), so an overlay/read-only open faults
+    /// [`Memory::verify`], so an overlay/read-only open faults
     /// in only the metadata, not the text or vector pools. The accessors stay
     /// panic-free on any bytes regardless (checked `from_utf8`, bounds-checked
     /// vector reads). Shared by both load paths.
@@ -826,7 +826,7 @@ impl<'a> Memory<'a> {
     /// panic-freedom on hostile input, linear and cache-friendly. Does **not**
     /// touch the large text or vector byte pools: stored-text UTF-8 and the
     /// vector fact↔slot bijection are deferred to [`Memory::verify`]
-    /// (specs/16 §9), so an overlay/read-only open faults in only the
+    /// so an overlay/read-only open faults in only the
     /// metadata. The accessors that read those pools are panic-free on any
     /// bytes on their own (checked `from_utf8`, bounds-checked slot reads).
     fn validate_references(&self) -> Result<(), Error> {
@@ -909,7 +909,7 @@ impl<'a> Memory<'a> {
     }
 
     /// Runs the integrity checks that `open` **defers** for speed and memory
-    /// (specs/16 §9) — the on-demand equivalent of SQLite's `integrity_check`.
+    /// — the on-demand equivalent of SQLite's `integrity_check`.
     ///
     /// A load (owned, overlay or read-only) validates only the metadata, so
     /// the large byte pools stay non-resident on an mmap'd base — an overlay
@@ -969,7 +969,7 @@ impl<'a> Memory<'a> {
     }
 
     /// Attributes [`Memory::verify`]'s content checks to individual facts — the
-    /// salvage predicate for `recover` (specs/16 §9). Walks every live
+    /// salvage predicate for `recover`. Walks every live
     /// (non-tombstone) fact and returns those whose stored text is not valid
     /// UTF-8, that are flagged with a vector whose slot is out of range or does
     /// not name the fact back, or whose metadata blob does not decode to a

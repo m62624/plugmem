@@ -9,7 +9,7 @@
 //!
 //! Interning is **never-forget**: terms are not removed. Vocabulary grows
 //! slowly in practice (Zipf), and dictionary compaction is explicitly out of
-//! scope for v1 (`specs/01`).
+//! scope for v1.
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -62,7 +62,7 @@ const TABLE_HEADER: usize = 2 * core::mem::size_of::<u32>();
 #[derive(Clone)]
 pub struct Interner<'a> {
     /// String bytes; `BlobId` values equal `TermId` values. Borrows from a
-    /// mapped snapshot on the read-only path (specs/16), tied to `'a`; the
+    /// mapped snapshot on the read-only path, tied to `'a`; the
     /// table stays owned (it is small and rebuilt-free).
     heap: BlobHeap<'a>,
     /// Open-addressing table: `0` = empty slot, otherwise `TermId + 1`.
@@ -200,19 +200,19 @@ impl<'a> Interner<'a> {
         self.table = table;
     }
 
-    /// Appends the string heap's index section to `out` (`specs/03`);
+    /// Appends the string heap's index section to `out`;
     /// see [`BlobHeap::dump_index`].
     pub fn dump_index(&self, out: &mut Vec<u8>) {
         self.heap.dump_index(out);
     }
 
-    /// Appends the string heap's pool section to `out` (`specs/03`);
+    /// Appends the string heap's pool section to `out`;
     /// see [`BlobHeap::dump_pool`].
     pub fn dump_pool(&self, out: &mut Vec<u8>) {
         self.heap.dump_pool(out);
     }
 
-    /// Appends the hash-table section to `out` (`specs/03`).
+    /// Appends the hash-table section to `out`.
     ///
     /// Layout (little-endian): `[slots u32][len u32]` then `slots × u32`
     /// entries (`0` = empty, else `TermId + 1`). The table is persisted
@@ -244,7 +244,7 @@ impl<'a> Interner<'a> {
     /// not re-verified — that would cost the full rebuild the stored table
     /// exists to avoid. A well-formed but misplaced table cannot cause
     /// memory unsafety or a panic; it degrades `intern` to assigning a
-    /// duplicate id for the affected terms. Section checksums (`specs/03`)
+    /// duplicate id for the affected terms. Section checksums
     /// cover accidental corruption.
     ///
     /// # Errors
@@ -255,7 +255,7 @@ impl<'a> Interner<'a> {
     }
 
     /// Rebuilds an interner that **borrows** its string bytes from a
-    /// longer-lived buffer (a memory-mapped snapshot, specs/16). The table
+    /// longer-lived buffer (a memory-mapped snapshot). The table
     /// stays owned; validation is identical to [`Interner::load`]. The term
     /// dictionary is small (Zipf vocabulary), so paging it in to check UTF-8
     /// is cheap and the large pools (texts, vectors) still load lazily.

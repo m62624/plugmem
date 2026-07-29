@@ -1,4 +1,4 @@
-//! Cross-target equivalence probe (specs/14 §3).
+//! Cross-target equivalence probe.
 //!
 //! Runs one deterministic scenario through the public engine API — facts
 //! with vectors, entities, tags, links, `forget`, `revise`, a `maintain`

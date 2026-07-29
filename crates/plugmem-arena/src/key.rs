@@ -5,7 +5,7 @@
 //! encoded values, integers must be stored **big-endian**: the most
 //! significant byte comes first, so lexicographic byte order equals numeric
 //! order. (Little-endian encodings are only usable for equality lookups —
-//! this is a classic pitfall; see `specs/01-arena.md`.)
+//! this is a classic pitfall.)
 //!
 //! Composite keys are built by concatenation: encode the most significant
 //! component first. For example a temporal index key `(timestamp, id)` is

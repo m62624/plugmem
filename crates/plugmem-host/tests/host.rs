@@ -1,4 +1,4 @@
-//! Host-layer tests (specs/13 §6): file storage roundtrips, locking,
+//! Host-layer tests: file storage roundtrips, locking,
 //! maintenance policy, auto-embedding against a local mock server, and
 //! multi-threaded handles.
 
@@ -1142,7 +1142,7 @@ fn journal_survives_repeated_clears() {
 }
 
 // ---------------------------------------------------------------------------
-// Overlay write path (specs/16 §9): the default `open` mmaps the snapshot and
+// Overlay write path: the default `open` mmaps the snapshot and
 // borrows it, re-mapping on snapshot. These tests prove the re-map is durable
 // and canonical, and that opening residents far less RAM than an owned load.
 // ---------------------------------------------------------------------------
@@ -1290,7 +1290,7 @@ fn rss() -> usize {
 fn an_overlay_open_residents_far_less_than_the_image() {
     let tmp = TempDir::new("overlay-rss");
     // The default open is trust/sparse: it does not verify the whole-file xxh3,
-    // and lazy validation (specs/16 §9) skips the text/vector scans — so an open
+    // and lazy validation skips the text/vector scans — so an open
     // faults in only the metadata and the large text pool stays non-resident.
     let c = cfg();
 
@@ -1303,7 +1303,7 @@ fn an_overlay_open_residents_far_less_than_the_image() {
             .unwrap();
         // Long texts from a tiny template set: the blob heap (every fact stores
         // its full text) dominates the image, while the small shared vocabulary
-        // keeps the posting lists compact. Lazy validation (specs/16 §9) means an
+        // keeps the posting lists compact. Lazy validation means an
         // open does not scan this text pool, so it stays non-resident.
         let templates = [
             "lorem ipsum dolor sit amet consectetur adipiscing elit sed do \
@@ -1339,7 +1339,7 @@ fn an_overlay_open_residents_far_less_than_the_image() {
 
     // The overlay open residents well under half the image: the text pool (the
     // majority of the file) is never scanned, so it stays out of the resident
-    // set — true sparse residency, not just no-copy (specs/16 §9). An owned
+    // set — true sparse residency, not just no-copy. An owned
     // load, by contrast, copies every pool onto the heap; that copy is proven
     // absent at the allocation level in core's `zero_alloc` gate.
     assert!(
@@ -1350,7 +1350,7 @@ fn an_overlay_open_residents_far_less_than_the_image() {
 }
 
 // ---------------------------------------------------------------------------
-// On-demand scrub (specs/16 §9): the default open trusts the file, so byte-level
+// On-demand scrub: the default open trusts the file, so byte-level
 // container integrity is a separate, resumable read-handle op. These prove the
 // scrub verifies a clean image, catches a flipped section byte on disk, and
 // holds a reader's lock for its whole life — independent of the handle it came
@@ -1461,7 +1461,7 @@ fn scrub_pins_its_generation_and_coexists_with_the_writer() {
 }
 
 // ---------------------------------------------------------------------------
-// recover() salvage (specs/16 §9, Tier 2): open a content-corrupt database,
+// recover salvage (Tier 2): open a content-corrupt database,
 // drop the bad records, maintain, and stream a clean image to a new file —
 // leaving the source untouched. Structural corruption is not salvageable
 // (Tier 0); the RAM guard refuses an image too large to rebuild.
@@ -1599,7 +1599,7 @@ fn recover_refuses_a_destination_equal_to_the_source() {
 }
 
 // ---------------------------------------------------------------------------
-// FileScratch (specs/16 §9, milestone H): a temp-file staging area — sequential
+// FileScratch (milestone H): a temp-file staging area — sequential
 // appends, a memory-mapped read-back on freeze, and cleanup on drop.
 // ---------------------------------------------------------------------------
 

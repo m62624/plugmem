@@ -1,5 +1,5 @@
 //! The vector index: flat quantized-vector storage with a two-phase
-//! flat search (specs/04 §5).
+//! flat search.
 //!
 //! Vectors are the fourth recall source. Storage is deliberately *not* an
 //! arena or a blob heap but one contiguous `Vec<u8>` of fixed-stride
@@ -69,13 +69,13 @@ impl VecScratch {
     }
 }
 
-/// Flat store of quantized vectors (specs/04 §5).
+/// Flat store of quantized vectors.
 ///
 /// The slot bytes are an **overlay** of a borrowed base and an owned tail:
 /// the owned path (`new`/`push`/`from_parts`) keeps `base = &[]` with every
 /// slot in `tail`, byte-for-byte unchanged; the borrowed/overlay path
 /// (`from_parts_borrowed`/`from_parts_overlay`) maps an mmap'd section as
-/// `base` and appends new slots to `tail` (specs/16). Because dead slots are
+/// `base` and appends new slots to `tail`. Because dead slots are
 /// dropped by `maintain` and never rewritten in place, a slot is wholly in
 /// `base` or wholly in `tail`, so a heap opened over a multi-gigabyte mmap
 /// grows without cloning it — reads dispatch on one comparison per slot.
@@ -127,7 +127,7 @@ impl<'a> VecPool<'a> {
     /// The `stride` bytes of slot `i`, dispatched to `base` or `tail`. The
     /// base is a whole number of slots (framed on load), so slot `i` never
     /// straddles the boundary. `pub(crate)` so the disk-first rebuild can stream
-    /// a survivor slot straight into a `Scratch` (specs/16 §9).
+    /// a survivor slot straight into a `Scratch`.
     #[inline]
     pub(crate) fn slot_bytes(&self, i: usize) -> &[u8] {
         let stride = self.stride();
@@ -444,7 +444,7 @@ impl<'a> VecPool<'a> {
 
     /// The vector section as its two contiguous pieces (`base`, `tail`)
     /// without concatenating them — lets the streaming snapshot writer
-    /// (specs/16 §9) emit the dominant pool with no owned full-section copy.
+    /// emit the dominant pool with no owned full-section copy.
     /// Concatenated, the pieces equal the section (`base ++ tail`).
     pub(crate) fn pieces(&self) -> [&[u8]; 2] {
         [self.base, &self.tail]
@@ -464,7 +464,7 @@ impl<'a> VecPool<'a> {
     /// Zero-copy sibling of [`VecPool::from_parts`]: the pool borrows the
     /// dumped section (an mmap'd byte range) as its base instead of copying
     /// it. Same framing checks; the lifetime ties the pool to `bytes`
-    /// (specs/16). Under the overlay write path a later [`VecPool::push`]
+    /// Under the overlay write path a later [`VecPool::push`]
     /// appends to an owned tail without cloning the base.
     pub(crate) fn from_parts_borrowed(
         dim: usize,
@@ -497,7 +497,7 @@ impl<'a> VecPool<'a> {
         Ok(())
     }
 
-    /// Structural self-check of every slot (specs/11 A.4): each scale is
+    /// Structural self-check of every slot (A.4): each scale is
     /// finite and non-negative, and each signature bit agrees with the
     /// sign of its quantized component. Keeps the panic-free contract:
     /// after this, a search over the pool cannot read a malformed slot

@@ -1,5 +1,4 @@
 //! The lexical index: classic BM25 over delta-encoded postings
-//! (specs/04 §2).
 //!
 //! Scoring is the standard formula with the Robertson idf:
 //!

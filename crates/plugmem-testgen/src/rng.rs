@@ -1,4 +1,4 @@
-//! The generator's own deterministic PRNG (specs/11 §3): xorshift64*,
+//! The generator's own deterministic PRNG: xorshift64*,
 //! implemented in place so the corpus depends on nothing but this crate.
 //!
 //! Not a statistical-quality RNG and not meant to be one — corpus

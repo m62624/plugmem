@@ -1,4 +1,4 @@
-//! Host-layer errors (specs/13 §5).
+//! Host-layer errors.
 
 use std::path::PathBuf;
 
@@ -10,7 +10,7 @@ use std::path::PathBuf;
 pub enum HostError {
     /// The database file is exclusively locked by another process (or
     /// another handle in this process). One file has one owner — open a
-    /// different file, or drop the other handle (specs/13 §1).
+    /// different file, or drop the other handle.
     #[error("database at {} is locked by another process", path.display())]
     Locked {
         /// The database base path.
@@ -32,7 +32,6 @@ pub enum HostError {
     /// whole arenas up from the mapped bytes (copy-on-write) — which
     /// defeats the zero-copy intent. Open the database read-write once to
     /// checkpoint it (fold the journal into the snapshot), then retry
-    /// (specs/16 §3).
     #[error("database at {} needs a checkpoint before a read-only open (non-empty journal)", path.display())]
     NeedsCheckpoint {
         /// The database base path.

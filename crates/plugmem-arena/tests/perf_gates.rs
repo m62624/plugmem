@@ -1,4 +1,4 @@
-//! Deterministic performance gates (specs/07 §3).
+//! Deterministic performance gates.
 //!
 //! Wall-clock numbers lie in CI; these tests assert ceilings on the
 //! `counters`-feature work counters instead. The workload is fixed-seed,
@@ -6,9 +6,9 @@
 //! regression (an accidentally quadratic path, a degenerated chain walk)
 //! fails the same way everywhere, while hardware noise cannot.
 //!
-//! Ceilings were set from measured values with a ×1.2 margin (the specs/07
+//! Ceilings were set from measured values with a ×1.2 margin (the
 //! rule) and may only be lowered; raising one is an explicit decision that
-//! must be recorded in specs/07. Measured 2026-07-18 on the 100k workload
+//! must be recorded in. Measured 2026-07-18 on the 100k workload
 //! below; the assert messages print the measured value on failure.
 //!
 //! Runs only with `--features counters` (the counters are compiled out

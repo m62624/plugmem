@@ -1,6 +1,6 @@
 //! `FileStorage`: the engine's `Storage` trait over a **versioned** on-disk
-//! layout — immutable snapshot generations named by a tiny manifest (specs/13,
-//! specs/16). This is what lets a reader map a stable snapshot while a writer
+//! layout — immutable snapshot generations named by a tiny manifest (
+//! ). This is what lets a reader map a stable snapshot while a writer
 //! keeps working: the writer never overwrites a live file, it publishes a new
 //! generation and repoints the manifest.
 //!
@@ -38,7 +38,7 @@ fn sink_io(e: std::io::Error) -> Error {
     Error::Storage(format!("{e}"))
 }
 
-/// When journal appends reach the disk (specs/13 §2).
+/// When journal appends reach the disk.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum FsyncPolicy {
@@ -78,7 +78,7 @@ impl FileStorage {
     /// **exclusive writer lock** — one writer at a time. Readers do *not* take
     /// this lock (they pin a generation file via
     /// [`pin_current_generation`] instead), so a writer and any number of
-    /// readers coexist across threads or processes (specs/13, the versioned
+    /// readers coexist across threads or processes (the versioned
     /// MVCC layout).
     ///
     /// # Errors
@@ -180,7 +180,7 @@ impl FileStorage {
 
     /// Streams a snapshot into the next generation's tmp file and fsyncs it,
     /// **without** publishing — the durable-but-not-yet-visible half of a
-    /// checkpoint (specs/16 §9). `write` drives the engine's streaming snapshot
+    /// checkpoint. `write` drives the engine's streaming snapshot
     /// writer against a buffered file sink, so the image never all lives in RAM
     /// at once. Split from [`FileStorage::commit_snapshot`] because the caller
     /// must drop the mmap of the *old* generation **between** the two: staging
@@ -221,7 +221,7 @@ impl FileStorage {
 /// A streaming [`SnapshotSink`] over a buffered file: sequential section
 /// writes are buffered, and the single `patch` (the header file-hash, once
 /// the running hash is known) flushes and seeks. Lets a snapshot stream to
-/// disk without a full-image buffer (specs/16 §9).
+/// disk without a full-image buffer.
 pub(crate) struct FileSink {
     buf: BufWriter<File>,
     path: PathBuf,
@@ -530,7 +530,7 @@ impl Storage for FileStorage {
     }
 }
 
-/// A host [`Scratch`] over a temp file (specs/16 §9, milestone H): sequential
+/// A host [`Scratch`] over a temp file (milestone H): sequential
 /// appends go through a buffered writer; [`freeze`](Scratch::freeze) flushes
 /// and memory-maps the file, so the staged pool is read (randomly and
 /// sequentially) straight from the map instead of RAM. Dropping it unmaps and
@@ -602,7 +602,7 @@ impl Scratch for FileScratch {
             // SAFETY: this is our private temp file — created by `create`,
             // owned by this `FileScratch` for its whole life, deleted on drop —
             // so no other process writes or truncates it under the map (the
-            // same argument as the read-only snapshot map, specs/16 §5).
+            // same argument as the read-only snapshot map).
             let map = unsafe { Mmap::map(&file) }.map_err(|e| HostError::io(&self.path, e))?;
             self.map = Some(map);
         }

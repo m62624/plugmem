@@ -1,4 +1,4 @@
-//! Recall tests (specs/04 §tests, specs/05): per-source scenarios,
+//! Recall tests: per-source scenarios,
 //! source agreement/disagreement, temporality filters, the rendered
 //! block as a golden contract, determinism, and the allow-set property.
 
@@ -295,7 +295,7 @@ fn reused_result_buffers_are_equivalent_to_fresh_ones() {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(32))]
     // With a tag filter, every recalled fact carries all query tags —
-    // the result is a subset of the allow-set (specs/04 property).
+    // the result is a subset of the allow-set (property).
     #[test]
     #[cfg_attr(miri, ignore)] // proptest persistence calls getcwd — forbidden under miri isolation
     fn results_are_subsets_of_the_allow_set(

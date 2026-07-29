@@ -1,4 +1,4 @@
-//! Typed identifiers (specs/02).
+//! Typed identifiers.
 //!
 //! All ids are `u32`, allocated monotonically, never reused (journal replay
 //! stays deterministic; holes after a purge are normal). `0` is a valid id;
@@ -40,12 +40,12 @@ macro_rules! id_type {
 }
 
 id_type! {
-    /// Identifier of a fact — the unit of memory (specs/02).
+    /// Identifier of a fact — the unit of memory.
     FactId
 }
 
 id_type! {
     /// Identifier of an entity — a graph node created lazily on first
-    /// mention (specs/02).
+    /// mention.
     EntityId
 }

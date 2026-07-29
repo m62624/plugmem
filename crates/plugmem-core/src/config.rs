@@ -1,4 +1,4 @@
-//! Engine configuration (specs/05).
+//! Engine configuration.
 //!
 //! Every knob that changes how bytes are interpreted lives here, because
 //! the config is persisted inside the snapshot: opening an existing
@@ -37,7 +37,7 @@ const RESERVED_LEN: usize = 8;
 /// Exact byte length of the encoded config block (see [`Config::encode`]).
 pub const ENCODED_LEN: usize = RESERVED_AT + RESERVED_LEN;
 
-/// Full engine configuration with the specs/05 defaults.
+/// Full engine configuration with the defaults.
 ///
 /// Plain data: construct with [`Config::default`], override fields, then
 /// let the engine call [`Config::validate`] (it is also callable directly —
@@ -100,7 +100,7 @@ pub struct Config {
     pub hnsw_ef_search: usize,
     /// Vector count at which `maintain` switches Flat → HNSW.
     pub flat_to_hnsw: usize,
-    /// Database lineage identity (specs/12 §6). Minted **once** by the
+    /// Database lineage identity. Minted **once** by the
     /// host at creation (the `no_std` core has no RNG) and persisted in
     /// every snapshot; it survives `maintain` and re-saves, so external
     /// holders of ids can tell "same database" from "a different one".
@@ -111,7 +111,7 @@ pub struct Config {
 }
 
 impl Default for Config {
-    /// The specs/05 defaults table.
+    /// The defaults table.
     fn default() -> Self {
         Self {
             dim: 0,
@@ -244,7 +244,7 @@ impl Config {
     }
 
     /// Appends the fixed binary form of the config to `out` — the config
-    /// block of the snapshot (specs/03). Layout, all little-endian, in
+    /// block of the snapshot. Layout, all little-endian, in
     /// field-declaration order: `usize` fields as `u64`, `f32` fields as
     /// their IEEE 754 bits, then `rrf_k`/`half_life_days`/`graph_depth` as
     /// `u32`, `db_uuid` as a `u128`, then 8 reserved zero bytes; exactly

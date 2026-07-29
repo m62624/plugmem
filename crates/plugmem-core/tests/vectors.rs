@@ -1,4 +1,4 @@
-//! The vector layer end-to-end (specs/04 §5, specs/11 A.5): remember with
+//! The vector layer end-to-end (A.5): remember with
 //! an embedding, the flat vector recall source, quantized-cosine
 //! similar-detection, persistence and journal replay, and the error
 //! surface. Quantization accuracy and the two-phase search internals are
@@ -259,12 +259,12 @@ fn truncated_vector_snapshot_errors_at_load() {
 }
 
 // Bitflip sweep — `catch_unwind` (unwinding) and heavy: native only, like the
-// proptest sections (specs/14 §3).
+// proptest sections.
 #[cfg(not(target_family = "wasm"))]
 #[test]
 fn a_vector_open_never_panics_and_verify_catches_corruption() {
     // The default trust/sparse open skips the checksums *and* the vector scan
-    // (specs/16 §9), so a corrupt vector slot can reach the engine. Vector
+    // so a corrupt vector slot can reach the engine. Vector
     // search reads slots with bounds-checked arithmetic, so it never panics;
     // `verify()` catches the deferred corruption.
     let dim = 32;

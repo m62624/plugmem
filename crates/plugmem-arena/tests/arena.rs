@@ -1,5 +1,5 @@
 //! Boundary and contract tests for `Arena` — every v2 invariant from
-//! `specs/01-arena.md` is pinned here: sorted shard chains, page splits
+//! is pinned here: sorted shard chains, page splits
 //! (including the single-slot degenerate case), free-list recycling,
 //! range scans, capacity errors, and the key/payload contracts.
 

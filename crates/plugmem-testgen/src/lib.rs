@@ -1,10 +1,10 @@
 //! Deterministic corpus and workload generator for plugmem tests and
-//! benches (specs/07 §6, specs/11 §3). Internal tooling, never published.
+//! benches. Internal tooling, never published.
 //!
 //! Everything is a pure function of `(seed, Profile)`: the same pair
 //! yields the same operation stream forever, on every machine — the
 //! repo-wide law "no randomness without a seed". The generated shape
-//! follows the corpus passport of specs/07 §6:
+//! follows the corpus passport of:
 //!
 //! - a Zipf(≈1.07) vocabulary of pronounceable syllable words;
 //! - text lengths normally distributed around a configured mean;
@@ -53,21 +53,21 @@ const RELS: &[&str] = &[
 /// Standard deviation of the per-dimension cluster noise (the cluster
 /// centers are unit vectors; this keeps members recognizably close).
 const CLUSTER_NOISE: f64 = 0.35;
-/// Zipf exponent of the specs/07 corpus passport.
+/// Zipf exponent of the corpus passport.
 const ZIPF_S: f64 = 1.07;
 
 /// Shape parameters of a generated workload. Construct with
 /// [`Profile::default`] and override fields.
 #[derive(Clone, Debug)]
 pub struct Profile {
-    /// Text dictionary size (specs/07: 30k).
+    /// Text dictionary size (: 30k).
     pub dict_words: usize,
-    /// Tag pool size (specs/07: 500).
+    /// Tag pool size (: 500).
     pub tag_pool: usize,
     /// Vector dimension; `0` generates no vectors. Must match the
     /// consuming engine's `Config::dim`.
     pub dim: usize,
-    /// Number of Gaussian clusters on the unit sphere (specs/07: 64).
+    /// Number of Gaussian clusters on the unit sphere (: 64).
     pub vector_clusters: usize,
     /// Probability that a remember mints a *new* entity instead of
     /// reusing one (the pool grows to roughly this share of remembers).
@@ -91,7 +91,7 @@ pub struct Profile {
 }
 
 impl Default for Profile {
-    /// The specs/07 §6 corpus passport with vectors off and no
+    /// The corpus passport with vectors off and no
     /// maintains.
     fn default() -> Self {
         Self {
@@ -290,7 +290,7 @@ impl Gen {
 
     /// Advances the time cursor by a jittered, shrinking step: early
     /// operations are days apart, late ones minutes — density rises
-    /// toward "today" (specs/07 §6).
+    /// toward "today".
     fn advance_clock(&mut self) {
         self.emitted += 1;
         let base = self.profile.start_step_ms;

@@ -1,5 +1,5 @@
-//! `maintain` — tombstone purge and satellite compaction (specs/05,
-//! specs/11 B). Coverage: observable state is preserved, space is
+//! `maintain` — tombstone purge and satellite compaction (
+//! B). Coverage: observable state is preserved, space is
 //! reclaimed, ids/chains/edges stay stable, the pass is canonical and
 //! replayable byte-for-byte, the compacted image has no orphan chunks or
 //! dangling references, vectors survive the bijection, and a random

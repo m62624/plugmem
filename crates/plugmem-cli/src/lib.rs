@@ -1,6 +1,6 @@
 //! `plugmem` — the command-line surface over the
 //! [temporal-memory engine](plugmem_core), a thin wrapper around
-//! [`plugmem_host::Database`] (specs/06). Parse the arguments, call one
+//! [`plugmem_host::Database`]. Parse the arguments, call one
 //! engine verb, render the result — human text by default, `--json` for
 //! tooling and agents. No memory logic lives here; that is the engine's.
 //!
@@ -197,7 +197,7 @@ fn report_locked(path: &std::path::Path) -> u8 {
     1
 }
 
-/// Database path precedence (specs/06): `--db` flag > `$PLUGMEM_DB` >
+/// Database path precedence: `--db` flag > `$PLUGMEM_DB` >
 /// `./plugmem.db`.
 fn resolve_db_path(flag: Option<&std::path::Path>) -> PathBuf {
     flag.map(PathBuf::from)
@@ -388,7 +388,7 @@ fn execute(
     }
 }
 
-/// Salvages `src` into a fresh `dst` (specs/16 §9): `Database::recover` opens
+/// Salvages `src` into a fresh `dst`: `Database::recover` opens
 /// the source under an exclusive lock, drops the content-corrupt facts, and
 /// writes a clean disk-first copy. The source is left untouched.
 fn do_recover(src: &Path, dst: &Path, settings: &Settings, json: bool, out: &mut impl Write) -> u8 {
@@ -723,7 +723,7 @@ fn run_repl_ro_line(
 /// by meaning while a writer process holds the database. Returns `None` when the
 /// command is not `recall`, carries no query text, or no embedder is configured
 /// — recall then falls back to lexical/structural sources. Mirrors the host's
-/// "embed before the lock" rule (specs/13 §1); the embed happens before the open
+/// "embed before the lock" rule; the embed happens before the open
 /// so a locked database only costs the embed on the rare read-write fallback.
 fn embed_recall_query(
     settings: &mut Settings,
@@ -769,7 +769,7 @@ fn with_recall_query<R>(
     let range_pair = range.as_ref().map(|v| (v[0], v[1]));
     // `override_vector` is set only on the read-only path, where the CLI has
     // already embedded the text query; the read-write path leaves it `None` and
-    // the host embeds inside `recall` (specs/13 §1).
+    // the host embeds inside `recall`.
     let q = RecallQuery {
         now,
         text: query.as_deref(),

@@ -1,4 +1,4 @@
-//! On-demand integrity and recovery (specs/16 §9).
+//! On-demand integrity and recovery.
 //!
 //! Run with: `cargo run --example integrity -p plugmem-host`
 //!

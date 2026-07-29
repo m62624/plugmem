@@ -1,4 +1,4 @@
-//! The recall indexes (specs/04): shared posting storage, the BM25
+//! The recall indexes: shared posting storage, the BM25
 //! lexical index, and plain id-list indexes (tag → facts,
 //! entity → facts) with sorted-list intersection.
 //!

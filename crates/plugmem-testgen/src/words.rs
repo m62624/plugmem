@@ -1,4 +1,4 @@
-//! Deterministic vocabularies (specs/07 §6, specs/11 §3): pronounceable
+//! Deterministic vocabularies: pronounceable
 //! syllable words and a Zipf sampler over their ranks.
 //!
 //! Words are *derived from an index*, not sampled: `word_for(i)` is a

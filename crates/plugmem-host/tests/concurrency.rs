@@ -95,7 +95,11 @@ fn run_with_deadline(secs: u64, label: &str, body: impl FnOnce() + Send + 'stati
     // the tight bound for local runs. The shape is unchanged either way: a worker
     // thread signals completion and a real deadlock still trips the deadline (it
     // just waits longer before doing so), so the no-deadlock property still holds.
-    let secs = if cfg!(debug_assertions) { secs * 8 } else { secs };
+    let secs = if cfg!(debug_assertions) {
+        secs * 8
+    } else {
+        secs
+    };
     let (tx, rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
         body();

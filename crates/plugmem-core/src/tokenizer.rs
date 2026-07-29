@@ -1,4 +1,4 @@
-//! The core tokenizer, v2 (specs/04 §1).
+//! The core tokenizer, v2.
 //!
 //! The pipeline mirrors what the strongest lexical engines (Lucene's
 //! ICU/Standard analyzers, SQLite FTS5 `unicode61`) converge on, built
@@ -38,7 +38,7 @@ use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::{decompose_canonical, is_combining_mark};
 use unicode_segmentation::UnicodeSegmentation;
 
-/// Upper bound on an emitted token, in bytes (specs/04).
+/// Upper bound on an emitted token, in bytes.
 pub const MAX_TOKEN_BYTES: usize = 64;
 
 /// `true` for characters treated as CJK unigram sources: Han ideographs

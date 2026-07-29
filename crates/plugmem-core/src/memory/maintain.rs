@@ -1,5 +1,5 @@
-//! Maintenance: tombstone purge and satellite compaction (specs/05,
-//! specs/11 B).
+//! Maintenance: tombstone purge and satellite compaction (
+//! B).
 //!
 //! `maintain` is the one O(base) verb — everything else is microseconds.
 //! It reclaims the space held by forgotten facts without ever renumbering
@@ -10,8 +10,8 @@
 //! `FactAux` are simply not carried into the rebuilt arenas. The id itself
 //! is *burned*, never reissued — id allocation runs on the persisted
 //! `next_fact` counter, not on record presence, so replay determinism and
-//! the "ids are never reused" invariant survive removal (specs/12 §7-bis;
-//! specs/02 allows numbering holes explicitly). A burned id behaves
+//! the "ids are never reused" invariant survive removal (
+//! allows numbering holes explicitly). A burned id behaves
 //! exactly like a tombstoned one did: `get` returns `None`, verbs return
 //! `NotFound`. References *to* a purged fact (a successor's `revises`, an
 //! edge's provenance) keep the burned id rather than being rewritten:
@@ -63,7 +63,7 @@ fn scratch_err<E: core::fmt::Debug>(e: E) -> Error {
 /// Sink for the two dominant pools (text, vectors) during a rebuild. The in-RAM
 /// path ([`OwnedPools`]) builds them owned; the disk-first path
 /// ([`StreamPools`]) streams them into a [`Scratch`] and never holds them
-/// (specs/16 §9). Everything else a rebuild produces is metadata — small enough
+/// Everything else a rebuild produces is metadata — small enough
 /// (∝ record count) to build in RAM on either path.
 trait PoolSink {
     /// Records a text blob, returning its new dense id.
@@ -131,7 +131,7 @@ struct RebuildMeta {
     entity_facts: IdListIndex<'static>,
 }
 
-/// Report of a `maintain` pass (specs/05).
+/// Report of a `maintain` pass.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MaintainReport {
@@ -163,7 +163,7 @@ struct Rebuilt {
 
 impl Memory<'_> {
     /// Physically purges tombstoned facts and compacts every satellite
-    /// structure (specs/05). Ids of living facts are preserved; purged ids
+    /// structure. Ids of living facts are preserved; purged ids
     /// are burned (never reissued); observable state is unchanged; only
     /// bytes shrink. Journaled as a `Maintain` marker so replay reproduces
     /// the compaction exactly.
@@ -256,7 +256,7 @@ impl Memory<'_> {
 
     /// Builds the compacted metadata and pushes the two big pools through
     /// `pools` — the walk shared by the in-RAM rebuild ([`OwnedPools`]) and the
-    /// disk-first one ([`StreamPools`]). Ids are **not** renumbered (specs/02);
+    /// disk-first one ([`StreamPools`]). Ids are **not** renumbered;
     /// only text-blob ids and vector slots are re-densified, in fact-id order,
     /// so both paths produce byte-identical output. Returns the metadata, the
     /// old→new vector-slot map (for the graph) and the purge count.
@@ -316,7 +316,7 @@ impl Memory<'_> {
         for fid in 0..self.next_fact {
             let id = FactId(fid);
             // A missing record is an id burned by an earlier pass — legal
-            // (specs/02: numbering holes after a purge are the norm).
+            // (: numbering holes after a purge are the norm).
             let Some(rec) = self.facts.get(&fid.to_be_bytes()) else {
                 continue;
             };
@@ -413,7 +413,7 @@ impl Memory<'_> {
         ))
     }
 
-    /// Disk-first compaction (specs/16 §9, milestone H): rebuilds the compacted
+    /// Disk-first compaction (milestone H): rebuilds the compacted
     /// image and writes it to `sink`, streaming the two big pools (text,
     /// vectors) through `text_scratch`/`vec_scratch` so peak RAM stays ∝ the
     /// record count (metadata + graph), never ∝ the content size. Byte-identical
@@ -479,7 +479,7 @@ impl Memory<'_> {
         Ok(purged)
     }
 
-    /// The vector index's maintenance policy (specs/04 §5 phase 2), all
+    /// The vector index's maintenance policy (phase 2), all
     /// deterministic:
     ///
     /// - below `flat_to_hnsw` the graph is empty (flat regime);

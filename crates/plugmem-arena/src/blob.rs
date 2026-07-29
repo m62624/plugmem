@@ -240,7 +240,7 @@ impl<'a> BlobHeap<'a> {
             .map(|(i, &(offset, len))| (BlobId(i as u32), self.slice(offset, len as usize)))
     }
 
-    /// Appends the heap's index section to `out` (`specs/03`).
+    /// Appends the heap's index section to `out`.
     ///
     /// Layout (little-endian): `[blobs u32]` then one `len u32` per blob.
     /// Offsets are not stored — blobs are contiguous in push order, so the
@@ -255,7 +255,7 @@ impl<'a> BlobHeap<'a> {
         }
     }
 
-    /// Appends the heap's pool section to `out` (`specs/03`) — a straight
+    /// Appends the heap's pool section to `out` — a straight
     /// copy of the logical pool (`base` then `tail`): every pool byte is
     /// initialized blob content, so an overlay heap dumps byte-identically
     /// to the owned heap holding the same blobs.
@@ -287,7 +287,7 @@ impl<'a> BlobHeap<'a> {
     }
 
     /// Rebuilds a heap that **borrows** its base pool from a longer-lived
-    /// buffer (a memory-mapped snapshot, specs/16) instead of copying it.
+    /// buffer (a memory-mapped snapshot) instead of copying it.
     /// The index is validated and rebuilt exactly as in [`BlobHeap::load`];
     /// no base byte is copied, so opening an 8 GiB heap this way touches
     /// only the pages the reader dereferences.

@@ -14,7 +14,7 @@
 //! `PAGE` is the fixed page size in bytes (a const generic so one type serves
 //! both the arena's 4 KiB pages and the chunk pool's 64-byte chunks).
 //!
-//! The overlay stays true to this crate's flat philosophy (`specs/00`, `01`):
+//! The overlay stays true to this crate's flat philosophy (`01`):
 //! **no `Box`, no map, no tree** — the copy-on-write layer is two flat `Vec`s,
 //! a dense `u32` redirect and one contiguous copy pool, exactly like the
 //! arena's existing `next`/`counts`/`pool`. A copied page is an amortized push

@@ -1,5 +1,5 @@
 //! Hybrid recall: source ranking, RRF fusion, budgeted selection and the
-//! rendered prompt block (specs/04 §6–7, specs/05).
+//! rendered prompt block (–7).
 //!
 //! The pipeline (scratch buffers reused, the zero-alloc invariant):
 //!
@@ -55,16 +55,16 @@ pub mod source {
     pub const VEC: u8 = 1 << 3;
 }
 
-/// Per-source candidate cap (specs/04 §7).
+/// Per-source candidate cap.
 const SOURCE_CAP: usize = 128;
 
-/// Graph expansion caps (specs/04 §6).
+/// Graph expansion caps.
 const GRAPH_ENTITY_CAP: usize = 64;
 const GRAPH_FACT_CAP: usize = 256;
 const GRAPH_EDGE_CAP: usize = 128;
 /// Hard budget on posting entries the graph source may *examine* — a hub
 /// entity with tens of thousands of facts must not turn expansion into a
-/// full decode of its list (the specs/04 "hub super-node" guard applies
+/// full decode of its list (the "hub super-node" guard applies
 /// to work, not only to the candidate count).
 const GRAPH_EXAMINE_CAP: usize = 2048;
 
@@ -79,7 +79,7 @@ const STOP_DF_DIVISOR: u64 = 8;
 /// stop-frequent (small corpora skip nothing).
 const STOP_DF_FLOOR: u64 = 1024;
 
-/// A recall request (specs/05). `Default`-like construction via
+/// A recall request. `Default`-like construction via
 /// [`RecallQuery::text`] plus field overrides.
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -129,7 +129,7 @@ impl<'a> RecallQuery<'a> {
     }
 }
 
-/// One recalled fact (specs/05).
+/// One recalled fact.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RecalledFact {
@@ -149,7 +149,7 @@ pub struct RecalledFact {
     pub valid_to: u64,
 }
 
-/// One edge the graph source walked (specs/05: agents want the relations,
+/// One edge the graph source walked (: agents want the relations,
 /// not only the facts).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -186,7 +186,7 @@ pub struct RecallResult {
 /// thread). Carries every buffer a recall mutates — the query-side term/score
 /// vectors, the fusion map, *and* its own tokenizer and name-normalization
 /// buffer — so a recall never touches the engine's write-side scratches. Reused
-/// across calls it upholds the zero-alloc invariant (specs/05, specs/07 §2).
+/// across calls it upholds the zero-alloc invariant.
 ///
 /// Opaque: construct with [`RecallScratch::new`] (or `Default`) and pass by
 /// `&mut`; the fields are engine-internal.
@@ -240,7 +240,7 @@ impl Memory<'_> {
     /// zero-alloc path: after warm-up neither `s` nor `out` allocate).
     ///
     /// Takes `&self` — recall never mutates engine data; every mutable buffer
-    /// it needs lives in `s` (specs/05). This is what lets many readers recall
+    /// it needs lives in `s`. This is what lets many readers recall
     /// one engine concurrently, each with its own [`RecallScratch`].
     pub fn recall_into(
         &self,
@@ -412,7 +412,7 @@ impl Memory<'_> {
         Ok(())
     }
 
-    /// The above-threshold vector source (specs/04 §5 phase 2): an HNSW
+    /// The above-threshold vector source (phase 2): an HNSW
     /// beam search over the graph plus an exact scan of the flat tail
     /// (vectors appended since the last `maintain` build), merged,
     /// admission-filtered and capped like every other source.
@@ -608,11 +608,11 @@ impl Memory<'_> {
                 .facts
                 .get(&fact.id.0.to_be_bytes())
                 .expect("selected ids exist");
-            // Deferred validation (specs/16 §9): tolerate invalid text bytes —
+            // Deferred validation: tolerate invalid text bytes —
             // an unreadable fact renders with an empty body, never a panic.
             let text = core::str::from_utf8(self.texts.get(record.text)).unwrap_or("");
             let _ = write!(out.rendered, "- [f{}] ", fact.id.0);
-            // A corrupt subject name (deferred validation, specs/16 §9)
+            // A corrupt subject name (deferred validation)
             // renders without the subject prefix rather than panicking.
             if let Some(entity) = fact.entity.some()
                 && let Some(name) = self.entity_name(entity)

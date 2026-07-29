@@ -1,5 +1,5 @@
 //! The engine: data model state, verbs, journaling and replay
-//! (specs/02, /03, /05).
+//! (/03, /05).
 //!
 //! All state lives in the flat structures of `plugmem-arena`; every
 //! mutating verb journals itself through the caller's
@@ -47,7 +47,7 @@ mod recall;
 pub use maintain::MaintainReport;
 pub use recall::{RecallQuery, RecallResult, RecallScratch, RecalledEdge, RecalledFact, source};
 
-/// Input of `remember` and `revise` (specs/05).
+/// Input of `remember` and `revise`.
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct RememberInput<'a> {
@@ -90,7 +90,7 @@ impl<'a> RememberInput<'a> {
     }
 }
 
-/// Input of `link` (specs/05).
+/// Input of `link`.
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct LinkInput<'a> {
@@ -106,7 +106,7 @@ pub struct LinkInput<'a> {
     pub provenance: Option<FactId>,
 }
 
-/// Result of `remember`/`revise` (specs/05).
+/// Result of `remember`/`revise`.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RememberOutcome {
@@ -117,11 +117,11 @@ pub struct RememberOutcome {
     /// Similar / potentially conflicting **live** facts, best match
     /// first (≤ 8). The engine never revises on its own — it surfaces
     /// the candidates, the agent judges: `revise`, keep both, or
-    /// `forget` (specs/05).
+    /// `forget`.
     pub similar: Vec<Similar>,
 }
 
-/// One similar-fact hint (specs/05).
+/// One similar-fact hint.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Similar {
@@ -134,7 +134,7 @@ pub struct Similar {
     pub reason: SimilarReason,
 }
 
-/// Why a fact was flagged as similar (specs/05).
+/// Why a fact was flagged as similar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SimilarReason {
@@ -157,7 +157,7 @@ pub struct FactView<'a> {
 }
 
 /// The per-fact content problem [`Memory::faulty_facts`] attributes to a
-/// fact — the salvage predicate `recover` uses (specs/16 §9). It mirrors the
+/// fact — the salvage predicate `recover` uses. It mirrors the
 /// content checks [`Memory::verify`] runs, split out per fact so a caller can
 /// drop the individual bad records instead of failing the whole image.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,7 +173,7 @@ pub enum FactFault {
     Metadata,
 }
 
-/// Engine size counters (specs/05). Every field is an O(1) read; the
+/// Engine size counters. Every field is an O(1) read; the
 /// struct is `#[non_exhaustive]` so later stages (database identity
 /// markers, HNSW state) can extend it without a breaking change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,12 +217,12 @@ pub struct OpenReport {
     pub truncated_tail: bool,
 }
 
-/// The memory engine (specs/05). See the module docs for staging.
+/// The memory engine. See the module docs for staging.
 ///
 /// The lifetime `'a` is the provenance of the engine's byte pools. Every
 /// owned constructor (`new`/`open`/`from_bytes`) yields a `Memory<'static>`
 /// that owns its bytes; the read-only [`Memory::from_bytes_borrowed`] path
-/// borrows them from an mmap'd snapshot instead of copying (specs/16).
+/// borrows them from an mmap'd snapshot instead of copying.
 pub struct Memory<'a> {
     cfg: Config,
     // -- data model --
@@ -333,7 +333,7 @@ impl<'a> Memory<'a> {
         Ok((mem, report))
     }
 
-    /// Opens a database read-only over a borrowed snapshot (specs/16): the
+    /// Opens a database read-only over a borrowed snapshot: the
     /// engine's byte pools borrow `snapshot` (typically an mmap'd file)
     /// instead of copying it, so a large database residents only the pages
     /// actually read. The returned engine is tied to `snapshot`'s lifetime.
@@ -359,7 +359,7 @@ impl<'a> Memory<'a> {
     }
 
     /// Opens a database read-**write** over a borrowed snapshot (the overlay
-    /// write path, specs/16 §9): like [`Memory::from_bytes_borrowed`] the byte
+    /// write path): like [`Memory::from_bytes_borrowed`] the byte
     /// pools borrow `snapshot` instead of copying it, but the journal is
     /// **replayed** and the engine stays fully mutable. Mutations do not clone
     /// the borrowed base: the flat structures land appends in an owned tail and
@@ -382,7 +382,7 @@ impl<'a> Memory<'a> {
         Ok((mem, report))
     }
 
-    /// Applies every journal record on top of the current state (specs/03
+    /// Applies every journal record on top of the current state (
     /// replay rules: assigned ids are authoritative; records whose
     /// assigned id is already present are skipped, which makes reapplying
     /// a tail idempotent).
@@ -477,7 +477,7 @@ impl<'a> Memory<'a> {
         Ok(report)
     }
 
-    /// Remembers a new fact (specs/05).
+    /// Remembers a new fact.
     pub fn remember<S: Storage>(
         &mut self,
         store: &mut S,
@@ -491,7 +491,7 @@ impl<'a> Memory<'a> {
     }
 
     /// Batch import: a sequence of remembers in one call, journaled
-    /// individually (specs/05). `skip_similar` turns off the
+    /// individually. `skip_similar` turns off the
     /// similar-detection pass — imports don't need hints, and skipping
     /// them makes a bulk load cheaper.
     ///
@@ -516,7 +516,7 @@ impl<'a> Memory<'a> {
         Ok(out)
     }
 
-    /// Lexical similar-detection (specs/05): live facts of the same
+    /// Lexical similar-detection: live facts of the same
     /// entity whose term sets overlap the new fact's above the
     /// `similar_jaccard` threshold. Bounded: the entity's most recent
     /// [`SIMILAR_CANDIDATE_CAP`] facts are compared (a hub's full list is
@@ -555,7 +555,7 @@ impl<'a> Memory<'a> {
 
             // Lexical signal: term-set Jaccard over the entity's text.
             let mut lexical = None;
-            // Deferred validation (specs/16 §9): a load no longer scans the
+            // Deferred validation: a load no longer scans the
             // text pool, so an unreadable text simply yields no lexical signal.
             if !new_terms.is_empty()
                 && let Ok(text) = core::str::from_utf8(self.texts.get(record.text))
@@ -612,7 +612,7 @@ impl<'a> Memory<'a> {
 
     /// Revises `target`: closes its validity at the new fact's
     /// `valid_from` and records the new fact with `revises = target`
-    /// (specs/02 rule 2).
+    /// (rule 2).
     pub fn revise<S: Storage>(
         &mut self,
         store: &mut S,
@@ -632,7 +632,7 @@ impl<'a> Memory<'a> {
     }
 
     /// Tombstones a fact: it disappears from every query immediately, the
-    /// bytes go with the next `maintain` (specs/02 rule 3). `Ok(false)`
+    /// bytes go with the next `maintain` (rule 3). `Ok(false)`
     /// when it was already tombstoned.
     pub fn forget<S: Storage>(
         &mut self,
@@ -681,7 +681,7 @@ impl<'a> Memory<'a> {
         if record.is_tombstone() {
             return None;
         }
-        // Deferred validation (specs/16 §9): a load no longer scans the text
+        // Deferred validation: a load no longer scans the text
         // pool, so tolerate invalid bytes here — a corrupt text hides the fact
         // rather than panicking. `verify()` reports it explicitly.
         let text = core::str::from_utf8(self.texts.get(record.text)).ok()?;
@@ -712,7 +712,7 @@ impl<'a> Memory<'a> {
     /// empty map is stored as no blob).
     ///
     /// A tombstoned or unknown fact, a fact with no metadata blob, or a blob
-    /// that fails to decode (deferred validation, specs/16 §9 — `verify()`
+    /// that fails to decode (deferred validation, — `verify`
     /// reports it) all leave `out` empty and return `false`; this accessor never
     /// panics on bad bytes.
     pub fn metadata_of<'s>(&'s self, id: FactId, out: &mut Vec<(&'s str, &'s str)>) -> bool {
@@ -757,7 +757,7 @@ impl<'a> Memory<'a> {
     /// [`EntityId`] carried by [`FactRecord`].
     pub fn entity_name(&self, id: EntityId) -> Option<&str> {
         let record = self.entities.get(&id.0.to_be_bytes())?;
-        // Tolerate invalid bytes (deferred validation, specs/16 §9): an
+        // Tolerate invalid bytes (deferred validation): an
         // unreadable name reads as `None`, never a panic.
         core::str::from_utf8(self.texts.get(record.name)).ok()
     }
@@ -779,7 +779,7 @@ impl<'a> Memory<'a> {
         &self.cfg
     }
 
-    /// Size counters of the engine (specs/05). O(1).
+    /// Size counters of the engine. O(1).
     pub fn stats(&self) -> Stats {
         Stats {
             facts: self.facts.len(),

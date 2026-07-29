@@ -1,5 +1,5 @@
 //! Criterion bench for the on-demand container scrub over an mmap'd snapshot
-//! (specs/16 §9). The core `scrub` bench sweeps the slice budget on a warm
+//! The core `scrub` bench sweeps the slice budget on a warm
 //! buffer and finds throughput flat (xxh3/bandwidth-bound); this adds the
 //! host path — a real file, mapped read-only — so the sweep here carries the
 //! cold-page fault cost too. Informational, not a CI gate.

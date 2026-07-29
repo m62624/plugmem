@@ -1,4 +1,4 @@
-//! Engine-verb contract tests (specs/02 §tests, specs/05): temporality
+//! Engine-verb contract tests: temporality
 //! scenarios, entity resolution, edges, errors — and the persistence
 //! property: replaying the journal reproduces the direct execution.
 

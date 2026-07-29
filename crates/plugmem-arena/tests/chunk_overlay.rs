@@ -1,4 +1,4 @@
-//! Overlay write-path tests for `ChunkPool` (specs/16 §9, per-chunk
+//! Overlay write-path tests for `ChunkPool` (per-chunk
 //! copy-on-write).
 //!
 //! A pool opened with [`ChunkPool::load_overlay`] borrows its chunks from a

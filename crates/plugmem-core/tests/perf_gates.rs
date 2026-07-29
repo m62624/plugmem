@@ -1,4 +1,4 @@
-//! Deterministic performance gates for the engine layers (specs/07 §3).
+//! Deterministic performance gates for the engine layers.
 //!
 //! Same discipline as the arena's gates: fixed-seed workloads, ceilings
 //! on work counters set from measured values ×1.2 — machine-independent,

@@ -1,6 +1,6 @@
 //! Native host layer for the plugmem engine: file-backed storage with
 //! exclusive locking, a thread-safe database handle with a maintenance
-//! policy, and embedding providers (specs/13).
+//! policy, and embedding providers.
 //!
 //! This crate is the "point it at a file and go" Rust experience:
 //!
@@ -14,7 +14,7 @@
 //! # Ok::<(), plugmem_host::HostError>(())
 //! ```
 //!
-//! Concurrency model (specs/13 §1): one file has one owning process —
+//! Concurrency model: one file has one owning process —
 //! a second open is refused with [`HostError::Locked`]; within the
 //! process, clone the [`Database`] handle across threads and agents;
 //! different files are fully independent. Embedding calls run outside

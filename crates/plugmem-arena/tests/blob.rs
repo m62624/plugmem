@@ -1,4 +1,4 @@
-//! Boundary tests for `BlobHeap` (specs/01 test plan) plus a property model
+//! Boundary tests for `BlobHeap` (test plan) plus a property model
 //! against `Vec<Vec<u8>>`.
 
 use plugmem_arena::{BlobHeap, BlobHeapBuilder, BlobHeapCfg, BlobId, Error};

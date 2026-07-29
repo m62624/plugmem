@@ -1,4 +1,4 @@
-//! Overlay write-path tests for `Arena` (specs/16 §9, per-page copy-on-write).
+//! Overlay write-path tests for `Arena` (per-page copy-on-write).
 //!
 //! An arena opened with [`Arena::load_overlay`] borrows its base pages from a
 //! longer-lived buffer (a memory-mapped snapshot in production) yet stays

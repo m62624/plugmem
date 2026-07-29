@@ -1,4 +1,4 @@
-//! LEB128 varint coding for posting lists (specs/04 §2).
+//! LEB128 varint coding for posting lists.
 //!
 //! Posting entries store fact-id *deltas*; lists are sorted by
 //! construction (fact ids are assigned monotonically), so deltas are

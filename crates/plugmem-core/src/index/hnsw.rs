@@ -1,7 +1,7 @@
-//! HNSW graph over the quantized vector pool (specs/10, specs/04 §5
+//! HNSW graph over the quantized vector pool (
 //! phase 2).
 //!
-//! The port follows the specs/10 blueprint: the rust-cv skeleton (flat
+//! The port follows the blueprint: the rust-cv skeleton (flat
 //! layers, an external reusable scratch) with the hnswlib algorithmics
 //! (the Algorithm-4 neighbor heuristic with `keep_pruned`, the classic
 //! early-stopped beam search). Four systematic replacements make it fit
@@ -23,7 +23,7 @@
 //!
 //! Graph nodes are **vector-slot indices** (`u32`). Only slots below
 //! `indexed` are in the graph; slots appended after the last build form
-//! the *flat tail* the engine scans separately and merges (specs/04:
+//! the *flat tail* the engine scans separately and merges (:
 //! inserts amortize into `maintain`, `remember` stays microseconds).
 //!
 //! The beam search does not consult admission filters while walking —
@@ -119,7 +119,7 @@ fn better(a: (f32, u32), b: (f32, u32)) -> core::cmp::Ordering {
 /// The navigable small-world graph. See the module docs.
 ///
 /// The upper-level pools carry a lifetime so a read-only open can borrow
-/// them from an mmap (specs/16); `level0` stays owned (it is rebuilt into
+/// them from an mmap; `level0` stays owned (it is rebuilt into
 /// a `Vec<u32>` on load — small metadata, not content-scaled). The owned
 /// build/load paths are `'static`.
 pub struct HnswGraph<'a> {
@@ -236,7 +236,7 @@ impl<'a> HnswGraph<'a> {
         false
     }
 
-    /// Classic beam search inside one level (specs/10 Alg. 2 with the
+    /// Classic beam search inside one level (Alg. 2 with the
     /// early stop). Results land in `scratch.found`, ascending by the
     /// deterministic order — best last.
     fn search_layer(
@@ -294,7 +294,7 @@ impl<'a> HnswGraph<'a> {
         }
     }
 
-    /// The Algorithm-4 neighbor heuristic with `keep_pruned` (specs/10):
+    /// The Algorithm-4 neighbor heuristic with `keep_pruned`:
     /// walks `scratch.found` best-first, keeps a candidate only if it is
     /// closer to the query than to any already-kept neighbor (spread over
     /// clusters), then tops up from the rejects. Result in `scratch.sel`.
@@ -407,7 +407,7 @@ impl<'a> HnswGraph<'a> {
         res
     }
 
-    /// Inserts every slot in `[indexed, upto)` into the graph (specs/10
+    /// Inserts every slot in `[indexed, upto)` into the graph (
     /// Alg. 1). Called from `maintain` — bulk, deterministic, never from
     /// `remember`.
     pub fn insert_bulk(
@@ -499,7 +499,7 @@ impl<'a> HnswGraph<'a> {
         Ok(())
     }
 
-    /// k-NN query (specs/10 Alg. 5): greedy descent to level 1, one beam
+    /// k-NN query (Alg. 5): greedy descent to level 1, one beam
     /// search on level 0 with `ef`, results appended to `out` as
     /// `(slot, cosine)`, best first.
     pub(crate) fn search_quantized(
@@ -543,7 +543,7 @@ impl<'a> HnswGraph<'a> {
         max_bytes: usize,
     ) -> Result<HnswGraph<'static>, Error> {
         // The remapped graph is freshly built (owned), so it is `'static`
-        // and swaps into a `Memory<'a>` field by covariance (specs/16).
+        // and swaps into a `Memory<'a>` field by covariance.
         let mut g: HnswGraph<'static> = HnswGraph::new(self.m, self.m0, max_bytes)?;
         let old_indexed = self.indexed as usize;
         let new_indexed = map[..old_indexed]
@@ -672,7 +672,7 @@ impl<'a> HnswGraph<'a> {
 
     /// Zero-copy sibling of [`HnswGraph::from_parts`]: the upper-level
     /// arena pool and the list pool borrow their mmap'd sections instead
-    /// of copying (specs/16). `level0` and the small arena/chunk metadata
+    /// of copying. `level0` and the small arena/chunk metadata
     /// are still rebuilt owned. Same framing checks as `from_parts`; the
     /// lifetime ties the graph to `upper_pool`/`lists_pool`.
     #[allow(clippy::too_many_arguments)]
@@ -876,7 +876,7 @@ mod tests {
     }
 
     /// Graph search agrees with brute force: recall@10 >= 0.9 at ef 64
-    /// (the specs/10 verification gate).
+    /// (the verification gate).
     #[test]
     #[cfg_attr(miri, ignore)] // data-heavy; the small graphs cover the logic
     fn recall_against_brute_force() {

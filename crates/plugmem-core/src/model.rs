@@ -1,4 +1,4 @@
-//! Record layouts of the data model (specs/02).
+//! Record layouts of the data model.
 //!
 //! Every record is a fixed-size [`Slot`] living in an [`Arena`]; the byte
 //! layouts below are **format contracts** — the snapshot is a memcpy of
@@ -31,7 +31,7 @@ pub mod fact_flags {
     pub const HAS_VECTOR: u16 = 1 << 2;
 }
 
-/// The unit of memory: one fact (specs/02, 48-byte slot, Uniform arena).
+/// The unit of memory: one fact (48-byte slot, Uniform arena).
 ///
 /// | off | size | field |
 /// |---|---|---|
@@ -90,7 +90,7 @@ impl FactRecord {
         self.flags & fact_flags::HAS_VECTOR != 0
     }
 
-    /// The `as_of(t)` liveness rule (specs/02): not a tombstone, already
+    /// The `as_of(t)` liveness rule: not a tombstone, already
     /// recorded at `t`, and `t` inside `[valid_from, valid_to)`.
     pub fn is_live_at(&self, t: u64) -> bool {
         !self.is_tombstone() && self.recorded_at <= t && self.valid_from <= t && t < self.valid_to
@@ -131,7 +131,7 @@ impl Slot for FactRecord {
 }
 
 /// Per-fact auxiliary record: the tag-list handle and the optional metadata
-/// blob (specs/02, 20-byte slot, Uniform arena; layout
+/// blob (20-byte slot, Uniform arena; layout
 /// `[id 4 | ListHandle 12 | meta 4]`).
 ///
 /// Split from [`FactRecord`] so the hot 48-byte record stays hot: tags and
@@ -169,7 +169,7 @@ impl Slot for FactAux {
     }
 }
 
-/// A graph node (specs/02, 24-byte slot, Uniform arena).
+/// A graph node (24-byte slot, Uniform arena).
 ///
 /// | off | size | field |
 /// |---|---|---|
@@ -216,7 +216,7 @@ impl Slot for EntityRecord {
     }
 }
 
-/// Name → entity resolution record (specs/02, 8-byte slot, Ordered arena,
+/// Name → entity resolution record (8-byte slot, Ordered arena,
 /// the whole slot is the key: `[name_term BE | id BE]`).
 ///
 /// The normalized name is unique (lookup-or-create), so a prefix scan on
@@ -248,7 +248,7 @@ impl Slot for EntityByName {
     }
 }
 
-/// A typed graph edge (specs/02, 16-byte slot, Ordered arena, key
+/// A typed graph edge (16-byte slot, Ordered arena, key
 /// `[a BE | rel BE | b BE]`, payload `fact`).
 ///
 /// Stored twice, in two mirrored arenas: the out-arena keys by
@@ -292,7 +292,7 @@ impl Slot for EdgeSlot {
     }
 }
 
-/// Temporal index record (specs/02, 12-byte slot, Ordered arena, the whole
+/// Temporal index record (12-byte slot, Ordered arena, the whole
 /// slot is the key: `[recorded_at BE | fact BE]`, no payload).
 ///
 /// Range scans answer "what was recorded in this window"; validity

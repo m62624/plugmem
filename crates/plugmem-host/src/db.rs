@@ -1,5 +1,5 @@
 //! `Database`: the engine + its file + the maintenance policy behind
-//! one lock (specs/13 §1, §3).
+//! one lock (§3).
 //!
 //! The orchestration model in one paragraph: a `Database` handle is
 //! `Clone + Send + Sync` (an `Arc` around an `RwLock`-guarded engine), so
@@ -20,7 +20,7 @@
 //! serialize — a single-threaded measurement build; the public API is
 //! unchanged. See `StateLock`.)
 //!
-//! ## Overlay write path (specs/16 §9)
+//! ## Overlay write path
 //!
 //! Opening a database does **not** copy its snapshot into RAM. `open`
 //! memory-maps the snapshot file and the engine *borrows* the mapped pages
@@ -28,7 +28,7 @@
 //! overlay; a mutation lands its appends in an owned tail and copies only
 //! the pages it rewrites (per-page copy-on-write in `plugmem-arena`). So a
 //! multi-gigabyte database is opened and written to while resident only in
-//! the pages it actually touches — the SQLite model (specs/00). A snapshot
+//! the pages it actually touches — the SQLite model. A snapshot
 //! materializes the base + overlay into a fresh file and **re-maps** it, so
 //! the overlay collapses and a long write session stays bounded. A brand-new
 //! database has no file to map yet: it opens *owned* and empty, and switches
@@ -119,7 +119,7 @@ impl Engine {
     }
 }
 
-/// Opens the engine at `store`'s path (specs/16 §9): memory-maps the snapshot
+/// Opens the engine at `store`'s path: memory-maps the snapshot
 /// and borrows it as an overlay, replaying the journal. A missing snapshot
 /// file (a brand-new database) opens owned and empty — the file appears at the
 /// first snapshot. `store` must already hold the exclusive lock.
@@ -135,7 +135,7 @@ fn open_engine(store: &mut FileStorage, cfg: &Config) -> Result<(Engine, OpenRep
     let file = File::open(&genp).map_err(|e| HostError::io(&genp, e))?;
     // SAFETY: mapping a file is inherently unsafe — a concurrent truncate or
     // overwrite of the mapped file would fault the process (SIGBUS/exception)
-    // on the next page access. Our correctness argument (specs/16 §5): the
+    // on the next page access. Our correctness argument: the
     // generation file is **immutable** (a checkpoint publishes a new one and
     // never rewrites this), and the `store` holds the exclusive writer lock, so
     // nothing overwrites it under the map. A foreign `truncate`/`rm` under a
@@ -171,7 +171,7 @@ pub struct FactSnapshot {
 }
 
 /// One exported fact — the human-readable, id-free shape [`Database::export`]
-/// dumps and an importer re-`remember`s (specs/06). Internal ids and
+/// dumps and an importer re-`remember`s. Internal ids and
 /// `recorded_at` are the engine's bookkeeping and are *not* preserved across
 /// a round-trip; the knowledge itself (text, subject name, tags, validity
 /// start) is.
@@ -193,7 +193,7 @@ pub struct ExportedFact {
     pub valid_from: u64,
 }
 
-/// The outcome of a [`Database::recover`] salvage (specs/16 §9).
+/// The outcome of a [`Database::recover`] salvage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RecoverReport {
@@ -264,7 +264,7 @@ pub(crate) fn export_facts(mem: &Memory) -> Vec<ExportedFact> {
     out
 }
 
-/// Tuning knobs of a [`Database`] (specs/13 §3). Construct through
+/// Tuning knobs of a [`Database`]. Construct through
 /// [`Database::builder`].
 pub struct DatabaseBuilder {
     cfg: Config,
@@ -298,7 +298,7 @@ impl DatabaseBuilder {
 
     /// Optional auto-`maintain` after this many forgets (default off —
     /// maintenance is O(database) and the first pass beyond the HNSW
-    /// threshold pays the graph build; see specs/07).
+    /// threshold pays the graph build).
     pub fn maintain_every_forgets(mut self, forgets: u64) -> Self {
         self.maintain_every_forgets = Some(forgets);
         self
@@ -394,7 +394,7 @@ impl Database {
         Self::builder(cfg).open(path)
     }
 
-    /// Opens `path` read-only over a memory-mapped snapshot (specs/16):
+    /// Opens `path` read-only over a memory-mapped snapshot:
     /// the engine borrows the mapped pages instead of copying the file
     /// into RAM, so a large read-mostly database residents only the pages
     /// `recall`/`get` touch. Requires a checkpointed database (empty
@@ -413,7 +413,7 @@ impl Database {
         ReadOnlyDatabase::open(path, cfg)
     }
 
-    /// Starts a configured open (specs/13 §3 knobs).
+    /// Starts a configured open (knobs).
     pub fn builder(cfg: Config) -> DatabaseBuilder {
         DatabaseBuilder {
             cfg,
@@ -490,7 +490,7 @@ impl Database {
         Ok(Some(embedder.embed(texts)?))
     }
 
-    /// Writes a full snapshot and re-maps the fresh file (specs/16 §9).
+    /// Writes a full snapshot and re-maps the fresh file.
     ///
     /// Materializes the borrowed base + overlay into an owned buffer, drops
     /// the current map, writes the buffer (tmp + fsync + rename) and clears
@@ -500,7 +500,7 @@ impl Database {
     /// (a mapped file cannot be renamed over on Windows).
     fn resnapshot(&self, st: &mut State, now: u64) -> Result<(), HostError> {
         // Stream the image straight to the tmp file — never a full-image Vec
-        // (specs/16 §9). This reads through the live map, so it happens
+        // This reads through the live map, so it happens
         // **before** the map is dropped.
         {
             let State { engine, store, .. } = &mut *st;
@@ -528,7 +528,7 @@ impl Database {
     }
 
     /// The post-mutation policy hook: counts the op, fires auto-maintain
-    /// and auto-snapshot inside the same critical section (specs/13 §3).
+    /// and auto-snapshot inside the same critical section.
     fn after_mutation(&self, st: &mut State, now: u64) -> Result<(), HostError> {
         st.ops += 1;
         if let Some(threshold) = self.inner.maintain_every_forgets
@@ -642,7 +642,7 @@ impl Database {
         }
         // One policy pass for the whole batch. The op counter advances by one per
         // batch; the journal-bytes threshold still fires on a large batch, so a
-        // snapshot is not starved (specs/13 §3).
+        // snapshot is not starved.
         self.after_mutation(&mut st, latest)?;
         Ok(out)
     }
@@ -728,7 +728,7 @@ impl Database {
     }
 
     /// Dumps the currently-open facts for a human-readable backup
-    /// (specs/06). See [`ExportedFact`]. Collects the whole set; for a large
+    /// See [`ExportedFact`]. Collects the whole set; for a large
     /// database prefer [`export_each`](Self::export_each), which streams.
     pub fn export(&self) -> Vec<ExportedFact> {
         self.read().engine.read(export_facts)
@@ -743,7 +743,7 @@ impl Database {
     }
 
     /// Runs a maintenance pass now (purge, compaction, HNSW build past the
-    /// threshold — see specs/07 for the cost model).
+    /// threshold — for the cost model).
     ///
     /// **Disk-first** (milestone H): the compacted image is written by streaming
     /// the two big pools (vectors, text) through temp files and then re-mapped,
@@ -816,7 +816,7 @@ impl Database {
         Ok(())
     }
 
-    /// Runs the on-demand integrity check (specs/16 §9) — the equivalent of
+    /// Runs the on-demand integrity check — the equivalent of
     /// SQLite's `integrity_check`. An open validates only the metadata, so the
     /// large byte pools stay non-resident on an mmap'd base; this sweeps them
     /// (text UTF-8, vector self-consistency and the fact↔slot bijection) and
@@ -832,7 +832,7 @@ impl Database {
         Ok(self.read().engine.read(|mem| mem.verify())?)
     }
 
-    /// Salvages a content-corrupt database (Tier 2, specs/16 §9): opens `src`,
+    /// Salvages a content-corrupt database (Tier 2): opens `src`,
     /// drops the facts that fail the per-fact content checks (`verify`'s
     /// predicate), compacts the survivors and their indexes, and writes a clean
     /// image to `dst`. `src` on disk is left untouched — the evidence is

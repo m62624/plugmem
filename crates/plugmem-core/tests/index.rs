@@ -1,7 +1,7 @@
-//! Index-layer tests (specs/04 test plan): varint properties, the posting
+//! Index-layer tests (test plan): varint properties, the posting
 //! store against a reference model, sorted-list intersection, and BM25
 //! against golden scores computed by an independent script (only the
-//! numbers live in the repo — specs/04).
+//! numbers live in the repo —).
 
 use plugmem_core::FactId;
 use plugmem_core::index::bm25::{Bm25Index, Bm25Scratch};
@@ -87,7 +87,7 @@ fn intersection_table() {
     assert_eq!(ids(&out), [5, 11, 40]);
 }
 
-/// The specs/04 golden corpus: term ids 1..=5, fact ids 0..=5. Scores
+/// The golden corpus: term ids 1..=5, fact ids 0..=5. Scores
 /// below were computed by an independent Python implementation of the
 /// same formula (k1 = 1.2, b = 0.75); only the numbers are checked in.
 fn golden_index() -> Bm25Index<'static> {

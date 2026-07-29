@@ -1,4 +1,4 @@
-//! The zero-allocation invariant (specs/07 §2): after warm-up, `recall`
+//! The zero-allocation invariant: after warm-up, `recall`
 //! and `get` perform **zero** allocator calls — scratches and result
 //! buffers are reused, growth happens only on new size maximums.
 //!
@@ -210,7 +210,7 @@ fn graph_regime_recall_allocates_nothing_after_warmup() {
 
 #[test]
 fn overlay_open_does_not_clone_the_base_pools() {
-    // The RAM-win proof (specs/16 §9): opening a snapshot with
+    // The RAM-win proof: opening a snapshot with
     // `from_bytes_overlay` borrows its byte pools, so it allocates only the
     // small owned metadata — nowhere near the whole image the owned open copies.
     let _serial = serial();

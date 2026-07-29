@@ -1,4 +1,4 @@
-//! Engine snapshot tests (specs/03 test plan, engine level): canonical
+//! Engine snapshot tests (test plan, engine level): canonical
 //! roundtrip, snapshot + journal-tail replay, config compatibility gates,
 //! and corruption rejection.
 
@@ -138,7 +138,7 @@ fn snapshot_plus_journal_tail_replays_and_skips() {
     assert_eq!(reopened.facts_len(), mem.facts_len());
 }
 
-/// A read-only borrowed open (specs/16 §8) over the same snapshot bytes is
+/// A read-only borrowed open over the same snapshot bytes is
 /// observably identical to an owned open: same facts, same recall across
 /// every source. The borrowed engine copies nothing — it reads straight
 /// out of `bytes`.
@@ -267,7 +267,7 @@ fn structural_corruption_is_a_typed_error_at_load() {
     workload(&mut mem, &mut store);
     let bytes = mem.snapshot_bytes(0);
 
-    // The default open is trust/sparse (specs/16 §9): only *structural* damage
+    // The default open is trust/sparse: only *structural* damage
     // is rejected at load — truncations, bad magic, unknown version. Container
     // checksums are checked on demand by scrub, content by verify(); those and
     // the never-panic contract are covered by the sweep test below.
@@ -283,11 +283,11 @@ fn structural_corruption_is_a_typed_error_at_load() {
 }
 
 // The bitflip sweep relies on `catch_unwind` (unwinding) and is heavy — native
-// only, like the proptest sections (specs/14 §3).
+// only, like the proptest sections.
 #[cfg(not(target_family = "wasm"))]
 #[test]
 fn an_open_never_panics_through_access_and_verify_catches_corruption() {
-    // The default open is trust/sparse (specs/16 §9): it does not verify the
+    // The default open is trust/sparse: it does not verify the
     // container checksums, so a corrupt image can reach the engine — content
     // validation is deferred. The contract stays panic-free: a load either
     // errors typed (metadata is still range-checked) or opens, and then every
@@ -425,7 +425,7 @@ fn db_uuid_is_minted_once_and_gates_opens() {
 }
 
 /// A sink that records every write so the test can prove the writer streams
-/// section by section (specs/16 §9) instead of assembling one full-image
+/// section by section instead of assembling one full-image
 /// buffer. Storage lives outside the sink, so the impl is on `&mut`.
 #[derive(Default)]
 struct RecordingSink {
@@ -477,7 +477,7 @@ fn write_snapshot_to_streams_and_matches_snapshot_bytes() {
     );
 }
 
-/// Milestone H (specs/16 §9): the disk-first rebuild must produce a snapshot
+/// Milestone H: the disk-first rebuild must produce a snapshot
 /// **byte-identical** to one taken after an in-RAM `maintain` — the load-bearing
 /// invariant that lets a big database be maintained/recovered on either path.
 /// `MemScratch` drives the streaming path deterministically, with no files.

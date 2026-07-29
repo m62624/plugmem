@@ -1,4 +1,4 @@
-//! Tokenizer v2 tests (specs/04 test plan): a unit table per data-format
+//! Tokenizer v2 tests (test plan): a unit table per data-format
 //! class (prose, identifiers, numbers, URLs, diacritics, CJK scripts),
 //! the concatenation property, and canonical-token invariants.
 

@@ -1,8 +1,8 @@
-//! Criterion benchmarks for the four storage structures (specs/01 matrix).
+//! Criterion benchmarks for the four storage structures (matrix).
 //!
 //! Run with `cargo bench -p plugmem-arena`. These are informational (trends,
 //! spec targets), not CI gates — the gates are deterministic counter tests
-//! (specs/07). Spec targets on a modern native x86-64 desktop @100k records:
+//! Spec targets on a modern native x86-64 desktop @100k records:
 //! insert <= 300 ns, get <= 150 ns.
 //!
 //! All inputs are deterministic (xorshift64 with fixed seeds): reruns

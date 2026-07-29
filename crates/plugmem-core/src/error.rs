@@ -1,4 +1,4 @@
-//! Engine error type (specs/05).
+//! Engine error type.
 //!
 //! A panic inside the engine is a bug by definition; every failure mode is
 //! a typed variant here. Variants that only become reachable with later

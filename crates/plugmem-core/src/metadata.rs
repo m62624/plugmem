@@ -1,6 +1,5 @@
 //! Canonical encoding of a fact's optional metadata: a small key→value map of
 //! UTF-8 strings, stored as one opaque blob per fact in the `metas` heap
-//! (specs/02).
 //!
 //! The engine never interprets metadata — it is a place for pointers and
 //! attributes (a URI to rehydrate the real payload from another store, a mime

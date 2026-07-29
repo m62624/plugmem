@@ -1,4 +1,4 @@
-//! Boundary tests for `ChunkPool` (specs/01 test plan) plus a property
+//! Boundary tests for `ChunkPool` (test plan) plus a property
 //! model against `Vec<Vec<Vec<u8>>>` (lists of values).
 
 use plugmem_arena::{CHUNK_BYTES, CHUNK_PAYLOAD, ChunkPool, ChunkPoolCfg, Error, ListHandle};

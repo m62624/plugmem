@@ -17,7 +17,7 @@ fn rejects(mutate: impl FnOnce(&mut Config), msg: &str) {
 fn defaults_are_valid() {
     let cfg = Config::default();
     cfg.validate().unwrap();
-    // Spot-check the specs/05 table.
+    // Spot-check the table.
     assert_eq!(cfg.dim, 0);
     assert_eq!(cfg.max_bytes, 2 * 1024 * 1024 * 1024);
     assert_eq!(cfg.shards_facts, 1024);

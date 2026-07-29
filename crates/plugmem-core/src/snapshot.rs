@@ -1,5 +1,5 @@
 //! Snapshot container: the file format's header, section table and
-//! checksums (specs/03).
+//! checksums.
 //!
 //! A snapshot is the engine's memory image: a 64-byte header, the binary
 //! [`Config`](crate::Config) block, a section table, then the sections —
@@ -49,7 +49,7 @@
 //! padding zero, no trailing bytes) — arbitrary bytes can produce any
 //! [`Error`] but never a panic. The container xxh3 checksums are **not**
 //! verified at parse; that runs on demand, in slices, via [`Snapshot::scrub`]
-//! (the ZFS-scrub model, specs/16 §9), keeping an open sparse on large files.
+//! (the ZFS-scrub model), keeping an open sparse on large files.
 
 use alloc::vec::Vec;
 
@@ -194,7 +194,7 @@ pub struct SectionMeta {
 
 /// The header + config + section-table region of a snapshot: everything
 /// before the first section body. Small and bounded (kilobytes), so it is
-/// materialized even when the bodies stream (specs/16 §9).
+/// materialized even when the bodies stream.
 #[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Prefix {
@@ -209,7 +209,7 @@ pub struct Prefix {
 }
 
 /// A byte sink for streaming a snapshot without materializing the whole
-/// image (specs/16 §9): `write` appends in file order, `patch` overwrites a
+/// image: `write` appends in file order, `patch` overwrites a
 /// short run at an absolute offset — used once for the header file-hash
 /// field, the only non-sequential write, done after the body has streamed.
 pub trait SnapshotSink {
@@ -315,7 +315,7 @@ pub struct Snapshot<'a> {
     config_len: usize,
     /// `(kind, start, len, stored_hash)` per section, in file order. The
     /// stored xxh3 is retained (not verified at parse) so the on-demand
-    /// [`ScrubCursor`] can check it in slices (specs/16 §9).
+    /// [`ScrubCursor`] can check it in slices.
     sections: Vec<(u16, usize, usize, u64)>,
     engine_ver_len: usize,
 }
@@ -324,7 +324,7 @@ impl<'a> Snapshot<'a> {
     /// Parses and structurally validates a snapshot file (trust model in the
     /// module docs): framing, canonical layout and bounds only. The container
     /// xxh3 checksums are **not** verified here — that is on demand, in slices,
-    /// via [`Snapshot::scrub`] (specs/16 §9). Content pools (text, vectors)
+    /// via [`Snapshot::scrub`]. Content pools (text, vectors)
     /// are validated lazily too; see [`Memory::verify`](crate::Memory::verify).
     ///
     /// # Errors
@@ -463,7 +463,7 @@ impl<'a> Snapshot<'a> {
     }
 
     /// A resumable container-checksum scan hashing at most `budget` bytes per
-    /// [`Iterator::next`] (specs/16 §9). See [`ScrubCursor`].
+    /// [`Iterator::next`]. See [`ScrubCursor`].
     pub fn scrub_with_budget(&self, budget: usize) -> ScrubCursor<'a> {
         ScrubCursor {
             bytes: self.bytes,
@@ -483,7 +483,7 @@ impl<'a> Snapshot<'a> {
 }
 
 /// Default number of bytes a [`ScrubCursor`] hashes per `next()` slice
-/// (specs/16 §9). The `scrub` slice-size bench sweeps 64 KiB…64 MiB and finds
+/// The `scrub` slice-size bench sweeps 64 KiB…64 MiB and finds
 /// throughput essentially flat (the scan is xxh3/memory-bandwidth-bound, not
 /// per-slice-overhead-bound), so the budget is a *pacing* quantum, not a
 /// throughput knob: 1 MiB is ~sub-millisecond per slice — fine-grained enough
@@ -501,7 +501,7 @@ pub struct ScrubProgress {
 }
 
 /// A resumable, budget-bounded container-checksum scan over a parsed snapshot
-/// (specs/16 §9 — the ZFS-scrub model, run on demand instead of at open).
+/// (— the ZFS-scrub model, run on demand instead of at open).
 ///
 /// It implements [`Iterator`]: each `next()` hashes up to the slice budget,
 /// verifying each section's stored xxh3 as its body completes and the

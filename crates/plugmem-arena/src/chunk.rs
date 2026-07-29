@@ -189,7 +189,7 @@ pub struct ChunkPool<'a> {
     ///
     /// A [`Paged`] backing (chunk-sized pages) so the pool can either own its
     /// bytes or borrow a base from a mapped snapshot and overlay writes
-    /// (`load_borrowed`/`load_overlay` — specs/16). Both the chain link and the
+    /// (`load_borrowed`/`load_overlay` —). Both the chain link and the
     /// free-list link live in a chunk's bytes, so writing either copies just
     /// that chunk up (per-page copy-on-write); the borrowed base is never
     /// mutated or cloned. `alloc`-only, so `no_std` holds.
@@ -338,7 +338,7 @@ impl<'a> ChunkPool<'a> {
     /// Walks one list's chain, marking every chunk in `visited`
     /// (`visited.len()` must equal [`ChunkPool::chunks`]).
     ///
-    /// This is the owner's load-time validation hook (`specs/03`): the
+    /// This is the owner's load-time validation hook: the
     /// pool cannot see the owners' handles, so cycle-freedom and
     /// exclusive ownership of chains are checked here — a shared bitmap
     /// across all of an owner's handles catches a chunk claimed twice,
@@ -406,7 +406,7 @@ impl<'a> ChunkPool<'a> {
         free
     }
 
-    /// Appends the pool's metadata section to `out` (`specs/03`).
+    /// Appends the pool's metadata section to `out`.
     ///
     /// Layout (little-endian): `[chunks u32][free_head u32]` then one
     /// `used u8` per chunk. Free chunks are written with `used = 0`
@@ -423,7 +423,7 @@ impl<'a> ChunkPool<'a> {
         }
     }
 
-    /// Appends the pool section to `out` (`specs/03`).
+    /// Appends the pool section to `out`.
     ///
     /// Each chunk contributes its [`LINK_BYTES`] link, its used payload prefix
     /// and zero padding to [`CHUNK_BYTES`]; free chunks contribute link plus
@@ -452,7 +452,7 @@ impl<'a> ChunkPool<'a> {
     /// What this method *cannot* check: cycles among chunks referenced by
     /// the owners' [`ListHandle`]s — the handles live in the owner's
     /// records, so the owning engine walks its handles with a shared
-    /// visited bitmap as part of its own load (`specs/03`).
+    /// visited bitmap as part of its own load.
     ///
     /// # Errors
     ///
@@ -468,7 +468,7 @@ impl<'a> ChunkPool<'a> {
     }
 
     /// Rebuilds a pool that **borrows** its chunk bytes from a longer-lived
-    /// buffer (a memory-mapped snapshot, specs/16) instead of copying them.
+    /// buffer (a memory-mapped snapshot) instead of copying them.
     /// Validation is identical to [`ChunkPool::load`]; the free-list walk
     /// and per-chunk link check touch the chunk bytes (needed for safety),
     /// but no byte is copied.

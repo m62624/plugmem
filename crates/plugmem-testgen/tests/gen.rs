@@ -1,6 +1,6 @@
 //! testgen contract tests: determinism, validity of the stream against a
 //! real engine (including canonical replay), and the corpus shape
-//! promises of specs/07 §6.
+//! promises of.
 
 use plugmem_core::{Config, MemStorage, Memory, RecallQuery};
 use plugmem_testgen::{Gen, GenOp, Profile, Vocabulary, apply, word_for};

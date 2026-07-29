@@ -1,4 +1,4 @@
-//! Journal framing tests (specs/03 test plan): roundtrip, crash-truncation
+//! Journal framing tests (test plan): roundtrip, crash-truncation
 //! at every byte of the tail record, mid-stream corruption, and the
 //! Storage contract over `MemStorage`.
 
@@ -122,7 +122,7 @@ fn oversized_len_field_reads_as_torn_tail() {
     assert!(got.truncated_tail);
 }
 
-/// The Storage contract scenarios (specs/03), generic over the
+/// The Storage contract scenarios, generic over the
 /// implementation — `plugmem-host` will run the same body for
 /// `FileStorage` when it lands (the suite moves to a shared home then).
 fn storage_contract<S: Storage>(store: &mut S) {

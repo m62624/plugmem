@@ -1,4 +1,4 @@
-//! Engine-level HNSW tests (specs/04 §5 phase 2, specs/10 verification
+//! Engine-level HNSW tests (phase 2, verification
 //! plan): the graph activates at the `flat_to_hnsw` threshold inside
 //! `maintain`, agrees with the exact flat search, searches its flat tail,
 //! respects tombstones, survives both maintenance paths (remap and full

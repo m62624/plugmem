@@ -1,6 +1,6 @@
 //! Sharded sorted arena over one flat byte pool.
 //!
-//! Full v2 mechanics of `specs/01-arena.md`: each shard owns a **chain of
+//! Full v2 mechanics of: each shard owns a **chain of
 //! range-partitioned pages** — every page holds a sorted run of keys, pages
 //! in a chain follow each other in ascending key ranges (a B+-tree leaf
 //! level without interior nodes; chains stay short because shard hashing
@@ -104,7 +104,7 @@ pub enum ShardMode {
 
 /// Arena configuration.
 ///
-/// Stored verbatim in snapshots later (`specs/03`), so everything that
+/// Stored verbatim in snapshots later, so everything that
 /// affects byte interpretation lives here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -171,7 +171,7 @@ pub struct Counters {
 /// module documentation for the chain/split mechanics. Highlights:
 ///
 /// - all state is `pool` + three small arrays — persisting the arena is a
-///   `memcpy` of defined bytes (`specs/03`);
+///   `memcpy` of defined bytes;
 /// - every operation touches O(1) pages: a short chain walk (one first-key
 ///   peek per step), then binary search and shifts inside one 4 KiB page;
 /// - capacity is bounded only by [`ArenaCfg::max_bytes`] — full pages split,
@@ -187,7 +187,7 @@ pub struct Arena<'a, T: Slot> {
     /// A [`Paged`] backing so the arena can either own the pool (`new`/`load` —
     /// the writable default, and the only shape on wasm32) or borrow a base
     /// from a longer-lived buffer such as a memory-mapped snapshot
-    /// (`load_borrowed`/`load_overlay` — specs/16). The overlay open borrows
+    /// (`load_borrowed`/`load_overlay` —). The overlay open borrows
     /// the base read-only and copies just the touched pages up on first write
     /// (per-page copy-on-write), so a mapped database is mutated without
     /// cloning it. The backing is `alloc`-only (no `std`/`Arc`), so the crate
@@ -608,7 +608,7 @@ impl<'a, T: Slot> Arena<'a, T> {
         self.counters.set(Counters::default());
     }
 
-    /// Appends the arena's metadata section to `out` (`specs/03`).
+    /// Appends the arena's metadata section to `out`.
     ///
     /// Layout (all little-endian): `[shards u32][pages u32][free_head u32]
     /// [total u64][mode u8][reserved 3]`, then `heads` (`shards × u32`),
@@ -640,7 +640,7 @@ impl<'a, T: Slot> Arena<'a, T> {
         }
     }
 
-    /// Appends the arena's pool section to `out` (`specs/03`).
+    /// Appends the arena's pool section to `out`.
     ///
     /// Each page contributes its initialized prefix (`counts[page] ×
     /// SIZE` bytes) followed by zero padding to [`PAGE_BYTES`]: the
@@ -673,7 +673,7 @@ impl<'a, T: Slot> Arena<'a, T> {
     ///
     /// Slot *content* is not validated beyond the per-page first/last key
     /// reads — record payloads are semantically validated lazily by the
-    /// owning engine (`specs/03`).
+    /// owning engine.
     ///
     /// # Errors
     ///
@@ -685,7 +685,7 @@ impl<'a, T: Slot> Arena<'a, T> {
     }
 
     /// Rebuilds an arena that **borrows** its page pool from a longer-lived
-    /// buffer (a memory-mapped snapshot, specs/16) instead of copying it.
+    /// buffer (a memory-mapped snapshot) instead of copying it.
     /// Validation is identical to [`Arena::load`] — it reads each page's
     /// first and last keys, so it touches one OS page per arena page (the
     /// key-order check needs them), but no pool byte is copied.
@@ -969,7 +969,7 @@ impl<'a, T: Slot> Arena<'a, T> {
         // bounded by the page count, and a slot's bytes are fully written
         // before the count is incremented. Consequently `Arena` exposes no
         // whole-pool reads (no `Clone`/`PartialEq`/`as_bytes`); the snapshot
-        // writer emits only the initialized prefixes of pages (`specs/03`).
+        // writer emits only the initialized prefixes of pages.
         // Routing the same reserve+set_len at the grown tail (not the base)
         // keeps this the crate's sole `unsafe` — the overlay adds none.
         #[allow(clippy::uninit_vec)]

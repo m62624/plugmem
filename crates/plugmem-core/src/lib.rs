@@ -7,7 +7,7 @@
 //! clock and no threads — timestamps arrive as parameters, bytes leave
 //! through the `Storage` trait.
 //!
-//! Design: `specs/02..05`. Implementation lands in stages 2-4; modules
+//! Design: `..05`. Implementation lands in stages 2-4; modules
 //! appear here in dependency order as those stages complete.
 
 #![no_std]

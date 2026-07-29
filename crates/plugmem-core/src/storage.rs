@@ -1,5 +1,4 @@
 //! The [`Storage`] trait and the in-memory reference implementation
-//! (specs/03).
 //!
 //! The core never touches files or the network: every byte entering or
 //! leaving the engine goes through this trait. Native wrappers implement
@@ -58,7 +57,7 @@ pub trait Storage {
 ///
 /// plugmem uses it for the disk-first `maintain`/`recover` rebuild, which streams
 /// the large pools (vectors, text) through a `Scratch` instead of holding them
-/// in RAM (specs/16 §9) — but the trait itself knows nothing of that.
+/// in RAM — but the trait itself knows nothing of that.
 pub trait Scratch {
     /// Implementation-specific failure (I/O error, host callback error…).
     type Error: core::fmt::Debug;
@@ -85,7 +84,7 @@ pub trait Scratch {
 /// In-memory [`Scratch`]: a growable buffer that "freezes" to a borrow of
 /// itself. The reference implementation — it backs tests, and because it
 /// drives the streaming path with no files it is the vehicle for the
-/// `disk_first == in_memory` property test (specs/16 §9). It stages in RAM, so
+/// `disk_first == in_memory` property test. It stages in RAM, so
 /// it does not *save* RAM; a host `Scratch` over a temp file is what bounds RAM
 /// in practice.
 #[derive(Debug, Default, Clone)]

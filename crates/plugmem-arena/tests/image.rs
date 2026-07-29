@@ -1,4 +1,4 @@
-//! Serialized-image tests (specs/03 test plan, structure level): canonical
+//! Serialized-image tests (test plan, structure level): canonical
 //! roundtrips (dump → load → dump reproduces identical bytes), state
 //! equivalence after load, and a corruption matrix per validation rule —
 //! plus a whole-section bitflip sweep that must never panic.

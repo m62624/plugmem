@@ -1,11 +1,11 @@
-//! The embedder contract and its implementations (specs/05, specs/13 §4).
+//! The embedder contract and its implementations.
 //!
 //! The engine takes ready vectors; computing them is the host's job.
 //! One HTTP client covers the whole OpenAI-compatible ecosystem —
 //! OpenAI itself, Ollama (`http://localhost:11434/v1`), LM Studio,
 //! vLLM, llama.cpp-server — because they all speak the same
 //! `/v1/embeddings` shape; a provider-specific client would be a second
-//! implementation of the same JSON (specs/13 records the decision).
+//! implementation of the same JSON (records the decision).
 
 use crate::error::HostError;
 

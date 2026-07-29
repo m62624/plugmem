@@ -1,5 +1,5 @@
 //! [`ReadOnlyDatabase`]: a zero-copy read-only open over an mmap'd
-//! snapshot (specs/16 §3).
+//! snapshot.
 //!
 //! A normal [`Database`](crate::Database) open reads the whole snapshot
 //! into RAM (every byte pool is copied into an arena). For a large,
@@ -16,7 +16,7 @@
 //! journal is refused with [`HostError::NeedsCheckpoint`].
 //!
 //! Locking is a **shared** advisory lock held for the handle's whole life
-//! (specs/13 §3): many read-only handles — in this process or others — map
+//! many read-only handles — in this process or others — map
 //! the same file at once, so a read-mostly database serves concurrent
 //! readers. A shared lock still excludes every exclusive (read-write)
 //! owner, so no cooperating process writes or truncates the file while it
@@ -93,7 +93,7 @@ self_cell::self_cell!(
 type BorrowedMemory<'a> = Memory<'a>;
 
 /// A read-only database handle backed by a memory-mapped snapshot
-/// (specs/16). See the module docs. `Send + Sync` — share it across
+/// See the module docs. `Send + Sync` — share it across
 /// threads behind a reference or an `Arc`.
 pub struct ReadOnlyDatabase {
     /// The map and the engine borrowing it. Normally no lock: every verb
@@ -124,7 +124,7 @@ pub struct ReadOnlyDatabase {
 }
 
 impl ReadOnlyDatabase {
-    /// Opens the database at `path` read-only over an mmap (specs/16 §3).
+    /// Opens the database at `path` read-only over an mmap.
     ///
     /// # Errors
     ///
@@ -146,7 +146,7 @@ impl ReadOnlyDatabase {
 
         // SAFETY: mapping a file is inherently unsafe — a concurrent truncate or
         // overwrite would fault the process on the next page access. Our
-        // argument (specs/16 §5): a generation file is **immutable** (a
+        // argument: a generation file is **immutable** (a
         // checkpoint publishes a *new* generation, never rewrites this one), and
         // `pin` holds a shared lock on it for this handle's whole life, so the
         // writer's GC cannot reclaim it under us. A foreign `truncate`/`rm` is
@@ -182,7 +182,7 @@ impl ReadOnlyDatabase {
         f(guard.borrow_dependent())
     }
 
-    /// Runs a recall (specs/04). Same semantics as
+    /// Runs a recall. Same semantics as
     /// [`Database::recall`](crate::Database::recall) minus the embedder:
     /// a text-only query is not auto-embedded, so pass a vector for the
     /// vector source.
@@ -213,7 +213,7 @@ impl ReadOnlyDatabase {
         self.with_mem(|mem| mem.stats())
     }
 
-    /// Runs the on-demand integrity check (specs/16 §9) — the equivalent of
+    /// Runs the on-demand integrity check — the equivalent of
     /// SQLite's `integrity_check`. A read-only open validates only the metadata
     /// (the mapped text and vector pools stay non-resident); this sweeps them
     /// and reports any latent corruption. Reads the whole image, so it residents
@@ -227,7 +227,7 @@ impl ReadOnlyDatabase {
     }
 
     /// A resumable byte-level container scrub of the snapshot file, with the
-    /// default slice budget (specs/16 §9 — the ZFS-scrub model). See
+    /// default slice budget (— the ZFS-scrub model). See
     /// [`Scrub`] and [`ReadOnlyDatabase::scrub_with_budget`].
     ///
     /// # Errors
@@ -239,7 +239,7 @@ impl ReadOnlyDatabase {
     }
 
     /// A resumable container scrub hashing at most `budget` bytes per
-    /// [`Iterator::next`] (specs/16 §9).
+    /// [`Iterator::next`].
     ///
     /// The returned [`Scrub`] owns its own map and its own shared advisory
     /// lock over the same file, so it holds a reader's lock for its whole
@@ -260,7 +260,7 @@ impl ReadOnlyDatabase {
     }
 
     /// Dumps the currently-open facts for a human-readable backup
-    /// (specs/06). See [`ExportedFact`](crate::ExportedFact). Collects the whole
+    /// See [`ExportedFact`](crate::ExportedFact). Collects the whole
     /// set; for a large database prefer [`export_each`](Self::export_each).
     pub fn export(&self) -> Vec<crate::db::ExportedFact> {
         self.with_mem(crate::db::export_facts)
@@ -391,7 +391,7 @@ self_cell::self_cell!(
 type BorrowedScrub<'a> = ScrubCursor<'a>;
 
 /// A resumable, byte-level container scrub over a memory-mapped snapshot
-/// (specs/16 §9 — the ZFS-scrub model). Obtained from
+/// (— the ZFS-scrub model). Obtained from
 /// [`ReadOnlyDatabase::scrub`].
 ///
 /// It implements [`Iterator`]: each [`Iterator::next`] hashes up to the slice
@@ -427,7 +427,7 @@ impl Scrub {
 
         // SAFETY: identical to `ReadOnlyDatabase::open` — a generation file is
         // immutable, and `pin` holds a shared lock on it for this scrub's whole
-        // life, so GC cannot reclaim it under the map (specs/16 §5).
+        // life, so GC cannot reclaim it under the map.
         let map = unsafe { Mmap::map(&pin) }.map_err(|e| HostError::io(&genp, e))?;
 
         let mapped = MappedScrub::try_new(map, |map| {

@@ -1,4 +1,4 @@
-//! Layout tests (specs/02 test plan): every record's `write` is compared
+//! Layout tests (test plan): every record's `write` is compared
 //! byte-for-byte against a hand-written reference buffer — the layouts are
 //! the file format, so these tests *are* the format contract. Plus
 //! roundtrip properties and the `as_of` liveness rule.

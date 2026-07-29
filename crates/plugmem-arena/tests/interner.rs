@@ -1,4 +1,4 @@
-//! Boundary tests for `Interner` (specs/01 test plan) plus a property model
+//! Boundary tests for `Interner` (test plan) plus a property model
 //! against `HashMap<String, u32>`.
 
 use std::collections::HashMap;

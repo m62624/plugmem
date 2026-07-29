@@ -1,6 +1,6 @@
-//! Criterion benchmarks for the engine layers (specs/07 §4). Groups are
+//! Criterion benchmarks for the engine layers. Groups are
 //! added as each layer lands; every index gets a group — the mandate from
-//! specs/07. Informational, not CI gates (gates are counter tests).
+//! Informational, not CI gates (gates are counter tests).
 
 use core::hint::black_box;
 
@@ -210,7 +210,7 @@ fn bench_recall(c: &mut Criterion) {
     cfg.shards_postings = 2048;
     let mut mem = Memory::new(cfg).unwrap();
     let mut store = MemStorage::new();
-    // The specs/07 §6 corpus passport via testgen: Zipf vocabulary,
+    // The corpus passport via testgen: Zipf vocabulary,
     // normal text lengths, hub entities, tags, links, revisions and
     // forgets in the default mix.
     let ops = Gen::new(0x5EED_0000_0000_0007, Profile::default()).ops(100_000);
@@ -290,7 +290,7 @@ fn bench_vec(c: &mut Criterion) {
     use plugmem_core::{Config, MemStorage, Memory, RecallQuery, RecallResult, RecallScratch};
     use plugmem_testgen::{Gen, GenOp, Profile, apply};
 
-    // The specs/11 A.5(9) gate corpus: 24k vectors of dim 384 — the
+    // The A.5(9) gate corpus: 24k vectors of dim 384 — the
     // flat-to-HNSW threshold — searched at k = 8.
     let mut g = c.benchmark_group("vec");
     g.sample_size(50);
@@ -488,7 +488,7 @@ fn bench_scrub(c: &mut Criterion) {
     use plugmem_core::snapshot::Snapshot;
     use plugmem_core::{Config, MemStorage, Memory, RememberInput};
 
-    // The on-demand container scrub (specs/16 §9): sweep the slice budget over
+    // The on-demand container scrub: sweep the slice budget over
     // one warm snapshot buffer to find the knee — below it, per-`next()`
     // overhead (parse of the cursor state, the section-boundary checks)
     // dominates; above it, the streaming xxh3 throughput plateaus. This is the

@@ -1,4 +1,4 @@
-//! Posting storage shared by every id-list index (specs/04 §2–3).
+//! Posting storage shared by every id-list index (–3).
 //!
 //! One shape serves BM25 postings, tag → facts and entity → facts: a
 //! [`plugmem_arena::Arena`] of per-key handle slots plus one
@@ -162,7 +162,7 @@ impl<'a, const TF: bool> PostingStore<'a, TF> {
         self.handles.len()
     }
 
-    /// Section dumps (specs/03): handle-arena meta.
+    /// Section dumps: handle-arena meta.
     pub(crate) fn handles_meta(&self) -> alloc::vec::Vec<u8> {
         let mut out = alloc::vec::Vec::new();
         self.handles.dump_meta(&mut out);
