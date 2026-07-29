@@ -36,18 +36,22 @@ permissions:
   contents: read
 
 jobs:
-  # MIRI — Rust-level UB and aliasing violations (Stacked Borrows), plus
-  # uninitialised reads, on the two no_std crates. MIRI is a deterministic
-  # interpreter and cannot touch mmap, so it never runs on the host.
-  #   - arena carries the workspace's only real `unsafe` (the flat byte arenas):
-  #     this is where MIRI earns its keep, and it is fast (~30 s).
-  #   - core has zero `unsafe`; running it is a cheap regression net that trips
-  #     only if `unsafe` is ever introduced (or a dependency regresses). Its
-  #     timing perf-gates and heavy proptests are `#[cfg_attr(miri, ignore)]` /
-  #     capped via PROPTEST_CASES — UB is per-operation, so small inputs exercise
-  #     the same code the large ones would, at a fraction of the interpreter cost.
+  # MIRI — Rust-level UB and aliasing violations (Stacked Borrows) plus
+  # uninitialised reads on the arena, the one crate that carries `unsafe`.
+  # MIRI is a deterministic interpreter and cannot touch mmap, so it never runs
+  # on the host.
+  #   - arena carries the workspace's only real `unsafe` (an uninitialised-page
+  #     `set_len` on the flat byte arenas): this is where MIRI earns its keep,
+  #     and it is fast (~30 s).
+  #   - core is NOT audited here: it declares `#![forbid(unsafe_code)]`, so
+  #     "the core is UB-free" is a compile-time guarantee. Running its (safe)
+  #     suite under MIRI's ~100x interpreter added no coverage while costing
+  #     ~45 min on the maintain rebuilds — a compile-time forbid is both cheaper
+  #     and stronger (it checks all code, not just the paths a test happens to
+  #     hit). If core ever genuinely needs `unsafe`, downgrade that one site to a
+  #     documented `#[allow]` and add a targeted MIRI step back.
   miri:
-    name: miri (arena + core, no_std unsafe/aliasing)
+    name: miri (arena — the crate's sole unsafe)
     # On a pull_request, run only when the PR carries the `ci-hardening` label.
     # On dispatch / schedule / workflow_call (release) the event is not
     # pull_request, so the audit always runs.
@@ -65,10 +69,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: miri — arena (the crate's unsafe, strict aliasing)
         run: cargo +nightly miri test -p plugmem-arena
-      - name: miri — core (zero-unsafe regression net, small proptest budget)
-        env:
-          PROPTEST_CASES: "8"
-        run: cargo +nightly miri test -p plugmem-core
 
   # valgrind (memcheck) — real-execution memory errors and leaks on the host
   # mmap/generation machinery, which MIRI cannot reach. This is the

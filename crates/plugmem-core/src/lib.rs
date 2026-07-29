@@ -11,6 +11,11 @@
 //! appear here in dependency order as those stages complete.
 
 #![no_std]
+// The engine holds zero `unsafe`: every byte-reinterpretation lives in
+// `plugmem_arena`, behind its single audited `unsafe`. Forbidding it here turns
+// "the core is UB-free" into a compile-time guarantee — which is why the MIRI
+// audit covers only the arena, not this crate's (necessarily safe) code.
+#![forbid(unsafe_code)]
 
 extern crate alloc;
 
