@@ -15,6 +15,7 @@
 mod cli;
 mod config;
 
+use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -264,9 +265,10 @@ fn execute(
             entity,
             tags,
             links,
+            meta,
             valid_from,
         } => {
-            let outcome = do_remember(db, now, text, entity, tags, links, *valid_from, None)?;
+            let outcome = do_remember(db, now, text, entity, tags, links, meta, *valid_from, None)?;
             render_remember(&outcome, json, out);
             Ok(0)
         }
@@ -276,6 +278,7 @@ fn execute(
             entity,
             tags,
             links,
+            meta,
             valid_from,
         } => {
             let outcome = do_remember(
@@ -285,6 +288,7 @@ fn execute(
                 entity,
                 tags,
                 links,
+                meta,
                 *valid_from,
                 Some(FactId(*id)),
             )?;
@@ -842,6 +846,7 @@ fn render_show(
                 "closed": r.is_closed(),
                 "tombstone": r.is_tombstone(),
                 "revises": (r.revises != FactId::NONE).then_some(r.revises.0),
+                "metadata": fact.metadata,
             })
         )
         .ok();
@@ -856,6 +861,15 @@ fn render_show(
         };
         if r.revises != FactId::NONE {
             writeln!(out, "  revises     fact {}", r.revises.0).ok();
+        }
+        if !fact.metadata.is_empty() {
+            let rendered = fact
+                .metadata
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(out, "  metadata    {rendered}").ok();
         }
         if r.is_tombstone() {
             writeln!(out, "  state       tombstoned").ok();
@@ -903,6 +917,7 @@ fn write_export_line(out: &mut impl Write, f: &ExportedFact) {
             "text": f.text,
             "entity": f.entity,
             "tags": f.tags,
+            "metadata": f.metadata,
             "recorded_at": f.recorded_at,
             "valid_from": f.valid_from,
         })
@@ -959,6 +974,7 @@ struct ParsedFact {
     text: String,
     entity: Option<String>,
     tags: Vec<String>,
+    metadata: Vec<(String, String)>,
     valid_from: Option<u64>,
 }
 
@@ -980,11 +996,24 @@ fn parse_import_line(line: &str, lineno: usize) -> Result<ParsedFact, CliError> 
                 .collect()
         })
         .unwrap_or_default();
+    // Metadata: an object of string values. Keys are sorted (via `BTreeMap`) so
+    // the imported pairs are canonical; non-string values are skipped.
+    let metadata = v["metadata"]
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect::<BTreeMap<_, _>>()
+                .into_iter()
+                .collect()
+        })
+        .unwrap_or_default();
     let valid_from = v["valid_from"].as_u64();
     Ok(ParsedFact {
         text,
         entity,
         tags,
+        metadata,
         valid_from,
     })
 }
@@ -995,17 +1024,29 @@ fn flush_import_batch(db: &Database, now: u64, batch: &[ParsedFact]) -> Result<u
     if batch.is_empty() {
         return Ok(0);
     }
-    // Per-fact `&[&str]` tag slices must outlive the `remember_many` call.
+    // Per-fact `&[&str]` tag slices and `&[(&str,&str)]` metadata pairs must
+    // outlive the `remember_many` call.
     let tag_refs: Vec<Vec<&str>> = batch
         .iter()
         .map(|p| p.tags.iter().map(String::as_str).collect())
         .collect();
+    let meta_refs: Vec<Vec<(&str, &str)>> = batch
+        .iter()
+        .map(|p| {
+            p.metadata
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect()
+        })
+        .collect();
     let inputs: Vec<RememberInput> = batch
         .iter()
         .zip(&tag_refs)
-        .map(|(p, tags)| RememberInput {
+        .zip(&meta_refs)
+        .map(|((p, tags), meta)| RememberInput {
             entity: p.entity.as_deref(),
             tags,
+            metadata: (!meta.is_empty()).then_some(meta.as_slice()),
             valid_from: p.valid_from,
             ..RememberInput::text(now, &p.text)
         })
@@ -1023,6 +1064,7 @@ fn do_remember(
     entity: &Option<String>,
     tags: &[String],
     links: &[String],
+    meta: &[String],
     valid_from: Option<u64>,
     revise: Option<FactId>,
 ) -> Result<RememberOutcome, CliError> {
@@ -1032,10 +1074,19 @@ fn do_remember(
         .iter()
         .map(|(r, e)| (r.as_str(), e.as_str()))
         .collect();
+    // A `BTreeMap` dedups keys (last `--meta` for a key wins) and sorts them;
+    // the engine re-canonicalizes regardless, but this keeps the borrowed pairs
+    // clean and dup-free.
+    let meta_map = parse_meta(meta)?;
+    let meta_refs: Vec<(&str, &str)> = meta_map
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
     let input = RememberInput {
         entity: entity.as_deref(),
         tags: &tag_refs,
         links: &link_refs,
+        metadata: (!meta_refs.is_empty()).then_some(meta_refs.as_slice()),
         valid_from,
         ..RememberInput::text(now, text)
     };
@@ -1043,6 +1094,20 @@ fn do_remember(
         Some(target) => Ok(db.revise(target, input)?),
         None => Ok(db.remember(input)?),
     }
+}
+
+/// Parses `--meta KEY=VALUE` strings into a sorted, deduped map (last value per
+/// key wins).
+fn parse_meta(meta: &[String]) -> Result<BTreeMap<String, String>, CliError> {
+    let mut map = BTreeMap::new();
+    for s in meta {
+        let (k, v) = s
+            .split_once('=')
+            .filter(|(k, _)| !k.is_empty())
+            .ok_or_else(|| CliError::Usage(format!("bad --meta `{s}` — expected KEY=VALUE")))?;
+        map.insert(k.to_string(), v.to_string());
+    }
+    Ok(map)
 }
 
 /// Parses `--link REL:ENTITY` strings into `(rel, entity)` pairs.
@@ -1360,8 +1425,52 @@ mod tests {
             entity: entity.map(Into::into),
             tags: tags.iter().map(|t| (*t).into()).collect(),
             links: Vec::new(),
+            meta: Vec::new(),
             valid_from: None,
         }
+    }
+
+    fn remember_with_meta(text: &str, meta: &[&str]) -> Command {
+        Command::Remember {
+            text: text.into(),
+            entity: None,
+            tags: Vec::new(),
+            links: Vec::new(),
+            meta: meta.iter().map(|m| (*m).into()).collect(),
+            valid_from: None,
+        }
+    }
+
+    #[test]
+    fn meta_flag_renders_sorted_in_show_and_export_and_rejects_bad_input() {
+        let (db, _t) = TempDb::open();
+        // Keys given out of order; last value for a repeated key wins.
+        let cmd = remember_with_meta("a scan", &["uri=s3://b/x", "page=2", "page=3"]);
+        assert_eq!(run_cmd(&db, &cmd, false, 1_000).0, 0);
+
+        // show (human): sorted `key=value`, last-write-wins on `page`.
+        let (_, human) = run_cmd(&db, &Command::Show { id: 0 }, false, 2_000);
+        assert!(
+            human.contains("metadata    page=3, uri=s3://b/x"),
+            "{human}"
+        );
+        // show (json): a metadata object.
+        let (_, jshow) = run_cmd(&db, &Command::Show { id: 0 }, true, 2_000);
+        let v: serde_json::Value = serde_json::from_str(&jshow).unwrap();
+        assert_eq!(v["metadata"]["page"], "3");
+        assert_eq!(v["metadata"]["uri"], "s3://b/x");
+
+        // export: the JSONL line carries the same object.
+        let (_, exp) = run_cmd(&db, &Command::Export, false, 2_000);
+        let line: serde_json::Value = serde_json::from_str(exp.lines().next().unwrap()).unwrap();
+        assert_eq!(line["metadata"]["uri"], "s3://b/x");
+
+        // A `--meta` without `=` is a usage error.
+        assert!(matches!(
+            parse_meta(&["noequals".to_string()]),
+            Err(CliError::Usage(_))
+        ));
+        assert!(parse_meta(&["=noKey".to_string()]).is_err());
     }
 
     #[test]
@@ -1438,6 +1547,7 @@ mod tests {
             entity: Some("user".into()),
             tags: Vec::new(),
             links: Vec::new(),
+            meta: Vec::new(),
             valid_from: None,
         };
         let (code, out) = run_cmd(&db, &revise, false, 2_000);
@@ -1518,6 +1628,7 @@ mod tests {
             entity: Some("user".into()),
             tags: Vec::new(),
             links: vec!["not-a-pair".into()],
+            meta: Vec::new(),
             valid_from: None,
         };
         let mut buf = Vec::new();
@@ -1540,6 +1651,7 @@ mod tests {
             entity: Some("user".into()),
             tags: Vec::new(),
             links: Vec::new(),
+            meta: Vec::new(),
             valid_from: None,
         };
         run_cmd(&db, &revise, false, 2_000);
@@ -1578,6 +1690,7 @@ mod tests {
             entity: Some("plugmem".into()),
             tags: Vec::new(),
             links: Vec::new(),
+            meta: Vec::new(),
             valid_from: None,
         };
         let (_, out) = run_cmd(&db, &revise, true, 1_500);
@@ -1640,6 +1753,7 @@ mod tests {
             entity: Some("e".into()),
             tags: Vec::new(),
             links: Vec::new(),
+            meta: Vec::new(),
             valid_from: None,
         };
         run_cmd(&db, &revise, false, 2_000);
@@ -1719,6 +1833,7 @@ mod tests {
                 entity: None,
                 tags: Vec::new(),
                 links: vec!["bad".into()],
+                meta: Vec::new(),
                 valid_from: None,
             },
         };
@@ -1760,6 +1875,7 @@ mod tests {
                 entity: Some("user".into()),
                 tags: vec!["pref".into(), "lang".into()],
                 links: Vec::new(),
+                meta: vec!["uri=s3://b/x".into(), "src=chat".into()],
                 valid_from: Some(500),
             },
             false,
@@ -1779,6 +1895,7 @@ mod tests {
                 entity: Some("user".into()),
                 tags: vec!["geo".into()],
                 links: Vec::new(),
+                meta: Vec::new(),
                 valid_from: None,
             },
             false,
@@ -1826,7 +1943,9 @@ mod tests {
         assert!(b_open.iter().any(|f| f.text == "prefers tokio"
             && f.valid_from == 500
             && f.entity.as_deref() == Some("user")
-            && f.tags == vec!["pref".to_string(), "lang".to_string()]));
+            && f.tags == vec!["pref".to_string(), "lang".to_string()]
+            && f.metadata.get("uri").map(String::as_str) == Some("s3://b/x")
+            && f.metadata.get("src").map(String::as_str) == Some("chat")));
         assert!(b_open.iter().any(|f| f.text == "lives in Berlin"));
         assert!(b_open.iter().any(|f| f.text == "uses rust"));
         assert!(!b_open.iter().any(|f| f.text.contains("Moscow")));
@@ -1933,6 +2052,7 @@ mod tests {
                 entity: None,
                 tags: Vec::new(),
                 links: Vec::new(),
+                meta: Vec::new(),
                 valid_from: None,
             },
         };

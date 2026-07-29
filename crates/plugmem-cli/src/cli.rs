@@ -67,6 +67,10 @@ pub(crate) enum Command {
         /// A typed edge `REL:ENTITY` from the subject; repeatable.
         #[arg(long = "link", value_name = "REL:ENTITY")]
         links: Vec<String>,
+        /// A metadata entry `KEY=VALUE` (opaque to the engine — a URI, mime,
+        /// external key); repeatable, last value wins per key.
+        #[arg(long = "meta", value_name = "KEY=VALUE")]
+        meta: Vec<String>,
         /// Validity start (unix millis); defaults to now.
         #[arg(long = "valid-from", value_name = "TS")]
         valid_from: Option<u64>,
@@ -109,6 +113,8 @@ pub(crate) enum Command {
         tags: Vec<String>,
         #[arg(long = "link", value_name = "REL:ENTITY")]
         links: Vec<String>,
+        #[arg(long = "meta", value_name = "KEY=VALUE")]
+        meta: Vec<String>,
         #[arg(long = "valid-from", value_name = "TS")]
         valid_from: Option<u64>,
     },
