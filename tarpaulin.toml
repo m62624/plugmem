@@ -29,6 +29,16 @@
 # happens in review, not by silently lowering the number.
 [default]
 workspace = true
+# plugmem-napi is excluded from the *build*, not just the metric: its
+# `#[napi]` surface references N-API runtime symbols (`napi_*`) that are only
+# provided by a Node process at load time. A normal `cargo test` links fine
+# because the unused `#[napi]` items are dead-code-eliminated, but tarpaulin's
+# instrumented, unoptimized build retains them, so linking its test binary
+# fails with undefined `napi_*` references. The crate's pure logic (the
+# skill-version gate) is covered by its own cargo tests; the `#[napi]` verbs
+# are covered by the Node tests in `__test__/`, neither attributable by
+# tarpaulin anyway (see `exclude-files` below).
+exclude = ["plugmem-napi"]
 out = ["Html", "Lcov", "Stdout"]
 output-dir = "coverage"
 exclude-files = [
