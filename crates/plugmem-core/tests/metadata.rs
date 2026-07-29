@@ -65,6 +65,55 @@ fn metadata_is_stored_and_read_back_in_canonical_order() {
     assert!(!mem.metadata_of(FactId(2), &mut out), "empty map = none");
 }
 
+/// Cross-layer parity: the raw pairs `core::metadata_of` yields and the
+/// `BTreeMap` a host builds from them agree on BOTH order and count. Order is
+/// fixed once (at encode); collecting into a map neither reorders nor drops a
+/// key. Uses deliberately shuffled input to prove the single canonical order.
+#[test]
+fn core_pairs_and_host_btreemap_agree_on_order_and_count() {
+    use std::collections::BTreeMap;
+    let (mut mem, mut store) = engine();
+    let shuffled = [
+        ("m", "1"),
+        ("a", "2"),
+        ("zzz", "3"),
+        ("b", "4"),
+        ("aa", "5"),
+    ];
+    mem.remember(
+        &mut store,
+        RememberInput {
+            metadata: Some(&shuffled),
+            ..RememberInput::text(100, "parity")
+        },
+    )
+    .unwrap();
+
+    // The core view: raw pairs in stored order.
+    let mut pairs = Vec::new();
+    assert!(mem.metadata_of(FactId(0), &mut pairs));
+
+    // The host view: the same pairs collected into a BTreeMap (what
+    // `metadata_map` does), then iterated back out.
+    let map: BTreeMap<&str, &str> = pairs.iter().copied().collect();
+    let map_seq: Vec<(&str, &str)> = map.into_iter().collect();
+
+    assert_eq!(pairs.len(), shuffled.len(), "no key lost");
+    assert_eq!(pairs.len(), map_seq.len(), "core and map agree on count");
+    assert_eq!(pairs, map_seq, "core order == map iteration order");
+    // And it is the one canonical (ascending) order.
+    assert_eq!(
+        pairs,
+        vec![
+            ("a", "2"),
+            ("aa", "5"),
+            ("b", "4"),
+            ("m", "1"),
+            ("zzz", "3"),
+        ]
+    );
+}
+
 /// A duplicate key in the input is rejected before anything is stored.
 #[test]
 fn duplicate_metadata_key_is_rejected() {

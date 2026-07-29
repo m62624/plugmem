@@ -28,6 +28,7 @@ fn host_data_types_round_trip() {
         text: "prefers tokio".to_string(),
         entity: Some("user".to_string()),
         tags: vec!["pref".to_string()],
+        metadata: std::collections::BTreeMap::from([("uri".to_string(), "s3://b/x".to_string())]),
         recorded_at: 1_784_000_000_000,
         valid_from: 1_784_000_000_000,
     };

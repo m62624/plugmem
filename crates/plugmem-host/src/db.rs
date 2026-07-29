@@ -35,6 +35,7 @@
 //! to the mapped overlay at its first snapshot.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 #[cfg(feature = "counters")]
@@ -164,6 +165,9 @@ pub struct FactSnapshot {
     pub record: FactRecord,
     /// The fact text.
     pub text: String,
+    /// The fact's metadata as a sorted key→value map (empty when the fact
+    /// carries none). The engine stores it opaquely; this is the decoded view.
+    pub metadata: BTreeMap<String, String>,
 }
 
 /// One exported fact — the human-readable, id-free shape [`Database::export`]
@@ -180,6 +184,9 @@ pub struct ExportedFact {
     pub entity: Option<String>,
     /// Tag strings.
     pub tags: Vec<String>,
+    /// Metadata as a sorted key→value map (empty when none) — preserved on
+    /// import.
+    pub metadata: BTreeMap<String, String>,
     /// When the memory learned it (informational; not restorable on import).
     pub recorded_at: u64,
     /// Validity start — preserved on import.
@@ -206,6 +213,19 @@ pub struct RecoverReport {
 /// streaming core of export: a caller that writes each fact out (CLI `export`)
 /// never materializes the whole dump, so a huge database exports without a RAM
 /// spike. Shared by the read-write and read-only handles.
+/// Decodes a fact's metadata into an owned, sorted key→value map (empty when
+/// the fact carries none). Shared by `get` (read-write and read-only) and
+/// `export`; the pairs come back from the engine in canonical order, so the
+/// resulting `BTreeMap` matches the raw core view key-for-key.
+pub(crate) fn metadata_map(mem: &Memory, id: plugmem_core::FactId) -> BTreeMap<String, String> {
+    let mut pairs = Vec::new();
+    mem.metadata_of(id, &mut pairs);
+    pairs
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+}
+
 pub(crate) fn export_facts_each(mem: &Memory, mut f: impl FnMut(ExportedFact)) {
     use plugmem_core::{EntityId, FactId, VALID_TO_OPEN};
     let next = mem.stats().next_fact;
@@ -229,6 +249,7 @@ pub(crate) fn export_facts_each(mem: &Memory, mut f: impl FnMut(ExportedFact)) {
             text: view.text.to_string(),
             entity,
             tags,
+            metadata: metadata_map(mem, id),
             recorded_at: view.record.recorded_at,
             valid_from: view.record.valid_from,
         });
@@ -696,6 +717,7 @@ impl Database {
             mem.get(id).map(|v| FactSnapshot {
                 record: v.record,
                 text: v.text.to_string(),
+                metadata: metadata_map(mem, id),
             })
         })
     }

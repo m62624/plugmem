@@ -203,6 +203,7 @@ impl ReadOnlyDatabase {
             mem.get(id).map(|v| FactSnapshot {
                 record: v.record,
                 text: v.text.to_string(),
+                metadata: crate::db::metadata_map(mem, id),
             })
         })
     }

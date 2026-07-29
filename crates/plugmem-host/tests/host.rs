@@ -1696,3 +1696,76 @@ fn maintain_compacts_disk_first_and_the_engine_stays_live() {
     assert_eq!(db2.stats().facts, 21);
     db2.verify().unwrap();
 }
+
+/// Metadata round-trips through the host: shuffled input keys come back sorted
+/// from `get` and `export`, and re-remembering the exported map preserves it.
+/// The cross-layer order/count parity (host `BTreeMap` == core pairs) is proven
+/// in `plugmem-core/tests/metadata.rs`; here we confirm the host surface.
+#[test]
+fn metadata_round_trips_through_get_and_export_sorted() {
+    use std::collections::BTreeMap;
+    let tmp = TempDir::new("metadata");
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+
+    // Input keys deliberately out of order.
+    let id = db
+        .remember(RememberInput {
+            metadata: Some(&[
+                ("uri", "s3://b/x"),
+                ("mime", "application/pdf"),
+                ("page", "3"),
+            ]),
+            ..RememberInput::text(100, "a scanned contract")
+        })
+        .unwrap()
+        .id;
+
+    let want: BTreeMap<String, String> = [
+        ("mime", "application/pdf"),
+        ("page", "3"),
+        ("uri", "s3://b/x"),
+    ]
+    .iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect();
+
+    // `get` decodes the sorted map.
+    let snap = db.get(id).expect("fact exists");
+    assert_eq!(snap.metadata, want);
+
+    // A fact with no metadata reports an empty map, not an error.
+    let bare = db
+        .remember(RememberInput::text(200, "no metadata"))
+        .unwrap()
+        .id;
+    assert!(db.get(bare).unwrap().metadata.is_empty());
+
+    // `export` carries the same map, and re-remembering it into a fresh
+    // database reproduces it exactly (import round-trip).
+    let exported = db.export();
+    let with_meta = exported
+        .iter()
+        .find(|f| !f.metadata.is_empty())
+        .expect("one exported fact carries metadata");
+    assert_eq!(with_meta.metadata, want);
+
+    let tmp2 = TempDir::new("metadata-import");
+    let (db2, _) = Database::open(tmp2.db(), cfg()).unwrap();
+    let pairs: Vec<(&str, &str)> = with_meta
+        .metadata
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let rid = db2
+        .remember(RememberInput {
+            metadata: Some(&pairs),
+            ..RememberInput::text(300, &with_meta.text)
+        })
+        .unwrap()
+        .id;
+    assert_eq!(
+        db2.get(rid).unwrap().metadata,
+        want,
+        "import preserves metadata"
+    );
+}
