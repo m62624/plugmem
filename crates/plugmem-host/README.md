@@ -1,5 +1,10 @@
 # plugmem-host
 
+> ⚠️ Experimental. plugmem is mostly an AI-built experiment — written with
+> the help of a small local model (Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf) and various
+> Claude models, in roughly equal measure. Expect non-professional design
+> choices, rough edges, broken behavior, or mistakes. Use it at your own risk.
+
 `plugmem-host` is the `std` host layer for the plugmem
 [temporal-memory engine](https://docs.rs/plugmem-core/latest). It supplies
 what the `no_std` engine does not own — files, locking, and network — so from

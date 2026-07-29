@@ -1,5 +1,10 @@
 # plugmem-core
 
+> ⚠️ Experimental. plugmem is mostly an AI-built experiment — written with
+> the help of a small local model (Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf) and various
+> Claude models, in roughly equal measure. Expect non-professional design
+> choices, rough edges, broken behavior, or mistakes. Use it at your own risk.
+
 `plugmem-core` is an embedded **temporal-memory engine for LLM agents** — a
 library that runs inside the process. An agent talks to
 it in four verbs — `remember / recall / revise / forget` — and it answers

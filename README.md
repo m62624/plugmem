@@ -1,5 +1,10 @@
 # plugmem
 
+> ⚠️ Experimental. plugmem is mostly an AI-built experiment — written with
+> the help of a small local model (Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf) and various
+> Claude models, in roughly equal measure. Expect non-professional design
+> choices, rough edges, broken behavior, or mistakes. Use it at your own risk.
+
 An embeddable **memory database for local LLM agents** — think SQLite, but
 for what an agent remembers rather than rows and columns. plugmem stores
 short **facts** — with a subject entity, tags, optional metadata, an optional

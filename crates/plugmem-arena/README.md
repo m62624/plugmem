@@ -1,5 +1,10 @@
 # plugmem-arena
 
+> ⚠️ Experimental. plugmem is mostly an AI-built experiment — written with
+> the help of a small local model (Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf) and various
+> Claude models, in roughly equal measure. Expect non-professional design
+> choices, rough edges, broken behavior, or mistakes. Use it at your own risk.
+
 Flat byte-pool data structures: a sharded sorted arena, an append-only
 blob heap, chunked lists, and a string interner. `no_std + alloc`, no
 dependencies, so it runs anywhere Rust compiles — designed for 32-bit
