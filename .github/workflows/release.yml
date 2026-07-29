@@ -284,6 +284,9 @@ jobs:
           workspaces: "crates/plugmem-napi"
       - name: Install dependencies (@napi-rs/cli)
         run: npm ci
+      - name: Install Zig
+        if: ${{ matrix.zig }}
+        uses: mlugg/setup-zig@v2
       - name: Build the addon
         # `@napi-rs/cli` is a *local* devDependency (installed by `npm ci`), so
         # invoke it through `npx`; a bare `napi` is not on PATH (see ci.yml).
