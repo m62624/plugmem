@@ -18,16 +18,13 @@ own; lift it into any project as-is.
 
 ## Which crate do I need?
 
-This crate is the **storage substrate** — reach for it to build your own
-container. If you want the agent-memory engine, not the raw structures, you
-almost certainly want one of the crates below instead.
-
-| You want | Use | Why |
-|---|---|---|
-| **A memory in a Rust program** — the common case | [`plugmem-host`](https://docs.rs/plugmem-host/latest) (`std`) | The full engine plus files, locking, mmap, HTTP embedders, integrity, concurrency. |
-| The memory engine with **no `std`** or **your own storage** | [`plugmem-core`](https://docs.rs/plugmem-core/latest) (`no_std`) | The engine built on these structures; you bring persistence. |
-| **Flat byte-pool containers** to build your own index/store | **`plugmem-arena`** (this crate) | Engine-agnostic storage: knows nothing about the data it holds. |
-| A memory from a **terminal**, an **LLM agent**, or **JavaScript / TypeScript** | `plugmem-cli` / `plugmem-mcp` / `plugmem-napi` | The command-line, agent (stdio JSON-RPC) and native Node addon surfaces. |
+This crate is a **standalone storage substrate**: flat byte-pool containers to
+build your own index or store on, engine-agnostic — it knows nothing about the
+data it holds. If you want the agent-memory engine rather than the raw
+structures, reach for [`plugmem-core`](https://docs.rs/plugmem-core/latest)
+(`no_std`, bring your own persistence) or
+[`plugmem-host`](https://docs.rs/plugmem-host/latest) (`std`, the full engine
+with files, locking, mmap and embedders).
 
 ## Design
 

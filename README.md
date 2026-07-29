@@ -58,15 +58,15 @@ Rust programs use the library (`host`, or `core` for specialists) — embedded
 in-process, like linking SQLite. Other languages and agents come in through
 `mcp` (or `napi` for Node/TS) — not the CLI, which is the human/scripting door.
 
-| Crate | What it is | State |
-|---|---|---|
-| [`plugmem-arena`](crates/plugmem-arena) | flat byte-pool storage structures (`no_std`, wasm-first) | done: tested, measured |
-| [`plugmem-core`](crates/plugmem-core) | the engine: data model, indexes, recall, snapshots (`no_std`) | done |
-| [`plugmem-host`](crates/plugmem-host) | OS glue: files, locking, mmap read-only, embedder clients (`std`) | done |
-| [`plugmem-cli`](crates/plugmem-cli) | command-line surface, one-shot + interactive `repl` | done |
-| [`plugmem-napi`](crates/plugmem-napi) | native Node.js addon (napi-rs), on npm as `plugmem` | done |
-| [`plugmem-mcp`](crates/plugmem-mcp) | MCP server (stdio JSON-RPC) for agents | done |
-| `plugmem-testgen` | deterministic corpus generator for tests and benches | done |
+| Crate | What it is |
+|---|---|
+| [`plugmem-arena`](crates/plugmem-arena) | flat byte-pool storage structures (`no_std`, wasm-first) |
+| [`plugmem-core`](crates/plugmem-core) | the engine: data model, indexes, recall, snapshots (`no_std`) |
+| [`plugmem-host`](crates/plugmem-host) | OS glue: files, locking, mmap read-only, embedder clients (`std`) |
+| [`plugmem-cli`](crates/plugmem-cli) | command-line surface, one-shot + interactive `repl` |
+| [`plugmem-napi`](crates/plugmem-napi) | native Node.js addon (napi-rs), on npm as `plugmem` |
+| [`plugmem-mcp`](crates/plugmem-mcp) | MCP server (stdio JSON-RPC) for agents |
+| `plugmem-testgen` | deterministic corpus generator for tests and benches |
 
 ## What recall does
 
@@ -203,9 +203,6 @@ prune that line from your shell profile if nothing else uses it.
 
 ## Design
 
-- **Benchmarked, not asserted.** Performance claims have a benchmark in the
-  repo; the cross-runtime suite (native, wasmtime, wasmer) reproduces with one
-  command.
 - **In-memory state is the on-disk format.** State lives in flat byte pools, so
   a snapshot is a `memcpy` and loading is validation plus adoption; a file
   opens byte-identically on native, wasm32 and wasm64.
