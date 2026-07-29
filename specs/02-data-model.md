@@ -1,160 +1,182 @@
-# 02 — модель данных
+# 02 — Data model
 
-> Что именно хранит plugmem-core и какими байтами. Все ключи в аренах — BE
-> (см. `01-arena.md`); все timestamps — u64, unix-миллисекунды UTC, **приносятся
-> хостом** (`now` — параметр каждого мутирующего вызова; ядро времени не знает).
+What plugmem-core stores, and in which bytes. All arena keys are big-endian (see
+`01-arena.md`); all timestamps are `u64`, unix milliseconds UTC, **passed in by the
+host** (`now` is a parameter of every mutating call; the core knows nothing of
+time).
 
-## Сущности модели
+## Model entities
 
-- **Fact** — единица памяти: короткий текст («предпочитает tokio строгим
-  версиям»), опциональная привязка к Entity-субъекту, теги, темпоральность,
-  опциональный вектор. Это то, что агент кладёт через `remember`.
-- **Entity** — узел графа: именованный объект («user», «проект plugmem»,
-  «Барсик»). Создаётся лениво при первом упоминании.
-- **Edge** — типизированное ребро entity → entity (`rel` — интернированный терм:
-  "works_at", "owns", …) с provenance-ссылкой на факт-основание.
-- **Tag** — интернированная строка-метка на факте (namespace свободный:
-  "pref", "health", "project:plugmem" — конвенции задаёт SKILL.md, не ядро).
+- **Fact** — the unit of memory: a short text ("prefers tokio over strict
+  versions"), an optional subject Entity, tags, temporality, and an optional
+  vector. This is what an agent stores with `remember`.
+- **Entity** — a graph node: a named object ("user", "the plugmem project",
+  "Barsik"). Created lazily on first mention.
+- **Edge** — a typed entity → entity edge (`rel` is an interned term: "works_at",
+  "owns", …) with a provenance reference to the fact that grounds it.
+- **Tag** — an interned label on a fact (free namespace: "pref", "health",
+  "project:plugmem" — conventions are set by `SKILL.md`, not the core).
 
-Агностичность: ядро не знает, что такое «пользователь» или «проект» — все
-имена/типы/теги суть интернированные строки хоста.
+The core is agnostic: it does not know what a "user" or a "project" is — all
+names/types/tags are interned host strings.
 
-## ID
+## IDs
 
-Все ID — `u32`, монотонно растущие, никогда не переиспользуются (журнал
-воспроизводим; дырки после purge — норма). `0` — валидный ID; «нет значения»
-кодируется `u32::MAX` (`NONE`). Типобезопасные ньютайпы: `FactId`, `EntityId`,
-`TermId`, `BlobId`.
+All ids are `u32`, monotonically increasing, and **never reused** (the journal is
+replayable; holes after a purge are normal). `0` is a valid id; "no value" is
+`u32::MAX` (`NONE`). Type-safe newtypes: `FactId`, `EntityId`, `TermId`, `BlobId`.
+The 4.29-billion ceiling per kind is far above the 1M capacity contract.
 
-Лимит 4.29 млрд каждого вида — заведомо выше потолка 1M паспорта.
+Id monotonicity rests on a persistent counter `next_fact` (in the ENGINE_STATE
+section), **not** on records staying in the arena — the fact arena is a map keyed
+by id, so a missing record is just a hole in the numbering. Reusing an id via a
+free list is rejected on purpose: an external saved reference would then silently
+point at a *different* fact, and silent corruption is worse than a loud NotFound.
 
-## Раскладки слотов
+## Slot layouts
 
-### FactRecord — Arena<FactRecord>, Uniform, слот 48 Б, KEY_LEN 4
+### FactRecord — `Arena<FactRecord>`, Uniform, 48 B slot, KEY_LEN 4
 
-| off | размер | поле | примечание |
+| off | size | field | note |
 |---|---|---|---|
-| 0 | 4 | `id` (ключ, BE) | |
-| 4 | 4 | `entity` | EntityId или NONE |
-| 8 | 2 | `flags` | биты: 0 tombstone, 1 closed (есть valid_to), 2 has_vector, 3–15 резерв |
-| 10 | 2 | `kind` | TermId-младшие-биты? Нет: резерв v1 = 0 |
-| 12 | 4 | `text` | BlobId текста (UTF-8) |
-| 16 | 4 | `vector` | индекс слота в векторной арене или NONE |
-| 20 | 4 | `revises` | FactId предшественника в цепочке ревизий или NONE |
-| 24 | 8 | `recorded_at` | когда записано |
-| 32 | 8 | `valid_from` | с какого момента истинно (default = recorded_at) |
-| 40 | 8 | `valid_to` | до какого момента; `u64::MAX` = открыт («действует сейчас») |
+| 0 | 4 | `id` (key, BE) | |
+| 4 | 4 | `entity` | EntityId or NONE |
+| 8 | 2 | `flags` | bit 0 tombstone, 1 closed (has valid_to), 2 has_vector, 3–15 reserved |
+| 10 | 2 | `kind` | reserved, 0 in v1 (fact typing is expressed by tag conventions from `SKILL.md`) |
+| 12 | 4 | `text` | BlobId of the text (UTF-8) |
+| 16 | 4 | `vector` | slot index in the vector arena, or NONE |
+| 20 | 4 | `revises` | FactId of the predecessor in the revision chain, or NONE |
+| 24 | 8 | `recorded_at` | when it was recorded |
+| 32 | 8 | `valid_from` | when it became true (default = recorded_at) |
+| 40 | 8 | `valid_to` | until when; `u64::MAX` = open ("true now") |
 
-Теги факта и метаданные — в холодном сайдкаре `Arena<FactAux>` Uniform, слот
-**20 Б**: id 4 + ListHandle-компакт 12 (теги) + `meta` 4 (BlobId метаданных или
-`NONE`). Вынесены из горячего 48-байтного `FactRecord`, чтобы он оставался
-горячим. Обратный индекс tag→facts — в `04-indexes-recall.md`.
+A fact's tags and metadata live in a cold sidecar `Arena<FactAux>` (Uniform, **20 B**
+slot): `id` 4 + a compact `ListHandle` 12 (tags) + `meta` 4 (BlobId of the metadata,
+or NONE). They are kept out of the hot 48-byte `FactRecord` so it stays hot. The
+tag→facts inverted index is in `04-recall.md`.
 
-### Метаданные факта — отдельный blob-heap `metas`, один blob на факт
+### Fact metadata — a dedicated blob heap `metas`, one blob per fact
 
-Опциональный словарь ключ→значение (UTF-8 строки): указатели/атрибуты (URI на
-реальный payload во внешнем хранилище, mime, внешний ключ). Движок **не
-интерпретирует** содержимое. Хранится как один опаковый blob в `metas`
-(зеркало `texts`, но отдельный пул — холодный, не резидентен на mmap-базе до
-`show`/`export`), ссылка — `FactAux.meta`. Каноничная кодировка одного blob:
+An optional key→value map (UTF-8 strings): pointers/attributes (a URI to the real
+payload in another store, a mime type, an external key). The engine **never
+interprets** the content. It is stored as one opaque blob in `metas` (a mirror of
+`texts` but a separate, cold pool — not resident on an mmap'd database until
+`show`/`export`), referenced by `FactAux.meta`. The canonical encoding of one blob:
 
 ```text
 [count: u32 LE]
-count раз, ключи СТРОГО по возрастанию (сырые UTF-8 байты), без дублей:
+count times, keys STRICTLY ascending (raw UTF-8 bytes), no duplicates:
   [klen: u32 LE][key UTF-8]
   [vlen: u32 LE][val UTF-8]
 ```
 
-Порядок задаётся ровно в одном месте — при энкоде (`core::metadata::encode`
-сортирует ключи, отвергает дубли), поэтому все читатели (core, host, обёртки)
-отдают один и тот же порядок, а snapshot/replay byte-identical. Пустой словарь =
-нет blob (`meta = NONE`). `verify` декодирует каждый blob (UTF-8, ascending,
-unique); `faulty_facts` атрибутирует `FactFault::Metadata`.
+The order is decided in exactly one place — at encode time (`core::metadata::encode`
+sorts the keys and rejects duplicates) — so every reader (core, host, wrappers) hands
+back the same order and snapshot/replay is byte-identical. An empty map means no blob
+(`meta = NONE`). `verify` decodes each blob (UTF-8, ascending, unique); `faulty_facts`
+attributes a `FactFault::Metadata`.
 
-### EntityRecord — Arena, Uniform, слот 24 Б, KEY_LEN 4
+### EntityRecord — Arena, Uniform, 24 B slot, KEY_LEN 4
 
-| off | размер | поле |
+| off | size | field |
 |---|---|---|
-| 0 | 4 | `id` (ключ, BE) |
-| 4 | 4 | `name` (BlobId, каноническое имя как введено) |
-| 8 | 4 | `name_term` (TermId нормализованного имени — для поиска) |
+| 0 | 4 | `id` (key, BE) |
+| 4 | 4 | `name` (BlobId, the canonical name as entered) |
+| 8 | 4 | `name_term` (TermId of the normalized name — for lookup) |
 | 12 | 8 | `created_at` |
-| 20 | 4 | `flags` + резерв |
+| 20 | 4 | `flags` + reserved |
 
-Резолв имени → EntityId: через интернер (`name_term`) + Arena<EntityByName>
-(Ordered, ключ = [name_term BE | id], слот 8 Б). **Нормализованное имя
-уникально**: remember/link делают lookup-or-create по `name_term`, поэтому
-`entity(name)` детерминирован. Семантические дубликаты ("user" vs
-"пользователь") — забота агента (similar-подсказки, alias-механизм — v2).
+Name → EntityId resolves through the interner (`name_term`) plus an
+`Arena<EntityByName>` (Ordered, key `[name_term BE | id]`, 8 B slot). The
+**normalized name is unique**: remember/link do lookup-or-create by `name_term`, so
+`entity(name)` is deterministic. Semantic duplicates ("user" vs "the user") are the
+agent's concern (similar hints; an alias mechanism is v2).
 
-### Edge — две зеркальные Arena, Ordered, слот 16 Б, KEY_LEN 12
+### Edge — two mirror arenas, Ordered, 16 B slot, KEY_LEN 12
 
-- out-арена, ключ `[src BE 4 | rel BE 4 | dst BE 4]` + payload `fact` 4 (provenance,
-  может быть NONE);
-- in-арена, ключ `[dst BE 4 | rel BE 4 | src BE 4]` + payload `fact` 4.
+- an out-arena, key `[src BE 4 | rel BE 4 | dst BE 4]` + payload `fact` 4 (provenance,
+  may be NONE);
+- an in-arena, key `[dst BE 4 | rel BE 4 | src BE 4]` + payload `fact` 4.
 
-Обход соседей = range-скан по префиксу `src` (или `src+rel`) — линейное чтение.
-Ребро уникально по (src, rel, dst); повторный link обновляет provenance.
+Walking neighbours is a range scan over the `src` (or `src+rel`) prefix — a linear
+read. An edge is unique by (src, rel, dst); a repeated link updates the provenance.
 
-### Временной индекс — Arena, Ordered, слот 12 Б, KEY_LEN 12
+### Time index — Arena, Ordered, 12 B slot, KEY_LEN 12
 
-Ключ `[recorded_at BE 8 | fact_id BE 4]`, payload пуст. Range-запросы «что
-записано в интервале»; фильтрация по validity (valid_from/valid_to) — по
-записи факта на кандидате (O(1) на кандидата).
+Key `[recorded_at BE 8 | fact_id BE 4]`, empty payload. Range queries answer "what
+was recorded in this interval"; validity filtering (valid_from/valid_to) is done per
+candidate against the fact record (O(1) per candidate).
 
-## Темпоральность — семантика
+## Temporality — semantics
 
-Модель битемпоральная в упрощённом виде:
+The model is bitemporal, in a simplified form:
 
-- `recorded_at` — ось знания: когда память об этом узнала. Неизменяемо.
-- `valid_from / valid_to` — ось истинности: когда факт был/остаётся истинным.
+- `recorded_at` — the knowledge axis: when memory learned of it. Immutable.
+- `valid_from / valid_to` — the truth axis: when the fact was/remains true.
 
-Правила:
+Rules:
 
-1. Новый факт: `valid_from = входной или now`, `valid_to = MAX` (открыт).
-2. **`revise(old, new)`**: старому `valid_to := new.valid_from`, флаг closed;
-   новый факт получает `revises = old`. Старый **не удаляется** — «жил в Москве»
-   остаётся истинным для своего интервала. Цепочка ревизий — односвязная,
-   ацикличная (проверяется: new.revises только что созданный → цикл невозможен
-   конструктивно; журнал-реплей проверяет явно).
-3. **`forget(id)`**: tombstone-флаг; факт исчезает из recall немедленно,
-   физически вычищается в `maintain()` (записи, векторный слот, постинги,
-   рёбра-provenance). Это «право на забвение», не ревизия.
-4. Запрос `as_of(t)`: живым считается факт с `valid_from ≤ t < valid_to` и
-   `recorded_at ≤ t` и не tombstone. Дефолтный recall = as_of(now hosts),
-   т.е. только открытые/актуальные версии (closed показываются с
-   `include_closed`).
+1. A new fact: `valid_from = input or now`, `valid_to = MAX` (open).
+2. **`revise(old, new)`**: the old fact's `valid_to := new.valid_from` and its
+   `closed` flag is set; the new fact gets `revises = old`. The old fact is **not
+   deleted** — "lived in Moscow" stays true for its interval. The revision chain is
+   singly linked and acyclic (constructively: `new.revises` is a just-created id, so
+   a cycle is impossible; the journal replay checks it too).
+3. **`forget(id)`**: sets the tombstone flag; the fact leaves recall immediately and
+   is physically purged at the next `maintain` (its record, vector slot, postings and
+   provenance edges). This is a right to be forgotten, not a revision.
+4. An `as_of(t)` query: a fact is live when `valid_from ≤ t < valid_to` and
+   `recorded_at ≤ t` and it is not a tombstone. The default recall is `as_of(now)`,
+   i.e. only open/current versions (closed ones surface with `include_closed`).
 
-## Инварианты модели (проверки debug_assert + журнал-реплей)
+## Physical deletion (maintain)
 
-1. Всякая ссылка (entity, text, vector, revises, рёбра, теги) указывает на
-   существующую живую запись; tombstone факта каскадно чистится в maintain,
-   до maintain ссылки на tombstone допустимы, но recall их фильтрует.
-2. `valid_from ≤ valid_to`; у closed-факта `valid_to < MAX`.
-3. Цепочка `revises` ацикличена; у головы цепочки valid_to = MAX либо
-   tombstone.
-4. Ключевой префикс слота после записи в арену не мутируется.
-5. Текст факта ≤ `cfg.max_text` (default 4096 Б); тегов ≤ 32; рёбер на link ≤ 16
-   за вызов — защита от мусорных вставок агентом, ошибки, не паники.
+`maintain` rebuilds the arenas and, in doing so, **does not re-insert** the
+`FactRecord`/`FactAux` of a tombstoned fact — there is no leftover "shell". Because
+`next_fact` is unchanged, the id stays burned forever and replay stays deterministic
+(the skip rule `assigned < next_fact` does not depend on a record existing; a
+Maintain entry always follows the Forget of a fact, and a Revise/Forget of an
+already-purged id can never appear in a valid journal — the live verb would have
+returned NotFound and not been journaled).
 
-## План тестов
+A reference to a purged ancestor (`revises`, edge provenance) keeps the burned
+number rather than being scrubbed to NONE; a `get` on it returns `None`, exactly as
+for a tombstone, which preserves observation-equivalence between maintained and
+unmaintained runs.
 
-- Юнит: раскладки слотов — write/read roundtrip каждого поля, побайтовое
-  сравнение с эталонными буферами (фиксируют формат: сломал раскладку — сломал
-  тест).
-- Семантика темпоральности: таблица сценариев (создать → revise → revise →
-  as_of в 5 точках времени; forget головы/середины цепочки; include_closed).
-- Property: случайные последовательности remember/revise/forget vs
-  референс-модель на `Vec<RefFact>` с наивной фильтрацией — recall-результаты
-  эквивалентны (без ранжирования, только множества живых).
-- Инварианты 1–5 на fuzz-последовательностях операций (валидные входы) —
-  ни одна не нарушается; невалидные входы дают типизированные ошибки.
+What remains after `maintain` is only slow-growing residue: dead interner terms
+(Zipf) and orphan entities (kept — an entity with no live fact is still knowledge).
+Neither has a reclaim path in v1. Rotation (auto-`forget` by TTL/tags, then a
+`maintain` trigger) is a wrapper policy, not core; because the file *is* the state
+image, a checkpoint after a purge shrinks the file with no disk fragmentation.
 
-## Открытые вопросы
+## Database identity
 
-- `kind` у факта — **решено**: в v1 типизация фактов выражается конвенциями
-  тегов (задаёт SKILL.md), поле остаётся бинарным резервом = 0; кодовую
-  семантику получит, только если recency-политикам понадобится
-  дифференциация по типу.
-- Мягкое слияние сущностей-дубликатов ("user" vs "пользователь") — v2,
-  механизм alias-рёбер `same_as` возможен без изменения формата.
+`Config::db_uuid` (u128, host-supplied since the core has no RNG; `0` = an unnamed
+database) is stored in the snapshot's config block and identifies the database
+lineage — it survives `maintain` and re-saves. On `open`, a caller's `0` adopts the
+stored uuid; a nonzero value must match the stored one or the open fails with
+`ConfigMismatch("stored db_uuid differs")`. It is visible in `Stats::db_uuid`. A
+different `db_uuid` means a different database whose ids are not comparable.
+
+## Model invariants (debug_assert + journal replay)
+
+1. Every reference (entity, text, vector, revises, edges, tags) points at an existing
+   record; a tombstoned fact is cascaded away in maintain, and until then references
+   to it are allowed but recall filters them.
+2. `valid_from ≤ valid_to`; a closed fact has `valid_to < MAX`.
+3. The `revises` chain is acyclic; the head has `valid_to = MAX` or is a tombstone.
+4. A slot's key prefix is not mutated after it is written to the arena.
+5. A fact's text ≤ `cfg.max_text` (default 4096 B); tags ≤ 32; edges per link ≤ 16 —
+   guards against junk inserts, returned as typed errors, never panics.
+
+## Test plan
+
+- Unit: slot layouts — write/read roundtrip of each field, byte-for-byte comparison
+  against reference buffers (these pin the format: break the layout, break the test).
+- Temporality semantics: a scenario table (create → revise → revise → as_of at five
+  points; forget the head/middle of a chain; include_closed).
+- Property: random remember/revise/forget sequences vs a reference model over a
+  `Vec<RefFact>` with naive filtering — the live sets match.
+- Invariants 1–5 over fuzz sequences of valid operations — none is violated; invalid
+  inputs give typed errors.

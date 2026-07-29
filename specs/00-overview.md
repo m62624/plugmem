@@ -1,129 +1,137 @@
-# plugmem — обзор проекта
+# 00 — Overview
 
-> Статус: принято. Этот документ — точка входа во все спеки; при противоречии
-> между обзором и профильной спекой истина — в профильной спеке.
+The entry point to every spec. Where this overview and a topic spec disagree,
+the topic spec wins.
 
-## Что это
+## What it is
 
-**plugmem** — embedded-движок долговременной памяти для LLM. Ядро — чистая
-библиотека без сервера и без I/O-допущений (модель SQLite); всё остальное —
-тонкие обёртки в одном workspace. База агностична к данным (хранит «что угодно»),
-но API заточен под LLM-агента: глаголы `remember / recall / revise / forget`,
-встроенная темпоральность, связи-граф, компактный текстовый вывод для промпта.
+**plugmem** is an embedded long-term-memory engine for LLM agents. The core is a
+pure library with no server and no I/O assumptions (the SQLite model); everything
+else is a thin wrapper in one workspace. The store is data-agnostic (it holds
+opaque bytes), but the API is shaped for an agent: the verbs
+`remember / recall / revise / forget`, built-in bitemporality, an entity graph,
+and a compact rendered block for the prompt.
 
-Три уровня доставки одного и того же движка:
+The same engine ships three ways:
 
-1. **Бинарники** (CLI, MCP-сервер) — «скачал и поехали», installers через cargo-dist.
-2. **Rust API** (crates.io) — «хочешь глубже».
-3. **npm-пакет** (WASM + TS-обвязка) — встраивание в Node-хосты и любые рантаймы с WASM.
+1. **Binaries** (the `plugmem-cli` CLI, the `plugmem-mcp` server) — installed via
+   cargo-dist (shell/PowerShell/`.msi`/Homebrew + `cargo binstall`).
+2. **Rust API** (crates.io) — embed the library directly.
+3. **npm package** (`plugmem`) — a native Node.js addon (napi-rs) that embeds the
+   host in-process, with TypeScript types.
 
-WASM здесь — формат переносимости ядра, **не** браузерная фича.
+The core is `no_std`, so it also builds and runs on WebAssembly; wasm is a
+portability target for the core (and the way the snapshot format is proven
+pointer-width independent), **not** the npm distribution mechanism.
 
-## Принципы (нарушение любого — повод остановить ревью)
+## Principles
 
-1. **Embedded-first.** Ядро — библиотека. Сервер, если появится, — обёртка.
-2. **`no_std + alloc` ядро.** Библиотечные крейты собираются под `wasm32v1-none`
-   (проверяется в CI). Ядро не знает про файлы, потоки, сеть и **время** —
-   timestamps приносит хост в каждом вызове.
-3. **Плоские арены.** Всё состояние — байтовые пулы + маленькие таблицы
-   (подход OpaqueBuckets — собственная старая наработка автора, см. `01-arena.md`).
-   Никаких `Box`/`Rc`/`HashMap` в данных. Следствие: **образ памяти ≡ формат
-   снапшота**, загрузка = memcpy.
-4. **Однопоточность без компромиссов.** Никаких фоновых потоков в ядре; вся
-   обслуживающая работа — явный `maintain()`. Параллелизм — опция обёрток,
-   не фундамент. SIMD — да (включая wasm simd128); потоки — нет.
-5. **Переводчики вне ядра.** Экстракция фактов — вызывающий LLM-агент (по
-   SKILL.md); эмбеддинги — trait `Embedder` в хост-слое (Ollama / OpenAI-совместимый
-   API / локальная модель / нет). Ядро принимает готовые векторы. Без эмбеддера
-   система полноценна (BM25 + теги + граф + время).
-6. **Перф-контракт, а не лозунг.** Бюджеты в `07-performance.md`, детерминированные
-   счётчики работы как CI-гейты, 100% покрытие библиотечных крейтов.
+Violating any of these is grounds to stop a review.
+
+1. **Embedded-first.** The core is a library. A server, if one ever appears, is a
+   wrapper.
+2. **`no_std + alloc` core.** The library crates build for `wasm32v1-none` (checked
+   in CI). The core knows nothing of files, threads, network, or **time** —
+   timestamps are passed in by the host on every call.
+3. **Flat arenas.** All state is byte pools plus small tables (no `Box`/`Rc`/`HashMap`
+   in the data). Consequence: **the in-memory image *is* the snapshot format**, so a
+   load is a `memcpy` plus validation.
+4. **Single-threaded, no compromise.** No background threads in the core; all upkeep
+   is an explicit `maintain()`. Concurrency is a wrapper option, not a foundation.
+   SIMD yes (including wasm simd128); threads no.
+5. **Translators live outside the core.** Fact extraction is the calling agent (per
+   `SKILL.md`); embeddings are an `Embedder` trait in the host. The core takes ready
+   vectors. Without an embedder the system is still complete (BM25 + tags + graph +
+   time).
+6. **A performance contract, not a slogan.** Budgets are enforced by deterministic
+   work counters as CI gates, with full coverage of the library crates.
 
 ## Workspace
 
-| Крейт | std? | Роль |
+| Crate | std? | Role |
 |---|---|---|
-| `plugmem-arena` | no_std | Плоские структуры: Arena (шардированная байтовая арена), BlobHeap, ChunkedList, Interner. Фундамент всего. |
-| `plugmem-core` | no_std | Движок: модель данных, индексы (BM25, время, граф, векторы), hybrid recall, снапшот/журнал, API-глаголы, trait `Storage`. |
-| `plugmem-host` | std | Нативный хост-слой: `FileStorage`, trait `Embedder` + реализации (ollama, openai-compat, null; local — за feature). |
-| `plugmem-cli` | std | Бинарник `plugmem-cli`: команды поверх core + host. |
-| `plugmem-mcp` | std | MCP-сервер (stdio JSON-RPC) поверх core + host; skill встроен `include_str!`. |
-| `plugmem-napi` | std | Нативный Node-аддон (napi-rs) поверх host; класс `Plugmem` зеркалит `Database`; npm-пакет `plugmem` с TS-типами. `publish = false`. |
-| `plugmem-testgen` | std | Внутренний: генератор синтетических корпусов для тестов и бенчей. `publish = false`. |
+| `plugmem-arena` | no_std | Flat structures: sharded byte arena, blob heap, chunked list, string interner. The substrate. |
+| `plugmem-core` | no_std | The engine: data model, indexes (BM25, time, graph, vectors), hybrid recall, snapshot/journal, the API verbs, the `Storage` trait. |
+| `plugmem-host` | std | Native host layer: `FileStorage`, the `Embedder` trait and its clients, read-only mmap, locking, cross-process concurrency. |
+| `plugmem-cli` | std | The `plugmem-cli` binary: commands over core + host. |
+| `plugmem-mcp` | std | The MCP server (stdio JSON-RPC) over core + host; the skill is embedded via `include_str!`. |
+| `plugmem-napi` | std | The native Node addon (napi-rs) over host; the `Plugmem` class mirrors `Database`; the npm package is `plugmem`. `publish = false` (ships to npm, not crates.io). |
+| `plugmem-testgen` | std | Internal: a deterministic corpus generator for tests and benches. `publish = false`. |
 
-Edition 2024, лицензия MIT, версии всех крейтов синхронизированы через
-`[workspace.package]`. Релизы бинарников — cargo-dist (shell/powershell/msi/homebrew
-+ cargo binstall), библиотеки `dist = false`. Структура и релизный конвейер
-зеркалят проверенный воркспейс elenchus.
+Edition 2024, MIT. All crate versions are one number, inherited from
+`[workspace.package]` and bumped together. Library crates set `dist = false`;
+only the two binaries are released by cargo-dist.
 
-## Паспорт ёмкости и производительности (контракт)
+**Field inheritance.** `version`, `edition`, `authors`, `license`, `repository`
+and `homepage` come from `[workspace.package]`; each crate sets only its own
+`name`, `description`, `publish`, `[lib] crate-type` and `[[bin]]`.
 
-Потолок диктует wasm32: линейная память ≤ 4 ГиБ, наш бюджет **≤ 2 ГиБ**.
-(64-битные сборки — native и Wasm 3.0 memory64 — несут те же байты формата
-с большими лимитами; классы ёмкости и доказательства — `14-wasm-versions.md`.)
+**Dependencies go through `[workspace.dependencies]`.** Versions are pinned once in
+the root; a crate writes `name = { workspace = true }` and may only narrow features,
+never set a version. `plugmem-arena` and `plugmem-core` are pulled with
+`default-features = false`; the consumer turns on `std`, so the
+`--no-default-features --target wasm32v1-none` gate always reflects the real
+no_std slice.
 
-| Параметр | Значение |
+**Features.** `std` (default on arena/core; off = pure `no_std + alloc`) and
+`counters` (deterministic work counters, zero-cost when off) propagate down the
+chain (`plugmem-core/std = ["plugmem-arena/std"]`). The host adds `serde`, `config`
+and `counters` as its own axes.
+
+**Quality gates, from the first commit.** `missing_docs = "deny"` (plus
+`unsafe_op_in_unsafe_fn` and `rustdoc::broken_intra_doc_links`) is set in
+`[workspace.lints]` and inherited by every crate — a missing doc comment fails the
+build. Code, rustdoc and these specs are English-only. Coverage runs through
+`tarpaulin.toml`, scoped to the library crates (binaries and the napi bridge are
+excluded, with the reason in the config comments).
+
+## Capacity and performance contract
+
+The ceiling is dictated by wasm32: linear memory ≤ 4 GiB, our budget **≤ 2 GiB**.
+64-bit builds (native and Wasm 3.0 memory64) carry the same format bytes with
+larger limits; the capacity classes and their proofs live in `09-portability.md`.
+
+| Parameter | Value |
 |---|---|
-| Дизайн-центр | **100k фактов** — «всё летает» |
-| Гарантированный потолок | **1M фактов в wasm32** (с квантованными векторами) |
-| Цена факта | ~0.36 КБ без векторов; ~0.82 КБ (+i8 384d); ~1.2 КБ (+i8 768d) |
-| Снапшот | ≈ размеру RAM-образа (это одно и то же) |
-| `recall` @100k | < 1 мс худший случай, сотни мкс типично |
-| `remember` | < 500 мкс — включая полную similar-детекцию; без вычисления эмбеддинга |
-| Cold start | время чтения файла + < 5 мс инициализации |
-| Аллокации в recall | **0** (инвариант, проверяется тестом) |
-| Векторы | i8-квантизация — дефолт; бинарные сигнатуры — пре-фильтр; f32 не храним |
-| Flat → HNSW | порог ~24k векторов (уточняется бенчем) |
+| Design center | **100k facts** — everything is instant |
+| Guaranteed ceiling | **1M facts on wasm32** (with quantized vectors) |
+| Cost per fact | ~0.36 KB without vectors; ~0.82 KB (+i8 384d); ~1.2 KB (+i8 768d) |
+| Snapshot | ≈ the in-RAM image size (they are the same bytes) |
+| `recall` @100k | < 1 ms worst case, hundreds of µs typical |
+| `remember` | < 500 µs including full similar-detection; excludes embedding compute |
+| Cold start | file read time + < 5 ms init |
+| Allocations in recall | **0** (an invariant, checked by a test) |
+| Vectors | i8 quantization is the default; binary signatures pre-filter; f32 is not stored |
+| Flat → HNSW | threshold ~24k vectors (tuned by a bench) |
 
-10M+ фактов — вне рамок v1 (территория будущего нативного сервера).
+10M+ facts is out of scope for v1 (the territory of a future native server).
 
-## Карта спек и порядок реализации
+## Spec map
 
-| # | Файл | Что фиксирует |
+| # | File | What it fixes |
 |---|---|---|
-| 00 | `00-overview.md` | этот документ |
-| 01 | `01-arena.md` | plugmem-arena: Arena v2, BlobHeap, ChunkedList, Interner |
-| 02 | `02-data-model.md` | ID, раскладки слотов, темпоральность, ревизии, инварианты |
-| 03 | `03-snapshot.md` | формат снапшота, журнал, trait Storage, защита от битых входов |
-| 04 | `04-indexes-recall.md` | токенизатор, BM25, время, граф, векторы, hybrid recall |
-| 05 | `05-api.md` | публичный API ядра, Config, Embedder, семантика глаголов |
-| 06 | `06-wrappers.md` | CLI, MCP, WASM/npm, SKILL.md, доставка |
-| 07 | `07-performance.md` | бюджеты, счётчики, бенчи, покрытие, fuzz/miri, CI-гейты |
-| 08 | `08-dependencies.md` | зафиксированные версии зависимостей + пробы wasm32v1-none |
-| 09 | `09-workspace.md` | структура workspace, наследование Cargo-полей, конвенции features |
-| 10 | `10-hnsw-port.md` | разбор трёх HNSW-реализаций, полный алгоритм, план порта на арены |
-| 11 | `11-stage4-handoff.md` | исполняемый план этапа 4 (векторы, maintain, testgen, README) — выполнен |
-| 12 | `12-vacuum-and-ids.md` | физическое удаление и идентичность id — решено (maintain v2) |
-| 13 | `13-host.md` | plugmem-host: FileStorage, Database, оркестрация, эмбеддеры |
-| 14 | `14-wasm-versions.md` | WebAssembly 2.0/3.0: memory64, классы ёмкости, кросс-таргет доказательства |
-| 15 | `15-ci-cd-and-next.md` | CI/CD (зеркало elenchus), релизный конвейер, секреты, handoff этапа 5 |
-| 16 | `16-mmap-readonly.md` | mmap zero-copy read-only open: Cow-backing (arena no_std/0 deps), `open_readonly`, memmap2 в host |
+| 00 | `00-overview.md` | this document, plus the workspace layout |
+| 01 | `01-arena.md` | `plugmem-arena`: arena, blob heap, chunked list, interner |
+| 02 | `02-data-model.md` | ids, slot layouts, temporality, revisions, invariants, physical deletion |
+| 03 | `03-snapshot.md` | snapshot format, journal, the `Storage` trait, corrupt-input safety, read-only mmap |
+| 04 | `04-recall.md` | tokenizer, BM25, time, graph, vectors, HNSW, hybrid recall |
+| 05 | `05-api.md` | the core public API, `Config`, `Embedder`, verb semantics |
+| 06 | `06-host.md` | `plugmem-host`: `FileStorage`, `Database`, embedders, concurrency |
+| 07 | `07-wrappers.md` | CLI, MCP, napi, `SKILL.md`, delivery |
+| 08 | `08-performance.md` | budgets, counters, benches, coverage, fuzz/miri, dependency pins, CI gates |
+| 09 | `09-portability.md` | WebAssembly 2.0/3.0: memory64, capacity classes, cross-target equivalence |
 
-Порядок реализации (каждый шаг заканчивается зелёным CI с гейтами):
+## Design choices
 
-1. `plugmem-arena` + тесты/бенчи (01, 07).
-2. Снапшот-каркас + Storage + журнал (03).
-3. Модель данных + remember/recall без векторов: BM25 + теги + время + граф (02, 04, 05).
-4. Векторный слой: квантизация, flat, сигнатуры (04).
-5. CLI + MCP + wasm-обвязка + SKILL.md (06).
-6. HNSW за порогом (04, фаза 2).
-
-## Журнал ключевых решений
-
-- Имя **plugmem** — по папке проекта; ранее рассматривался вариант membox.
-- Экстрактор = вызывающий агент; движок не делает LLM-вызовов. Zep/Graphiti-класс
-  графовой памяти достигается механикой (темпоральность, конфликт-подсказки
-  при remember), суждение остаётся за агентом.
-- Одно хранилище + несколько индексов; «вектор + граф» — не два слоя-сервиса,
-  а два входа в один граф фактов.
-- Никакой сериализации: снапшот — это образ арен (решение подтверждено
-  существующей наработкой OpaqueBuckets).
-- Эмбеддер и LLM работают в связке **снаружи**; в wasm оба пробрасываются
-  callback'ами хоста.
-- Языковая политика: код и rustdoc — **только English** с первого коммита
-  (закреплено линтом `missing_docs = deny`); спеки — на русском на время
-  проектирования, перевод на английский — финальным шагом перед публикацией.
-- Шардирование/мультиинстансность в ядро не закладывается: на масштабе
-  паспорта буста не даёт (оркестрация дороже работы). Двери оставлены в
-  обёртках: read-реплики поверх zero-copy снапшота и rayon за feature-флагом
-  для batch-операций (`maintain`, эмбеддинги).
+- The extractor is the calling agent; the engine makes no LLM calls. Zep/Graphiti-class
+  graph memory is reached mechanically (bitemporality, conflict hints on `remember`);
+  the judgement stays with the agent.
+- One store, several indexes. "Vector + graph" is not two services but two entry
+  points into one fact graph.
+- No serialization: a snapshot is the image of the arenas.
+- The embedder and the LLM work together **outside** the core; on wasm both are host
+  callbacks.
+- Sharding / multi-instance is not built into the core: at the capacity above it does
+  not pay (orchestration costs more than the work). The doors are left in the wrappers —
+  read replicas over the zero-copy snapshot, and rayon behind a feature flag for batch
+  work (`maintain`, embeddings).

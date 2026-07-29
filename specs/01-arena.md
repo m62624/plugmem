@@ -1,245 +1,195 @@
-# 01 — plugmem-arena: плоские структуры хранения
+# 01 — plugmem-arena: flat storage structures
 
-> Фундаментный крейт. `no_std + alloc`, ноль зависимостей кроме `thiserror`
-> (core-совместимый) и xxh3-хеша. Всё остальное в проекте строится на этих
-> четырёх структурах. Основа — ранняя наработка автора (шардированная
-> байтовая арена `OpaqueBuckets`, первая тестовая версия сохранена в
-> `reference/opaque-v1/`); здесь описана её обобщённая версия v2.
+The foundation crate. `no_std + alloc`, no dependencies beyond `thiserror`
+(core-compatible) and an xxh3 hash. Everything else in the project is built on the
+four structures here.
 
-## Общая философия
+## Philosophy
 
-1. Состояние структуры = плоские байтовые буферы + маленькие массивы метаданных.
-   Никаких указателей, никаких per-element аллокаций.
-2. Образ памяти — и есть формат персистентности: каждая структура умеет отдать
-   свои секции как `&[u8]` и подняться из них без парсинга (см. `03-snapshot.md`).
-3. Generic-код типо-стёрт до байтов: контейнеры работают со слотами-срезами,
-   типизация — тонкий trait поверх. Мономорфизация не раздувает wasm-бинарь.
-4. Вся стоимость видима: операции локальны странице, worst case ограничен и
-   посчитан; структуры экспортируют счётчики работы (feature `counters`).
+1. A structure's state is flat byte buffers plus small metadata arrays. No
+   pointers, no per-element allocation.
+2. The in-memory image *is* the persistence format: each structure hands out its
+   sections as `&[u8]` and rebuilds from them without parsing (see `03-snapshot.md`).
+3. Generic code is type-erased down to bytes: containers work over slot-slices and
+   typing is a thin trait on top, so monomorphization does not bloat the wasm binary.
+4. All cost is visible: operations are page-local, the worst case is bounded and
+   counted, and the structures export work counters (feature `counters`).
 
-## 1. `Arena<T: Slot>` — шардированная сортированная арена (OpaqueBuckets v2)
+## 1. `Arena<T: Slot>` — a sharded sorted arena
 
-### Отличия от v1 (мотивация — числа из 00-overview)
-
-| v1 | v2 | Причина |
-|---|---|---|
-| 1 страница на шард, 64 слота, ошибка при переполнении | цепочка страниц с range-split | при 1M записей v1 теряет ~50% ёмкости и падает на живой базе |
-| `page_map: [u16; B]` | `u32`-индексы страниц | u16 → потолок 128 МБ пула при 32Б-слотах |
-| 64 слота × SLOT_SIZE (страница «плавает») | `PAGE_BYTES = 4096` фикс., слотов = `PAGE_BYTES / SLOT_SIZE` | страница всегда L1-дружелюбна при любом размере слота |
-| сортировка по всем байтам слота | сортировка по ключевому префиксу `KEY_LEN` | слот = ключ + payload |
-| LE-кодировка чисел | **BE-кодировка ключей** | байтовый порядок = числовой ⇒ range-сканы по сырым байтам |
-| const-generic B, M | runtime-конфиг (в заголовке секции) | один код, разные арены; снапшот самоописателен |
+A shard is a chain of range-partitioned pages: each page holds a sorted run of
+keys, and pages in a chain ascend by range. This is "the leaf level of a B+-tree
+with no internal nodes" — at our chain lengths (a shard tops out at tens of pages)
+internal nodes do not pay.
 
 ### Trait
 
 ```rust
 pub trait Slot: Clone {
-    /// Размер слота в байтах (компилятайм).
+    /// Slot size in bytes (compile time).
     const SIZE: usize;
-    /// Длина ключевого префикса; сортировка и поиск сравнивают только его.
+    /// Key-prefix length; sort and search compare only this.
     const KEY_LEN: usize; // KEY_LEN <= SIZE
     fn write(&self, out: &mut [u8]);          // out.len() == SIZE
     fn read(bytes: &[u8]) -> Self;            // bytes.len() == SIZE
 }
 ```
 
-Ключи пишутся **big-endian** (числа, timestamps) — инвариант проекта: побайтовое
-`cmp` на ключах эквивалентно сравнению значений. Хелперы: `key_u32(&mut [u8], u32)`,
-`key_u64`, `key_pair(u64, u32)` и симметричные читатели.
+Keys are written **big-endian** (numbers, timestamps) — a project invariant: a
+byte-wise `cmp` on keys equals comparing the values, so range scans run over raw
+bytes. Helpers: `key_u32`, `key_u64`, `key_pair(u64, u32)` and their readers.
 
-Для слотов с размером, известным только в рантайме (векторы: `dim` из конфига),
-есть сырой вариант `DynArena` — тот же код, `slot_size`/`key_len` в полях
-заголовка; `Arena<T>` — тонкая типизированная обёртка над ним.
+For slots whose size is only known at runtime (vectors: `dim` from config) there is
+a raw `DynArena` — the same code with `slot_size`/`key_len` in header fields;
+`Arena<T>` is a thin typed wrapper over it.
 
-### Раскладка
+### Layout
 
 ```rust
 pub struct RawArena {
-    pool: Vec<u8>,          // страницы по PAGE_BYTES, подряд
-    heads: Vec<u32>,        // shard -> индекс первой страницы цепочки (NONE = !0)
-    next: Vec<u32>,         // page -> следующая страница цепочки (NONE = !0)
-    counts: Vec<u16>,       // page -> занятых слотов
-    free_head: u32,         // односвязный free-list пустых страниц (через next)
-    total: u64,             // всего элементов
-    cfg: ArenaCfg,          // slot_size, key_len, shards (степень 2), max_bytes, shard_mode
+    pool: Vec<u8>,          // PAGE_BYTES pages, contiguous
+    heads: Vec<u32>,        // shard -> first page of its chain (NONE = !0)
+    next: Vec<u32>,         // page -> next page in the chain (NONE = !0)
+    counts: Vec<u16>,       // page -> occupied slots
+    free_head: u32,         // singly-linked free list of empty pages (via next)
+    total: u64,             // element count
+    cfg: ArenaCfg,          // slot_size, key_len, shards (power of 2), max_bytes, shard_mode
 }
 ```
 
-`PAGE_BYTES = 4096`. `slots_per_page = PAGE_BYTES / slot_size` (минимум 1;
-слоты > 4096 Б запрещены — `Error::SlotTooLarge`).
+`PAGE_BYTES = 4096`. `slots_per_page = PAGE_BYTES / slot_size` (min 1; slots
+larger than 4096 B are rejected with `Error::SlotTooLarge`). A fixed 4 KB page
+stays L1-friendly at any slot size, and `u32` page indices keep the pool ceiling
+well above the capacity contract.
 
-### Шардирование — два режима
+### Sharding — two modes
 
-- `Uniform` — для lookup-арен (запись фактов по id): шард = fibonacci-хеш
-  ключа → равномерное заполнение, порядок между шардами не значим.
-- `Ordered` — для range-арен (временной индекс, рёбра): шард = старшие
-  `log2(shards)` бит ключа → глобальный порядок «шард за шардом», range-скан
-  пересекает шарды последовательно.
+- `Uniform` — for lookup arenas (facts keyed by id): shard = fibonacci hash of the
+  key, giving even fill; order across shards is meaningless.
+- `Ordered` — for range arenas (the time index, edges): shard = the top
+  `log2(shards)` bits of the key, giving a global "shard after shard" order so a
+  range scan crosses shards in sequence.
 
-### Операции и их стоимость
+### Operations and their cost
 
-Внутри шарда цепочка страниц **range-партиционирована**: каждая страница
-хранит сортированный отрезок ключей, страницы в цепочке идут по возрастанию
-диапазонов. Это «листовой уровень B+-дерева без внутренних узлов» — при наших
-длинах цепочек (ёмкость шарда ~десятки страниц максимум) внутренние узлы не
-окупаются.
+- `insert(slot) -> Result<bool>`: shard → walk the chain to the page whose range
+  covers the key (comparing against the page's first slot — one cache line per
+  step) → binary search in the page → memmove the page tail (≤ 4 KB) → write. A
+  full page **splits**: a new page (from the free list or the pool end) takes the
+  upper half, the chain is relinked, and the insert retries into the right half. A
+  duplicate key returns `Ok(false)`.
+- `get(key)` / `contains`, `find_by` / `find_slice_by` / `find_slice_mut_by`: the
+  same descent and binary search, O(chain + log slots). `find_slice_mut_by` may
+  mutate only payload bytes — the key prefix is immutable (debug_assert).
+- `remove(key) -> bool`: shift within the page; a page that empties is unlinked to
+  the free list. Half-empty neighbours are not merged (memory is reclaimed by the
+  `maintain` compaction, which rebuilds the arena).
+- `range(from_key..to_key)` — an iterator over slot-slices; `Ordered` only.
+- `iter()` — all elements, shard by shard (in key order for `Ordered`).
+- Capacity: `pool.len()` never exceeds `cfg.max_bytes` → `Error::CapacityExceeded`.
+  No panics on overflow.
 
-- `insert(slot) -> Result<bool>`: шард → проход цепочки до страницы, чей диапазон
-  покрывает ключ (сравнение с первым слотом страницы — одна кэш-линия на шаг) →
-  бинарный поиск в странице → memmove-сдвиг хвоста страницы (≤ 4 КБ) → запись.
-  Если страница полна — **split**: новая страница из free-list или конец пула,
-  верхняя половина слотов переезжает, цепочка перелинковывается, вставка
-  повторяется в нужную половину. Дубликат ключа → `Ok(false)`.
-- `get(key) -> Option<T>` / `contains`, `find_by` / `find_slice_by` /
-  `find_slice_mut_by`: тот же спуск, бинарный поиск, O(chain + log slots).
-  Мутировать через `find_slice_mut_by` можно только payload-байты — ключевой
-  префикс неизменяем (debug_assert).
-- `remove(key) -> bool`: сдвиг внутри страницы; опустевшая страница
-  отцепляется в free-list. Слияния полупустых соседей нет (v1: не окупается,
-  память вернёт `maintain`-компакция пересборкой арены).
-- `range(from_key..to_key)` — итератор по срезам слотов: только для `Ordered`;
-  находит стартовую страницу, дальше линейное чтение подряд.
-- `iter()` — все элементы по шардам (для `Ordered` — в порядке ключей).
-- Ёмкость: `pool.len()` не превышает `cfg.max_bytes` → `Error::CapacityExceeded`.
-  Никаких паник на переполнении.
+### Snapshot contract
 
-### Снапшот-контракт
+The arena emits four sections: `pool`, `heads`, `next+counts` (page metadata), and
+a `header` (`ArenaCfg` + `free_head` + `total`). On load, the metadata is
+bounds-checked (every page index < page_count, counts ≤ slots_per_page, chains
+acyclic — an O(pages) bitmap check); slot *contents* are not validated (they are
+the owner's data). Malformed metadata is `Error::Corrupt`, never a panic.
 
-Арена отдаёт 4 секции: `pool`, `heads`, `next+counts` (метаданные страниц),
-`header` (ArenaCfg + free_head + total). Подъём: bounds-check метаданных
-(каждый индекс страницы < page_count, counts ≤ slots_per_page, цепочки без
-циклов — проверка за O(pages) битовой картой) — затем структура готова.
-Содержимое слотов не валидируется (это данные владельца).
+### unsafe policy
 
-### unsafe-политика (подкреплена измерением, 2026-07-18)
+The one default `unsafe` is allocating uninitialized pages
+(`reserve + set_len` instead of zero-filling): measured ~12× faster on the page
+allocation path under wasm (our target), free insurance natively. It carries a
+strict invariant ("read only up to `count`"), a `// SAFETY:` comment, and miri
+confirmation. Any other `unsafe` — including bounds-check elision, which measured
+*slower* under wasm because the runtime bounds-checks anyway — is added only in its
+own commit with a bench on a real arena. Functional correctness is always pinned by
+a safe version first. The whole crate runs under miri in CI.
 
-Микробенч обоих unsafe-приёмов v1 (изолированно: 64 МиБ пула, 2M lookups;
-native x86-64 и wasmtime/wasm32-wasip1, release+lto):
-
-| Приём | native | wasm (wasmtime) | Вердикт |
-|---|---|---|---|
-| `reserve + set_len` (без зануления страниц) vs `resize(.., 0)` | ×1.03 (шум) | **×12.3 быстрее** на пути аллокации страниц (3889 мкс → 316 мкс / 32k страниц) | **оставляем**: главный выигрыш — именно wasm, наш целевой таргет; бесплатная страховка нативу |
-| `get_unchecked`-срез страницы vs checked-срез | ×1.01 (шум) | ×0.97 (**медленнее** — wasm сам проверяет границы) | **не используем по умолчанию**: доминирует бинарный поиск, bounds-check предсказуем |
-
-Правила: uninit-страницы — единственный «дефолтный» unsafe (со строгим
-инвариантом «чтение только до `count`», `// SAFETY:`-комментарием и
-формальным подтверждением miri). Любой другой unsafe (включая elision
-bounds-check) — только отдельным коммитом с бенч-подтверждением на реальной
-арене; микробенч показал, что по умолчанию он не окупается. Функциональная
-корректность всегда сначала фиксируется safe-версией. Весь крейт проходит
-miri в CI.
-
-## 2. `BlobHeap` — переменная длина (тексты, имена)
+## 2. `BlobHeap` — variable length (texts, names)
 
 ```rust
 pub struct BlobHeap {
-    pool: Vec<u8>,            // append-only байты
-    index: Vec<(u32, u32)>,   // BlobId (=позиция в index) -> (offset, len)
+    pool: Vec<u8>,            // append-only bytes
+    index: Vec<(u32, u32)>,   // BlobId (= position in index) -> (offset, len)
 }
 pub struct BlobId(pub u32);
 ```
 
-- `push(&[u8]) -> Result<BlobId>` (лимит `max_bytes`, blob ≤ `max_blob` из конфига),
+- `push(&[u8]) -> Result<BlobId>` (bounded by `max_bytes`, blob ≤ `max_blob`),
   `get(BlobId) -> &[u8]`.
-- Удаления нет: blob'ы живут, пока на них ссылаются записи. Возврат памяти —
-  компакция в `maintain()`: обход живых ссылок, перезапись pool, таблица
-  переадресации старый→новый BlobId, владельцы обновляют ссылки (протокол
-  компакции — в `05-api.md`).
-- Снапшот: две секции as-is.
+- No deletion: blobs live while a record references them. Memory comes back via the
+  `maintain` compaction — walk live references, rewrite the pool, build an
+  old→new `BlobId` redirect table, owners update their references (the compaction
+  protocol is in `05-api.md`).
+- Snapshot: two sections, as-is.
 
-## 3. `ChunkedList` — растущие списки поверх плоского пула
+## 3. `ChunkedList` — growing lists over a flat pool
 
-Для инвертированных индексов и списков смежности: много маленьких растущих
-списков без per-list аллокаций.
+For the inverted indexes and adjacency lists: many small growing lists with no
+per-list allocation.
 
 ```rust
 pub struct ChunkPool {
-    pool: Vec<u8>,      // чанки по CHUNK_BYTES = 64
+    pool: Vec<u8>,      // CHUNK_BYTES = 64 chunks
     free_head: u32,
     cfg: ...,
 }
-/// Хэндл списка хранится владельцем (индексом), не пулом.
+/// The list handle is held by the owner (an index), not the pool.
 pub struct ListHandle { head: u32, tail: u32, len: u32, tail_used: u8 }
 ```
 
-Чанк 64 Б: `[next: u32][payload: 60 Б]`. Операции: `push(&mut ListHandle, &[u8])`
-(байты значения не пересекают границу чанка, если значение ≤ 60 Б — для varint
-пар это всегда так), `iter(&ListHandle)` — последовательное чтение,
-`free(&mut ListHandle)` — чанки в free-list. Компакция (перекладка чанков
-списка подряд для локальности чтения) — в `maintain()`.
+A 64 B chunk is `[next: u32][payload: 60 B]`. Operations: `push` (a value's bytes
+never straddle a chunk boundary when the value is ≤ 60 B — always true for the
+varint pairs stored here), `iter` (sequential read), `free` (chunks to the free
+list). Compaction (relaying a list's chunks contiguously for read locality) is part
+of `maintain`.
 
-## 4. `Interner` — строка → u32
+## 4. `Interner` — string → u32
 
 ```rust
 pub struct Interner {
-    heap: BlobHeap,                 // байты строк; BlobId == TermId
-    table: Vec<u32>,                // open addressing: 0 = пусто, иначе TermId+1
-    mask: u32, len: u32,            // размер таблицы (степень 2), занятость
+    heap: BlobHeap,                 // string bytes; BlobId == TermId
+    table: Vec<u32>,                // open addressing: 0 = empty, else TermId+1
+    mask: u32, len: u32,            // table size (power of 2), occupancy
 }
 pub struct TermId(pub u32);
 ```
 
-- `intern(&str) -> Result<TermId>`: xxh3 → linear probing → сравнение байтов
-  через heap; miss → `heap.push` + запись в таблицу. Load factor ≤ 0.7,
-  rehash ×2 (амортизированно; rehash не аллоцирует по-элементно — одна таблица).
+- `intern(&str) -> Result<TermId>`: xxh3 → linear probing → byte compare via the
+  heap; a miss does `heap.push` + a table write. Load factor ≤ 0.7, rehash ×2
+  (amortized; a rehash allocates one table, not per element).
 - `resolve(TermId) -> &str` — `heap.get`, O(1).
-- Снапшот: секции heap + таблица as-is (таблица мала: 4 Б × слоты; храним,
-  а не перестраиваем — cold start важнее пары мегабайт на потолке).
-- Интернер never-forget: термы не удаляются (словарь растёт медленно;
-  компакция словаря — вне рамок v1, отмечено в открытых вопросах).
+- Snapshot: the heap sections plus the table, as-is (the table is small — 4 B per
+  slot — and stored rather than rebuilt; cold start beats a few megabytes at the
+  ceiling).
+- Never-forget: terms are not deleted (the vocabulary grows slowly; dictionary
+  compaction is out of scope for v1).
 
-## План тестов (мандат: 100% покрытие крейта)
+## Test plan (mandate: 100% crate coverage)
 
-1. **Property-тесты (proptest)** — эквивалентность модели:
-   - `Arena` ≡ `BTreeMap<Vec<u8>, Vec<u8>>` на случайных последовательностях
-     insert/remove/get/range (оба режима шардирования, слоты 4–4096 Б,
-     KEY_LEN 4–32);
-   - `Interner` ≡ `HashMap<String, u32>` + биекция intern/resolve;
+1. **Property tests (proptest)** — model equivalence:
+   - `Arena` ≡ `BTreeMap<Vec<u8>, Vec<u8>>` over random insert/remove/get/range
+     sequences (both shard modes, slots 4–4096 B, KEY_LEN 4–32);
+   - `Interner` ≡ `HashMap<String, u32>` plus the intern/resolve bijection;
    - `ChunkPool` ≡ `Vec<Vec<Vec<u8>>>`.
-2. **Границы**: пустая арена; один элемент; ровно полная страница; split на
-   каждой позиции вставки (первый/средний/последний слот); каскад split'ов;
-   удаление до пустой страницы и реюз из free-list; дубликаты; `max_bytes`
-   впритык и с перебором; слот ровно 4096 и 4097 Б; blob длиной 0;
-   rehash интернера на границе load factor.
-3. **Снапшот-подъём**: dump → load → структурная эквивалентность; битые
-   метаданные (цикл в цепочке, count > slots_per_page, индекс за пределами) →
-   `Error::Corrupt`, не паника (см. fuzz в `07-performance.md`).
-4. **BE-порядок**: для `Ordered` итерация строго возрастает по ключам на
-   случайных u32/u64/(u64,u32) ключах.
-5. **miri** на всём крейте (unsafe-пути обязаны исполняться в тестах).
+2. **Boundaries**: an empty arena; one element; an exactly-full page; a split at
+   every insert position (first/middle/last slot); a cascade of splits; delete to an
+   empty page and reuse from the free list; duplicates; `max_bytes` at the edge and
+   over; a slot of exactly 4096 and 4097 B; a zero-length blob; an interner rehash
+   at the load-factor boundary.
+3. **Snapshot load**: dump → load → structural equivalence; malformed metadata (a
+   cycle in a chain, count > slots_per_page, an out-of-range index) → `Error::Corrupt`,
+   not a panic (see the fuzz plan in `08-performance.md`).
+4. **BE order**: for `Ordered`, iteration is strictly ascending by key over random
+   u32/u64/(u64,u32) keys.
+5. **miri** over the whole crate (the unsafe paths must execute in tests).
 
-## Бенчи и счётчики
+## Counters and benches
 
-Счётчики (feature `counters`, нулевая стоимость без неё): `cmp_ops`,
-`bytes_shifted`, `pages_walked`, `splits`, `probes` (интернер). Гейты на
-эталонных нагрузках — в `07-performance.md`.
-
-Criterion-матрица (native + wasmtime): insert seq/random × 1k/100k/1M;
-get hit/miss; range-скан 1k подряд; интернер hit/miss; целевые ориентиры:
-insert ≤ 300 нс, get ≤ 150 нс @100k (native).
-
-Первый замер (native x86-64, 2026-07-18, `benches/storage.rs`, слот 16 Б,
-1024 шарда Uniform; на элемент):
-
-| Бенч | @100k | @1M | Цель |
-|---|---|---|---|
-| insert seq | 21 нс | 58 нс | ≤ 300 нс ✔ |
-| insert random | 63 нс | 133 нс | ≤ 300 нс ✔ |
-| get hit | 58 нс | 124 нс | ≤ 150 нс ✔ |
-| get miss | 63 нс | 127 нс | — |
-| range-скан 1k (Ordered) | 4.3 нс | — | — |
-| intern hit / miss / resolve | 17 / 35 / 6.6 нс | — | — |
-| chunk push 8Б / iter | 4.9 нс / 0.5 нс | — | — |
-
-Просадка @1M против @100k (×2) — кэш и длина цепочек (~4 страницы/шард
-при 1024 шардах), не алгоритмическая: рост логарифмический по странице и
-линейный по цепочке. Сырые отчёты criterion — `target/criterion`,
-сводки — `bench-history/`.
-
-## Открытые вопросы
-
-- Fence-ключи в метаданных страниц (спуск по цепочке без касания pool):
-  добавить, если бенч покажет > 15% времени в проходе цепочек.
-- Слияние полупустых страниц при удалениях: ждём реальных профилей от
-  `maintain`-компакции.
-- Компакция словаря интернера (мёртвые термы после массовых forget) — v2.
+Counters (feature `counters`, zero cost otherwise): `cmp_ops`, `bytes_shifted`,
+`pages_walked`, `splits`, `probes` (interner). Targets on the reference workloads:
+insert ≤ 300 ns, get ≤ 150 ns @100k (native). The full criterion matrix, the gate
+ceilings and the recorded numbers live in `08-performance.md`.
