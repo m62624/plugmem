@@ -66,6 +66,34 @@ await db.checkpoint();        // async (see below)
 db.close();                   // release the file + lock explicitly
 ```
 
+## Configuration & embeddings
+
+The constructor resolves settings **exactly like the CLI and MCP server**: an
+explicit `config` path wins, else `$PLUGMEM_CONFIG`, else
+`$XDG_CONFIG_HOME/plugmem/config.toml`, else all defaults.
+
+```typescript
+const db = new Plugmem("agent.plugmem", { config: "./plugmem.toml" });
+```
+
+```toml
+# plugmem.toml
+[engine]
+dim = 768                     # embedding size (0 = vectors off)
+
+[embedder]                    # optional — omit for lexical/tag/graph/time only
+kind  = "ollama"              # or openai / lmstudio / vllm / llamacpp
+url   = "http://localhost:11434/v1/embeddings"
+model = "nomic-embed-text"
+```
+
+With an `[embedder]`, a text-only `remember`/`recall` **auto-embeds** — the
+provider's HTTP call runs outside the engine lock. Without one, there is no
+embedder and vector recall is skipped (lexical, tag, graph and time recall still
+answer). The optional `dim` open option sets the embedding size when there is no
+config; if the config configured an embedder, its dimension governs and `dim`
+must agree. A `{ readOnly: true }` handle never auto-embeds — pass a vector.
+
 ## The verbs
 
 Method names mirror `plugmem-host`'s `Database` one-to-one.
