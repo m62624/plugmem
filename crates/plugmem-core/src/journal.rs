@@ -112,6 +112,10 @@ pub enum Op<'a> {
         /// pre-quantization so replay re-quantizes with the same pure
         /// function and reproduces every slot byte for byte.
         vector: Vec<f32>,
+        /// Metadata key→value pairs as remembered (empty = none). Replay
+        /// re-canonicalizes them (sorts, dedups) the same way `remember` did,
+        /// so the stored blob is reproduced byte for byte.
+        metadata: Vec<(&'a str, &'a str)>,
         /// Predecessor being revised ([`crate::id::FactId::NONE`] for op 1).
         revises: crate::id::FactId,
         /// The fact id assigned at execution time — authoritative on
@@ -225,6 +229,7 @@ impl<'a> Op<'a> {
                 tags,
                 links,
                 vector,
+                metadata,
                 revises,
                 assigned,
             } => {
@@ -252,6 +257,11 @@ impl<'a> Op<'a> {
                 payload.extend_from_slice(&(vector.len() as u32).to_le_bytes());
                 for &x in vector {
                     payload.extend_from_slice(&x.to_le_bytes());
+                }
+                payload.extend_from_slice(&(metadata.len() as u32).to_le_bytes());
+                for (k, v) in metadata {
+                    put_str(&mut payload, k);
+                    put_str(&mut payload, v);
                 }
                 if revises.is_none() { 1 } else { 2 }
             }
@@ -329,6 +339,13 @@ impl<'a> Op<'a> {
                     links.push((rel, dst));
                 }
                 let vector = take_vec_f32(payload, at)?;
+                let meta_cnt = take_u32(payload, at)?;
+                let mut metadata = Vec::new();
+                for _ in 0..meta_cnt {
+                    let k = take_str(payload, at)?;
+                    let v = take_str(payload, at)?;
+                    metadata.push((k, v));
+                }
                 Op::Remember {
                     now,
                     valid_from,
@@ -337,6 +354,7 @@ impl<'a> Op<'a> {
                     tags,
                     links,
                     vector,
+                    metadata,
                     revises,
                     assigned,
                 }

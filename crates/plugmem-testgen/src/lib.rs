@@ -475,6 +475,7 @@ pub fn apply<S: Storage>(
                     links: &link_refs,
                     vector: vector.as_deref(),
                     valid_from: None,
+                    metadata: None,
                 },
             )
             .map(Some)
@@ -499,6 +500,7 @@ pub fn apply<S: Storage>(
                     links: &[],
                     vector: vector.as_deref(),
                     valid_from: None,
+                    metadata: None,
                 },
             )
             .map(Some)

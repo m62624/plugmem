@@ -18,7 +18,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use plugmem_arena::{
-    Arena, ArenaCfg, BlobHeap, BlobHeapCfg, ChunkPool, ChunkPoolCfg, Interner, ListHandle,
+    Arena, ArenaCfg, BlobHeap, BlobHeapCfg, BlobId, ChunkPool, ChunkPoolCfg, Interner, ListHandle,
     ShardMode, TermId, key,
 };
 
@@ -67,6 +67,11 @@ pub struct RememberInput<'a> {
     pub vector: Option<&'a [f32]>,
     /// Validity start; defaults to `now`.
     pub valid_from: Option<u64>,
+    /// Optional metadata as key→value pairs (UTF-8). Passed in any order; the
+    /// engine canonicalizes (sorts keys, rejects duplicates) and stores them as
+    /// one opaque blob (see [`crate::metadata`]). `None` or an empty slice = no
+    /// metadata. The engine never interprets the values.
+    pub metadata: Option<&'a [(&'a str, &'a str)]>,
 }
 
 impl<'a> RememberInput<'a> {
@@ -80,6 +85,7 @@ impl<'a> RememberInput<'a> {
             links: &[],
             vector: None,
             valid_from: None,
+            metadata: None,
         }
     }
 }
@@ -162,6 +168,9 @@ pub enum FactFault {
     /// The fact is flagged with a vector but its slot is out of range or does
     /// not name the fact back (the fact↔slot bijection is broken).
     Vector,
+    /// The fact's metadata blob is out of range or does not decode to a
+    /// well-formed key→value map.
+    Metadata,
 }
 
 /// Engine size counters (specs/05). Every field is an O(1) read; the
@@ -226,6 +235,11 @@ pub struct Memory<'a> {
     temporal: Arena<'a, TemporalSlot>,
     /// Fact texts and canonical entity names.
     texts: BlobHeap<'a>,
+    /// Per-fact metadata blobs (canonical key→value, see [`crate::metadata`]),
+    /// referenced by [`FactAux::meta`]. Empty and inert until a fact carries
+    /// metadata; kept out of `texts` so this cold pool stays non-resident on an
+    /// mmap'd base until `show`/`export` touches it.
+    metas: BlobHeap<'a>,
     /// Terms: tokens, tags (verbatim), relation names, normalized entity
     /// names.
     terms: Interner<'a>,
@@ -275,6 +289,7 @@ impl<'a> Memory<'a> {
             edges_in: Arena::new(ord(cfg.shards_edges))?,
             temporal: Arena::new(ord(cfg.shards_temporal))?,
             texts: BlobHeap::new(blob),
+            metas: BlobHeap::new(blob),
             terms: Interner::new(blob),
             tag_lists: ChunkPool::new(ChunkPoolCfg::new().with_max_bytes(cfg.max_bytes)),
             bm25: Bm25Index::new(cfg.shards_postings, cfg.max_bytes)?,
@@ -391,6 +406,7 @@ impl<'a> Memory<'a> {
                     ref tags,
                     ref links,
                     ref vector,
+                    ref metadata,
                     revises,
                     assigned,
                 } => {
@@ -419,6 +435,7 @@ impl<'a> Memory<'a> {
                             links: &links.to_vec(),
                             vector: (!vector.is_empty()).then_some(vector.as_slice()),
                             valid_from: Some(valid_from),
+                            metadata: (!metadata.is_empty()).then_some(metadata.as_slice()),
                         },
                         revises,
                     )?;
@@ -688,6 +705,33 @@ impl<'a> Memory<'a> {
         }
     }
 
+    /// Fills `out` with the fact's metadata as key→value pairs in canonical
+    /// (ascending-key) order — the same order the blob was written and the same
+    /// order a host `BTreeMap` yields, so no layer sorts twice. Returns `true`
+    /// when the fact carries metadata (even an empty map is `false`, since an
+    /// empty map is stored as no blob).
+    ///
+    /// A tombstoned or unknown fact, a fact with no metadata blob, or a blob
+    /// that fails to decode (deferred validation, specs/16 §9 — `verify()`
+    /// reports it) all leave `out` empty and return `false`; this accessor never
+    /// panics on bad bytes.
+    pub fn metadata_of<'s>(&'s self, id: FactId, out: &mut Vec<(&'s str, &'s str)>) -> bool {
+        out.clear();
+        let Some(record) = self.fact(id) else {
+            return false;
+        };
+        if record.is_tombstone() {
+            return false;
+        }
+        let Some(aux) = self.fact_aux.get(&id.0.to_be_bytes()) else {
+            return false;
+        };
+        if aux.meta.0 == NONE_U32 || aux.meta.0 >= self.metas.len() as u32 {
+            return false;
+        }
+        crate::metadata::decode(self.metas.get(aux.meta), out).is_ok() && !out.is_empty()
+    }
+
     /// Resolves an entity by name (normalized), without creating it.
     pub fn entity(&mut self, name: &str) -> Option<EntityId> {
         let mut norm = core::mem::take(&mut self.name_scratch);
@@ -878,11 +922,22 @@ impl<'a> Memory<'a> {
         self.bm25.index_doc(id, &tfs)?;
         self.tf_scratch = tfs;
 
+        // Metadata: canonicalized (keys sorted, dups rejected) and stored as one
+        // opaque blob; an absent or empty map leaves the sentinel. Pushed before
+        // the fact record so a capacity/validation failure aborts the whole op.
+        let meta = match input.metadata {
+            Some(pairs) if !pairs.is_empty() => {
+                self.metas.push(&crate::metadata::encode(pairs)?)?
+            }
+            _ => BlobId(NONE_U32),
+        };
+
         // Tags: interned verbatim, deduplicated, listed on the fact and
         // inverted.
         let mut aux = FactAux {
             id,
             tags: ListHandle::EMPTY,
+            meta,
         };
         let mut seen_tags: [u32; 32] = [NONE_U32; 32];
         let mut seen_cnt = 0usize;
@@ -1054,6 +1109,7 @@ impl<'a> Memory<'a> {
             tags: input.tags.to_vec(),
             links: input.links.to_vec(),
             vector: input.vector.map(<[f32]>::to_vec).unwrap_or_default(),
+            metadata: input.metadata.map(<[_]>::to_vec).unwrap_or_default(),
             revises,
             assigned,
         }

@@ -83,6 +83,8 @@ mod kind {
     pub const HNSW_UPPER_POOL: u16 = 41;
     pub const HNSW_LISTS_META: u16 = 42;
     pub const HNSW_LISTS_POOL: u16 = 43;
+    pub const METAS_INDEX: u16 = 44;
+    pub const METAS_POOL: u16 = 45;
 }
 
 /// Byte length of the engine-state section.
@@ -107,6 +109,7 @@ pub(crate) struct Sections<'r, 'a> {
     pub(crate) entities: &'r Arena<'a, EntityRecord>,
     pub(crate) temporal: &'r Arena<'a, TemporalSlot>,
     pub(crate) texts: &'r BlobHeap<'a>,
+    pub(crate) metas: &'r BlobHeap<'a>,
     pub(crate) tag_lists: &'r ChunkPool<'a>,
     pub(crate) bm25: &'r Bm25Index<'a>,
     pub(crate) tags_idx: &'r IdListIndex<'a>,
@@ -320,6 +323,7 @@ impl<'a> Memory<'a> {
             entities: &self.entities,
             temporal: &self.temporal,
             texts: &self.texts,
+            metas: &self.metas,
             tag_lists: &self.tag_lists,
             bm25: &self.bm25,
             tags_idx: &self.tags_idx,
@@ -377,6 +381,11 @@ impl<'a> Memory<'a> {
         s.texts.dump_pool(&mut p);
         f(kind::TEXTS_INDEX, &[&i])?;
         f(kind::TEXTS_POOL, &[&p])?;
+        let (mut i, mut p) = (Vec::new(), Vec::new());
+        s.metas.dump_index(&mut i);
+        s.metas.dump_pool(&mut p);
+        f(kind::METAS_INDEX, &[&i])?;
+        f(kind::METAS_POOL, &[&p])?;
         let (mut i, mut p, mut t) = (Vec::new(), Vec::new(), Vec::new());
         self.terms.dump_index(&mut i);
         self.terms.dump_pool(&mut p);
@@ -595,6 +604,11 @@ impl<'a> Memory<'a> {
             section(&snap, kind::TEXTS_INDEX)?,
             section(&snap, kind::TEXTS_POOL)?,
         )?;
+        mem.metas = BlobHeap::load(
+            blob,
+            section(&snap, kind::METAS_INDEX)?,
+            section(&snap, kind::METAS_POOL)?,
+        )?;
         mem.terms = Interner::load(
             blob,
             section(&snap, kind::TERMS_INDEX)?,
@@ -697,6 +711,11 @@ impl<'a> Memory<'a> {
             blob,
             section(&snap, kind::TEXTS_INDEX)?,
             section(&snap, kind::TEXTS_POOL)?,
+        )?;
+        mem.metas = BlobHeap::load_borrowed(
+            blob,
+            section(&snap, kind::METAS_INDEX)?,
+            section(&snap, kind::METAS_POOL)?,
         )?;
         mem.terms = Interner::load_borrowed(
             blob,
@@ -833,9 +852,10 @@ impl<'a> Memory<'a> {
                 return Err(Error::Corrupt("fact without a vector flag carries a slot"));
             }
         }
+        let metas = self.metas.len() as u32;
         let mut visited = alloc::vec![false; self.tag_lists.chunks()];
         for aux in self.fact_aux.iter() {
-            if aux.id.0 >= self.next_fact {
+            if aux.id.0 >= self.next_fact || (aux.meta.0 != NONE_U32 && aux.meta.0 >= metas) {
                 return Err(Error::Corrupt("aux record references out of range"));
             }
             self.tag_lists.validate_chain(&aux.tags, &mut visited)?;
@@ -916,6 +936,16 @@ impl<'a> Memory<'a> {
                 return Err(Error::Corrupt("stored text is not valid UTF-8"));
             }
         }
+        // Metadata: every referenced blob decodes to a well-formed key→value
+        // map (bounds, UTF-8, strictly ascending unique keys). Ranges were
+        // validated at load; this is the content confirmation, like the text
+        // pass above.
+        let mut pairs = Vec::new();
+        for aux in self.fact_aux.iter() {
+            if aux.meta.0 != NONE_U32 {
+                crate::metadata::decode(self.metas.get(aux.meta), &mut pairs)?;
+            }
+        }
         // Vectors: structural self-check, then the fact↔slot bijection (each
         // HAS_VECTOR fact points at a slot that names it back; no slot is
         // orphaned).
@@ -941,14 +971,18 @@ impl<'a> Memory<'a> {
     /// Attributes [`Memory::verify`]'s content checks to individual facts — the
     /// salvage predicate for `recover` (specs/16 §9). Walks every live
     /// (non-tombstone) fact and returns those whose stored text is not valid
-    /// UTF-8, or that are flagged with a vector whose slot is out of range or
-    /// does not name the fact back. It reads the text and vector pools (like
-    /// `verify`), so it residents them; the accessors it uses are panic-free on
-    /// any bytes. Unlike `verify`, it does not fail on the first problem — it
+    /// UTF-8, that are flagged with a vector whose slot is out of range or does
+    /// not name the fact back, or whose metadata blob does not decode to a
+    /// well-formed key→value map. It reads the text, vector and metadata pools
+    /// (like `verify`), so it residents them; the accessors it uses are
+    /// panic-free on any bytes. Unlike `verify`, it does not fail on the first
+    /// problem — it
     /// reports each faulty fact so the caller can `forget` it and rebuild a
     /// clean image from the survivors.
     pub fn faulty_facts(&self) -> Vec<(FactId, FactFault)> {
         let vslots = self.vecs.len() as u32;
+        let metas = self.metas.len() as u32;
+        let mut pairs = Vec::new();
         let mut out = Vec::new();
         for i in 0..self.next_fact {
             let id = FactId(i);
@@ -966,6 +1000,17 @@ impl<'a> Memory<'a> {
                 && (record.vector >= vslots || self.vecs.slot_fact(record.vector as usize) != id.0)
             {
                 out.push((id, FactFault::Vector));
+                continue;
+            }
+            // Metadata: a referenced blob that is out of range or does not decode
+            // to a well-formed key→value map. `metadata_of` hides such a fact's
+            // metadata gracefully; here it becomes an explicit salvage fault.
+            if let Some(aux) = self.fact_aux.get(&id.0.to_be_bytes())
+                && aux.meta.0 != NONE_U32
+                && (aux.meta.0 >= metas
+                    || crate::metadata::decode(self.metas.get(aux.meta), &mut pairs).is_err())
+            {
+                out.push((id, FactFault::Metadata));
             }
         }
         out

@@ -16,6 +16,7 @@ fn host_data_types_round_trip() {
         kept: 100,
         dropped_text: 2,
         dropped_vector: 1,
+        dropped_metadata: 3,
     };
     let json = serde_json::to_string(&report).unwrap();
     assert_eq!(

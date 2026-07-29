@@ -398,6 +398,7 @@ fn do_recover(src: &Path, dst: &Path, settings: &Settings, json: bool, out: &mut
                         "kept": r.kept,
                         "dropped_text": r.dropped_text,
                         "dropped_vector": r.dropped_vector,
+                        "dropped_metadata": r.dropped_metadata,
                         "dst": dst.display().to_string(),
                     })
                 )
@@ -405,11 +406,12 @@ fn do_recover(src: &Path, dst: &Path, settings: &Settings, json: bool, out: &mut
             } else {
                 writeln!(
                     out,
-                    "recovered to {}: kept {}, dropped {} text + {} vector",
+                    "recovered to {}: kept {}, dropped {} text + {} vector + {} metadata",
                     dst.display(),
                     r.kept,
                     r.dropped_text,
-                    r.dropped_vector
+                    r.dropped_vector,
+                    r.dropped_metadata
                 )
                 .ok();
             }

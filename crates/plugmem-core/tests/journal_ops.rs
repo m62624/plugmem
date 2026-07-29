@@ -26,6 +26,7 @@ fn sample_ops() -> Vec<Op<'static>> {
             tags: vec!["pref", "rust"],
             links: vec![("works_on", "plugmem")],
             vector: vec![],
+            metadata: vec![("mime", "text/plain"), ("uri", "s3://b/x")],
             revises: FactId::NONE,
             assigned: FactId(0),
         },
@@ -37,6 +38,7 @@ fn sample_ops() -> Vec<Op<'static>> {
             tags: vec![],
             links: vec![],
             vector: vec![],
+            metadata: vec![],
             revises: FactId(0),
             assigned: FactId(1),
         },
@@ -120,6 +122,7 @@ fn decode_rejects_op_revises_disagreement() {
         tags: vec![],
         links: vec![],
         vector: vec![],
+        metadata: vec![],
         revises: FactId(5),
         assigned: FactId(6),
     }
@@ -152,6 +155,7 @@ fn replay_rejects_semantically_corrupt_journals() {
         tags: vec![],
         links: vec![],
         vector: vec![],
+        metadata: vec![],
         revises: FactId::NONE,
         assigned: FactId(7),
     }])
@@ -167,6 +171,7 @@ fn replay_rejects_semantically_corrupt_journals() {
         tags: vec![],
         links: vec![],
         vector: vec![],
+        metadata: vec![],
         revises: FactId(3),
         assigned: FactId(0),
     }])
@@ -195,6 +200,7 @@ fn replay_rejects_semantically_corrupt_journals() {
         tags: vec![],
         links: vec![],
         vector: vec![],
+        metadata: vec![],
         revises: FactId::NONE,
         assigned: FactId(0),
     };

@@ -196,6 +196,9 @@ pub struct RecoverReport {
     pub dropped_text: usize,
     /// Facts dropped because their vector slot was out of range or mismatched.
     pub dropped_vector: usize,
+    /// Facts dropped because their metadata blob did not decode to a
+    /// well-formed key→value map.
+    pub dropped_metadata: usize,
 }
 
 /// Visits the currently-open facts (skipping closed revisions and tombstones),
@@ -880,11 +883,13 @@ impl Database {
         let mut scratch = MemStorage::new();
         let mut dropped_text = 0usize;
         let mut dropped_vector = 0usize;
+        let mut dropped_metadata = 0usize;
         for (id, fault) in mem.faulty_facts() {
             mem.forget(&mut scratch, now, id)?;
             match fault {
                 FactFault::Text => dropped_text += 1,
                 FactFault::Vector => dropped_vector += 1,
+                FactFault::Metadata => dropped_metadata += 1,
             }
         }
 
@@ -909,6 +914,7 @@ impl Database {
             kept,
             dropped_text,
             dropped_vector,
+            dropped_metadata,
         })
     }
 }

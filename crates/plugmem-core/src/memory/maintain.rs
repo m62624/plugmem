@@ -123,6 +123,9 @@ struct RebuildMeta {
     entities: Arena<'static, EntityRecord>,
     temporal: Arena<'static, TemporalSlot>,
     tag_lists: ChunkPool<'static>,
+    /// Compacted metadata blobs of the live facts (built owned in RAM on both
+    /// paths — metadata is pointers/attributes, ∝ record count, not a big pool).
+    metas: BlobHeap<'static>,
     bm25: Bm25Index<'static>,
     tags_idx: IdListIndex<'static>,
     entity_facts: IdListIndex<'static>,
@@ -148,6 +151,7 @@ struct Rebuilt {
     entities: Arena<'static, EntityRecord>,
     fact_aux: Arena<'static, FactAux>,
     texts: BlobHeap<'static>,
+    metas: BlobHeap<'static>,
     tag_lists: ChunkPool<'static>,
     bm25: Bm25Index<'static>,
     tags_idx: IdListIndex<'static>,
@@ -208,6 +212,7 @@ impl Memory<'_> {
             + self.entities.pool_bytes()
             + self.hnsw.pool_bytes()
             + self.texts.pool_bytes()
+            + self.metas.pool_bytes()
             + self.tag_lists.pool_bytes()
             + self.bm25.pool_bytes()
             + self.tags_idx.pool_bytes()
@@ -236,6 +241,7 @@ impl Memory<'_> {
                 entities: m.entities,
                 fact_aux: m.fact_aux,
                 texts: pools.texts,
+                metas: m.metas,
                 tag_lists: m.tag_lists,
                 bm25: m.bm25,
                 tags_idx: m.tags_idx,
@@ -272,6 +278,11 @@ impl Memory<'_> {
         let mut tags_idx = IdListIndex::new(cfg.shards_postings, cfg.max_bytes)?;
         let mut entity_facts = IdListIndex::new(cfg.shards_entities, cfg.max_bytes)?;
         let mut temporal = Arena::new(ord(cfg.shards_temporal))?;
+        let mut metas = BlobHeap::new(
+            BlobHeapCfg::new()
+                .with_max_bytes(cfg.max_bytes)
+                .with_max_blob(cfg.max_blob),
+        );
 
         // Entities first (id order), each with its name pushed into the new
         // text pool. Entities are never purged, so a gap is corruption.
@@ -352,7 +363,14 @@ impl Memory<'_> {
                     tags_idx.push(term, id, 0)?;
                 }
             }
-            fact_aux.insert(&FactAux { id, tags })?;
+            // Metadata rides across the compaction verbatim: the stored blob is
+            // already canonical, so it is copied byte for byte into the new heap.
+            let meta = if aux.meta.0 == NONE_U32 {
+                BlobId(NONE_U32)
+            } else {
+                metas.push(self.metas.get(aux.meta))?
+            };
+            fact_aux.insert(&FactAux { id, tags, meta })?;
 
             // Entity index and temporal index.
             if let Some(entity) = rec.entity.some() {
@@ -385,6 +403,7 @@ impl Memory<'_> {
                 entities,
                 temporal,
                 tag_lists,
+                metas,
                 bm25,
                 tags_idx,
                 entity_facts,
@@ -448,6 +467,7 @@ impl Memory<'_> {
             entities: &m.entities,
             temporal: &m.temporal,
             texts: &texts,
+            metas: &m.metas,
             tag_lists: &m.tag_lists,
             bm25: &m.bm25,
             tags_idx: &m.tags_idx,
@@ -500,6 +520,7 @@ impl Memory<'_> {
         self.entities = r.entities;
         self.fact_aux = r.fact_aux;
         self.texts = r.texts;
+        self.metas = r.metas;
         self.tag_lists = r.tag_lists;
         self.bm25 = r.bm25;
         self.tags_idx = r.tags_idx;

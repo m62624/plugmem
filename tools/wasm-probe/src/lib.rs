@@ -71,6 +71,7 @@ pub fn scenario_hash() -> u64 {
             links: &[("relates_to", ents[((i + 1) % 4) as usize])],
             vector: Some(&vec_buf),
             valid_from: None,
+            metadata: None,
         };
         let out = mem.remember(&mut store, input).expect("remember");
         if i % 7 == 0 {
@@ -88,6 +89,7 @@ pub fn scenario_hash() -> u64 {
                 links: &[],
                 vector: Some(&vec_buf),
                 valid_from: None,
+                metadata: None,
             };
             mem.revise(&mut store, out.id, rin).expect("revise");
         }

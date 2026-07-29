@@ -59,6 +59,7 @@ fn fact_aux_reference_layout() {
     let rec = FactAux {
         id: FactId(0x0A0B_0C0D),
         tags,
+        meta: BlobId(0x1A1B_1C1D),
     };
     #[rustfmt::skip]
     let want = [
@@ -66,6 +67,7 @@ fn fact_aux_reference_layout() {
         0x00, 0x00, 0x00, 0x00,   // handle.head = chunk 0
         0x00, 0x00, 0x00, 0x00,   // handle.tail = chunk 0
         0x00, 0x00, 0x00, 0x02,   // handle.len = 2
+        0x1A, 0x1B, 0x1C, 0x1D,   // meta blob id (BE)
     ];
     assert_eq!(bytes_of(&rec), want);
     let back = FactAux::read(&want);

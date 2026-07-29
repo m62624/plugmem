@@ -130,11 +130,13 @@ impl Slot for FactRecord {
     }
 }
 
-/// Per-fact auxiliary record: the tag-list handle (specs/02, 16-byte slot,
-/// Uniform arena; layout `[id 4 | ListHandle 12]`).
+/// Per-fact auxiliary record: the tag-list handle and the optional metadata
+/// blob (specs/02, 20-byte slot, Uniform arena; layout
+/// `[id 4 | ListHandle 12 | meta 4]`).
 ///
-/// Split from [`FactRecord`] so the hot 48-byte record stays hot: tags are
-/// touched only by tag-filtered queries and `maintain`.
+/// Split from [`FactRecord`] so the hot 48-byte record stays hot: tags and
+/// metadata are touched only by tag-filtered queries, `show`/`export` and
+/// `maintain`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FactAux {
@@ -142,21 +144,27 @@ pub struct FactAux {
     pub id: FactId,
     /// The fact's tag list (`TermId` values) in the tag `ChunkPool`.
     pub tags: ListHandle,
+    /// The fact's metadata blob in the `metas` heap (a canonical key→value
+    /// encoding, see [`crate::metadata`]), or [`BlobId`]`(`[`NONE_U32`]`)` when
+    /// the fact carries no metadata. The engine never interprets the bytes.
+    pub meta: BlobId,
 }
 
 impl Slot for FactAux {
-    const SIZE: usize = 16;
+    const SIZE: usize = 20;
     const KEY_LEN: usize = 4;
 
     fn write(&self, out: &mut [u8]) {
         key::write_u32(out, self.id.0);
         out[4..16].copy_from_slice(&self.tags.to_bytes());
+        key::write_u32(&mut out[16..], self.meta.0);
     }
 
     fn read(bytes: &[u8]) -> Self {
         Self {
             id: FactId(key::read_u32(bytes)),
             tags: ListHandle::from_bytes(bytes[4..16].try_into().unwrap()),
+            meta: BlobId(key::read_u32(&bytes[16..])),
         }
     }
 }
@@ -319,7 +327,7 @@ impl Slot for TemporalSlot {
 /// break, catch it before any test runs.
 const _: () = {
     assert!(FactRecord::SIZE == 48 && FactRecord::KEY_LEN == 4);
-    assert!(FactAux::SIZE == 16 && FactAux::KEY_LEN == 4);
+    assert!(FactAux::SIZE == 20 && FactAux::KEY_LEN == 4);
     assert!(EntityRecord::SIZE == 24 && EntityRecord::KEY_LEN == 4);
     assert!(EntityByName::SIZE == 8 && EntityByName::KEY_LEN == 8);
     assert!(EdgeSlot::SIZE == 16 && EdgeSlot::KEY_LEN == 12);

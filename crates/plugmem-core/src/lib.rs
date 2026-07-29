@@ -20,6 +20,7 @@ pub mod id;
 pub mod index;
 pub mod journal;
 pub mod memory;
+pub(crate) mod metadata;
 pub mod model;
 pub mod snapshot;
 pub mod storage;
