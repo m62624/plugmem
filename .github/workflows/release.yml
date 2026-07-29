@@ -40,8 +40,11 @@ jobs:
             echo "rc_branch=rc/v$VERSION"
           } >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
       - uses: Swatinem/rust-cache@v2
-      - name: Bump workspace version and push RC branch
+      - name: Bump workspace and npm versions, then push RC branch
         run: |
           VERSION="${{ steps.info.outputs.version }}"
           RC="${{ steps.info.outputs.rc_branch }}"
@@ -50,6 +53,7 @@ jobs:
           git checkout -B "$RC"
           cargo install cargo-edit --locked
           cargo set-version --workspace "$VERSION"
+          npm --prefix crates/plugmem-napi version "$VERSION" --no-git-tag-version --allow-same-version
           git add -A
           # On the very first release the workspace is already at $VERSION, so
           # set-version is a no-op and there is nothing to commit — that's fine.
