@@ -15,6 +15,9 @@ fusion; tags act as filters. What plugmem is actually about:
   revision chains kept intact, physical erasure on `maintain`;
 - **an entity graph** — typed edges between entities, relational knowledge,
   not just nearest-neighbor vectors;
+- **opaque per-fact metadata** — an optional key→value map (a URI to the real
+  payload in another store, a mime type, an external key); the engine stores
+  and returns it but never interprets it — big blobs live outside, by reference;
 - **conflict surfacing on `remember`** — a new fact comes back with the
   live facts it may duplicate or contradict; the engine never merges on
   its own, the caller decides;

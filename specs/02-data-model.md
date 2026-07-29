@@ -45,9 +45,31 @@
 | 32 | 8 | `valid_from` | с какого момента истинно (default = recorded_at) |
 | 40 | 8 | `valid_to` | до какого момента; `u64::MAX` = открыт («действует сейчас») |
 
-Теги факта: список `TermId` в `ChunkPool` (хэндлы — в отдельной
-`Arena<FactAux>` Uniform, слот 16 Б: id 4 + ListHandle-компакт 12). Обратный
-индекс tag→facts — в `04-indexes-recall.md`.
+Теги факта и метаданные — в холодном сайдкаре `Arena<FactAux>` Uniform, слот
+**20 Б**: id 4 + ListHandle-компакт 12 (теги) + `meta` 4 (BlobId метаданных или
+`NONE`). Вынесены из горячего 48-байтного `FactRecord`, чтобы он оставался
+горячим. Обратный индекс tag→facts — в `04-indexes-recall.md`.
+
+### Метаданные факта — отдельный blob-heap `metas`, один blob на факт
+
+Опциональный словарь ключ→значение (UTF-8 строки): указатели/атрибуты (URI на
+реальный payload во внешнем хранилище, mime, внешний ключ). Движок **не
+интерпретирует** содержимое. Хранится как один опаковый blob в `metas`
+(зеркало `texts`, но отдельный пул — холодный, не резидентен на mmap-базе до
+`show`/`export`), ссылка — `FactAux.meta`. Каноничная кодировка одного blob:
+
+```text
+[count: u32 LE]
+count раз, ключи СТРОГО по возрастанию (сырые UTF-8 байты), без дублей:
+  [klen: u32 LE][key UTF-8]
+  [vlen: u32 LE][val UTF-8]
+```
+
+Порядок задаётся ровно в одном месте — при энкоде (`core::metadata::encode`
+сортирует ключи, отвергает дубли), поэтому все читатели (core, host, обёртки)
+отдают один и тот же порядок, а snapshot/replay byte-identical. Пустой словарь =
+нет blob (`meta = NONE`). `verify` декодирует каждый blob (UTF-8, ascending,
+unique); `faulty_facts` атрибутирует `FactFault::Metadata`.
 
 ### EntityRecord — Arena, Uniform, слот 24 Б, KEY_LEN 4
 

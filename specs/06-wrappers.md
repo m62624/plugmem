@@ -27,7 +27,7 @@ default):
 
 | Команда | Суть |
 |---|---|
-| `plugmem-cli remember "text" [--entity E] [--tag T]... [--link REL:ENTITY]... [--valid-from TS]` | remember; печатает id + similar-подсказки |
+| `plugmem-cli remember "text" [--entity E] [--tag T]... [--link REL:ENTITY]... [--meta KEY=VALUE]... [--valid-from TS]` | remember; печатает id + similar-подсказки. `--meta` повторяем, last-wins на ключ |
 | `plugmem-cli recall [QUERY] [--tag]... [--entity]... [--as-of TS] [--range A B] [-k N] [--budget N] [--closed]` | recall; человеческий вывод = `rendered` |
 | `plugmem-cli revise ID "text" [...]` | revise |
 | `plugmem-cli forget ID` | forget |
@@ -49,8 +49,9 @@ Cold start — критичный путь CLI (процесс на команд
 
 stdio JSON-RPC. Инструменты (схемы зеркалят CLI/ядро):
 
-- `plugmem_remember { text, entity?, tags?, links?, valid_from? }` →
-  `{ id, similar[] }` — в описании инструмента прямо сказано: «если similar
+- `plugmem_remember { text, entity?, tags?, links?, metadata?, valid_from? }` →
+  `{ id, similar[] }` (`metadata` — объект строк, opaque; `show` его отдаёт) — в
+  описании инструмента прямо сказано: «если similar
   содержит противоречие — реши: plugmem_revise или оставь оба»;
 - `plugmem_recall { query?, tags?, entities?, as_of?, range?, k?, budget?, include_closed? }`
   → `{ rendered, facts[], edges[] }`;

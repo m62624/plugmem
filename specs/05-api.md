@@ -47,6 +47,10 @@ impl Memory {
     /// (db_uuid и HNSW-поля доклеятся без слома).
     pub fn stats(&self) -> Stats;
     pub fn get(&self, id: FactId) -> Option<FactView<'_>>;
+    /// Метаданные факта в буфер вызывающего, в каноничном (возрастающем) порядке;
+    /// толерантно к битым байтам (скрывает, не паникует). host собирает из пар
+    /// `BTreeMap`, CLI/MCP/napi — объект (`Record<string,string>`), тот же порядок.
+    pub fn metadata_of(&self, id: FactId, out: &mut Vec<(&str, &str)>) -> bool;
     /// &mut self — нормализация имени использует скретч токенизатора.
     pub fn entity(&mut self, name: &str) -> Option<EntityId>;
 }
@@ -72,6 +76,8 @@ pub struct RememberInput<'a> {
     pub links: &'a [(&'a str, &'a str)],     // (rel, target_entity), ≤ 16; рёбра entity→target
     pub vector: Option<&'a [f32]>,           // len == cfg.dim; квантуется внутри
     pub valid_from: Option<u64>,             // default now
+    pub metadata: Option<&'a [(&'a str, &'a str)]>, // ключ→значение, любой порядок; движок
+                                             // канонизирует (сорт+дедуп) и хранит опаково
 }
 
 pub struct RememberOutcome {

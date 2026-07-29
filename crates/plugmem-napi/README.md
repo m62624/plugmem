@@ -51,6 +51,7 @@ const out = db.remember({
   entity: "user",
   tags: ["pref"],
   links: [{ rel: "works_at", entity: "acme" }],
+  metadata: { source: "chat", uri: "s3://bucket/note.txt" }, // opaque; a pointer
 });
 out.id;                       // number
 out.similar;                  // Similar[] — the engine surfaces conflicts, you decide
@@ -58,6 +59,9 @@ out.similar;                  // Similar[] — the engine surfaces conflicts, yo
 const res = db.recall({ query: "runtime?", k: 5 });
 res.rendered;                 // the prompt-ready block
 res.facts;                    // RecalledFact[] — { id, score, entity, recordedAt, … }
+
+const card = db.get(out.id);
+card.metadata;                // Record<string,string> — keys sorted, {} when none
 
 db.revise(out.id, { text: "prefers async-std" });
 db.link({ src: "user", rel: "works_at", dst: "acme" });

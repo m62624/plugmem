@@ -118,7 +118,7 @@ engine keeps no clock, so `now` comes from the system clock at each call.
 
 | command | what it does |
 |---|---|
-| `remember <TEXT> [--entity E] [--tag T]… [--link REL:ENTITY]… [--valid-from TS]` | store a fact; prints its id and any similar/conflicting facts |
+| `remember <TEXT> [--entity E] [--tag T]… [--link REL:ENTITY]… [--meta KEY=VALUE]… [--valid-from TS]` | store a fact; prints its id and any similar/conflicting facts. `--meta` is repeatable (opaque key→value, e.g. a URI; last value wins per key) |
 | `recall [QUERY] [--tag T]… [--entity E]… [--as-of TS] [--range FROM TO] [-k N] [--closed]` | ranked, token-budgeted block; sources compose. Each line is `- [fN] text …` — `N` is the fact's id (see below) |
 | `revise <ID> <TEXT> [same flags as remember]` | close the old fact, record the successor |
 | `forget <ID>` | tombstone a fact (purged physically at the next `maintain`) |
@@ -152,8 +152,10 @@ database — run `checkpoint` (or `maintain`) first if the journal is dirty.
 ### Examples
 
 ```sh
-# Remember, with a subject entity and a tag:
-plugmem-cli remember "prefers tokio with pinned versions" --entity user --tag pref
+# Remember, with a subject entity, a tag, and opaque metadata (a URI to the
+# real payload in another store — the engine never interprets it):
+plugmem-cli remember "prefers tokio with pinned versions" --entity user --tag pref \
+    --meta source=chat --meta uri=s3://bucket/note.txt
 
 # Recall — a ranked block ready to paste into a prompt:
 plugmem-cli recall "which runtime"
