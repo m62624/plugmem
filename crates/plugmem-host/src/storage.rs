@@ -275,6 +275,54 @@ const MANIFEST_VERSION: u16 = 1;
 /// Manifest length: magic(4) + version(2) + pad(2) + gen(8) + checksum(8).
 const MANIFEST_LEN: usize = 24;
 
+/// How many times a reader retries an open across the Windows manifest-swap
+/// window. Publishing the manifest is a `rename(tmp, base)`, which on Windows
+/// briefly leaves the old `base` *delete-pending*; a reader opening it in that
+/// window gets a transient `ERROR_ACCESS_DENIED` (5) / `ERROR_SHARING_VIOLATION`
+/// (32). POSIX renames are atomic with respect to a concurrent open, so this
+/// never happens there. `100 * 1ms` dwarfs the microsecond swap while adding a
+/// negligible delay to a genuine failure.
+#[cfg(windows)]
+const SHARE_RETRIES: u32 = 100;
+
+/// True for the transient Windows sharing errors a rename-replace throws at a
+/// concurrent open. Always `false` off Windows (codes 5/32 mean unrelated things
+/// on POSIX), so the retry paths below collapse to the original single shot.
+fn is_transient_share_error(e: &std::io::Error) -> bool {
+    #[cfg(windows)]
+    {
+        matches!(e.raw_os_error(), Some(5) | Some(32))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = e;
+        false
+    }
+}
+
+/// `std::fs::read`, retried across the transient Windows rename-swap window so a
+/// reader rides over a concurrent manifest publish instead of spuriously failing
+/// with "Access is denied". On non-Windows it is a plain `std::fs::read`.
+fn read_across_rename(path: &Path) -> std::io::Result<Vec<u8>> {
+    #[cfg(windows)]
+    {
+        let mut attempts = 0u32;
+        loop {
+            match std::fs::read(path) {
+                Err(e) if is_transient_share_error(&e) && attempts < SHARE_RETRIES => {
+                    attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                other => return other,
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::read(path)
+    }
+}
+
 /// 64-bit FNV-1a — a dependency-free integrity check for the manifest. The
 /// manifest is written atomically (tmp + rename), so it can never be torn; this
 /// only catches external garbage / bit-rot in the tiny fixed record.
@@ -301,7 +349,7 @@ fn gen_tmp_path(base: &Path, n: u64) -> PathBuf {
 /// fresh database); `Err(Corrupt)` when it is present but malformed; `Err(Io)`
 /// on a real filesystem failure. The returned generation is always ≥ 1.
 pub(crate) fn read_manifest(base: &Path) -> Result<Option<u64>, HostError> {
-    let bytes = match std::fs::read(base) {
+    let bytes = match read_across_rename(base) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(HostError::io(base, e)),
@@ -438,6 +486,12 @@ pub(crate) fn pin_current_generation(
             Ok(f) => f,
             // GC reclaimed it between the manifest read and the open — retry.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            // Windows: a gen file being GC-reclaimed can surface as a transient
+            // delete-pending share error rather than NotFound — also a retry.
+            Err(e) if is_transient_share_error(&e) => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            }
             Err(e) => return Err(HostError::io(&genp, e)),
         };
         match file.try_lock_shared() {
