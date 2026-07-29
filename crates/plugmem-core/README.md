@@ -56,7 +56,7 @@ when you need `no_std` or your own persistence.
 ## Who this is for
 
 Agents and applications that need a **personal memory**: tens of
-thousands to a million facts about a user, a project, a codebase — with
+thousands to a hundred thousand facts about a user, a project, a codebase — with
 temporal reasoning ("what was true then"), revision history, a
 relationship graph, and hybrid retrieval, all inside the process and
 inside a single file. It is not a horizontally scalable search cluster

@@ -323,13 +323,6 @@ to toggle (it builds and is gated on `wasm32v1-none` in CI).
   Off by default; pulls in `serde` (itself `no_std`, `derive` + `alloc`) only
   when enabled, so the default build keeps its minimal dependency set.
 
-## Testing
-
-75 boundary tests + 6 proptest reference models (`BTreeMap`,
-`Vec<Vec<u8>>`, per-list model, `HashMap` bijection), ≥90% line coverage
-with hand-audited analyzer artifacts, clippy-clean with `counters` off and
-on, miri on the full suite, and `wasm32v1-none` builds as a hard gate.
-
 ## License
 
 MIT.

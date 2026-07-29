@@ -39,8 +39,8 @@ fusion; tags act as filters. What plugmem is actually about:
 
 **Where it fits — and where it doesn't.** plugmem holds the memory of a local
 agent or an embedded system: one process, one file, nothing to run. It targets a
-single machine — up to a few million facts (the flat storage layer is
-benchmarked to a million entries, recall to a hundred-thousand-op corpus) — not
+single machine — a design center of ~100k facts (where recall is
+benchmarked; the flat storage layer is benchmarked to a million entries) — not
 a distributed vector store. For nearest-neighbour search over tens of millions
 of embeddings, sharded across a cluster or behind a managed API, use a dedicated
 one ([Qdrant](https://qdrant.tech), [Milvus](https://milvus.io),
