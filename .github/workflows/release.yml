@@ -308,7 +308,7 @@ jobs:
   publish-napi:
     name: Publish npm packages
     needs: [prepare, tag, dist, napi-build]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       id-token: write
@@ -334,9 +334,9 @@ jobs:
           pattern: napi-*
           merge-multiple: true
       - name: Sync the npm package versions to the release version
-        run: napi version
+        run: npx napi version
       - name: Move each addon into its platform package
-        run: napi artifacts --dir artifacts
+        run: npx napi artifacts --dir artifacts
       - name: Publish platform packages + meta (skip versions already published)
         # `napi prepublish` wires the meta's optionalDependencies and publishes
         # each platform package; then the meta itself.
@@ -350,7 +350,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          napi prepublish -t npm --skip-gh-release
+          npx napi prepublish -t npm --skip-gh-release
           npm publish --access public || echo "meta already published — skipping"
 
   sync:
