@@ -277,10 +277,13 @@ fn remember(db: &Database, id: Value, args: Option<&Value>, revise: Option<FactI
         .iter()
         .map(|(r, e)| (r.as_str(), e.as_str()))
         .collect();
+    let meta = arg_meta(args);
+    let meta_refs: Vec<(&str, &str)> = meta.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let input = RememberInput {
         entity: arg_str(args, "entity"),
         tags: &tag_refs,
         links: &link_refs,
+        metadata: (!meta_refs.is_empty()).then_some(meta_refs.as_slice()),
         valid_from: arg_u64(args, "valid_from"),
         ..RememberInput::text(now_ms(), text)
     };
@@ -411,6 +414,11 @@ fn remember_like(name: &str, description: &str, with_id: bool) -> Value {
                 "required": ["rel", "entity"]
             },
             "description": messages::ARG_LINKS
+        },
+        "metadata": {
+            "type": "object",
+            "additionalProperties": { "type": "string" },
+            "description": messages::ARG_METADATA
         },
         "valid_from": { "type": "integer", "minimum": 0, "description": messages::ARG_VALID_FROM },
         "format": format_prop()
@@ -594,6 +602,22 @@ fn arg_links(args: Option<&Value>) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+/// The `metadata` argument: a flat object of string values → owned key→value
+/// pairs, sorted and deduped (a `BTreeMap`), non-string values skipped. The
+/// engine canonicalizes regardless; sorting here keeps the borrowed pairs clean.
+fn arg_meta(args: Option<&Value>) -> Vec<(String, String)> {
+    args.and_then(|a| a.get("metadata"))
+        .and_then(Value::as_object)
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect::<std::collections::BTreeMap<_, _>>()
+                .into_iter()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The `range` argument as `[from, to)`, accepting a `[from, to]` array.
 fn arg_range(args: Option<&Value>) -> Option<(u64, u64)> {
     let arr = args
@@ -688,6 +712,7 @@ mod tests {
             "s": "hi", "n": 7, "b": true,
             "list": ["x", 1, "y"],
             "links": [{"rel": "r", "entity": "e"}, {"rel": "only"}],
+            "metadata": {"uri": "s3://b/x", "n2": 5, "mime": "pdf"},
             "range": [10, 20]
         });
         let a = Some(&a);
@@ -698,6 +723,14 @@ mod tests {
         assert!(!arg_bool(a, "missing"));
         assert_eq!(arg_str_vec(a, "list"), vec!["x", "y"]); // non-strings skipped
         assert_eq!(arg_links(a), vec![("r".to_string(), "e".to_string())]); // partial skipped
+        // metadata: sorted, non-string values skipped.
+        assert_eq!(
+            arg_meta(a),
+            vec![
+                ("mime".to_string(), "pdf".to_string()),
+                ("uri".to_string(), "s3://b/x".to_string()),
+            ]
+        );
         assert_eq!(arg_range(a), Some((10, 20)));
         assert_eq!(arg_range(None), None);
         assert_eq!(format_arg(a), "json");
@@ -896,6 +929,38 @@ mod tests {
             ))
             .contains("skill")
         );
+    }
+
+    #[test]
+    fn remember_accepts_metadata_and_show_returns_it_sorted() {
+        let tmp = TempDir::new("meta");
+        let (db, _) = Database::open(tmp.db(), Config::default()).unwrap();
+
+        // The schema advertises a `metadata` object of string values.
+        let schema = &remember_def()["inputSchema"]["properties"]["metadata"];
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["additionalProperties"]["type"], "string");
+
+        // Remember with metadata whose keys arrive out of order.
+        let r = call(
+            &db,
+            json!(1),
+            Some(&params(
+                "plugmem_remember",
+                json!({"text": "a scan", "metadata": {"uri": "s3://b/x", "mime": "pdf"}}),
+            )),
+        );
+        assert!(!is_error(&r));
+
+        // show serializes the fact with its metadata, sorted by key.
+        let card: Value = serde_json::from_str(&text(&call(
+            &db,
+            json!(2),
+            Some(&params("plugmem_show", json!({"id": 0}))),
+        )))
+        .unwrap();
+        assert_eq!(card["metadata"]["uri"], "s3://b/x");
+        assert_eq!(card["metadata"]["mime"], "pdf");
     }
 
     #[test]

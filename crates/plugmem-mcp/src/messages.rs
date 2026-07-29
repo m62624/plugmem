@@ -96,6 +96,10 @@ pub const ARG_TAGS: &str = "Verbatim tag strings (≤ 32). In recall they filter
 all of them); they are not a ranking source.";
 pub const ARG_LINKS: &str = "Typed edges from this fact's subject entity, as an array of \
 { \"rel\": \"...\", \"entity\": \"...\" } (≤ 16). Optional.";
+pub const ARG_METADATA: &str = "Opaque metadata as a flat object of string values \
+(e.g. { \"uri\": \"s3://…\", \"mime\": \"application/pdf\" }). The engine never \
+interprets it — a place for a pointer to the real payload in another store, or \
+side attributes. Optional.";
 pub const ARG_VALID_FROM: &str =
     "Validity start, unix milliseconds (the truth axis). Defaults to now.";
 pub const ARG_QUERY: &str = "Free-text query for the lexical/semantic sources. Optional — a recall \
