@@ -55,9 +55,9 @@ The retrieval above lives in the engine; this crate adds the OS side:
   copy-on-write), so opening a multi-gigabyte database to append one fact
   no longer copies the whole image into RAM. A snapshot materializes the
   base + overlay into a fresh file and re-maps it. Validation is lazy (the
-  SQLite model): an open checks only the metadata, so the large text and
-  vector pools stay non-resident until a query touches them — a measured
-  open residents well under half of a text-heavy image. The default open
+  SQLite model): an open checks only the record metadata, so the large text,
+  vector and per-fact-metadata pools stay non-resident until a query touches
+  them — a measured open residents well under half of a text-heavy image. The default open
   trusts the file and never checksums the whole image (the SQLite model),
   so it stays sparse; corruption is caught when the bad record is read
   (never a panic), or on demand with `verify()` (content) and `scrub()`

@@ -1,11 +1,16 @@
 # plugmem
 
-Temporal memory for LLM agents, as an embeddable library. plugmem stores
-short **facts** — with a subject entity, tags, an optional embedding and
-two time axes — and answers a query with a ranked, token-budgeted block
-ready to paste into a prompt. It runs in-process and keeps a whole database
-in one snapshot file plus an append-only journal — no server, no daemon. The
-core is `no_std`, so the same engine runs natively and in WebAssembly.
+An embeddable **memory database for local LLM agents** — think SQLite, but
+for what an agent remembers rather than rows and columns. plugmem stores
+short **facts** — with a subject entity, tags, optional metadata, an optional
+embedding and two time axes — and answers a query with a ranked,
+token-budgeted block ready to paste into a prompt. It runs in-process from one
+snapshot file plus an append-only journal — no server, no daemon, one machine.
+The core is `no_std`, so the same engine runs natively and in WebAssembly.
+
+It is meant for a local agent on your own device or inside your own project —
+one process, one file — not a multi-tenant service fielding queries from many
+users.
 
 It is **not** a vector database. A vector is one of four recall sources —
 lexical (BM25), vector, entity graph and time — fused with reciprocal-rank
