@@ -14,6 +14,7 @@
 //! freshness verbs (`generation`/`refresh`) become available. Async offloading
 //! lands in the next milestone.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use napi::bindgen_prelude::AsyncTask;
@@ -69,6 +70,9 @@ pub struct RememberArgs {
     pub tags: Option<Vec<String>>,
     /// Typed edges to attach.
     pub links: Option<Vec<LinkRef>>,
+    /// Opaque metadata as a key→value map (a URI to the real payload, a mime
+    /// type, an external key). The engine never interprets it.
+    pub metadata: Option<BTreeMap<String, String>>,
     /// Validity start, unix milliseconds (default: the fact's record time).
     pub valid_from: Option<f64>,
 }
@@ -419,10 +423,18 @@ fn do_remember(
         .iter()
         .map(|l| (l.rel.as_str(), l.entity.as_str()))
         .collect();
+    // A `BTreeMap` gives the pairs already sorted and deduped, matching the one
+    // canonical order core and host use; the engine canonicalizes again anyway.
+    let meta: Vec<(&str, &str)> = args
+        .metadata
+        .as_ref()
+        .map(|m| m.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect())
+        .unwrap_or_default();
     let input = RememberInput {
         entity: args.entity.as_deref(),
         tags: &tags,
         links: &links,
+        metadata: (!meta.is_empty()).then_some(meta.as_slice()),
         valid_from: args.valid_from.map(|f| f as u64),
         ..RememberInput::text(now_ms(), &args.text)
     };

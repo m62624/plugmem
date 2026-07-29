@@ -15,6 +15,8 @@
 //! `Stats::db_uuid` (a 128-bit lineage id) is intentionally omitted: it exceeds
 //! JS number precision and is engine bookkeeping, not agent-facing.
 
+use std::collections::BTreeMap;
+
 use napi_derive::napi;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -143,6 +145,9 @@ pub struct FactSnapshot {
     pub record: FactRecord,
     /// The fact text.
     pub text: String,
+    /// The fact's metadata as a key→value map (empty when it has none). Opaque
+    /// to the engine — a URI to the real payload, a mime type, an external key.
+    pub metadata: BTreeMap<String, String>,
 }
 
 /// One exported fact — the id-free, import-ready shape.
@@ -155,6 +160,8 @@ pub struct ExportedFact {
     pub entity: Option<String>,
     /// Tag strings.
     pub tags: Vec<String>,
+    /// Metadata as a key→value map (empty when none); preserved on import.
+    pub metadata: BTreeMap<String, String>,
     /// When the memory learned it (unix ms; informational).
     pub recorded_at: f64,
     /// Validity start (unix ms; preserved on import).
