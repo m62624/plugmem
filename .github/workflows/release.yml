@@ -336,7 +336,16 @@ jobs:
         run: napi artifacts --dir artifacts
       - name: Publish platform packages + meta (skip versions already published)
         # `napi prepublish` wires the meta's optionalDependencies and publishes
-        # each platform package; then the meta itself. Both go over OIDC.
+        # each platform package; then the meta itself.
+        #
+        # FIRST-RELEASE ONLY: OIDC cannot make the *first* publish of a package
+        # (the trusted publisher is set on a page that does not exist yet), so
+        # authenticate with an npm token for the first tagged release. Set the
+        # `NPM_TOKEN` repo secret, cut the release, then configure trusted
+        # publishing per package on npmjs.org and DELETE this `env:` block — with
+        # it gone, publishing falls back to OIDC (id-token: write, above).
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           napi prepublish -t npm --skip-gh-release
           npm publish --access public || echo "meta already published — skipping"
