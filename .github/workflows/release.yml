@@ -354,8 +354,47 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          npx napi prepublish -t npm --skip-gh-release
-          npm publish --access public || echo "meta already published — skipping"
+          # napi-rs makes publishing idempotent: `napi prepublish` recognises
+          # npm's "previously published version" error and SKIPS those platform
+          # packages, so re-running only re-attempts what genuinely failed —
+          # never a double publish (https://napi.rs/docs/deep-dive/release). We
+          # lean on that to retry a partial release in place:
+          #   - retry transient failures (network blip, npm 5xx, a dropped
+          #     runner) a few times with linear backoff;
+          #   - stop immediately on an auth/permission/policy error (401/403/
+          #     2FA/blocked) — those never heal on retry, so burning attempts
+          #     is pointless;
+          #   - treat "already published" as success (a resumed release whose
+          #     packages all landed on a previous attempt).
+          publish_once() {
+            npx napi prepublish -t npm --skip-gh-release &&
+              npm publish --access public
+          }
+          max=4
+          attempt=1
+          while true; do
+            echo "::group::npm publish — attempt ${attempt}/${max}"
+            set +e
+            out="$(publish_once 2>&1)"; code=$?
+            set -e
+            printf '%s\n' "$out"
+            echo "::endgroup::"
+            [ "$code" -eq 0 ] && { echo "publish OK on attempt ${attempt}"; break; }
+            if printf '%s' "$out" | grep -qiE 'cannot publish over|previously published version'; then
+              echo "everything already on npm (idempotent resume) — treating as success"
+              break
+            fi
+            if printf '%s' "$out" | grep -qiE '\b(401|403|E401|E403|EOTP)\b|forbidden|not permitted|is blocked|one-time pass|two-factor'; then
+              echo "::error::non-transient publish failure (auth/permission/2FA) — not retrying"
+              exit "$code"
+            fi
+            if [ "$attempt" -ge "$max" ]; then
+              echo "::error::npm publish still failing after ${max} attempts"
+              exit "$code"
+            fi
+            sleep "$((attempt * 15))"
+            attempt="$((attempt + 1))"
+          done
 
   sync:
     name: Sync PR to main

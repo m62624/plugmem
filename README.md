@@ -5,7 +5,7 @@
   <a href="https://docs.rs/plugmem-host"><img src="https://img.shields.io/docsrs/plugmem-host?style=flat-square&logo=docsdotrs&label=docs.rs" alt="docs.rs"></a>
   <a href="https://www.npmjs.com/package/plugmem"><img src="https://img.shields.io/npm/v/plugmem?style=flat-square&logo=npm&color=cb3837" alt="npm"></a>
   <a href="https://github.com/m62624/plugmem/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/m62624/plugmem/ci.yml?branch=main&style=flat-square&logo=github&label=ci" alt="CI"></a>
-  <a href="https://codecov.io/gh/m62624/plugmem"><img src="https://codecov.io/gh/m62624/plugmem/graph/badge.svg?token=LPSGHH030C" alt="codecov"></a>
+  <a href="https://codecov.io/gh/m62624/plugmem"><img src="https://img.shields.io/codecov/c/github/m62624/plugmem?style=flat-square&logo=codecov&token=LPSGHH030C" alt="codecov"></a>
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT licence"></a>
 </p>
 
