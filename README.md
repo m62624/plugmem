@@ -1,13 +1,22 @@
 # plugmem
 
+<p align="center">
+  <a href="https://crates.io/crates/plugmem-host"><img src="https://img.shields.io/crates/v/plugmem-host?style=flat-square&logo=rust&label=crates.io&color=e37933" alt="crates.io"></a>
+  <a href="https://docs.rs/plugmem-host"><img src="https://img.shields.io/docsrs/plugmem-host?style=flat-square&logo=docsdotrs&label=docs.rs" alt="docs.rs"></a>
+  <a href="https://www.npmjs.com/package/plugmem"><img src="https://img.shields.io/npm/v/plugmem?style=flat-square&logo=npm&color=cb3837" alt="npm"></a>
+  <a href="https://github.com/m62624/plugmem/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/m62624/plugmem/ci.yml?branch=main&style=flat-square&logo=github&label=ci" alt="CI"></a>
+  <a href="https://codecov.io/gh/m62624/plugmem"><img src="https://codecov.io/gh/m62624/plugmem/graph/badge.svg?token=LPSGHH030C" alt="codecov"></a>
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT licence"></a>
+</p>
+
 > ⚠️ Experimental. plugmem is mostly an AI-built experiment — written with
 > the help of a small local model (Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf) and various
 > Claude models, in roughly equal measure. Expect non-professional design
 > choices, rough edges, broken behavior, or mistakes. Use it at your own risk.
 
-An embeddable **memory database for local LLM agents** — think SQLite, but
-for what an agent remembers rather than rows and columns. plugmem stores
-short **facts** — with a subject entity, tags, optional metadata, an optional
+An embeddable **memory database for local LLM agents** — you link it into your
+program like SQLite, in-process and single-file. plugmem stores short
+**facts** — with a subject entity, tags, optional metadata, an optional
 embedding and two time axes — and answers a query with a ranked,
 token-budgeted block ready to paste into a prompt. It runs in-process from one
 snapshot file plus an append-only journal — no server, no daemon, one machine.
@@ -210,17 +219,6 @@ If you pointed the installer somewhere else (`PLUGMEM_CLI_INSTALL_DIR` /
 `PLUGMEM_MCP_INSTALL_DIR`, or `CARGO_DIST_FORCE_INSTALL_DIR`), delete from that
 directory instead. The installer may also have added the bin dir to your `PATH` —
 prune that line from your shell profile if nothing else uses it.
-
-## Design
-
-- **In-memory state is the on-disk format.** State lives in flat byte pools, so
-  a snapshot is a `memcpy` and loading is validation plus adoption; a file
-  opens byte-identically on native, wasm32 and wasm64.
-- **`no_std` core, OS in the host.** The engine is a single-threaded
-  `no_std + alloc` crate; files, mmap, locking and HTTP live only in the thin
-  `plugmem-host` layer.
-- **Corrupt input is a typed error, not a crash.** Arbitrary bytes yield some
-  `Error`, never a panic or UB; every stored id is range-checked after a load.
 
 ## License
 
