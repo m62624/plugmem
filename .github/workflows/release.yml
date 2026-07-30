@@ -345,14 +345,14 @@ jobs:
         # `napi prepublish` wires the meta's optionalDependencies and publishes
         # each platform package; then the meta itself.
         #
-        # FIRST-RELEASE ONLY: OIDC cannot make the *first* publish of a package
-        # (the trusted publisher is set on a page that does not exist yet), so
-        # authenticate with an npm token for the first tagged release. Set the
-        # `NPM_TOKEN` repo secret, cut the release, then configure trusted
-        # publishing per package on npmjs.org and DELETE this `env:` block — with
-        # it gone, publishing falls back to OIDC (id-token: write, above).
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # Auth is OIDC trusted publishing (no token): the job carries
+        # `id-token: write` (above) and installs a recent npm, and each of the 7
+        # packages (`plugmem` + the 6 `plugmem-<platform>`) has GitHub Actions
+        # configured as a trusted publisher on npmjs.org. The first release was
+        # bootstrapped once with an `NPM_TOKEN`; that `env:` block is now gone, so
+        # publishing runs keyless. If a NEW platform package is ever added, its
+        # first publish needs the token again (configure its trusted publisher,
+        # then drop the token) — the same one-time bootstrap.
         run: |
           # napi-rs makes publishing idempotent: `napi prepublish` recognises
           # npm's "previously published version" error and SKIPS those platform
