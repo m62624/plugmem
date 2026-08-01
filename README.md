@@ -100,6 +100,15 @@ recency boost (tags filter; they are not a source):
 | **Graph** | entity graph with typed edges, breadth-first from query anchors | relational knowledge |
 | **Temporal** | range scans over a `recorded_at`-ordered index; bitemporal validity | "what was true *then*", time windows |
 
+The lexical tokenizer is ICU4X-backed: it applies Unicode NFKC normalization,
+locale-neutral lowercase mapping, UAX #29 word boundaries, language-aware
+segmentation for complex scripts, Latin search folding and CJK bigrams. Its
+generic Unicode path reuses scratch buffers and performs no tokenizer-internal
+allocations after warm-up. ICU4X's dictionary/LSTM path may allocate a
+temporary boundary cache for scripts such as Thai and Khmer in exchange for
+better word segmentation. The tokenizer emits canonical lexical terms; it
+does not perform stemming or lemmatization.
+
 ## Install
 
 Two binaries — the `plugmem-cli` CLI (crate `plugmem-cli`) and the `plugmem-mcp`
