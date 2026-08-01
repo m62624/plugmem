@@ -64,6 +64,10 @@ pub struct Tokenizer {
     norm: String,
     /// The token being assembled (folded word or CJK bigram).
     token: String,
+    /// Reused scratch for the rare post-fold NFKC pass. Lowercasing can
+    /// expose a non-canonical combining-mark order even though `norm` was
+    /// normalized before folding.
+    canonical: String,
 }
 
 impl Tokenizer {
@@ -95,6 +99,7 @@ impl Tokenizer {
             self.norm.extend(text.nfkc());
         }
         let token = &mut self.token;
+        let canonical = &mut self.canonical;
 
         // The CJK adjacency machine: previous unigram char + run length.
         // At a run boundary the machine may still owe a token: a lone
@@ -135,12 +140,17 @@ impl Tokenizer {
                 _ if seg.chars().any(char::is_alphanumeric) => {
                     flush_cjk(&mut prev_cjk, &mut run_len, token, sink);
                     token.clear();
+                    let mut needs_nfkc = false;
                     for c in seg.chars() {
                         for lc in c.to_lowercase() {
-                            fold_into(lc, token);
+                            if fold_into(lc, token, &mut needs_nfkc) {
+                                emit_folded(token, canonical, needs_nfkc, sink);
+                                token.clear();
+                                needs_nfkc = false;
+                            }
                         }
                     }
-                    emit_truncated(token, sink);
+                    emit_folded(token, canonical, needs_nfkc, sink);
                 }
                 _ => flush_cjk(&mut prev_cjk, &mut run_len, token, sink),
             }
@@ -167,38 +177,44 @@ fn is_ignorable_format(c: char) -> bool {
 /// - ignorable format characters are dropped ([`is_ignorable_format`]);
 /// - combining marks are dropped after an ASCII base (this also absorbs
 ///   the one Unicode lowercase expansion that emits a mark, `İ` → `i` +
-///   U+0307) and kept otherwise — including a mark opening the token,
-///   which happens when UAX #29 glues a mark onto a separator base (the
-///   separator itself is dropped by the next rule);
-/// - other non-alphanumeric chars survive only *after* an alphanumeric
-///   one: that keeps the word-internal joiners UAX #29 admits (`don't`,
-///   `3.14`, `snake_case`) while separator bases glued to a segment start
-///   (a space carrying a combining mark) never enter the term;
+///   U+0307) and kept otherwise; emission removes leading marks when a
+///   later base character exists, while preserving mark-only terms;
+/// - documented word-internal joiners survive only after an alphanumeric
+///   one (`don't`, `3.14`, `snake_case`); other punctuation is a boundary;
+///   trailing joiners are removed at emission so every token is a fixed
+///   point when tokenized in isolation;
 /// - Latin precomposed diacritics are stripped to their ASCII base;
 ///   everything else — Cyrillic `й`, Greek, Kana — is kept precomposed.
-fn fold_into(c: char, out: &mut String) {
+///
+/// Returns `true` when `c` is a real boundary after an already assembled
+/// token. Ignorable format characters are removed without splitting; this is
+/// what keeps `co\u{AD}operate` together while preventing a dropped `_` or `:`
+/// from gluing two otherwise separate lexical pieces.
+fn fold_into(c: char, out: &mut String, needs_nfkc: &mut bool) -> bool {
     if c == 'ё' {
         out.push('е');
-        return;
+        return false;
     }
     if is_ignorable_format(c) {
-        return;
+        return false;
     }
     if is_combining_mark(c) {
+        *needs_nfkc = true;
         if !out.ends_with(|p: char| p.is_ascii_alphanumeric()) {
             out.push(c);
         }
-        return;
+        return false;
     }
     if !c.is_alphanumeric() {
-        if out.ends_with(char::is_alphanumeric) {
+        if out.ends_with(char::is_alphanumeric) && is_word_joiner(c) {
             out.push(c);
+            return false;
         }
-        return;
+        return !out.is_empty();
     }
     if c.is_ascii() {
         out.push(c);
-        return;
+        return false;
     }
     // Canonical decomposition into a tiny fixed buffer (canonical
     // decompositions are at most a few chars).
@@ -219,12 +235,81 @@ fn fold_into(c: char, out: &mut String) {
     } else {
         out.push(c);
     }
+    false
+}
+
+/// Returns whether punctuation is allowed inside a lexical token.
+///
+/// This is deliberately a small allow-list. UAX #29 decides which source
+/// characters belong to a segment, but it does not by itself guarantee that
+/// the folded segment is a fixed point when tokenized in isolation.
+fn is_word_joiner(c: char) -> bool {
+    matches!(c, '\'' | '\u{2019}' | '.' | ',' | '_')
+}
+
+/// Re-normalizes a folded token only when lowercase/folding saw combining
+/// marks. NFKC runs before folding for the common path, but Unicode lowercase
+/// can change the base character while leaving a mark sequence whose canonical
+/// order is visible only after the fold. The folding pass is repeated after
+/// NFKC because NFKC may recreate a project-specific form such as `ё`, which
+/// must still be folded to `е`.
+fn emit_folded(
+    token: &mut String,
+    canonical: &mut String,
+    needs_nfkc: bool,
+    sink: &mut dyn FnMut(&str),
+) {
+    if needs_nfkc {
+        canonical.clear();
+        canonical.extend(token.nfkc());
+        token.clear();
+        let mut ignored = false;
+        for c in canonical.chars() {
+            for lc in c.to_lowercase() {
+                if fold_into(lc, token, &mut ignored) {
+                    drop_leading_marks_before_base(token);
+                    emit_truncated(token, sink);
+                    token.clear();
+                    ignored = false;
+                }
+            }
+        }
+        drop_leading_marks_before_base(token);
+        emit_truncated(token, sink);
+    } else {
+        emit_truncated(token, sink);
+    }
+}
+
+/// Removes combining marks that precede a real token character. A mark-only
+/// token remains valid and is kept for compatibility with the tokenizer's
+/// existing behavior; a leading mark plus a base would otherwise disappear
+/// when that emitted token is normalized in isolation.
+fn drop_leading_marks_before_base(token: &mut String) {
+    let mut prefix = 0usize;
+    for (offset, c) in token.char_indices() {
+        if is_combining_mark(c) {
+            prefix = offset + c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if prefix == token.len() {
+        if !token.chars().any(char::is_alphanumeric) {
+            token.clear();
+        }
+        return;
+    }
+    if prefix < token.len() {
+        token.replace_range(..prefix, "");
+    }
 }
 
 /// Sends the assembled token, truncated to [`MAX_TOKEN_BYTES`] at a char
-/// boundary. Empty tokens (theoretically unreachable — a word segment
-/// always folds to at least one char) are guarded against rather than
-/// asserted.
+/// boundary. Trailing word joiners are removed: they are meaningful only
+/// between lexical characters, and keeping one would make re-tokenization
+/// context-sensitive (for example, `word.` → `word`). Empty tokens are
+/// guarded against rather than asserted.
 fn emit_truncated(token: &str, sink: &mut dyn FnMut(&str)) {
     if token.is_empty() {
         return;
@@ -232,6 +317,19 @@ fn emit_truncated(token: &str, sink: &mut dyn FnMut(&str)) {
     let mut end = token.len().min(MAX_TOKEN_BYTES);
     while !token.is_char_boundary(end) {
         end -= 1;
+    }
+    while end > 0 {
+        let c = token[..end]
+            .chars()
+            .next_back()
+            .expect("non-empty token has a last char");
+        if !is_word_joiner(c) {
+            break;
+        }
+        end -= c.len_utf8();
+    }
+    if end == 0 {
+        return;
     }
     sink(&token[..end]);
 }

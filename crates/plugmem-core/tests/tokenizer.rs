@@ -5,12 +5,49 @@
 use plugmem_core::tokenizer::{MAX_TOKEN_BYTES, Tokenizer};
 #[cfg(not(target_family = "wasm"))]
 use proptest::prelude::*;
+#[cfg(not(target_family = "wasm"))]
+use proptest::test_runner::{Config as ProptestConfig, TestCaseError, TestRunner};
 
 fn tokens(text: &str) -> Vec<String> {
     let mut tk = Tokenizer::new();
     let mut out = Vec::new();
     tk.tokenize(text, &mut |t| out.push(t.to_owned()));
     out
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn stress_char() -> impl Strategy<Value = char> {
+    prop_oneof![
+        8 => (b'a' as u32..=b'z' as u32).prop_map(|n| char::from_u32(n).unwrap()),
+        4 => (b'A' as u32..=b'Z' as u32).prop_map(|n| char::from_u32(n).unwrap()),
+        4 => (b'0' as u32..=b'9' as u32).prop_map(|n| char::from_u32(n).unwrap()),
+        3 => (0x0041u32..=0x024F).prop_map(|n| char::from_u32(n).unwrap()),
+        3 => (0x0300u32..=0x036F).prop_map(|n| char::from_u32(n).unwrap()),
+        3 => (0x0370u32..=0x052F).prop_map(|n| char::from_u32(n).unwrap()),
+        2 => (0x0590u32..=0x06FF).prop_map(|n| char::from_u32(n).unwrap()),
+        2 => (0x0900u32..=0x0DFF).prop_map(|n| char::from_u32(n).unwrap()),
+        3 => (0x3041u32..=0x30FF).prop_map(|n| char::from_u32(n).unwrap()),
+        3 => (0x3400u32..=0x9FFF).prop_map(|n| char::from_u32(n).unwrap()),
+        3 => (0xAC00u32..=0xD7AF).prop_map(|n| char::from_u32(n).unwrap()),
+        2 => (0x1F300u32..=0x1FAFF).prop_map(|n| char::from_u32(n).unwrap()),
+        2 => any::<char>(),
+        3 => prop::sample::select(vec![
+            '\u{00AD}', '\u{200B}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{202E}',
+            '\u{2060}', '\u{FEFF}',
+        ]),
+        4 => prop::sample::select(vec![
+            ':', ';', '!', '?', '.', ',', '_', '\'', '\u{2019}', '/', '\\', '-', '+', '=',
+            '#', '@', '%', '&',
+        ]),
+        3 => prop::sample::select(vec![
+            'º', 'K', 'ﬁ', 'ﬂ', 'Ａ', '１', 'Å', 'é', 'ï', 'İ', 'ñ', 'й', 'ё', 'ἀ',
+        ]),
+    ]
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn stress_text() -> impl Strategy<Value = String> {
+    prop::collection::vec(stress_char(), 0..192).prop_map(|chars| chars.into_iter().collect())
 }
 
 #[test]
@@ -149,6 +186,71 @@ fn scratch_buffers_are_reused_not_leaked() {
     tk.clone()
         .tokenize("δ delta", &mut |t| third.push(t.to_owned()));
     assert_eq!(third, ["δ", "delta"]);
+}
+
+#[test]
+fn regression_canonical_token_from_ordinal_and_modifier_symbols() {
+    let emitted = tokens("º:˥");
+    assert_eq!(emitted, ["o"]);
+
+    let retokenized = tokens(&emitted[0]);
+    assert_eq!(retokenized, emitted, "emitted token must be a fixed point");
+}
+
+#[test]
+fn word_joiners_are_internal_and_canonical() {
+    let cases: &[(&str, &[&str])] = &[
+        ("don't o'clock", &["don't", "o'clock"]),
+        (
+            "3.14 v1.2.3 example.com 1,000",
+            &["3.14", "v1.2.3", "example.com", "1,000"],
+        ),
+        ("snake_case", &["snake_case"]),
+        ("word. word, word_", &["word", "word", "word"]),
+    ];
+    for (input, want) in cases {
+        let got = tokens(input);
+        assert_eq!(&got, want, "input: {input:?}");
+        for token in got {
+            let again = tokens(&token);
+            assert_eq!(
+                again.as_slice(),
+                std::slice::from_ref(&token),
+                "token is not canonical: {token:?}"
+            );
+        }
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn unicode_stress_tokens_are_canonical() {
+    let config = ProptestConfig {
+        cases: 1024,
+        max_shrink_iters: 4096,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    };
+    let mut runner = TestRunner::new(config);
+    runner
+        .run(&stress_text(), |text| {
+            let emitted = tokens(&text);
+            for token in &emitted {
+                if token.is_empty() || token.len() > MAX_TOKEN_BYTES {
+                    return Err(TestCaseError::fail(format!(
+                        "invalid token {token:?} from input {text:?}"
+                    )));
+                }
+                let again = tokens(token);
+                if again != [token.clone()] {
+                    return Err(TestCaseError::fail(format!(
+                        "non-canonical token {token:?} from input {text:?}; retokenized as {again:?}"
+                    )));
+                }
+            }
+            Ok(())
+        })
+        .expect("Unicode stress properties failed");
 }
 
 #[cfg(not(target_family = "wasm"))]
