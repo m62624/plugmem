@@ -120,7 +120,7 @@ fn initialize_list_and_stats() {
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     assert_eq!(tools[0], "plugmem_remember");
-    assert_eq!(tools.last(), Some(&"plugmem_about"));
+    assert_eq!(tools.last(), Some(&"plugmem_settings_help"));
     for expected in ["plugmem_recall", "plugmem_stats", "plugmem_version"] {
         assert!(
             tools.contains(&expected),

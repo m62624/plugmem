@@ -26,6 +26,19 @@ everything.** The others are for narrower needs.
 | A memory for an **LLM agent** or a **non-Rust program** | `plugmem-mcp` | Long-lived stdio JSON-RPC; language-independent. In Rust, embed this crate instead. |
 | A memory in **JavaScript / TypeScript** (Node) | `plugmem-napi` | The engine as a native Node addon (napi-rs), in-process; on npm as `plugmem`. |
 
+## Configuration
+
+The shared `config.toml` loader and platform-aware database paths are documented
+in the [full settings reference](SETTINGS.md). `plugmem-cli`, `plugmem-mcp` and
+`plugmem-napi` use the same settings catalogue and database-path precedence;
+only their explicit override syntax differs.
+
+The `config` feature is enabled by default for this native host crate, so
+`Settings::load` and `read_config` are available without extra feature flags.
+Applications that construct `Config` programmatically and want the smallest
+host dependency surface can use `default-features = false`; this does not alter
+the `plugmem-core` or WASM build.
+
 ## What recall does
 
 Recall is not a vector lookup — it fuses four sources by reciprocal-rank fusion

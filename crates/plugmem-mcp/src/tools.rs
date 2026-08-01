@@ -61,6 +61,7 @@ const CHECKPOINT: &str = "plugmem_checkpoint";
 const VERIFY: &str = "plugmem_verify";
 const VERSION: &str = "plugmem_version";
 const ABOUT: &str = "plugmem_about";
+const SETTINGS_HELP: &str = "plugmem_settings_help";
 
 /// Every tool definition, in the order `tools/list` advertises them: the write
 /// verbs, then the read verbs, then the operational verbs, then meta.
@@ -84,6 +85,7 @@ pub fn definitions() -> Vec<Value> {
         verify_def(),
         version_def(),
         about_def(),
+        settings_help_def(),
     ]
 }
 
@@ -119,6 +121,7 @@ pub fn call(db: &Database, id: Value, params: Option<&Value>) -> Value {
         },
         VERSION => rpc::tool_result(id, format!("plugmem {}", env!("CARGO_PKG_VERSION")), false),
         ABOUT => rpc::tool_result(id, messages::ABOUT_TOOL.to_string(), false),
+        SETTINGS_HELP => settings_help(db, id, args),
         other => rpc::tool_result(id, format!("unknown tool: {other}"), true),
     }
 }
@@ -138,6 +141,7 @@ pub fn definitions_ro() -> Vec<Value> {
         format_only_def(REFRESH, messages::REFRESH_TOOL),
         version_def(),
         about_def(),
+        settings_help_def(),
     ]
 }
 
@@ -202,6 +206,9 @@ pub fn call_ro(reader: &ReaderShared, id: Value, params: Option<&Value>) -> Valu
         // A known write verb, or anything else: refused in read-only mode.
         REMEMBER | REVISE | FORGET | LINK | MAINTAIN | CHECKPOINT => {
             rpc::tool_result(id, messages::READ_ONLY_REFUSAL.into(), true)
+        }
+        SETTINGS_HELP => {
+            rpc::tool_result(id, render(&settings_help_value(), format_arg(args)), false)
         }
         other => rpc::tool_result(id, format!("unknown tool: {other}"), true),
     }
@@ -530,6 +537,40 @@ fn about_def() -> Value {
     simple_def(ABOUT, messages::ABOUT_TOOL)
 }
 
+fn settings_help_def() -> Value {
+    format_only_def(SETTINGS_HELP, messages::SETTINGS_HELP_TOOL)
+}
+
+fn settings_help(db: &Database, id: Value, args: Option<&Value>) -> Value {
+    let _ = db;
+    rpc::tool_result(id, render(&settings_help_value(), format_arg(args)), false)
+}
+
+fn settings_help_value() -> Value {
+    let help = plugmem_host::settings_help();
+    let settings: Vec<_> = help
+        .docs()
+        .iter()
+        .map(|doc| {
+            json!({
+                "section": doc.section,
+                "key": doc.key,
+                "type": doc.value_type,
+                "default": doc.default,
+                "description": doc.description,
+                "scope": doc.scope.as_str(),
+            })
+        })
+        .collect();
+    json!({
+        "topic": "settings",
+        "config_path_precedence": help.config_path_precedence(),
+        "default_config_path": plugmem_host::default_config_path()
+            .map(|path| path.display().to_string()),
+        "settings": settings,
+    })
+}
+
 /// A no-argument tool definition (an empty input schema).
 fn simple_def(name: &str, description: &str) -> Value {
     json!({
@@ -759,6 +800,26 @@ mod tests {
         let ro = names(definitions_ro());
         assert!(ro.iter().any(|n| n == REFRESH) && ro.iter().any(|n| n == GENERATION));
         assert!(!ro.iter().any(|n| n == REMEMBER)); // no write verbs
+    }
+
+    #[test]
+    fn settings_help_is_explicit_and_contains_shared_database_path() {
+        let tmp = TempDir::new("settings-help");
+        let (db, _) = Database::open(tmp.db(), Config::default()).unwrap();
+        let response = call(
+            &db,
+            json!(1),
+            Some(&params(SETTINGS_HELP, json!({ "format": "json" }))),
+        );
+        let value: Value = serde_json::from_str(&text(&response)).unwrap();
+        assert_eq!(value["topic"], "settings");
+        assert!(
+            value["settings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|setting| { setting["section"] == "database" && setting["key"] == "path" })
+        );
     }
 
     #[test]

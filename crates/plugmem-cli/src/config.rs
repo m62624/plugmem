@@ -7,6 +7,10 @@ use plugmem_host::SettingsError;
 
 use crate::CliError;
 
+/// CLI-owned config keys. The settings-help completeness test compares this
+/// inventory with the host catalogue whenever the parser gains a new key.
+pub(crate) const CLI_SETTING_KEYS: &[(&str, &str)] = &[("maintenance", "batch_size")];
+
 impl From<SettingsError> for CliError {
     fn from(e: SettingsError) -> Self {
         CliError::Usage(e.to_string())
@@ -17,9 +21,9 @@ impl From<SettingsError> for CliError {
 /// engine knob), read from the shared [`plugmem_host::read_config`] table.
 pub(crate) fn read_batch_size(table: Option<&toml::Table>) -> Option<u64> {
     table
-        .and_then(|t| t.get("maintenance"))
+        .and_then(|t| t.get(CLI_SETTING_KEYS[0].0))
         .and_then(toml::Value::as_table)
-        .and_then(|m| m.get("batch_size"))
+        .and_then(|m| m.get(CLI_SETTING_KEYS[0].1))
         .and_then(toml::Value::as_integer)
         .filter(|n| *n >= 0)
         .map(|n| n as u64)
@@ -46,5 +50,16 @@ mod tests {
     fn settings_error_maps_to_a_usage_error() {
         let e: CliError = SettingsError::Config("boom".into()).into();
         assert!(matches!(e, CliError::Usage(m) if m == "boom"));
+    }
+
+    #[test]
+    fn every_cli_setting_is_documented() {
+        let docs = plugmem_host::settings_help().docs();
+        let documented: Vec<_> = docs
+            .iter()
+            .filter(|doc| doc.scope == plugmem_host::SettingScope::Cli)
+            .map(|doc| (doc.section, doc.key))
+            .collect();
+        assert_eq!(documented.as_slice(), CLI_SETTING_KEYS);
     }
 }

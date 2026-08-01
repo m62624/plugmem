@@ -15,7 +15,7 @@
 //! lands in the next milestone.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use napi::bindgen_prelude::AsyncTask;
 use napi::{Env, Error, Result, Task};
@@ -41,7 +41,9 @@ pub struct OpenOptions {
     /// database). The write verbs then throw; `generation`/`refresh` appear. A
     /// read-only handle never auto-embeds a text query — pass a vector instead.
     pub read_only: Option<bool>,
-    /// Path to a `config.toml` (`[engine]` / `[embedder]` / `[maintenance]`).
+    /// Path to a `config.toml` (`[database]` / `[engine]` / `[embedder]` /
+    /// `[maintenance]`). When the constructor path is omitted, `[database].path`
+    /// participates in database-path resolution.
     /// Omitted, the standard discovery applies — `$PLUGMEM_CONFIG`, then
     /// `$XDG_CONFIG_HOME/plugmem/config.toml` — exactly as the CLI and MCP
     /// server resolve it. The `[embedder]` section is what makes a text-only
@@ -129,21 +131,42 @@ pub struct Plugmem {
 
 #[napi]
 impl Plugmem {
-    /// Opens (or creates) the memory at `path`.
+    /// Opens (or creates) the memory at `path`. If omitted, path resolution is
+    /// `PLUGMEM_DB` > `[database].path` > the platform data path.
     ///
     /// @throws if the file is locked by another writer, if `readOnly` is set on a
     /// database with no published snapshot, or on a config/IO error.
     #[napi(constructor)]
-    pub fn new(path: String, options: Option<OpenOptions>) -> Result<Self> {
+    pub fn new(path: Option<String>, options: Option<OpenOptions>) -> Result<Self> {
         let options = options.unwrap_or_default();
 
         // Resolve settings exactly like the CLI and MCP server: an explicit
-        // `config` path wins, else `$PLUGMEM_CONFIG`, else the XDG config file,
-        // else all defaults. This is what attaches the `[embedder]`, so a
-        // text-only `remember`/`recall` auto-embeds at parity with the other
-        // surfaces. No config file means no embedder.
+        // `config` path wins, else `$PLUGMEM_CONFIG`, else the platform config
+        // path. This is what attaches the `[embedder]`, so a text-only
+        // `remember`/`recall` auto-embeds at parity with the other surfaces.
         let mut settings =
             Settings::load(options.config.as_deref().map(Path::new)).map_err(settings_to_napi)?;
+
+        let env_path = std::env::var_os("PLUGMEM_DB").map(PathBuf::from);
+        let use_config_or_default_path = path.is_none() && env_path.is_none();
+        let path = path
+            .map(PathBuf::from)
+            .or(env_path)
+            .or_else(|| settings.database_path.clone())
+            .or_else(plugmem_host::default_database_path)
+            .unwrap_or_else(|| PathBuf::from("plugmem.db"));
+
+        if use_config_or_default_path
+            && !options.read_only.unwrap_or(false)
+            && let Some(parent) = path.parent()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                Error::from_reason(format!(
+                    "cannot create database directory {}: {e}",
+                    parent.display()
+                ))
+            })?;
+        }
 
         // A `dim` option sets the embedding dimension. If the config built an
         // embedder, that embedder's dimension is authoritative — `dim` must
@@ -164,12 +187,11 @@ impl Plugmem {
         let handle = if options.read_only.unwrap_or(false) {
             // A read-only handle observes another writer's snapshot and never
             // auto-embeds; drop the embedder and open over `settings.config`.
-            let ro =
-                Database::open_readonly(path.as_str(), settings.config).map_err(to_napi_err)?;
+            let ro = Database::open_readonly(&path, settings.config).map_err(to_napi_err)?;
             Handle::Reader(Box::new(ro))
         } else {
             // The writer takes the embedder and maintenance policy from settings.
-            let db = settings.open(Path::new(&path)).map_err(to_napi_err)?;
+            let db = settings.open(&path).map_err(to_napi_err)?;
             Handle::Writer(db)
         };
         Ok(Self {
@@ -542,7 +564,7 @@ model = \"dummy\"
         let cfg = tmp.write("config.toml", EMBEDDER_DIM8);
         // `dim: 8` agrees with the config's embedder → the writer opens.
         let db = Plugmem::new(
-            tmp.path("mem.plugmem"),
+            Some(tmp.path("mem.plugmem")),
             Some(OpenOptions {
                 dim: Some(8),
                 read_only: None,
@@ -558,7 +580,7 @@ model = \"dummy\"
         let cfg = tmp.write("config.toml", EMBEDDER_DIM8);
         // `dim: 16` contradicts the config's 8-dim embedder → refused up front.
         let Err(err) = Plugmem::new(
-            tmp.path("mem.plugmem"),
+            Some(tmp.path("mem.plugmem")),
             Some(OpenOptions {
                 dim: Some(16),
                 read_only: None,
@@ -578,7 +600,7 @@ model = \"dummy\"
     fn missing_config_path_throws() {
         let tmp = TempDir::new("missing");
         let Err(err) = Plugmem::new(
-            tmp.path("mem.plugmem"),
+            Some(tmp.path("mem.plugmem")),
             Some(OpenOptions {
                 dim: None,
                 read_only: None,
