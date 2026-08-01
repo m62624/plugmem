@@ -300,6 +300,12 @@ fn marks_after_trailing_joiners_are_canonical() {
     assert_eq!(tokens(&emitted[0]), emitted);
 }
 
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn combining_marks_after_joiners_are_canonical() {
+    assert_canonical_tokens("_\u{0610}_\u{0300}").unwrap();
+}
+
 #[test]
 fn word_joiners_are_internal_and_canonical() {
     let cases: &[(&str, &[&str])] = &[
