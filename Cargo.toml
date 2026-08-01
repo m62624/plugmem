@@ -34,10 +34,17 @@ plugmem-testgen = { path = "crates/plugmem-testgen" }
 thiserror = { version = "2.0.18", default-features = false }
 xxhash-rust = { version = "0.8.17", default-features = false, features = ["xxh3"] }
 hashbrown = { version = "0.17.1", default-features = false }
-# Tokenizer tables (unicode-rs, pure `core`): UAX#29 word boundaries and
-# NFKC/decomposition — the same segmentation standard Lucene/ICU use.
-unicode-segmentation = { version = "1.13.3", default-features = false }
+# Tokenizer decomposition helper retained for the search policy's
+# diacritic/combining-mark rules.
 unicode-normalization = { version = "0.1.25", default-features = false }
+# ICU4X is the production Unicode backend: NFKC, locale-neutral lowercase,
+# Unicode properties, and UAX #29 word segmentation with complex-script data.
+icu-casemap = { version = "2.2.0", package = "icu_casemap", default-features = false, features = ["compiled_data"] }
+icu-locale-core = { version = "2.2.0", package = "icu_locale_core", default-features = false }
+icu-normalizer = { version = "2.2.0", package = "icu_normalizer", default-features = false, features = ["compiled_data", "utf8_iter"] }
+icu-properties = { version = "2.2.0", package = "icu_properties", default-features = false, features = ["compiled_data"] }
+icu-segmenter = { version = "2.2.0", package = "icu_segmenter", default-features = false, features = ["compiled_data", "auto"] }
+writeable = { version = "0.6.3", default-features = false }
 # Float math for no_std (BM25 idf/tf norms, recency decay).
 libm = { version = "0.2.16", default-features = false }
 # Optional serde support, gated behind each crate's `serde` feature (off by
