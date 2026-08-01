@@ -180,7 +180,7 @@ The host spawns the binary and wires its arguments once, in its MCP config:
 plugmem-mcp [--db PATH] [--config PATH] [--read-only] [--workers N]
 ```
 
-- `--db` — the memory file (else `$PLUGMEM_DB`, else `./plugmem.db`).
+- `--db` — the memory file (else `$PLUGMEM_DB`, else the platform data path).
 - `--config` — a `config.toml` (else `$PLUGMEM_CONFIG`, else the XDG default).
 - `--read-only` — observe another process's writer (requires a checkpointed
   database).
@@ -221,11 +221,15 @@ monopolizing the box. Override it with `[server].workers` or `--workers`.
 ## Configuration
 
 Optional `config.toml`, found by `--config PATH`, then `$PLUGMEM_CONFIG`, then
-`$XDG_CONFIG_HOME/plugmem/config.toml` (all optional). The engine, embedder and
-maintenance sections are the **same** shared loader the CLI uses; MCP adds one
-`[server]` section.
+the platform config directory. The engine, database, embedder and maintenance
+sections are the **same** shared loader the CLI uses; MCP adds one `[server]`
+section. See the [full settings reference](../plugmem-host/SETTINGS.md) for
+all fields and OS-specific paths.
 
 ```toml
+[database]
+path = "/path/to/memory.plugmem" # optional example; --db and PLUGMEM_DB win
+
 [server]
 workers = 4            # worker threads (default: half the cores)
 

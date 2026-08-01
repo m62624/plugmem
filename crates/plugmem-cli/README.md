@@ -118,7 +118,7 @@ plugmem-cli [--db PATH] [--json] <command>
 ```
 
 The database is chosen by, in order: `--db PATH`, the `PLUGMEM_DB`
-environment variable, or `./plugmem.db` (created on first write). The
+environment variable, or the platform data path (created on first write). The
 engine keeps no clock, so `now` comes from the system clock at each call.
 
 | command | what it does |
@@ -237,12 +237,16 @@ plugmem(ro)> exit
 
 ## Configuration
 
-Optional `config.toml`, found by `--config PATH`, then `$PLUGMEM_CONFIG`,
-then `$XDG_CONFIG_HOME/plugmem/config.toml` (all optional — the CLI works
-with none). Precedence overall is **flag > environment > config file >
-default**.
+Optional `config.toml`, found by `--config PATH`, then `$PLUGMEM_CONFIG`, then
+the platform config directory (all optional — the CLI works with none).
+Precedence overall is **explicit path/flag > environment > config file >
+platform default**. See the [full settings reference](../plugmem-host/SETTINGS.md)
+for all fields and OS-specific paths.
 
 ```toml
+[database]
+path = "/path/to/memory.plugmem" # optional example; --db and PLUGMEM_DB win
+
 [engine]
 dim = 768              # embedding size (0 = vectors off); other Config
                        # size fields: max_bytes, max_text, shards_* …

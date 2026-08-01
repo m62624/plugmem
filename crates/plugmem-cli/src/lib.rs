@@ -28,12 +28,12 @@ use plugmem_host::{
 };
 use serde_json::json;
 
-use crate::cli::{Cli, Command};
+use crate::cli::{Cli, Command, HelpTopic};
 use crate::config::read_batch_size;
 
 /// Environment variable naming the database file (below the `--db` flag).
 pub(crate) const ENV_DB: &str = "PLUGMEM_DB";
-/// Default database file when neither flag nor env is given.
+/// Last-resort relative database name if the platform data directory is unavailable.
 pub(crate) const DEFAULT_DB: &str = "plugmem.db";
 
 /// A failure before or during a command: a runtime engine/host error, or a
@@ -70,7 +70,10 @@ pub fn run() -> ExitCode {
 /// open the right handle, run the command into `out`, return the exit code
 /// (`0` ok, `1` soft miss / locked, `2` error). Errors go to stderr.
 fn run_parsed(cli: Cli, out: &mut impl Write) -> u8 {
-    let path = resolve_db_path(cli.db.as_deref());
+    if let Command::Help { topic } = &cli.command {
+        return execute_help(topic, cli.json, out);
+    }
+
     // Read config.toml once: the shared loader builds engine/embedder/
     // maintenance settings; the CLI reads its own `[maintenance].batch_size`
     // from the same table (used by `import` below).
@@ -83,6 +86,7 @@ fn run_parsed(cli: Cli, out: &mut impl Write) -> u8 {
         Ok(s) => s,
         Err(e) => return report_err(&e.into()),
     };
+    let path = resolve_db_path(cli.db.as_deref(), settings.database_path.as_deref());
 
     // `recover` is a standalone salvage on file paths — it opens the source
     // itself (under an exclusive lock) and writes a fresh destination, so it
@@ -198,11 +202,53 @@ fn report_locked(path: &std::path::Path) -> u8 {
 }
 
 /// Database path precedence: `--db` flag > `$PLUGMEM_DB` >
-/// `./plugmem.db`.
-fn resolve_db_path(flag: Option<&std::path::Path>) -> PathBuf {
+/// `[database].path` > the platform default.
+fn resolve_db_path(
+    flag: Option<&std::path::Path>,
+    config_path: Option<&std::path::Path>,
+) -> PathBuf {
     flag.map(PathBuf::from)
         .or_else(|| std::env::var_os(ENV_DB).map(PathBuf::from))
+        .or_else(|| config_path.map(PathBuf::from))
+        .or_else(plugmem_host::default_database_path)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_DB))
+}
+
+/// Render the opt-in detailed help topics without reading a config file or
+/// opening a database.
+fn execute_help(topic: &HelpTopic, json_output: bool, out: &mut impl Write) -> u8 {
+    match topic {
+        HelpTopic::Settings => {
+            if json_output {
+                let help = plugmem_host::settings_help();
+                let settings: Vec<_> = help
+                    .docs()
+                    .iter()
+                    .map(|doc| {
+                        json!({
+                            "section": doc.section,
+                            "key": doc.key,
+                            "type": doc.value_type,
+                            "default": doc.default,
+                            "description": doc.description,
+                            "scope": doc.scope.as_str(),
+                        })
+                    })
+                    .collect();
+                let value = json!({
+                    "topic": "settings",
+                    "config_path_precedence": help.config_path_precedence(),
+                    "default_config_path": plugmem_host::default_config_path()
+                        .map(|path| path.display().to_string()),
+                    "settings": settings,
+                });
+                writeln!(out, "{value}").ok();
+            } else {
+                write!(out, "{}", plugmem_host::settings_help().render_human()).ok();
+            }
+            0
+        }
+    }
 }
 
 /// Runs a read-only command over a zero-copy [`ReadOnlyDatabase`] (mmap,
@@ -382,8 +428,9 @@ fn execute(
         Command::Scrub
         | Command::Recover { .. }
         | Command::Repl { .. }
-        | Command::Import { .. } => {
-            unreachable!("scrub/recover/repl/import are dispatched before execute")
+        | Command::Import { .. }
+        | Command::Help { .. } => {
+            unreachable!("this command is dispatched before execute")
         }
     }
 }
@@ -462,7 +509,11 @@ fn do_scrub(path: &Path, settings: &Settings, json: bool, out: &mut impl Write) 
 /// Parses a single REPL line: the subcommand grammar, with no leading binary
 /// name (the line is `recall tokio`, not `plugmem recall tokio`).
 #[derive(Parser)]
-#[command(no_binary_name = true, name = "plugmem")]
+#[command(
+    no_binary_name = true,
+    name = "plugmem",
+    disable_help_subcommand = true
+)]
 struct ReplLine {
     #[command(subcommand)]
     command: Command,
@@ -1190,6 +1241,7 @@ mod tests {
 
     fn settings_with(embedder: Option<Box<dyn plugmem_host::Embedder>>) -> Settings {
         Settings {
+            database_path: None,
             config: Config::default(),
             embedder,
             snapshot_every_ops: None,
@@ -1765,10 +1817,26 @@ mod tests {
     #[test]
     fn resolve_db_path_prefers_the_flag() {
         let p = std::path::Path::new("/tmp/explicit.plugmem");
-        assert_eq!(resolve_db_path(Some(p)), PathBuf::from(p));
-        // With no flag it falls back (to $PLUGMEM_DB or the default) — we
+        assert_eq!(resolve_db_path(Some(p), None), PathBuf::from(p));
+        let configured = std::path::Path::new("/tmp/configured.plugmem");
+        assert_eq!(
+            resolve_db_path(None, Some(configured)),
+            PathBuf::from(configured)
+        );
+        // With no flag/config it falls back to $PLUGMEM_DB or the platform default — we
         // only assert the code path runs and yields some path.
-        let _ = resolve_db_path(None);
+        let _ = resolve_db_path(None, None);
+    }
+
+    #[test]
+    fn settings_help_runs_without_opening_a_database() {
+        let cli = Cli::try_parse_from(["plugmem-cli", "help", "settings"]).unwrap();
+        let mut output = Vec::new();
+        assert_eq!(run_parsed(cli, &mut output), 0);
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("plugmem settings"));
+        assert!(output.contains("[database]"));
+        assert!(output.contains("path (path string"));
     }
 
     #[test]

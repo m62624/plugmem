@@ -13,6 +13,7 @@ categories = ["filesystem", "api-bindings", "database"]
 [dependencies]
 plugmem-core = { workspace = true }
 thiserror = { workspace = true }
+directories = { workspace = true }
 memmap2 = { workspace = true }
 self_cell = { workspace = true }
 ureq = { workspace = true, features = ["json"] }
@@ -21,6 +22,10 @@ serde = { workspace = true, optional = true }
 toml = { workspace = true, optional = true }
 
 [features]
+# The native host is the configuration boundary, so TOML settings are
+# available by default. Consumers that only construct `Config` in code can
+# opt out with `default-features = false`; this never changes plugmem-core.
+default = ["config"]
 # Deterministic work counters (perf gates), forwarded to plugmem-core. Enabling
 # it changes the engine lock from an RwLock to a Mutex (the arena's counter
 # Cells are not Sync), so read-only verbs serialize instead of running
@@ -32,10 +37,10 @@ counters = ["plugmem-core/counters"]
 # plugmem-core's serde. HostError is not covered — it wraps std::io::Error,
 # which is not serializable.
 serde = ["dep:serde", "plugmem-core/serde"]
-# Optional config.toml loader (Settings): resolves the engine Config, an
-# embedder, and the maintenance policy from a TOML file + environment, shared
-# by the CLI and MCP wrappers. Off by default so library users who build a
-# Config in code do not pull the `toml` parser.
+# config.toml loader (Settings): resolves the engine Config, an embedder, and
+# the maintenance policy from a TOML file + environment, shared by the CLI and
+# MCP wrappers. Enabled by default; opt out with `default-features = false` for
+# a host caller that supplies Config programmatically.
 config = ["dep:toml"]
 
 [dev-dependencies]

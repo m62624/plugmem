@@ -40,6 +40,61 @@ pub fn about() -> String {
     ABOUT.to_string()
 }
 
+/// One config.toml setting returned by [`settings_help`].
+#[napi(object)]
+pub struct SettingHelpItem {
+    /// TOML section name.
+    pub section: String,
+    /// TOML key name.
+    pub key: String,
+    /// Human-readable value type.
+    pub value_type: String,
+    /// Displayed default value.
+    pub default_value: String,
+    /// Setting behavior.
+    pub description: String,
+    /// Owning surface: shared, CLI or MCP.
+    pub scope: String,
+}
+
+/// Complete config.toml help returned by [`settings_help`].
+#[napi(object)]
+pub struct SettingsHelpResult {
+    /// Config discovery order from highest to lowest precedence.
+    pub config_path_precedence: Vec<String>,
+    /// Resolved platform default config path, if the OS exposes a user home.
+    pub default_config_path: Option<String>,
+    /// Every supported config.toml setting.
+    pub settings: Vec<SettingHelpItem>,
+}
+
+/// Return the complete settings catalogue without opening a database.
+#[napi]
+pub fn settings_help() -> SettingsHelpResult {
+    let help = plugmem_host::settings_help();
+    SettingsHelpResult {
+        config_path_precedence: help
+            .config_path_precedence()
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect(),
+        default_config_path: plugmem_host::default_config_path()
+            .map(|path| path.display().to_string()),
+        settings: help
+            .docs()
+            .iter()
+            .map(|doc| SettingHelpItem {
+                section: doc.section.to_owned(),
+                key: doc.key.to_owned(),
+                value_type: doc.value_type.to_owned(),
+                default_value: doc.default.to_owned(),
+                description: doc.description.to_owned(),
+                scope: doc.scope.as_str().to_owned(),
+            })
+            .collect(),
+    }
+}
+
 /// The companion skill for napi consumers: the canonical `SKILL.md` with the
 /// CLI/MCP "Run it" appendix removed (a napi host has one transport and always
 /// ships skill and engine from the same release, so that ceremony never applies).
@@ -146,5 +201,15 @@ mod tests {
     fn about_points_at_the_skill_and_version_is_semver() {
         assert!(about().contains("skill()"));
         assert_eq!(version().split('.').count(), 3);
+    }
+
+    #[test]
+    fn settings_help_exposes_the_shared_database_setting() {
+        let help = settings_help();
+        assert!(
+            help.settings
+                .iter()
+                .any(|setting| setting.section == "database" && setting.key == "path")
+        );
     }
 }

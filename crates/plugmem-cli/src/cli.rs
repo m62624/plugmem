@@ -14,15 +14,16 @@ use clap::{Parser, Subcommand};
     about = "Temporal memory for LLM agents — remember, recall, revise, forget over one file.",
     long_about = LONG_ABOUT,
     after_help = AFTER_HELP,
+    disable_help_subcommand = true,
 )]
 pub(crate) struct Cli {
-    /// Database file (default: ./plugmem.db, or $PLUGMEM_DB).
+    /// Database file (default: the platform data path, or $PLUGMEM_DB).
     #[arg(long, global = true, value_name = "PATH")]
     pub(crate) db: Option<PathBuf>,
 
     /// Config file (default: $PLUGMEM_CONFIG, else
-    /// $XDG_CONFIG_HOME/plugmem/config.toml). Sections: [engine],
-    /// [embedder], [maintenance].
+    /// $XDG_CONFIG_HOME/plugmem/config.toml). Sections: [database],
+    /// [engine], [embedder], [maintenance].
     #[arg(long, global = true, value_name = "PATH")]
     pub(crate) config: Option<PathBuf>,
 
@@ -41,7 +42,7 @@ plus link / show / stats / maintain / checkpoint / export / import, integrity: v
 scrub / recover, and an interactive `repl` (one open handle, host speed). Recall fuses lexical \
 (BM25), vector, entity-graph and temporal evidence into one \
 ranked, token-budgeted block. One database is a single snapshot file plus a journal; point \
---db at it (default ./plugmem.db, or $PLUGMEM_DB). Human output by default, --json for \
+--db at it (default: the platform data path, or $PLUGMEM_DB). Human output by default, --json for \
 tooling. Exit code: 0 ok, 1 not found / database locked, 2 usage / runtime error / \
 corruption.";
 
@@ -54,6 +55,11 @@ release at https://github.com/m62624/plugmem/releases";
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
+    /// Show detailed help for a topic without opening a database.
+    Help {
+        #[command(subcommand)]
+        topic: HelpTopic,
+    },
     /// Store a new fact; prints its id and any similar/conflicting facts.
     Remember {
         /// The fact text.
@@ -194,4 +200,28 @@ pub(crate) enum Command {
         #[arg(long)]
         read_only: bool,
     },
+}
+
+/// Detailed help topics that are intentionally separate from ordinary `--help`.
+#[derive(Subcommand)]
+pub(crate) enum HelpTopic {
+    /// Explain config.toml discovery and every supported setting.
+    Settings,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn settings_help_is_an_explicit_topic() {
+        let cli = Cli::try_parse_from(["plugmem-cli", "help", "settings"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Help {
+                topic: HelpTopic::Settings
+            }
+        ));
+    }
 }

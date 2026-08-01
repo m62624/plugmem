@@ -78,15 +78,21 @@ db.close();                   // release the file + lock explicitly
 ## Configuration & embeddings
 
 The constructor resolves settings **exactly like the CLI and MCP server**: an
-explicit `config` path wins, else `$PLUGMEM_CONFIG`, else
-`$XDG_CONFIG_HOME/plugmem/config.toml`, else all defaults.
+explicit `config` path wins, else `$PLUGMEM_CONFIG`, else the platform config
+directory, else all defaults. The database path is resolved as an explicit
+constructor path, then `$PLUGMEM_DB`, then `[database].path`, then the platform
+data directory. See the [full settings reference](../plugmem-host/SETTINGS.md)
+for all fields and OS-specific paths.
 
 ```typescript
-const db = new Plugmem("agent.plugmem", { config: "./plugmem.toml" });
+const db = new Plugmem(undefined, { config: "./plugmem.toml" });
 ```
 
 ```toml
 # plugmem.toml
+[database]
+path = "/path/to/memory.plugmem" # optional example
+
 [engine]
 dim = 768                     # embedding size (0 = vectors off)
 

@@ -4,9 +4,10 @@
 //! default**.
 //!
 //! This is the loader the CLI and the MCP server share so they agree on config
-//! semantics. It is deliberately small: it reads three sections — `[engine]`
-//! (size-bearing [`Config`] fields), `[embedder]` (an OpenAI-compatible
-//! provider), and `[maintenance]` (snapshot/maintain thresholds). Keys a
+//! semantics. It is deliberately small: it reads four shared sections —
+//! `[database]` (the optional database path), `[engine]` (size-bearing
+//! [`Config`] fields), `[embedder]` (an OpenAI-compatible provider), and
+//! `[maintenance]` (snapshot/maintain thresholds). Keys a
 //! specific wrapper owns — the CLI's `[maintenance].batch_size`, the server's
 //! `[server].workers` — are **not** parsed here; a wrapper reads them from the
 //! same table via [`read_config`].
@@ -22,9 +23,27 @@ use crate::{Config, Database, DatabaseBuilder, Embedder, HostError, OpenAiCompat
 const ENV_CONFIG: &str = "PLUGMEM_CONFIG";
 /// Environment variable selecting the embedder kind (above the config file).
 const ENV_EMBEDDER: &str = "PLUGMEM_EMBEDDER";
-/// The app's config subdirectory and file, under `$XDG_CONFIG_HOME`.
-const CONFIG_DIR: &str = "plugmem";
-const CONFIG_FILE: &str = "config.toml";
+// Keep these inventories next to the parser. The settings-help tests compare
+// them with the public documentation catalogue, so adding a parser key without
+// adding its help entry fails loudly.
+pub(crate) const ENGINE_SETTING_KEYS: &[&str] = &[
+    "dim",
+    "max_bytes",
+    "max_text",
+    "max_blob",
+    "shards_facts",
+    "shards_entities",
+    "shards_edges",
+    "shards_temporal",
+    "shards_postings",
+];
+pub(crate) const DATABASE_SETTING_KEYS: &[&str] = &["path"];
+pub(crate) const EMBEDDER_SETTING_KEYS: &[&str] = &["kind", "url", "model", "api_key_env"];
+pub(crate) const MAINTENANCE_SETTING_KEYS: &[&str] = &[
+    "snapshot_every_ops",
+    "snapshot_journal_bytes",
+    "maintain_every_forgets",
+];
 
 /// A configuration error: malformed TOML, a bad `[engine]` value, or an
 /// `[embedder]` section missing a required field. Distinct from [`HostError`]
@@ -47,6 +66,9 @@ impl SettingsError {
 /// maintenance policy. The wrapper-specific knobs (`import` batch size, server
 /// workers) are read separately from the same [`read_config`] table.
 pub struct Settings {
+    /// `[database].path`, if set. Wrapper-specific explicit paths take
+    /// precedence over this value; otherwise the platform default is used.
+    pub database_path: Option<PathBuf>,
     /// The engine configuration (size-bearing fields from `[engine]`).
     pub config: Config,
     /// The embedder built from `[embedder]`, or `None` (lexical/graph/time
@@ -62,8 +84,8 @@ pub struct Settings {
 
 impl Settings {
     /// Loads settings from the config file resolved by [`read_config`] (an
-    /// explicit `flag` path, else `$PLUGMEM_CONFIG`, else
-    /// `$XDG_CONFIG_HOME/plugmem/config.toml`). Missing config → all defaults.
+    /// explicit `flag` path, else `$PLUGMEM_CONFIG`, else the platform config
+    /// path from [`crate::default_config_path`]). Missing config → defaults.
     pub fn load(flag: Option<&Path>) -> Result<Settings, SettingsError> {
         let table = read_config(flag)?;
         Settings::from_table(table.as_ref())
@@ -75,12 +97,27 @@ impl Settings {
     /// (read once via [`read_config`], then passed here).
     pub fn from_table(table: Option<&toml::Table>) -> Result<Settings, SettingsError> {
         let mut config = Config::default();
+        let mut database_path = None;
         let mut embedder = EmbedderCfg::default();
         let mut snapshot_every_ops = None;
         let mut snapshot_journal_bytes = None;
         let mut maintain_every_forgets = None;
 
         if let Some(table) = table {
+            if let Some(t) = table.get("database").and_then(toml::Value::as_table) {
+                database_path = t
+                    .get(DATABASE_SETTING_KEYS[0])
+                    .map(|value| {
+                        let path = value.as_str().ok_or_else(|| {
+                            SettingsError::config("[database].path must be a string")
+                        })?;
+                        if path.is_empty() {
+                            return Err(SettingsError::config("[database].path must not be empty"));
+                        }
+                        Ok(PathBuf::from(path))
+                    })
+                    .transpose()?;
+            }
             if let Some(t) = table.get("engine").and_then(toml::Value::as_table) {
                 apply_engine(&mut config, t)?;
             }
@@ -88,9 +125,9 @@ impl Settings {
                 embedder.merge(t);
             }
             if let Some(t) = table.get("maintenance").and_then(toml::Value::as_table) {
-                snapshot_every_ops = table_u64(t, "snapshot_every_ops");
-                snapshot_journal_bytes = table_u64(t, "snapshot_journal_bytes");
-                maintain_every_forgets = table_u64(t, "maintain_every_forgets");
+                snapshot_every_ops = table_u64(t, MAINTENANCE_SETTING_KEYS[0]);
+                snapshot_journal_bytes = table_u64(t, MAINTENANCE_SETTING_KEYS[1]);
+                maintain_every_forgets = table_u64(t, MAINTENANCE_SETTING_KEYS[2]);
             }
         }
 
@@ -100,6 +137,7 @@ impl Settings {
 
         let embedder = embedder.build(config.dim)?;
         Ok(Settings {
+            database_path,
             config,
             embedder,
             snapshot_every_ops,
@@ -132,8 +170,8 @@ impl Settings {
 
 /// Reads and parses `config.toml`, or `Ok(None)` if none applies. An explicit
 /// `flag` path **must** exist (a read error is a usage error); otherwise
-/// `$PLUGMEM_CONFIG`, then `$XDG_CONFIG_HOME/plugmem/config.toml`, are read
-/// only if present. Wrappers call this once, then pass the table to
+/// `$PLUGMEM_CONFIG`, then the platform path from
+/// [`crate::default_config_path`], are read only if present. Wrappers call this once, then pass the table to
 /// [`Settings::from_table`] and also read their own keys (batch size, workers)
 /// from it.
 pub fn read_config(flag: Option<&Path>) -> Result<Option<toml::Table>, SettingsError> {
@@ -155,7 +193,7 @@ pub(crate) fn table_u64(t: &toml::Table, key: &str) -> Option<u64> {
         .map(|n| n as u64)
 }
 
-/// Reads the config file text with the flag/env/XDG precedence.
+/// Reads the config file text with flag/env/platform-default precedence.
 fn read_config_text(flag: Option<&Path>) -> Result<Option<String>, SettingsError> {
     if let Some(p) = flag {
         return std::fs::read_to_string(p)
@@ -164,7 +202,7 @@ fn read_config_text(flag: Option<&Path>) -> Result<Option<String>, SettingsError
     }
     let candidate = std::env::var_os(ENV_CONFIG)
         .map(PathBuf::from)
-        .or_else(default_config_path);
+        .or_else(crate::default_config_path);
     match candidate {
         Some(p) if p.exists() => std::fs::read_to_string(&p)
             .map(Some)
@@ -173,29 +211,20 @@ fn read_config_text(flag: Option<&Path>) -> Result<Option<String>, SettingsError
     }
 }
 
-/// `$XDG_CONFIG_HOME/plugmem/config.toml`, falling back to
-/// `$HOME/.config/plugmem/config.toml`.
-fn default_config_path() -> Option<PathBuf> {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .map(|base| base.join(CONFIG_DIR).join(CONFIG_FILE))
-}
-
 /// Applies the `[engine]` table onto a [`Config`] (the size-bearing fields;
 /// tuning parameters keep their defaults). A non-integer or negative value is
 /// a usage error.
 fn apply_engine(cfg: &mut Config, t: &toml::Table) -> Result<(), SettingsError> {
-    let fields: [(&str, &mut usize); 9] = [
-        ("dim", &mut cfg.dim),
-        ("max_bytes", &mut cfg.max_bytes),
-        ("max_text", &mut cfg.max_text),
-        ("max_blob", &mut cfg.max_blob),
-        ("shards_facts", &mut cfg.shards_facts),
-        ("shards_entities", &mut cfg.shards_entities),
-        ("shards_edges", &mut cfg.shards_edges),
-        ("shards_temporal", &mut cfg.shards_temporal),
-        ("shards_postings", &mut cfg.shards_postings),
+    let fields: [(&str, &mut usize); ENGINE_SETTING_KEYS.len()] = [
+        (ENGINE_SETTING_KEYS[0], &mut cfg.dim),
+        (ENGINE_SETTING_KEYS[1], &mut cfg.max_bytes),
+        (ENGINE_SETTING_KEYS[2], &mut cfg.max_text),
+        (ENGINE_SETTING_KEYS[3], &mut cfg.max_blob),
+        (ENGINE_SETTING_KEYS[4], &mut cfg.shards_facts),
+        (ENGINE_SETTING_KEYS[5], &mut cfg.shards_entities),
+        (ENGINE_SETTING_KEYS[6], &mut cfg.shards_edges),
+        (ENGINE_SETTING_KEYS[7], &mut cfg.shards_temporal),
+        (ENGINE_SETTING_KEYS[8], &mut cfg.shards_postings),
     ];
     for (key, slot) in fields {
         if let Some(v) = t.get(key) {
@@ -220,16 +249,16 @@ struct EmbedderCfg {
 impl EmbedderCfg {
     fn merge(&mut self, t: &toml::Table) {
         let s = |t: &toml::Table, k: &str| t.get(k).and_then(toml::Value::as_str).map(String::from);
-        if let Some(v) = s(t, "kind") {
+        if let Some(v) = s(t, EMBEDDER_SETTING_KEYS[0]) {
             self.kind = Some(v);
         }
-        if let Some(v) = s(t, "url") {
+        if let Some(v) = s(t, EMBEDDER_SETTING_KEYS[1]) {
             self.url = Some(v);
         }
-        if let Some(v) = s(t, "model") {
+        if let Some(v) = s(t, EMBEDDER_SETTING_KEYS[2]) {
             self.model = Some(v);
         }
-        if let Some(v) = s(t, "api_key_env") {
+        if let Some(v) = s(t, EMBEDDER_SETTING_KEYS[3]) {
             self.api_key_env = Some(v);
         }
     }
@@ -324,6 +353,7 @@ maintain_every_forgets = 3
     #[test]
     fn defaults_when_no_table() {
         let s = Settings::from_table(None).unwrap();
+        assert!(s.database_path.is_none());
         assert_eq!(s.config.dim, Config::default().dim);
         assert!(s.embedder.is_none());
         assert_eq!(s.snapshot_every_ops, None);
@@ -347,6 +377,24 @@ dim = 8
     }
 
     #[test]
+    fn database_path_reads_and_validates_from_config() {
+        let table: toml::Table = "[database]\npath = \"/tmp/memory.plugmem\""
+            .parse()
+            .unwrap();
+        let settings = Settings::from_table(Some(&table)).unwrap();
+        assert_eq!(
+            settings.database_path.as_deref(),
+            Some(std::path::Path::new("/tmp/memory.plugmem"))
+        );
+
+        let bad: toml::Table = "[database]\npath = 42".parse().unwrap();
+        assert!(matches!(
+            Settings::from_table(Some(&bad)),
+            Err(SettingsError::Config(message)) if message == "[database].path must be a string"
+        ));
+    }
+
+    #[test]
     fn settings_open_applies_maintenance_and_embedder() {
         // Every maintenance knob set, plus an embedder, so `Settings::open`
         // exercises each builder branch. The embedder is never invoked by a
@@ -364,6 +412,7 @@ dim = 8
         .unwrap();
         assert!(embedder.is_some());
         let settings = Settings {
+            database_path: None,
             config,
             embedder,
             snapshot_every_ops: Some(4),
@@ -415,10 +464,11 @@ dim = 8
         let cfgfile = tmp.0.join("config.toml");
         std::fs::write(
             &cfgfile,
-            "[engine]\ndim = 512\n[embedder]\nkind = \"none\"\n[maintenance]\nsnapshot_every_ops = 64\n",
+            "[database]\npath = \"memory.plugmem\"\n[engine]\ndim = 512\n[embedder]\nkind = \"none\"\n[maintenance]\nsnapshot_every_ops = 64\n",
         )
         .unwrap();
         let s = Settings::load(Some(&cfgfile)).unwrap();
+        assert_eq!(s.database_path, Some(PathBuf::from("memory.plugmem")));
         assert_eq!(s.config.dim, 512);
         assert!(s.embedder.is_none());
         assert_eq!(s.snapshot_every_ops, Some(64));
@@ -447,5 +497,30 @@ dim = 8
             .and_then(toml::Value::as_table)
             .and_then(|m| table_u64(m, "batch_size"));
         assert_eq!(batch, Some(256));
+    }
+
+    #[test]
+    fn every_host_setting_is_documented() {
+        let docs = crate::settings_help::settings_help().docs();
+        for (section, keys) in [
+            ("database", DATABASE_SETTING_KEYS),
+            ("engine", ENGINE_SETTING_KEYS),
+            ("embedder", EMBEDDER_SETTING_KEYS),
+            ("maintenance", MAINTENANCE_SETTING_KEYS),
+        ] {
+            let documented: Vec<_> = docs
+                .iter()
+                .filter(|doc| {
+                    doc.section == section
+                        && doc.scope == crate::settings_help::SettingScope::Shared
+                })
+                .map(|doc| doc.key)
+                .collect();
+            assert_eq!(
+                documented.as_slice(),
+                keys,
+                "undocumented {section} setting"
+            );
+        }
     }
 }

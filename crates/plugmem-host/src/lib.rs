@@ -19,21 +19,33 @@
 //! process, clone the [`Database`] handle across threads and agents;
 //! different files are fully independent. Embedding calls run outside
 //! the database lock.
+//!
+//! With the default `config` feature, the host also accepts the shared
+//! `config.toml` format through [`Settings::load`] and [`read_config`]. The
+//! `SETTINGS.md` file is the reference documentation for that format, not an
+//! input file. Disable the feature with `default-features = false` when a
+//! caller wants only programmatic [`Config`] construction.
 
 mod db;
 mod embedder;
 mod error;
+mod paths;
 mod readonly;
 #[cfg(feature = "config")]
 mod settings;
+#[cfg(feature = "config")]
+mod settings_help;
 mod storage;
 
 pub use db::{Database, DatabaseBuilder, ExportedFact, FactSnapshot, RecoverReport};
 pub use embedder::{Embedder, NullEmbedder, OpenAiCompatEmbedder};
 pub use error::HostError;
+pub use paths::{default_config_dir, default_config_path, default_data_dir, default_database_path};
 pub use readonly::{ReadOnlyDatabase, Scrub};
 #[cfg(feature = "config")]
 pub use settings::{Settings, SettingsError, read_config};
+#[cfg(feature = "config")]
+pub use settings_help::{SettingDoc, SettingScope, SettingsHelp, settings_help};
 pub use storage::{FileScratch, FileStorage, FsyncPolicy};
 
 // The engine types a host caller works with, re-exported so simple
