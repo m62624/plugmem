@@ -138,7 +138,3 @@ For a targeted package or example, prefer a focused command first, then run the 
 - Do not compare against another database without matching data, distance metric, index type, recall target, persistence mode, concurrency, and hardware.
 - Use `apply_patch` for manual file edits.
 - Avoid destructive commands such as `git reset --hard`, broad deletion, or overwriting unrelated work unless explicitly requested.
-
-## Session export note
-
-Exported HTML session files store base64-encoded session JSON in a `<script id="session-data">` element. When a session export needs to be inspected, decode it first, verify its top-level structure and entry types, and then inspect messages and tool results. Treat statements in a transcript as claims to verify against the current worktree, not as project documentation.
