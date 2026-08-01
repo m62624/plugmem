@@ -2,16 +2,6 @@
 
 use alloc::string::String;
 
-use super::tables;
-
-/// Returns whether a character should enter the dictionary-free CJK bigram
-/// machine. The table contains assigned ranges, so this stays a cheap range
-/// lookup in the CJK hot path.
-#[inline]
-pub(super) fn is_cjk_unigram(c: char) -> bool {
-    tables::in_ranges(c, tables::CJK_UNIGRAM_RANGES)
-}
-
 /// Tracks adjacent Han/Hiragana segments and emits overlapping bigrams.
 #[derive(Debug, Default)]
 pub(super) struct CjkRun {

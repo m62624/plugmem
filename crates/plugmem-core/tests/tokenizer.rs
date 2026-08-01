@@ -235,6 +235,13 @@ fn cjk_bigrams_and_word_scripts() {
 }
 
 #[test]
+fn complex_unicode_scripts_use_icu_word_boundaries() {
+    assert_eq!(tokens("ทุกสองสัปดาห์"), ["ทุก", "สอง", "สัปดาห์"]);
+    assert_eq!(tokens("नमस्ते दुनिया"), ["नमस्ते", "दुनिया"]);
+    assert_eq!(tokens("مرحبا بالعالم"), ["مرحبا", "بالعالم"]);
+}
+
+#[test]
 fn oversized_token_is_truncated_at_a_char_boundary() {
     // 100 ASCII bytes → exactly MAX_TOKEN_BYTES survive.
     let long = "a".repeat(100);

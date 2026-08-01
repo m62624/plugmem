@@ -7,8 +7,11 @@
 //! 3. policy-driven Unicode folding;
 //! 4. canonical, byte-budgeted token emission.
 //!
-//! The stages share caller-owned scratch buffers, so the hot path remains
-//! allocation-free after warm-up and behaves identically on native and WASM.
+//! The stages share caller-owned scratch buffers, so the ordinary Latin,
+//! Cyrillic, and generic-script paths remain allocation-free after warm-up and
+//! behave identically on native and WASM. ICU4X's dictionary/LSTM path for
+//! complex scripts may allocate inside its iterator, but uses the same token
+//! policy and canonical emission rules.
 //! Emitted tokens are canonical fixed points of the tokenizer.
 
 use alloc::string::String;
@@ -19,16 +22,19 @@ mod normalize;
 mod policy;
 mod segment;
 mod tables;
+mod unicode;
 
 pub use self::emit::MAX_TOKEN_BYTES;
 pub use self::policy::TokenizerPolicy;
-use self::segment::{CjkRun, is_cjk_unigram};
-use unicode_segmentation::UnicodeSegmentation;
+use self::segment::CjkRun;
+use self::unicode::UnicodeBackend;
 
 /// Streaming tokenizer with reusable scratch buffers.
 ///
 /// One instance should be reused by an engine or by one thread of a wrapper.
-/// After warm-up, [`Tokenizer::tokenize`] performs no heap allocation.
+/// After warm-up, [`Tokenizer::tokenize`] performs no heap allocation on the
+/// generic Unicode path. Complex scripts may use ICU4X dictionary/LSTM
+/// scratch allocations to obtain language-aware word boundaries.
 #[derive(Debug, Default, Clone)]
 pub struct Tokenizer {
     /// Folding policy. This is copied into the hot loop and has no heap cost.
@@ -37,8 +43,12 @@ pub struct Tokenizer {
     norm: String,
     /// The token being assembled (folded word or CJK bigram).
     token: String,
+    /// Lowercase copy of the current ICU word segment.
+    lower: String,
     /// Reused scratch for the rare post-fold NFKC pass.
     canonical: String,
+    /// Compiled Unicode data and segmentation rules.
+    unicode: UnicodeBackend,
 }
 
 impl Tokenizer {
@@ -75,27 +85,35 @@ impl Tokenizer {
     /// assert_eq!(tokens, ["hello", "мир", "42", "東京", "タワー"]);
     /// ```
     pub fn tokenize(&mut self, text: &str, sink: &mut dyn FnMut(&str)) {
-        normalize::normalize_into(text, &mut self.norm);
+        normalize::normalize_into(&self.unicode, text, &mut self.norm);
 
         let policy = self.policy;
         let token = &mut self.token;
+        let lower = &mut self.lower;
         let canonical = &mut self.canonical;
+        let unicode = &self.unicode;
         let mut cjk_run = CjkRun::default();
+        let mut start = 0usize;
 
-        for segment in self.norm.split_word_bounds() {
-            let mut chars = segment.chars();
-            let first = chars.next();
-            let single = first.is_some() && chars.next().is_none();
-            match first {
-                Some(character) if single && is_cjk_unigram(character) => {
-                    cjk_run.push(character, token, sink);
-                }
-                _ if segment.chars().any(char::is_alphanumeric) => {
-                    cjk_run.flush(token, sink);
-                    fold::fold_segment(segment, token, canonical, policy, sink);
-                }
-                _ => cjk_run.flush(token, sink),
+        for end in unicode.word_boundaries(&self.norm) {
+            if end == start {
+                continue;
             }
+            let segment = &self.norm[start..end];
+            if segment.chars().any(char::is_alphanumeric) {
+                if segment.chars().all(UnicodeBackend::is_cjk_unigram) {
+                    for character in segment.chars() {
+                        cjk_run.push(character, token, sink);
+                    }
+                } else {
+                    cjk_run.flush(token, sink);
+                    unicode.lowercase_into(segment, lower);
+                    fold::fold_segment(lower, token, canonical, policy, unicode, sink);
+                }
+            } else {
+                cjk_run.flush(token, sink);
+            }
+            start = end;
         }
         cjk_run.flush(token, sink);
     }

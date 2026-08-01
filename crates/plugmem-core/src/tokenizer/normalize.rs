@@ -2,16 +2,12 @@
 
 use alloc::string::String;
 
-use unicode_normalization::UnicodeNormalization;
+use super::unicode::UnicodeBackend;
 
 /// Replaces `out` with the NFKC form of `text`.
-pub(super) fn normalize_into(text: &str, out: &mut String) {
-    out.clear();
-    if text.is_ascii() {
-        // NFKC is the identity on ASCII — avoid walking the normalization
-        // tables on the common English and identifier path.
-        out.push_str(text);
-    } else {
-        out.extend(text.nfkc());
-    }
+pub(super) fn normalize_into(backend: &UnicodeBackend, text: &str, out: &mut String) {
+    // ICU4X performs the same NFKC identity fast path internally for already
+    // normalized input while covering all Unicode versions represented by its
+    // compiled data.
+    backend.normalize_into(text, out);
 }

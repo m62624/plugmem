@@ -242,6 +242,25 @@ Four sources feed one ranked result:
   [UAX #29](https://unicode.org/reports/tr29/) word segmentation, Latin
   diacritic folding and CJK bigrams. A stop-frequency guard drops query
   terms whose posting lists would dominate the cost.
+
+### Tokenizer and allocations
+
+`Tokenizer` owns reusable normalization and folding buffers, so callers
+should reuse one tokenizer instance when processing a stream of text. After
+warm-up, the generic Unicode path (including ordinary Latin, Cyrillic,
+Arabic, Indic and similar text) performs no tokenizer-internal heap
+allocations. The guarantee applies to the tokenizer itself; a callback that
+stores emitted `&str` values may of course allocate its own output.
+
+For complex scripts without reliable whitespace boundaries, ICU4X uses its
+language-aware dictionary/LSTM segmentation path. That path may allocate a
+temporary internal boundary cache, in exchange for better word segmentation
+for languages such as Thai and Khmer and for relevant Japanese text. This is
+intentional: the tokenizer provides broad Unicode coverage and
+language-aware segmentation, but it is not a universal zero-allocation
+component. It emits the same canonical tokens on native and WebAssembly
+targets.
+
 - **Vector** — embeddings are stored as symmetric int8 quantizations of
   the L2-normalized vector (f32 is never persisted). Below a configured
   threshold, search is a two-phase flat scan: a Hamming prefilter over

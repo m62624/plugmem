@@ -8,6 +8,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
+use plugmem_core::tokenizer::Tokenizer;
 use plugmem_core::{
     Config, MemStorage, Memory, RecallQuery, RecallResult, RecallScratch, RememberInput, Storage,
 };
@@ -57,6 +58,23 @@ fn alloc_bytes<R>(f: impl FnOnce() -> R) -> (u64, R) {
     let before = ALLOC_BYTES.load(Ordering::Relaxed);
     let result = f();
     (ALLOC_BYTES.load(Ordering::Relaxed) - before, result)
+}
+
+#[test]
+fn tokenizer_generic_unicode_path_allocates_nothing_after_warmup() {
+    let _serial = serial();
+    let mut tokenizer = Tokenizer::new();
+    let input = "Hello МИР-42 café Straße नमस्ते";
+    for _ in 0..8 {
+        tokenizer.tokenize(input, &mut |_| {});
+    }
+
+    let (n, ()) = allocs(|| {
+        for _ in 0..128 {
+            tokenizer.tokenize(input, &mut |_| {});
+        }
+    });
+    assert_eq!(n, 0, "generic tokenizer path allocated {n} times");
 }
 
 #[test]

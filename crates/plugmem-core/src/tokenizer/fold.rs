@@ -2,12 +2,12 @@
 
 use alloc::string::String;
 
-use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::{decompose_canonical, is_combining_mark};
 
 use super::emit::emit_truncated;
 use super::policy::TokenizerPolicy;
 use super::tables;
+use super::unicode::UnicodeBackend;
 
 /// Folds one UAX #29 segment into the reusable token scratch buffers.
 pub(super) fn fold_segment(
@@ -15,20 +15,19 @@ pub(super) fn fold_segment(
     token: &mut String,
     canonical: &mut String,
     policy: TokenizerPolicy,
+    unicode: &UnicodeBackend,
     sink: &mut dyn FnMut(&str),
 ) {
     token.clear();
     let mut needs_nfkc_again = false;
     for c in segment.chars() {
-        for lowercase in c.to_lowercase() {
-            if fold_into(lowercase, token, policy, &mut needs_nfkc_again) {
-                emit_folded(token, canonical, needs_nfkc_again, policy, sink);
-                token.clear();
-                needs_nfkc_again = false;
-            }
+        if fold_into(c, token, policy, &mut needs_nfkc_again) {
+            emit_folded(token, canonical, needs_nfkc_again, policy, unicode, sink);
+            token.clear();
+            needs_nfkc_again = false;
         }
     }
-    emit_folded(token, canonical, needs_nfkc_again, policy, sink);
+    emit_folded(token, canonical, needs_nfkc_again, policy, unicode, sink);
 }
 
 /// `true` for format characters that carry no lexical content in running
@@ -36,7 +35,7 @@ pub(super) fn fold_segment(
 /// must be removed without turning them into a token boundary.
 #[inline]
 fn is_ignorable_format(c: char) -> bool {
-    tables::in_ranges(c, tables::IGNORABLE_FORMAT_RANGES)
+    UnicodeBackend::is_default_ignorable(c)
 }
 
 /// Pushes one lowercased character into the token, applying project folding
@@ -110,21 +109,19 @@ fn emit_folded(
     canonical: &mut String,
     needs_nfkc_again: bool,
     policy: TokenizerPolicy,
+    unicode: &UnicodeBackend,
     sink: &mut dyn FnMut(&str),
 ) {
     if needs_nfkc_again {
-        canonical.clear();
-        canonical.extend(token.nfkc());
+        unicode.normalize_into(token, canonical);
         token.clear();
         let mut boundary = false;
         for c in canonical.chars() {
-            for lowercase in c.to_lowercase() {
-                if fold_into(lowercase, token, policy, &mut boundary) {
-                    drop_leading_marks_before_base(token);
-                    emit_truncated(token, sink);
-                    token.clear();
-                    boundary = false;
-                }
+            if fold_into(c, token, policy, &mut boundary) {
+                drop_leading_marks_before_base(token);
+                emit_truncated(token, sink);
+                token.clear();
+                boundary = false;
             }
         }
         drop_leading_marks_before_base(token);

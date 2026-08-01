@@ -16,9 +16,14 @@ thiserror = { workspace = true }
 xxhash-rust = { workspace = true }
 serde = { workspace = true, optional = true }
 hashbrown = { workspace = true }
-unicode-segmentation = { workspace = true }
 unicode-normalization = { workspace = true }
 libm = { workspace = true }
+icu-casemap = { workspace = true }
+icu-locale-core = { workspace = true }
+icu-normalizer = { workspace = true }
+icu-properties = { workspace = true }
+icu-segmenter = { workspace = true }
+writeable = { workspace = true }
 
 # Gated off wasm targets: proptest's harness (via wait-timeout) does not
 # compile there, and `cargo build --examples/--benches` for wasm would pull
