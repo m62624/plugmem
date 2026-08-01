@@ -210,7 +210,15 @@ fn cjk_bigrams_and_word_scripts() {
         assert_eq!(&tokens(input), want, "input: {input:?}");
     }
 
-    for input in ["\u{3400}\u{3401}", "\u{F900}\u{F901}", "\u{20000}\u{20001}"] {
+    for input in [
+        "\u{3400}\u{3401}",
+        "\u{F900}\u{F901}",
+        "\u{20000}\u{20001}",
+        "\u{2F800}\u{2F801}",
+        "\u{30000}\u{30001}",
+        "\u{31350}\u{31351}",
+        "\u{323B0}\u{323B1}",
+    ] {
         let got = tokens(input);
         assert_eq!(got.len(), 1, "table boundary input: {input:?}");
         assert_eq!(got[0].chars().count(), 2, "table boundary input: {input:?}");
@@ -220,6 +228,10 @@ fn cjk_bigrams_and_word_scripts() {
             "table boundary token is not canonical"
         );
     }
+
+    // The gaps between extension ranges are not lexical characters and must
+    // reset adjacency instead of becoming synthetic CJK bigram members.
+    assert_eq!(tokens("\u{4E00}\u{2A6E0}\u{4E01}"), ["一", "丁"]);
 }
 
 #[test]
@@ -270,6 +282,13 @@ fn regression_canonical_token_from_ordinal_and_modifier_symbols() {
 #[test]
 fn leading_joiners_after_marks_are_canonical() {
     let emitted = tokens("׳\u{363}_a");
+    assert_eq!(emitted, ["a"]);
+    assert_eq!(tokens(&emitted[0]), emitted);
+}
+
+#[test]
+fn marks_after_trailing_joiners_are_canonical() {
+    let emitted = tokens("a'\u{300}\u{200D}🌀");
     assert_eq!(emitted, ["a"]);
     assert_eq!(tokens(&emitted[0]), emitted);
 }
