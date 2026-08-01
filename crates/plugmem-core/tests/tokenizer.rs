@@ -2,7 +2,7 @@
 //! class (prose, identifiers, numbers, URLs, diacritics, CJK scripts),
 //! the concatenation property, and canonical-token invariants.
 
-use plugmem_core::tokenizer::{MAX_TOKEN_BYTES, Tokenizer};
+use plugmem_core::tokenizer::{MAX_TOKEN_BYTES, Tokenizer, TokenizerPolicy};
 #[cfg(not(target_family = "wasm"))]
 use proptest::prelude::*;
 #[cfg(not(target_family = "wasm"))]
@@ -13,6 +13,26 @@ fn tokens(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     tk.tokenize(text, &mut |t| out.push(t.to_owned()));
     out
+}
+
+fn tokens_with_policy(text: &str, policy: TokenizerPolicy) -> Vec<String> {
+    let mut tk = Tokenizer::with_policy(policy);
+    let mut out = Vec::new();
+    tk.tokenize(text, &mut |t| out.push(t.to_owned()));
+    out
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn scalar_from_u32(value: u32) -> char {
+    char::from_u32(value).expect("the strategy must never generate UTF-16 surrogates")
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn full_unicode_scalar() -> impl Strategy<Value = char> {
+    prop_oneof![
+        1 => (0x0000u32..=0xD7FFu32).prop_map(scalar_from_u32),
+        1 => (0xE000u32..=0x10FFFFu32).prop_map(scalar_from_u32),
+    ]
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -30,7 +50,10 @@ fn stress_char() -> impl Strategy<Value = char> {
         3 => (0x3400u32..=0x9FFF).prop_map(|n| char::from_u32(n).unwrap()),
         3 => (0xAC00u32..=0xD7AF).prop_map(|n| char::from_u32(n).unwrap()),
         2 => (0x1F300u32..=0x1FAFF).prop_map(|n| char::from_u32(n).unwrap()),
-        2 => any::<char>(),
+        // This branch spans every Unicode scalar value, including scripts and
+        // blocks not listed above. The focused branches keep common boundary
+        // classes frequent enough to exercise their interactions as well.
+        8 => full_unicode_scalar(),
         3 => prop::sample::select(vec![
             '\u{00AD}', '\u{200B}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{202E}',
             '\u{2060}', '\u{FEFF}',
@@ -47,7 +70,13 @@ fn stress_char() -> impl Strategy<Value = char> {
 
 #[cfg(not(target_family = "wasm"))]
 fn stress_text() -> impl Strategy<Value = String> {
-    prop::collection::vec(stress_char(), 0..192).prop_map(|chars| chars.into_iter().collect())
+    prop::collection::vec(stress_char(), 0..=256).prop_map(|chars| chars.into_iter().collect())
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn full_unicode_text() -> impl Strategy<Value = String> {
+    prop::collection::vec(full_unicode_scalar(), 0..=256)
+        .prop_map(|chars| chars.into_iter().collect())
 }
 
 #[test]
@@ -128,6 +157,36 @@ fn nfkc_and_diacritic_folding() {
 }
 
 #[test]
+fn explicit_policies_keep_language_folding_out_of_the_scanner() {
+    assert_eq!(
+        tokens_with_policy("Ёлка café", TokenizerPolicy::search()),
+        ["елка", "cafe"]
+    );
+    assert_eq!(
+        tokens_with_policy("Ёлка café", TokenizerPolicy::unicode()),
+        ["ёлка", "café"]
+    );
+    assert_eq!(Tokenizer::new().policy(), TokenizerPolicy::search());
+}
+
+#[test]
+fn every_ignorable_format_table_entry_is_removed_inside_words() {
+    let chars = [
+        '\u{00AD}', '\u{200B}', '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{202A}',
+        '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2060}', '\u{2061}', '\u{2062}',
+        '\u{2063}', '\u{2064}', '\u{FEFF}',
+    ];
+    for c in chars {
+        let got = tokens(&format!("a{c}b"));
+        assert!(
+            got.iter().all(|token| !token.contains(c)),
+            "format character survived: U+{:04X} in {got:?}",
+            c as u32
+        );
+    }
+}
+
+#[test]
 fn cjk_bigrams_and_word_scripts() {
     let cases: &[(&str, &[&str])] = &[
         // Han: overlapping bigrams (Lucene CJKBigramFilter scheme).
@@ -149,6 +208,17 @@ fn cjk_bigrams_and_word_scripts() {
     ];
     for (input, want) in cases {
         assert_eq!(&tokens(input), want, "input: {input:?}");
+    }
+
+    for input in ["\u{3400}\u{3401}", "\u{F900}\u{F901}", "\u{20000}\u{20001}"] {
+        let got = tokens(input);
+        assert_eq!(got.len(), 1, "table boundary input: {input:?}");
+        assert_eq!(got[0].chars().count(), 2, "table boundary input: {input:?}");
+        assert_eq!(
+            tokens(&got[0]),
+            got,
+            "table boundary token is not canonical"
+        );
     }
 }
 
@@ -198,6 +268,13 @@ fn regression_canonical_token_from_ordinal_and_modifier_symbols() {
 }
 
 #[test]
+fn leading_joiners_after_marks_are_canonical() {
+    let emitted = tokens("׳\u{363}_a");
+    assert_eq!(emitted, ["a"]);
+    assert_eq!(tokens(&emitted[0]), emitted);
+}
+
+#[test]
 fn word_joiners_are_internal_and_canonical() {
     let cases: &[(&str, &[&str])] = &[
         ("don't o'clock", &["don't", "o'clock"]),
@@ -223,34 +300,52 @@ fn word_joiners_are_internal_and_canonical() {
 }
 
 #[cfg(not(target_family = "wasm"))]
+fn assert_canonical_tokens(text: &str) -> Result<(), TestCaseError> {
+    let emitted = tokens(text);
+    for token in &emitted {
+        if token.is_empty() || token.len() > MAX_TOKEN_BYTES {
+            return Err(TestCaseError::fail(format!(
+                "invalid token {token:?} from input {text:?}"
+            )));
+        }
+        let again = tokens(token);
+        if again != [token.clone()] {
+            return Err(TestCaseError::fail(format!(
+                "non-canonical token {token:?} from input {text:?}; retokenized as {again:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_family = "wasm"))]
 #[test]
 fn unicode_stress_tokens_are_canonical() {
     let config = ProptestConfig {
-        cases: 1024,
+        cases: 2048,
         max_shrink_iters: 4096,
         failure_persistence: None,
         ..ProptestConfig::default()
     };
     let mut runner = TestRunner::new(config);
     runner
-        .run(&stress_text(), |text| {
-            let emitted = tokens(&text);
-            for token in &emitted {
-                if token.is_empty() || token.len() > MAX_TOKEN_BYTES {
-                    return Err(TestCaseError::fail(format!(
-                        "invalid token {token:?} from input {text:?}"
-                    )));
-                }
-                let again = tokens(token);
-                if again != [token.clone()] {
-                    return Err(TestCaseError::fail(format!(
-                        "non-canonical token {token:?} from input {text:?}; retokenized as {again:?}"
-                    )));
-                }
-            }
-            Ok(())
-        })
+        .run(&stress_text(), |text| assert_canonical_tokens(&text))
         .expect("Unicode stress properties failed");
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn full_unicode_scalar_texts_are_canonical() {
+    let config = ProptestConfig {
+        cases: 512,
+        max_shrink_iters: 4096,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    };
+    let mut runner = TestRunner::new(config);
+    runner
+        .run(&full_unicode_text(), |text| assert_canonical_tokens(&text))
+        .expect("full Unicode property failed");
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -272,12 +367,15 @@ proptest! {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn tokens_are_canonical(text in ".{0,80}") {
-        for t in tokens(&text) {
-            prop_assert!(!t.is_empty());
-            prop_assert!(t.len() <= MAX_TOKEN_BYTES);
-            let again = tokens(&t);
-            prop_assert_eq!(again.len(), 1, "token {:?} re-split into {:?}", t, again);
-            prop_assert_eq!(&again[0], &t, "token is not a fixed point");
-        }
+        prop_assert!(assert_canonical_tokens(&text).is_ok());
+    }
+
+    // The small ASCII property above remains a quick regression check. This
+    // companion uses arbitrary Unicode scalar values and stresses mixed
+    // scripts, combining marks, format controls, punctuation, and NFKC forms.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn full_unicode_tokens_are_canonical(text in full_unicode_text()) {
+        prop_assert!(assert_canonical_tokens(&text).is_ok());
     }
 }

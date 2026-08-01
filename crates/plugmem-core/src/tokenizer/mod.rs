@@ -34,6 +34,8 @@
 
 use alloc::string::String;
 
+mod tables;
+use self::tables as tokenizer_tables;
 use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::{decompose_canonical, is_combining_mark};
 use unicode_segmentation::UnicodeSegmentation;
@@ -41,16 +43,51 @@ use unicode_segmentation::UnicodeSegmentation;
 /// Upper bound on an emitted token, in bytes.
 pub const MAX_TOKEN_BYTES: usize = 64;
 
+/// Controls search-specific folding without changing the scanner or its
+/// allocation behavior.
+///
+/// The default preserves the tokenizer's existing index contract: Latin
+/// diacritics are folded for recall and Russian `ё` is treated as `е`. Use
+/// [`TokenizerPolicy::unicode`] when callers need Unicode lowercase and
+/// normalization without either language/search-specific equivalence.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct TokenizerPolicy {
+    /// Fold Latin precomposed diacritics to their ASCII base.
+    pub fold_latin_diacritics: bool,
+    /// Treat Russian small letter `ё` as `е` after lowercase.
+    pub fold_russian_yo: bool,
+}
+
+impl TokenizerPolicy {
+    /// A language-neutral policy: Unicode lowercase and normalization only.
+    pub const fn unicode() -> Self {
+        Self {
+            fold_latin_diacritics: false,
+            fold_russian_yo: false,
+        }
+    }
+
+    /// The search policy used by [`Tokenizer::new`] and existing indexes.
+    pub const fn search() -> Self {
+        Self {
+            fold_latin_diacritics: true,
+            fold_russian_yo: true,
+        }
+    }
+}
+
+impl Default for TokenizerPolicy {
+    fn default() -> Self {
+        Self::search()
+    }
+}
+
 /// `true` for characters treated as CJK unigram sources: Han ideographs
 /// (BMP blocks, the compatibility block, supplementary-plane extensions)
 /// and Hiragana. Katakana and Hangul are excluded on purpose — UAX #29
 /// already groups them into word runs.
 fn is_cjk_unigram(c: char) -> bool {
-    matches!(
-        c as u32,
-        0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0x20000..=0x2FFFF
-            | 0x3041..=0x309F
-    )
+    tokenizer_tables::in_ranges(c, tokenizer_tables::CJK_UNIGRAM_RANGES)
 }
 
 /// Streaming tokenizer with reusable scratch buffers.
@@ -60,6 +97,8 @@ fn is_cjk_unigram(c: char) -> bool {
 /// invariant depends on.
 #[derive(Debug, Default, Clone)]
 pub struct Tokenizer {
+    /// Folding policy. This is copied into the hot loop and has no heap cost.
+    policy: TokenizerPolicy,
     /// NFKC-normalized copy of the input.
     norm: String,
     /// The token being assembled (folded word or CJK bigram).
@@ -74,6 +113,19 @@ impl Tokenizer {
     /// A tokenizer with empty scratch buffers.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates a tokenizer with an explicit folding policy.
+    pub fn with_policy(policy: TokenizerPolicy) -> Self {
+        Self {
+            policy,
+            ..Self::default()
+        }
+    }
+
+    /// Returns the policy used by this tokenizer.
+    pub const fn policy(&self) -> TokenizerPolicy {
+        self.policy
     }
 
     /// Splits `text` into normalized tokens, calling `sink` for each one.
@@ -98,29 +150,14 @@ impl Tokenizer {
         } else {
             self.norm.extend(text.nfkc());
         }
+        let policy = self.policy;
         let token = &mut self.token;
         let canonical = &mut self.canonical;
 
         // The CJK adjacency machine: previous unigram char + run length.
         // At a run boundary the machine may still owe a token: a lone
         // char is a unigram; longer runs were already emitted as bigrams.
-        let mut prev_cjk: Option<char> = None;
-        let mut run_len = 0usize;
-        fn flush_cjk(
-            prev: &mut Option<char>,
-            run_len: &mut usize,
-            token: &mut String,
-            sink: &mut dyn FnMut(&str),
-        ) {
-            if let Some(p) = prev.take()
-                && *run_len == 1
-            {
-                token.clear();
-                token.push(p);
-                sink(token);
-            }
-            *run_len = 0;
-        }
+        let mut cjk_run = CjkRun::default();
 
         for seg in self.norm.split_word_bounds() {
             let mut chars = seg.chars();
@@ -128,35 +165,70 @@ impl Tokenizer {
             let single = first.is_some() && chars.next().is_none();
             match first {
                 Some(c) if single && is_cjk_unigram(c) => {
-                    if let Some(p) = prev_cjk {
-                        token.clear();
-                        token.push(p);
-                        token.push(c);
-                        sink(token);
-                    }
-                    prev_cjk = Some(c);
-                    run_len += 1;
+                    cjk_run.push(c, token, sink);
                 }
                 _ if seg.chars().any(char::is_alphanumeric) => {
-                    flush_cjk(&mut prev_cjk, &mut run_len, token, sink);
-                    token.clear();
-                    let mut needs_nfkc = false;
-                    for c in seg.chars() {
-                        for lc in c.to_lowercase() {
-                            if fold_into(lc, token, &mut needs_nfkc) {
-                                emit_folded(token, canonical, needs_nfkc, sink);
-                                token.clear();
-                                needs_nfkc = false;
-                            }
-                        }
-                    }
-                    emit_folded(token, canonical, needs_nfkc, sink);
+                    cjk_run.flush(token, sink);
+                    fold_segment(seg, token, canonical, policy, sink);
                 }
-                _ => flush_cjk(&mut prev_cjk, &mut run_len, token, sink),
+                _ => cjk_run.flush(token, sink),
             }
         }
-        flush_cjk(&mut prev_cjk, &mut run_len, token, sink);
+        cjk_run.flush(token, sink);
     }
+}
+
+/// Tracks adjacent Han/Hiragana segments and emits overlapping bigrams.
+#[derive(Debug, Default)]
+struct CjkRun {
+    previous: Option<char>,
+    length: usize,
+}
+
+impl CjkRun {
+    fn push(&mut self, current: char, token: &mut String, sink: &mut dyn FnMut(&str)) {
+        if let Some(previous) = self.previous {
+            token.clear();
+            token.push(previous);
+            token.push(current);
+            sink(token);
+        }
+        self.previous = Some(current);
+        self.length += 1;
+    }
+
+    fn flush(&mut self, token: &mut String, sink: &mut dyn FnMut(&str)) {
+        if let Some(previous) = self.previous.take()
+            && self.length == 1
+        {
+            token.clear();
+            token.push(previous);
+            sink(token);
+        }
+        self.length = 0;
+    }
+}
+
+/// Folds one UAX #29 segment into the reusable token scratch buffers.
+fn fold_segment(
+    segment: &str,
+    token: &mut String,
+    canonical: &mut String,
+    policy: TokenizerPolicy,
+    sink: &mut dyn FnMut(&str),
+) {
+    token.clear();
+    let mut needs_nfkc = false;
+    for c in segment.chars() {
+        for lowercase in c.to_lowercase() {
+            if fold_into(lowercase, token, policy, &mut needs_nfkc) {
+                emit_folded(token, canonical, needs_nfkc, policy, sink);
+                token.clear();
+                needs_nfkc = false;
+            }
+        }
+    }
+    emit_folded(token, canonical, needs_nfkc, policy, sink);
 }
 
 /// `true` for the default-ignorable format characters that occur inside
@@ -165,15 +237,11 @@ impl Tokenizer {
 /// `Format`/`Extend` for word breaking) but they carry no lexical content
 /// and must never survive into a term.
 fn is_ignorable_format(c: char) -> bool {
-    matches!(
-        c as u32,
-        0xAD | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0xFEFF
-    )
+    tokenizer_tables::in_ranges(c, tokenizer_tables::IGNORABLE_FORMAT_RANGES)
 }
 
 /// Pushes one lowercased char into the token, applying the folding rules:
 ///
-/// - `ё` → `е`;
 /// - ignorable format characters are dropped ([`is_ignorable_format`]);
 /// - combining marks are dropped after an ASCII base (this also absorbs
 ///   the one Unicode lowercase expansion that emits a mark, `İ` → `i` +
@@ -190,9 +258,12 @@ fn is_ignorable_format(c: char) -> bool {
 /// token. Ignorable format characters are removed without splitting; this is
 /// what keeps `co\u{AD}operate` together while preventing a dropped `_` or `:`
 /// from gluing two otherwise separate lexical pieces.
-fn fold_into(c: char, out: &mut String, needs_nfkc: &mut bool) -> bool {
-    if c == 'ё' {
-        out.push('е');
+fn fold_into(c: char, out: &mut String, policy: TokenizerPolicy, needs_nfkc: &mut bool) -> bool {
+    if policy.fold_russian_yo
+        && let Some(mapped) =
+            tokenizer_tables::mapped_char(c, tokenizer_tables::RUSSIAN_SEARCH_FOLDS)
+    {
+        out.push(mapped);
         return false;
     }
     if is_ignorable_format(c) {
@@ -226,7 +297,8 @@ fn fold_into(c: char, out: &mut String, needs_nfkc: &mut bool) -> bool {
         }
         n += 1;
     });
-    if n <= parts.len() && n > 0 && parts[0].is_ascii_alphanumeric() {
+    if policy.fold_latin_diacritics && n <= parts.len() && n > 0 && parts[0].is_ascii_alphanumeric()
+    {
         for &d in &parts[..n] {
             if !is_combining_mark(d) {
                 out.push(d);
@@ -244,7 +316,7 @@ fn fold_into(c: char, out: &mut String, needs_nfkc: &mut bool) -> bool {
 /// characters belong to a segment, but it does not by itself guarantee that
 /// the folded segment is a fixed point when tokenized in isolation.
 fn is_word_joiner(c: char) -> bool {
-    matches!(c, '\'' | '\u{2019}' | '.' | ',' | '_')
+    tokenizer_tables::WORD_JOINERS.contains(&c)
 }
 
 /// Re-normalizes a folded token only when lowercase/folding saw combining
@@ -257,6 +329,7 @@ fn emit_folded(
     token: &mut String,
     canonical: &mut String,
     needs_nfkc: bool,
+    policy: TokenizerPolicy,
     sink: &mut dyn FnMut(&str),
 ) {
     if needs_nfkc {
@@ -266,7 +339,7 @@ fn emit_folded(
         let mut ignored = false;
         for c in canonical.chars() {
             for lc in c.to_lowercase() {
-                if fold_into(lc, token, &mut ignored) {
+                if fold_into(lc, token, policy, &mut ignored) {
                     drop_leading_marks_before_base(token);
                     emit_truncated(token, sink);
                     token.clear();
@@ -306,11 +379,13 @@ fn drop_leading_marks_before_base(token: &mut String) {
 }
 
 /// Sends the assembled token, truncated to [`MAX_TOKEN_BYTES`] at a char
-/// boundary. Trailing word joiners are removed: they are meaningful only
-/// between lexical characters, and keeping one would make re-tokenization
-/// context-sensitive (for example, `word.` → `word`). Empty tokens are
-/// guarded against rather than asserted.
+/// boundary. Word joiners are meaningful only between lexical characters, so
+/// leading and trailing joiners are removed without allocating. Keeping one
+/// would make re-tokenization context-sensitive (for example, `_word` →
+/// `word` and `word.` → `word`). Empty tokens are guarded against rather than
+/// asserted.
 fn emit_truncated(token: &str, sink: &mut dyn FnMut(&str)) {
+    let token = token.trim_start_matches(is_word_joiner);
     if token.is_empty() {
         return;
     }
