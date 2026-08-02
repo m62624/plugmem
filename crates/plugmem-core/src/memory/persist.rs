@@ -87,8 +87,10 @@ mod kind {
     pub const METAS_POOL: u16 = 45;
 }
 
-/// Byte length of the engine-state section.
-const STATE_LEN: usize = 24;
+/// Byte length of the original engine-state section.
+const STATE_V1_LEN: usize = 24;
+/// Byte length of the current engine-state section.
+const STATE_LEN: usize = 32;
 
 /// The callback [`Memory::emit_sections_from`] drives once per snapshot
 /// section: the section `kind` and the byte pieces whose concatenation is its
@@ -301,7 +303,7 @@ impl<'a> Bm25Index<'a> {
         snap: &Snapshot<'_>,
     ) -> Result<Self, Error> {
         let state = section(snap, kind::ENGINE_STATE)?;
-        if state.len() != STATE_LEN {
+        if state.len() != STATE_V1_LEN && state.len() != STATE_LEN {
             return Err(Error::Corrupt("engine state section has a wrong length"));
         }
         let total_docs = u64::from_le_bytes(state[8..16].try_into().unwrap());
@@ -316,7 +318,7 @@ impl<'a> Bm25Index<'a> {
 impl<'a> Memory<'a> {
     /// A [`Sections`] view over this engine's own structures — the source for
     /// an ordinary snapshot.
-    fn sections(&self) -> Sections<'_, 'a> {
+    pub(super) fn sections(&self) -> Sections<'_, 'a> {
         Sections {
             facts: &self.facts,
             fact_aux: &self.fact_aux,
@@ -416,6 +418,8 @@ impl<'a> Memory<'a> {
         state.extend_from_slice(&self.next_entity.to_le_bytes());
         state.extend_from_slice(&s.bm25.docs().to_le_bytes());
         state.extend_from_slice(&s.bm25.total_len().to_le_bytes());
+        state.extend_from_slice(&self.bm25_tokenizer_version.to_le_bytes());
+        state.extend_from_slice(&0u32.to_le_bytes());
         f(kind::ENGINE_STATE, &[&state])?;
         // The vector pool is one flat section (empty when dim is 0), streamed
         // as its two borrowed pieces so the dominant pool needs no owned copy.
@@ -807,16 +811,22 @@ impl<'a> Memory<'a> {
     /// vector reads). Shared by both load paths.
     fn finish_load(mut mem: Self, snap: &Snapshot<'_>) -> Result<Self, Error> {
         let state = section(snap, kind::ENGINE_STATE)?;
-        if state.len() != STATE_LEN {
+        if state.len() != STATE_V1_LEN && state.len() != STATE_LEN {
             return Err(Error::Corrupt("engine state section has a wrong length"));
         }
         mem.next_fact = u32::from_le_bytes(state[0..4].try_into().unwrap());
         mem.next_entity = u32::from_le_bytes(state[4..8].try_into().unwrap());
+        mem.bm25_tokenizer_version = if state.len() >= STATE_LEN {
+            u32::from_le_bytes(state[24..28].try_into().unwrap())
+        } else {
+            crate::memory::maintain::TOKENIZER_INDEX_VERSION
+        };
         if (mem.next_fact as usize) < mem.facts.len()
             || (mem.next_entity as usize) < mem.entities.len()
         {
             return Err(Error::Corrupt("engine id counters below record counts"));
         }
+        mem.tombstones = mem.facts.iter().filter(|fact| fact.is_tombstone()).count();
         mem.validate_references()?;
         Ok(mem)
     }

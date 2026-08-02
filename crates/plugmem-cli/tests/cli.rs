@@ -481,8 +481,8 @@ fn verify_reports_a_clean_database() {
 fn scrub_verifies_a_checkpointed_database() {
     let tmp = TempDir::new("scrub-ok");
     plugmem(&tmp.db(), &["remember", "a fact worth some bytes to scrub"]);
-    // maintain checkpoints (empties the journal) so the read-only scrub opens.
-    plugmem(&tmp.db(), &["maintain"]);
+    // checkpoint empties the journal so the read-only scrub opens.
+    plugmem(&tmp.db(), &["checkpoint"]);
     let out = plugmem(&tmp.db(), &["scrub"]);
     assert!(
         out.status.success(),
@@ -496,7 +496,7 @@ fn scrub_verifies_a_checkpointed_database() {
 fn scrub_detects_on_disk_corruption() {
     let tmp = TempDir::new("scrub-corrupt");
     plugmem(&tmp.db(), &["remember", "a corruptible tokio fact"]);
-    plugmem(&tmp.db(), &["maintain"]);
+    plugmem(&tmp.db(), &["checkpoint"]);
     // Flip a byte inside a section body (the text pool) of the snapshot.
     let snap = snapshot_file(&tmp.db());
     let mut bytes = std::fs::read(&snap).unwrap();
@@ -511,7 +511,7 @@ fn scrub_detects_on_disk_corruption() {
 fn recover_writes_a_clean_copy_and_preserves_the_source() {
     let tmp = TempDir::new("recover");
     plugmem(&tmp.db(), &["remember", "keep me"]);
-    plugmem(&tmp.db(), &["maintain"]); // materialize a snapshot file to salvage
+    plugmem(&tmp.db(), &["checkpoint"]); // materialize a snapshot file to salvage
     let dst = tmp.0.join("recovered.plugmem");
     let out = plugmem(&tmp.db(), &["recover", dst.to_str().unwrap()]);
     assert!(

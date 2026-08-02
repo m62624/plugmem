@@ -126,12 +126,13 @@ remembers facts one at a time as the conversation goes.
 
 ## Async and concurrency (no tokio)
 
-`maintain()` and `checkpoint()` do real disk I/O (compaction, HNSW build,
+`maintain()` and `checkpoint()` can do real disk I/O (compaction, HNSW work,
 fsync), so they return a **`Promise`** and run on the **libuv** thread pool —
-they never block the event loop. Every other verb is microsecond-fast in memory
-and stays synchronous (a Promise there would be pure overhead). There is no async
-runtime: the engine is CPU-bound, and the one thing that can wait — a remote
-embedder's HTTP call — happens outside the engine lock.
+they never block the event loop. A maintenance call may also return a no-op
+report when there is nothing to purge, reindex or optimize. Every other verb is
+microsecond-fast in memory and stays synchronous (a Promise there would be pure
+overhead). There is no async runtime: the engine is CPU-bound, and the one thing
+that can wait — a remote embedder's HTTP call — happens outside the engine lock.
 
 `close()` releases the file and its lock; every verb afterwards throws, and it is
 idempotent (the handle is also released on garbage collection, but `close()`

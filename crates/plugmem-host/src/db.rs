@@ -46,9 +46,9 @@ use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use memmap2::Mmap;
 use plugmem_core::{
-    Config, Error, FactFault, FactRecord, LinkInput, MaintainReport, MemStorage, Memory,
-    OpenReport, RecallQuery, RecallResult, RecallScratch, RememberInput, RememberOutcome, Stats,
-    Storage,
+    Config, Error, FactFault, FactRecord, LinkInput, MaintainReport, MaintenanceMode,
+    MaintenanceOptions, MemStorage, Memory, OpenReport, RecallQuery, RecallResult, RecallScratch,
+    RememberInput, RememberOutcome, Stats, Storage,
 };
 
 thread_local! {
@@ -742,8 +742,8 @@ impl Database {
         self.read().engine.read(|mem| export_facts_each(mem, f));
     }
 
-    /// Runs a maintenance pass now (purge, compaction, HNSW build past the
-    /// threshold — for the cost model).
+    /// Runs a maintenance pass now (cheap no-op, purge/compaction, text
+    /// reindex, and/or bounded HNSW work — for the cost model).
     ///
     /// **Disk-first** (milestone H): the compacted image is written by streaming
     /// the two big pools (vectors, text) through temp files and then re-mapped,
@@ -755,6 +755,15 @@ impl Database {
     ///
     /// The report's byte counts are the on-disk image size before and after.
     pub fn maintain(&self, now: u64) -> Result<MaintainReport, HostError> {
+        self.maintain_with_options(now, MaintenanceOptions::auto())
+    }
+
+    /// Runs a maintenance pass with explicit policy.
+    pub fn maintain_with_options(
+        &self,
+        now: u64,
+        options: MaintenanceOptions,
+    ) -> Result<MaintainReport, HostError> {
         let mut st = self.write();
         // The image size is the current snapshot generation's, not the tiny
         // manifest at the base path.
@@ -768,6 +777,30 @@ impl Database {
                 .unwrap_or(0)
         };
         let bytes_before = snap_len(&st.store);
+        if !st.engine.read(|mem| mem.maintenance_needed(options)) {
+            let mut report = st
+                .engine
+                .read(|mem| mem.maintenance_preview(options, bytes_before));
+            report.bytes_after = bytes_before;
+            return Ok(report);
+        }
+        let stats = st.engine.read(|mem| mem.stats());
+        let needs_disk_first =
+            stats.tombstones != 0 || matches!(options.mode, MaintenanceMode::Full);
+        if !needs_disk_first {
+            let mut report = {
+                let State { engine, store, .. } = &mut *st;
+                engine.with(store, |mem, store| {
+                    mem.maintain_with_options(store, now, options)
+                })?
+            };
+            self.resnapshot(&mut st, now)?;
+            st.forgets = 0;
+            st.ops = 0;
+            report.bytes_before = bytes_before;
+            report.bytes_after = snap_len(&st.store);
+            return Ok(report);
+        }
         let text_tmp = tmp_sibling(st.store.path(), "mtext");
         let vec_tmp = tmp_sibling(st.store.path(), "mvec");
 
@@ -775,15 +808,23 @@ impl Database {
         // this reads through the live map, so it happens before the map is
         // dropped (as in `resnapshot`).
         let mut purged = 0usize;
+        let mut report = MaintainReport::default();
         {
             let State { engine, store, .. } = &mut *st;
             store.stage_snapshot(|sink| {
                 engine.read(|mem| {
                     let mut text_scratch = FileScratch::create(&text_tmp)?;
                     let mut vec_scratch = FileScratch::create(&vec_tmp)?;
-                    purged = mem
-                        .snapshot_disk_first(now, &mut text_scratch, &mut vec_scratch, &mut *sink)
+                    report = mem
+                        .snapshot_disk_first_with_options(
+                            now,
+                            &mut text_scratch,
+                            &mut vec_scratch,
+                            &mut *sink,
+                            options,
+                        )
                         .map_err(HostError::from)?;
+                    purged = report.purged;
                     Ok(())
                 })
             })?;
@@ -800,11 +841,10 @@ impl Database {
         st.forgets = 0;
         st.ops = 0;
         let bytes_after = snap_len(&st.store);
-        Ok(MaintainReport {
-            purged,
-            bytes_before,
-            bytes_after,
-        })
+        report.purged = purged;
+        report.bytes_before = bytes_before;
+        report.bytes_after = bytes_after;
+        Ok(report)
     }
 
     /// Writes a full snapshot and clears the journal now (re-mapping the

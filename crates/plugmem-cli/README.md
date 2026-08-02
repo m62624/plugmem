@@ -130,7 +130,7 @@ engine keeps no clock, so `now` comes from the system clock at each call.
 | `link <SRC> <REL> <DST>` | upsert a typed edge between entities |
 | `show <ID>` | one fact's full card — text, both time axes, state |
 | `stats` | engine size counters |
-| `maintain` | purge tombstones, compact, build HNSW past the threshold (disk-first) |
+| `maintain` | policy-driven maintenance: cheap no-op, tombstone compaction, text reindex or bounded HNSW work |
 | `checkpoint` | flush the journal into a fresh snapshot and clear it (leaves the database checkpointed) |
 | `verify` | check content integrity (text UTF-8, vector↔fact consistency); exit 2 on damage |
 | `scrub` | check the snapshot's byte-level container checksums; exit 2 on the first damaged section |

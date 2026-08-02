@@ -44,7 +44,7 @@ mod maintain;
 mod persist;
 mod recall;
 
-pub use maintain::MaintainReport;
+pub use maintain::{MaintainReport, MaintenanceMode, MaintenanceOptions};
 pub use recall::{RecallQuery, RecallResult, RecallScratch, RecalledEdge, RecalledFact, source};
 
 /// Input of `remember` and `revise`.
@@ -192,6 +192,11 @@ pub struct Stats {
     pub edges: usize,
     /// Quantized vector slots.
     pub vectors: usize,
+    /// Tombstoned fact records awaiting physical purge.
+    pub tombstones: usize,
+    /// Vector slots already covered by the HNSW graph; slots after this are
+    /// searched as the flat tail.
+    pub hnsw_indexed: u32,
     /// The next fact id to be assigned. Ids below it are in use or burned
     /// (forgotten and purged) — never reissued.
     pub next_fact: u32,
@@ -258,6 +263,9 @@ pub struct Memory<'a> {
     // -- id allocation (derived from the arenas on load) --
     next_fact: u32,
     next_entity: u32,
+    // -- maintenance state --
+    tombstones: usize,
+    bm25_tokenizer_version: u32,
     // -- reusable scratches --
     tokenizer: Tokenizer,
     tf_scratch: Vec<(u32, u8)>,
@@ -299,6 +307,8 @@ impl<'a> Memory<'a> {
             hnsw: HnswGraph::new(cfg.hnsw_m, cfg.hnsw_m0, cfg.max_bytes)?,
             next_fact: 0,
             next_entity: 0,
+            tombstones: 0,
+            bm25_tokenizer_version: maintain::TOKENIZER_INDEX_VERSION,
             tokenizer: Tokenizer::new(),
             tf_scratch: Vec::new(),
             name_scratch: String::new(),
@@ -465,11 +475,17 @@ impl<'a> Memory<'a> {
                     self.apply_link(now, src, rel, dst, provenance)?;
                     report.replayed += 1;
                 }
-                Op::Maintain { .. } => {
+                Op::Maintain {
+                    mode,
+                    max_hnsw_inserts,
+                    ..
+                } => {
                     // Re-execute the compaction deterministically, so a
                     // replayed image matches one snapshotted after a live
                     // maintain byte for byte.
-                    self.replay_maintain()?;
+                    let options =
+                        maintain::MaintenanceOptions::from_journal(mode, max_hnsw_inserts)?;
+                    self.replay_maintain_with_options(options)?;
                     report.replayed += 1;
                 }
             }
@@ -787,6 +803,8 @@ impl<'a> Memory<'a> {
             terms: self.terms.len(),
             edges: self.edges_out.len(),
             vectors: self.vecs.len(),
+            tombstones: self.tombstones,
+            hnsw_indexed: self.hnsw.indexed(),
             next_fact: self.next_fact,
             next_entity: self.next_entity,
             db_uuid: self.cfg.db_uuid,
@@ -1008,6 +1026,7 @@ impl<'a> Memory<'a> {
             .expect("record fetched above");
         let flags = record.flags | fact_flags::TOMBSTONE;
         payload[4..6].copy_from_slice(&flags.to_be_bytes());
+        self.tombstones += 1;
         Ok(true)
     }
 

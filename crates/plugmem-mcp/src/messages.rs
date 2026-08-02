@@ -81,9 +81,9 @@ recorded_at, valid_from). The counterpart of the CLI's JSONL export; useful for 
 inspection.";
 
 /// `plugmem_maintain` tool description.
-pub const MAINTAIN_TOOL: &str = "Purge tombstoned facts, compact storage, and build the vector \
-index past its threshold. Returns a report (purged count, bytes before/after). Time is the \
-server's wall clock.";
+pub const MAINTAIN_TOOL: &str = "Run policy-driven maintenance: no-op when nothing is pending, \
+purge tombstoned facts, compact storage, reindex text when needed and advance the vector index. \
+Returns a report with purge, byte and maintenance-action counters. Time is the server's wall clock.";
 
 /// `plugmem_checkpoint` tool description.
 pub const CHECKPOINT_TOOL: &str = "Flush the journal into a fresh snapshot and clear it, leaving \

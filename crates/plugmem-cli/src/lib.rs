@@ -391,14 +391,39 @@ fn execute(
                         "purged": report.purged,
                         "bytes_before": report.bytes_before,
                         "bytes_after": report.bytes_after,
+                        "no_op": report.no_op,
+                        "tombstones_before": report.tombstones_before,
+                        "facts_before": report.facts_before,
+                        "facts_after": report.facts_after,
+                        "vectors_before": report.vectors_before,
+                        "vectors_after": report.vectors_after,
+                        "hnsw_indexed_before": report.hnsw_indexed_before,
+                        "hnsw_indexed_after": report.hnsw_indexed_after,
+                        "structural_compacted": report.structural_compacted,
+                        "bm25_compacted": report.bm25_compacted,
+                        "bm25_reindexed": report.bm25_reindexed,
+                        "hnsw_rebuilt": report.hnsw_rebuilt,
+                        "hnsw_remapped": report.hnsw_remapped,
+                        "hnsw_inserted": report.hnsw_inserted,
                     })
                 )
                 .ok();
             } else {
                 writeln!(
                     out,
-                    "maintained: purged {}, {} -> {} bytes",
-                    report.purged, report.bytes_before, report.bytes_after
+                    "maintained: purged {}, {} -> {} bytes, hnsw +{}, bm25 {}{}",
+                    report.purged,
+                    report.bytes_before,
+                    report.bytes_after,
+                    report.hnsw_inserted,
+                    if report.bm25_reindexed {
+                        "reindexed"
+                    } else if report.bm25_compacted {
+                        "compacted"
+                    } else {
+                        "unchanged"
+                    },
+                    if report.no_op { " (no-op)" } else { "" }
                 )
                 .ok();
             }

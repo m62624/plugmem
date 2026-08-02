@@ -128,7 +128,7 @@ use the same OpenAI-compatible HTTP shape.
 |---|---:|---|
 | `snapshot_every_ops` | `1024` | Snapshot after this many mutations. |
 | `snapshot_journal_bytes` | `4194304` | Snapshot when the journal reaches this size. |
-| `maintain_every_forgets` | off | Run physical tombstone maintenance after this many forgets. |
+| `maintain_every_forgets` | off | Run policy maintenance after this many forgets. |
 | `batch_size` | `128` | CLI-only `import` batch size; `--batch` overrides it. |
 
 ### `[server]`

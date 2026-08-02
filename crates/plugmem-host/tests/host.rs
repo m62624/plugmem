@@ -180,6 +180,23 @@ fn maintain_policy_fires_on_forgets() {
 }
 
 #[test]
+fn maintain_noop_does_not_rewrite_the_snapshot() {
+    let tmp = TempDir::new("maintain-noop");
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    db.remember(RememberInput::text(1, "stable fact")).unwrap();
+    db.checkpoint(2).unwrap();
+    let before = snapshot_file(&tmp.db());
+    let before_len = std::fs::metadata(&before).unwrap().len();
+
+    let report = db.maintain(3).unwrap();
+    assert!(report.no_op);
+    assert_eq!(report.purged, 0);
+    assert!(!report.structural_compacted);
+    assert_eq!(snapshot_file(&tmp.db()), before);
+    assert_eq!(std::fs::metadata(before).unwrap().len(), before_len);
+}
+
+#[test]
 fn concurrent_handles_share_one_file() {
     let tmp = TempDir::new("threads");
     let (db, _) = Database::open(tmp.db(), cfg()).unwrap();

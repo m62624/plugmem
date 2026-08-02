@@ -108,6 +108,10 @@ pub struct Stats {
     pub edges: f64,
     /// Quantized vector slots.
     pub vectors: f64,
+    /// Tombstoned fact records awaiting physical purge.
+    pub tombstones: f64,
+    /// Vector slots covered by HNSW.
+    pub hnsw_indexed: f64,
     /// The next fact id to be assigned.
     pub next_fact: f64,
     /// The next entity id to be assigned.
@@ -178,6 +182,34 @@ pub struct MaintainReport {
     pub bytes_before: f64,
     /// On-disk image bytes after the pass.
     pub bytes_after: f64,
+    /// No storage/index rewrite was needed.
+    pub no_op: bool,
+    /// Tombstones present before the pass.
+    pub tombstones_before: f64,
+    /// Fact records before the pass.
+    pub facts_before: f64,
+    /// Fact records after the pass.
+    pub facts_after: f64,
+    /// Vector slots before the pass.
+    pub vectors_before: f64,
+    /// Vector slots after the pass.
+    pub vectors_after: f64,
+    /// HNSW coverage before the pass.
+    pub hnsw_indexed_before: f64,
+    /// HNSW coverage after the pass.
+    pub hnsw_indexed_after: f64,
+    /// Physical compaction ran.
+    pub structural_compacted: bool,
+    /// BM25 was compacted from existing postings.
+    pub bm25_compacted: bool,
+    /// BM25 was rebuilt from text.
+    pub bm25_reindexed: bool,
+    /// HNSW was rebuilt from empty.
+    pub hnsw_rebuilt: bool,
+    /// HNSW was carried/remapped.
+    pub hnsw_remapped: bool,
+    /// Vector slots inserted into HNSW.
+    pub hnsw_inserted: f64,
 }
 
 /// Convert a host result into its typed JS mirror via a serde round-trip: the

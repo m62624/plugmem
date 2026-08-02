@@ -335,9 +335,12 @@ threads, matching the engine's own philosophy:
 | `snapshot_journal_bytes` | 4 MiB | …or when the journal outgrows this |
 | `maintain_every_forgets` | off | optional auto-`maintain` (physical purge) |
 
-`maintain` is O(database) and the first pass beyond the HNSW threshold
-pays the vector-graph build (~1.6 ms per vector) — which is why it is
-explicit by default: call `db.maintain(now)` on your schedule.
+`maintain` is policy-driven. The default `Auto` path first checks whether
+anything is pending; with no tombstones, stale text index or vector tail to
+optimize, it returns a no-op report without rewriting the snapshot. When work
+is pending, host maintenance stays disk-first: text and vector pools stream
+through scratch files, ordinary BM25 compaction filters existing postings, and
+HNSW work is bounded unless a full rebuild is explicitly requested.
 
 ## Embedders
 

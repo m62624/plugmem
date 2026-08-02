@@ -428,6 +428,26 @@ impl<'a> HnswGraph<'a> {
         Ok(())
     }
 
+    /// Owned clone used by graph-only maintenance. The clone is produced via
+    /// the canonical snapshot sections, so it works for both owned and borrowed
+    /// graphs without exposing the arena internals.
+    pub(crate) fn to_owned(&self, max_bytes: usize) -> Result<HnswGraph<'static>, Error> {
+        let meta = self.dump_meta();
+        let level0 = self.dump_level0();
+        let [upper_meta, upper_pool, lists_meta, lists_pool] = self.dump_upper();
+        HnswGraph::from_parts(
+            self.m,
+            self.m0,
+            max_bytes,
+            &meta,
+            &level0,
+            &upper_meta,
+            &upper_pool,
+            &lists_meta,
+            &lists_pool,
+        )
+    }
+
     fn insert_one(
         &mut self,
         pool: &VecPool<'_>,

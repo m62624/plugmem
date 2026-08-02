@@ -229,7 +229,7 @@ that justified them.
 | `revise` | close the predecessor, record the successor, keep the chain |
 | `forget` | immediate tombstone; physical purge at `maintain` |
 | `link` | upsert a typed edge between entities |
-| `maintain` | the one O(base) verb: purge, compaction, index rebuilds, HNSW build |
+| `maintain` | policy-driven maintenance: no-op, compaction, text reindex, vector optimization or full rebuild |
 | `snapshot` | full image + journal reset |
 
 ## Retrieval
@@ -265,7 +265,7 @@ targets.
   the L2-normalized vector (f32 is never persisted). Below a configured
   threshold, search is a two-phase flat scan: a Hamming prefilter over
   1-bit sign signatures, then an exact quantized-cosine rescore of the
-  best candidates. Above the threshold, `maintain` builds an
+  best candidates. Above the threshold, maintenance builds or advances an
   [HNSW](https://arxiv.org/abs/1603.09320) graph (Malkov & Yashunin)
   with the neighbor-selection heuristic and early-stopped beam search;
   vectors added since the last build sit in a flat tail that is scanned
@@ -322,9 +322,14 @@ around this one; this is the map.
 - **HNSW graph** above a size threshold (Malkov & Yashunin) — sub-linear
   approximate search with the neighbor-selection heuristic and early-stopped
   beam. Why: linear scan stops paying off past ~tens of thousands of vectors.
-  Cost: a one-time build in `maintain` (~ms/vector) and approximate recall.
+  Cost: graph construction is maintenance work (~ms/vector when rebuilt) and
+  approximate recall.
 - **Delta + LEB128 posting lists** with a stop-frequency guard. Why: compact
   lists decode fast and a hub term cannot dominate query cost.
+- **Posting-based BM25 compaction** — ordinary compaction filters existing
+  posting lists instead of re-tokenizing every live document. Why: deleting
+  tombstones should not make Unicode tokenization the dominant maintenance
+  cost. Cost: tokenizer semantic changes require explicit text reindex.
 - **Bounded everything in fusion** — per-source candidate cap (`SOURCE_CAP`),
   graph expansion budgets, greedy top-k. Why: one hub entity or one common term
   can never blow a query up; cost is a fixed ceiling regardless of data shape.
@@ -416,7 +421,7 @@ break out:
 | tags + time-range recall @ 100k | ~230 µs |
 | hybrid recall (text + hub entity anchor) @ 100k | ~470 µs |
 | `remember` (tokenize, index, quantize d384, similar-detect, journal) | ~72 µs mean |
-| one-time HNSW build inside `maintain` | ~1.6 ms/vector |
+| full HNSW rebuild during explicit maintenance | ~1.6 ms/vector |
 
 Reproduce: `cargo bench -p plugmem-core` (Criterion; a separate target,
 never run under `cargo test`) for the full statistical suite, or
@@ -512,8 +517,10 @@ truncated). See [WebAssembly 2.0 and 3.0](#webassembly-20-and-30).
   computed — and approximate above the HNSW threshold (recall@10 ≥ 0.9
   against brute force is a test gate, not a proof).
 - The tokenizer does no stemming or lemmatization.
-- `maintain` is O(database) and the first one past the HNSW threshold
-  pays the graph build; call it on your schedule, not on a hot path.
+- `maintain` defaults to `Auto`: it returns a cheap no-op when no work is
+  pending, compacts tombstones when present, reindexes text only when tokenizer
+  semantics require it, and advances HNSW with a bounded insertion budget.
+  `MaintenanceMode::Full` remains the explicit offline rebuild path.
 - The snapshot format is not yet frozen (pre-1.0): a new version may
   require re-importing, not migrating.
 
