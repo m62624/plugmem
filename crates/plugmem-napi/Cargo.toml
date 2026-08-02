@@ -11,8 +11,8 @@ description = "Native Node.js addon (napi-rs) for the plugmem engine: plugmem-ho
 publish = false
 
 [lib]
-# cdylib: the `.node` addon. rlib: so native `cargo test` can exercise the
-# pure wrapper logic (e.g. the skill-version gate) without a Node runtime.
+# cdylib: the `.node` addon. rlib: so native `cargo test` can exercise the pure
+# wrapper logic without a Node runtime.
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]

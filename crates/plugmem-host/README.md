@@ -22,16 +22,19 @@ everything.** The others are for narrower needs.
 | **A memory in a Rust program** — the common case | **`plugmem-host`** (this crate, `std`) | Everything included: files, locking, read-only mmap, HTTP embedders, integrity, cross-process concurrency. One dependency — it re-exports the engine. |
 | A memory in Rust with **no `std`** or **your own storage** (browser, wasm host, custom file layer) | [`plugmem-core`](https://docs.rs/plugmem-core/latest) (`no_std`) | The engine only. You bring the `Storage` trait, the clock, file I/O and embedding — so you also manage when the file opens and how memory loads. |
 | Just the **flat byte-pool containers** | [`plugmem-arena`](https://docs.rs/plugmem-arena/latest) (`no_std`) | The storage substrate, engine-agnostic. |
-| A memory from a **terminal or shell script** | `plugmem-cli` (`plugmem`) | One file, no server; `plugmem repl` keeps the engine open for host speed. |
-| A memory for an **LLM agent** or a **non-Rust program** | `plugmem-mcp` | Long-lived stdio JSON-RPC; language-independent. In Rust, embed this crate instead. |
-| A memory in **JavaScript / TypeScript** (Node) | `plugmem-napi` | The engine as a native Node addon (napi-rs), in-process; on npm as `plugmem`. |
+| A memory from a **terminal or shell script** | [`plugmem-cli`](https://docs.rs/plugmem-cli/latest) (`plugmem`) | One file, no server; `plugmem repl` keeps the engine open for host speed. |
+| A memory for an **LLM agent** or a **non-Rust program** | [`plugmem-mcp`](https://docs.rs/plugmem-mcp/latest) | Long-lived stdio JSON-RPC; language-independent. In Rust, embed this crate instead. |
+| A memory in **JavaScript / TypeScript** (Node) | [`plugmem-napi`](https://docs.rs/plugmem-napi/latest) | The engine as a native Node addon (napi-rs), in-process; on npm as `plugmem`. |
 
 ## Configuration
 
 The shared `config.toml` loader and platform-aware database paths are documented
-in the [full settings reference](SETTINGS.md). `plugmem-cli`, `plugmem-mcp` and
-`plugmem-napi` use the same settings catalogue and database-path precedence;
-only their explicit override syntax differs.
+in the [full settings reference](https://github.com/m62624/plugmem/blob/main/crates/plugmem-host/SETTINGS.md).
+[`plugmem-cli`](https://docs.rs/plugmem-cli/latest),
+[`plugmem-mcp`](https://docs.rs/plugmem-mcp/latest) and
+[`plugmem-napi`](https://docs.rs/plugmem-napi/latest) use the same settings
+catalogue and database-path precedence; only their explicit override syntax
+differs.
 
 The `config` feature is enabled by default for this native host crate, so
 `Settings::load` and `read_config` are available without extra feature flags.
@@ -122,6 +125,25 @@ let out = db.recall(RecallQuery::text(1_784_000_100_000, "which runtime?"))?;
 println!("{}", out.rendered);
 # Ok::<(), plugmem_host::HostError>(())
 ```
+
+## Benchmarks
+
+```text
+cargo run --release -p plugmem-host --example bench_database -- 100000 --diagnose-recall | tee database-benchmark-100k.tsv
+cargo run --release -p plugmem-host --example bench_database -- 1000000 --diagnose-recall | tee database-benchmark-1m.tsv
+cat database-benchmark-100k.tsv database-benchmark-1m.tsv > database-benchmark-scale.tsv
+cargo run -p plugmem-bench-charts -- database-benchmark-scale.tsv --force
+cargo bench -p plugmem-host
+```
+
+The committed `assets/database-*.svg` charts are generated from the 1M run.
+![Recall latency at 100k versus 1M operations](assets/database-recall-scale-100k-1m.svg)
+
+For the same-workload comparison between 100k and 1M, see the
+[measured scale table on GitHub](https://github.com/m62624/plugmem#measured-scale).
+For the public Rust API, see the [plugmem-host documentation on docs.rs](https://docs.rs/plugmem-host/latest/).
+The database example uses deterministic synthetic facts and `dim=0`; it does
+not call an embedding service or use a network connection.
 
 Native builds are 64-bit, so a host process reads every capacity class
 of the shared file format: databases sized for the 32-bit wasm budget

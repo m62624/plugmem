@@ -100,6 +100,38 @@ recency boost (tags filter; they are not a source):
 | **Graph** | entity graph with typed edges, breadth-first from query anchors | relational knowledge |
 | **Temporal** | range scans over a `recorded_at`-ordered index; bitemporal validity | "what was true *then*", time windows |
 
+## Measured scale
+
+The following is a like-for-like native, file-backed benchmark using the same
+deterministic synthetic workload at both sizes (`dim=0`, so no embedding
+service is involved). Recall values are p50 latencies after the database has
+been checkpointed and maintained; the 1M SVGs live in
+[`plugmem-host/assets`](crates/plugmem-host/assets).
+
+| Measurement | 100k operations | 1M operations |
+|---|---:|---:|
+| Active facts after `maintain` | 86,010 | 860,204 |
+| Pool bytes after `maintain` | 56.8 MB | 382.0 MB |
+| Streaming load | 7.88 s (12,689 ops/s) | 148.32 s (6,742 ops/s) |
+| Text-only recall p50 | 52 µs | 1.91 ms |
+| Full hybrid recall p50 | 636 µs | 4.89 ms |
+| Checkpoint | 69 ms | 550 ms |
+| `maintain` | 0.68 s | 13.85 s |
+
+![Recall latency at 100k versus 1M operations](crates/plugmem-host/assets/database-recall-scale-100k-1m.svg)
+
+The 1M run holds roughly 10× as many active facts while the pool is 6.7×
+larger. Total load time is 18.8× higher, but the per-operation load cost grows
+by 1.9×; full hybrid recall grows by 7.7×. These are machine-specific trend
+measurements, not release guarantees. Reproduce both columns with:
+
+```text
+cargo run --release -p plugmem-host --example bench_database -- 100000 --diagnose-recall | tee database-benchmark-100k.tsv
+cargo run --release -p plugmem-host --example bench_database -- 1000000 --diagnose-recall | tee database-benchmark-1m.tsv
+cat database-benchmark-100k.tsv database-benchmark-1m.tsv > database-benchmark-scale.tsv
+cargo run -p plugmem-bench-charts -- database-benchmark-scale.tsv --force
+```
+
 The lexical tokenizer is ICU4X-backed: it applies Unicode NFKC normalization,
 locale-neutral lowercase mapping, UAX #29 word boundaries, language-aware
 segmentation for complex scripts, Latin search folding and CJK bigrams. Its
@@ -108,7 +140,6 @@ allocations after warm-up. ICU4X's dictionary/LSTM path may allocate a
 temporary boundary cache for scripts such as Thai and Khmer in exchange for
 better word segmentation. The tokenizer emits canonical lexical terms; it
 does not perform stemming or lemmatization.
-
 ## Install
 
 Two binaries — the `plugmem-cli` CLI (crate `plugmem-cli`) and the `plugmem-mcp`

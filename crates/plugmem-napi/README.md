@@ -81,7 +81,7 @@ The constructor resolves settings **exactly like the CLI and MCP server**: an
 explicit `config` path wins, else `$PLUGMEM_CONFIG`, else the platform config
 directory, else all defaults. The database path is resolved as an explicit
 constructor path, then `$PLUGMEM_DB`, then `[database].path`, then the platform
-data directory. See the [full settings reference](../plugmem-host/SETTINGS.md)
+data directory. See the [full settings reference](https://github.com/m62624/plugmem/blob/main/crates/plugmem-host/SETTINGS.md)
 for all fields and OS-specific paths.
 
 ```typescript

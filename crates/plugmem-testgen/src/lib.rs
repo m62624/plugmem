@@ -425,6 +425,18 @@ impl Gen {
     }
 }
 
+impl Iterator for Gen {
+    type Item = GenOp;
+
+    /// Produces the next deterministic operation without materializing a
+    /// corpus. The iterator is intentionally infinite; callers choose the
+    /// bounded workload with [`Iterator::take`]. This is the streaming path
+    /// used by large benchmarks and import-style callers.
+    fn next(&mut self) -> Option<Self::Item> {
+        Some(self.next_op())
+    }
+}
+
 /// L2-normalizes `v` in place (regenerating is unnecessary: a Gaussian
 /// draw is zero with probability zero, and cluster members sit near a
 /// unit center anyway).

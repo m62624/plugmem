@@ -1,5 +1,31 @@
 # AGENTS.md
 
+## README link policy
+
+- The repository-root `README.md` is the workspace README. It may use relative
+  links to files, crates, assets, and sections inside this repository.
+- A crate-local `crates/<crate>/README.md` is package documentation: Cargo can
+  publish it to crates.io, and readers may encounter it outside the checkout.
+  Keep it self-contained and do not link to the workspace with paths such as
+  `../../README.md` or to sibling crate files with `../...` paths.
+- In crate-local READMEs, link public Rust APIs and sibling crates through their
+  absolute `https://docs.rs/<crate>/latest` URLs. Link repository-only material
+  (settings files, benchmarks, source files, and markdown documents from another
+  crate) through absolute `https://github.com/m62624/plugmem/...` URLs.
+- A crate-local README may refer to an SVG or other asset shipped by that same
+  crate with a relative path such as `assets/chart.svg`. Cargo packages the
+  README and the crate's `assets/` directory together, so this remains valid in
+  the workspace, on GitHub, and on crates.io. Do not use relative paths to
+  workspace files or sibling crates.
+
+## Benchmark documentation
+
+- Benchmark SVGs are generated artifacts. Keep their source data and renderer
+  in `tools/bench-charts`; do not hand-draw a chart that the tool cannot
+  reproduce.
+- When a benchmark compares corpus sizes, the chart must be generated from the
+  same tool input and the README must state the workload, platform, units, and
+  whether embeddings are enabled.
 ## Project overview
 
 `plugmem` is a Rust embedded memory and knowledge engine. It stores facts, temporal state, tags, entities, relationships, text indexes, and vectors. The core is designed to be usable in `no_std` environments; the host layer adds filesystem persistence, journals, snapshots, memory mapping, recovery, and embedding integration.
@@ -138,3 +164,24 @@ For a targeted package or example, prefer a focused command first, then run the 
 - Do not compare against another database without matching data, distance metric, index type, recall target, persistence mode, concurrency, and hardware.
 - Use `apply_patch` for manual file edits.
 - Avoid destructive commands such as `git reset --hard`, broad deletion, or overwriting unrelated work unless explicitly requested.
+
+## Release versioning
+
+- Keep the workspace, Cargo manifests, `Cargo.lock`, and npm metadata at the
+  current development version between releases. The only manual release-prep
+  version edit is the `skill/SKILL.md` marker in its dedicated release commit.
+- Do not manually bump package versions in a feature or performance PR. The
+  release workflow derives the release version from the pushed `vX.Y.Z` tag,
+  updates the workspace and npm versions on its release-candidate branch, and
+  opens the synchronization PR back to `main`.
+- Skill content may be updated in any normal PR; regular CI checks its
+  structure, frontmatter, and that the marker is well formed, but does not
+  compare it with the development package version. When the release workflow
+  creates `rc/vX.Y.Z` and synchronizes package versions from the `pin/vX.Y.Z`
+  trigger, update only the `<!-- skill-version: X.Y.Z -->` marker in
+  `skill/SKILL.md` on that RC branch (and its documentation if the skill
+  behavior changed). The release gate is the only version-equality check and
+  verifies the marker against the tag-derived package version.
+- Verify the release workflow when changing this policy: `.github/workflows/release.yml`
+  is the source of truth for tag parsing, version synchronization, and the
+  skill-version gate.

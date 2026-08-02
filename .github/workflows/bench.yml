@@ -7,9 +7,11 @@
 # regular CI under `--features counters` and are bit-identical on any machine.
 #
 # One trigger, one label: a human adds the `benchmark` label to a PR (re-add
-# it to re-run), or dispatches this workflow by hand. Both jobs run off that
+# it to re-run), or dispatches this workflow by hand. All jobs run off that
 # single label so there is no second, divergent benchmark pipeline:
 #   - `criterion` — the full statistical suite into the job log.
+#   - `database-scale` — the streaming, file-backed 100k and million-operation
+#                       host runs plus their TSV and database SVG artifacts.
 #   - `charts`    — regenerates the README chart SVGs on the runner and reports
 #                   what moved versus the committed charts (artifact + summary
 #                   + a sticky PR comment). It never commits anything.
@@ -48,6 +50,62 @@ jobs:
         run: |
           cargo bench -p plugmem-arena
           cargo bench -p plugmem-core
+          cargo bench -p plugmem-host
+
+  database-scale:
+    name: file-backed database (100k + 1M, informational)
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.label.name == 'benchmark'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: System deps for the SVG renderer
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
+      - name: Stream and measure 100k and one million synthetic operations
+        run: |
+          set -euo pipefail
+          cargo run -q --release -p plugmem-host --example bench_database -- 100000 \
+            --diagnose-recall | tee database-benchmark-100k.tsv
+          cargo run -q --release -p plugmem-host --example bench_database -- 1000000 \
+            --diagnose-recall | tee database-benchmark-1m.tsv
+          cat database-benchmark-100k.tsv database-benchmark-1m.tsv \
+            > database-benchmark.tsv
+      - name: Render database SVGs
+        run: |
+          cargo run -qr -p plugmem-bench-charts -- database-benchmark.tsv --force \
+            | tee database-charts-report.txt
+      - name: Summarize database benchmark
+        run: |
+          {
+            echo '## File-backed database benchmark (100k and 1M operations)'
+            echo
+            echo 'The corpus is deterministic and synthetic. No embedding service'
+            echo 'or network endpoint is used; vector mode is an explicit `--dim` run.'
+            echo
+            echo '### Chart report'
+            echo '```'
+            cat database-charts-report.txt
+            echo '```'
+            echo '### Key measurements'
+            echo '```'
+            grep -E $'^#DB\tdatabase\tnative\t(mixed_stream|checkpoint|maintain|reopen|readonly|writer_verify|reopen_verify|readonly_verify|readonly_scrub)\t(elapsed_ms|load_ops_per_sec|pool_bytes|rss_delta_bytes|p50_us|bytes)\t' database-benchmark-1m.tsv || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload database benchmark artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: database-benchmark-scale
+          path: |
+            database-benchmark.tsv
+            database-benchmark-100k.tsv
+            database-benchmark-1m.tsv
+            database-charts-report.txt
+            crates/plugmem-host/assets/database-*.svg
+          if-no-files-found: error
 
   charts:
     name: regenerate benchmark charts

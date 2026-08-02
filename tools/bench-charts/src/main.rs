@@ -1,8 +1,9 @@
 //! Renders the benchmark `#TSV` rows into the README chart SVGs — the
 //! arena charts from the [`plugmem-bench-matrix`](../bench-matrix) stand
 //! and the core recall-latency chart from `plugmem-core`'s `bench_ops`
-//! example. A chart whose rows are absent from the input is left alone, so
-//! either source can be rendered on its own or both piped together.
+//! example, plus the native file-backed database benchmark and its 100k-vs-1M
+//! recall comparison. A chart whose rows are absent from the input is left
+//! alone, so any source can be rendered on its own or all can be piped together.
 //!
 //! Pure Rust: [plotters](https://github.com/plotters-rs/plotters) with its
 //! SVG backend, so there is no browser, no WebDriver and nothing downloaded
@@ -74,6 +75,7 @@ struct Chart {
 /// Where each chart set is written (fixed repo paths, not user config).
 const ARENA_OUT: &str = "crates/plugmem-arena/assets";
 const CORE_OUT: &str = "crates/plugmem-core/assets";
+const HOST_OUT: &str = "crates/plugmem-host/assets";
 
 /// The core (engine) chart: per-source recall latency, native only. Its
 /// rows come from `plugmem-core`'s `bench_ops` example (`n = core`,
@@ -92,6 +94,77 @@ const CORE_CHARTS: &[Chart] = &[Chart {
     y_title: "µs",
     log: false,
 }];
+
+/// Native file-backed database charts. Rows come from the
+/// `plugmem-host/examples/bench_database.rs` runner and use `n = database`.
+const DATABASE_CHARTS: &[Chart] = &[
+    Chart {
+        file: "database-throughput-1m.svg",
+        title: "file-backed database — streamed mixed-load throughput",
+        n: "database-1m",
+        metric: "load_ops_per_sec",
+        structures: &["mixed_stream"],
+        y_title: "operations / second",
+        log: false,
+    },
+    Chart {
+        file: "database-phases-1m.svg",
+        title: "file-backed database — 1M lifecycle phase time",
+        n: "database-1m",
+        metric: "elapsed_ms",
+        structures: &[
+            "mixed_stream",
+            "checkpoint",
+            "maintain",
+            "writer_verify",
+            "reopen",
+            "reopen_verify",
+            "readonly",
+            "readonly_verify",
+            "readonly_scrub",
+        ],
+        y_title: "milliseconds",
+        log: true,
+    },
+    Chart {
+        file: "database-recall-1m.svg",
+        title: "file-backed database — recall p50 at 1M",
+        n: "database-1m",
+        metric: "p50_us",
+        structures: &[
+            "writer/text_recall",
+            "writer/hybrid_recall",
+            "writer/vector_recall",
+            "readonly/text_recall",
+            "readonly/hybrid_recall",
+            "readonly/vector_recall",
+        ],
+        y_title: "microseconds",
+        log: false,
+    },
+    Chart {
+        file: "database-memory-1m.svg",
+        title: "file-backed database — engine pool bytes at 1M",
+        n: "database-1m",
+        metric: "pool_bytes",
+        structures: &["after_load", "after_maintain", "readonly"],
+        y_title: "bytes",
+        log: false,
+    },
+];
+
+/// The like-for-like recall comparison chart. Its input contains one
+/// `database-100k` and one `database-1m` series, both emitted by the same
+/// file-backed runner and rendered in the same units.
+const DATABASE_SCALE_SERIES: [(&str, RGBColor); 2] = [
+    ("100k operations", RGBColor(30, 58, 138)),
+    ("1M operations", RGBColor(190, 24, 93)),
+];
+const DATABASE_SCALE_ROWS: &[(&str, &str, &str)] = &[
+    ("text_only", "writer_diagnostic/text_only", "p50_us"),
+    ("tag + range", "writer_diagnostic/text_tag_range", "p50_us"),
+    ("full hybrid", "writer_diagnostic/full_hybrid", "p50_us"),
+];
 
 /// The arena chart set. Every structure name matches a row the bench
 /// stand emits.
@@ -252,9 +325,19 @@ fn main() {
     // Charts absent from the input (e.g. the core chart when only arena
     // data was piped) are left entirely alone — SVG and baseline both.
     let mut next_baseline = base.clone();
+    // `database` was the original label before the parser learned to retain
+    // the operation count from the benchmark header. Drop those legacy rows
+    // once a size-labelled database input is present.
+    if new.keys().any(|key| key.0.starts_with("database-")) {
+        next_baseline.retain(|key, _| key.0 != "database");
+    }
     let mut updated = 0usize;
     let mut total = 0usize;
-    for (out, charts) in [(ARENA_OUT, ARENA_CHARTS), (CORE_OUT, CORE_CHARTS)] {
+    for (out, charts) in [
+        (ARENA_OUT, ARENA_CHARTS),
+        (CORE_OUT, CORE_CHARTS),
+        (HOST_OUT, DATABASE_CHARTS),
+    ] {
         for chart in charts {
             let cells = chart_cells(chart, &new);
             if cells.is_empty() {
@@ -268,6 +351,7 @@ fn main() {
             };
             match verdict {
                 Verdict::Render { max_delta } => {
+                    std::fs::create_dir_all(out).unwrap_or_else(|e| panic!("creating {out}: {e}"));
                     render(chart, &new, Path::new(out));
                     for (key, v) in &cells {
                         next_baseline.insert(key.clone(), (*v, 1));
@@ -287,6 +371,42 @@ fn main() {
                         cfg.threshold * 100.0
                     );
                 }
+            }
+        }
+    }
+
+    let scale_cells = database_scale_cells(&new);
+    let has_100k = scale_cells.iter().any(|(key, _)| key.0 == "database-100k");
+    let has_1m = scale_cells.iter().any(|(key, _)| key.0 == "database-1m");
+    if has_100k && has_1m {
+        total += 1;
+        let verdict = if force {
+            Verdict::Render { max_delta: 0.0 }
+        } else {
+            decide(&scale_cells, &base, cfg.threshold)
+        };
+        match verdict {
+            Verdict::Render { max_delta } => {
+                std::fs::create_dir_all(HOST_OUT)
+                    .unwrap_or_else(|e| panic!("creating {HOST_OUT}: {e}"));
+                render_database_scale(&new, Path::new(HOST_OUT));
+                for (key, value) in &scale_cells {
+                    next_baseline.insert(key.clone(), (*value, 1));
+                }
+                updated += 1;
+                println!(
+                    "{:32} rewritten (Δmax {:.0}%)",
+                    "database-recall-scale-100k-1m.svg",
+                    max_delta * 100.0
+                );
+            }
+            Verdict::Skip { max_delta } => {
+                println!(
+                    "{:32} unchanged (Δmax {:.0}% ≤ {:.0}%)",
+                    "database-recall-scale-100k-1m.svg",
+                    max_delta * 100.0,
+                    cfg.threshold * 100.0
+                );
             }
         }
     }
@@ -325,20 +445,72 @@ fn avg(table: &Table, key: &Key) -> Option<f64> {
 /// Parses `#TSV` rows and accumulates duplicates for averaging.
 fn parse(raw: &str) -> Table {
     let mut table = Table::new();
+    let mut database_label = String::from("database");
     for line in raw.lines() {
-        let c: Vec<&str> = line.split('\t').collect();
-        if c.len() != 5 {
+        if let Some(operations) = line
+            .strip_prefix("# plugmem database benchmark: operations=")
+            .and_then(|rest| rest.split_whitespace().next())
+        {
+            database_label = database_label_for(operations);
             continue;
         }
-        let Ok(value) = c[4].parse::<f64>() else {
-            continue;
+        let c: Vec<&str> = line.split('\t').collect();
+        let (key, value): (Key, f64) = match c.as_slice() {
+            [n, runtime, structure, metric, value] => {
+                let Ok(value) = value.parse::<f64>() else {
+                    continue;
+                };
+                (
+                    (
+                        (*n).into(),
+                        (*runtime).into(),
+                        (*structure).into(),
+                        (*metric).into(),
+                    ),
+                    value,
+                )
+            }
+            ["#DB", n, runtime, structure, metric, value] => {
+                let Ok(value) = value.parse::<f64>() else {
+                    continue;
+                };
+                let n = if *n == "database" {
+                    database_label.as_str()
+                } else {
+                    *n
+                };
+                (
+                    (
+                        n.into(),
+                        (*runtime).into(),
+                        (*structure).into(),
+                        (*metric).into(),
+                    ),
+                    value,
+                )
+            }
+            _ => continue,
         };
-        let key = (c[0].into(), c[1].into(), c[2].into(), c[3].into());
         let cell = table.entry(key).or_insert((0.0, 0));
         cell.0 += value;
         cell.1 += 1;
     }
     table
+}
+
+/// Converts the runner's operation count into the stable corpus labels used
+/// by database charts and the 100k-vs-1M comparison.
+fn database_label_for(operations: &str) -> String {
+    let Ok(operations) = operations.parse::<u64>() else {
+        return "database".into();
+    };
+    if operations >= 1_000_000 && operations % 1_000_000 == 0 {
+        format!("database-{}m", operations / 1_000_000)
+    } else if operations >= 1_000 && operations % 1_000 == 0 {
+        format!("database-{}k", operations / 1_000)
+    } else {
+        format!("database-{operations}")
+    }
 }
 
 /// The (key, averaged value) cells one chart reads, skipping any absent
@@ -355,6 +527,25 @@ fn chart_cells(chart: &Chart, new: &Table) -> Vec<(Key, f64)> {
             );
             if let Some(v) = avg(new, &key) {
                 cells.push((key, v));
+            }
+        }
+    }
+    cells
+}
+
+/// Returns the rows consumed by the corpus-size comparison chart.
+fn database_scale_cells(new: &Table) -> Vec<(Key, f64)> {
+    let mut cells = Vec::new();
+    for &size in ["database-100k", "database-1m"].iter() {
+        for &(_, structure, metric) in DATABASE_SCALE_ROWS {
+            let key = (
+                size.into(),
+                "native".into(),
+                structure.into(),
+                metric.into(),
+            );
+            if let Some(value) = avg(new, &key) {
+                cells.push((key, value));
             }
         }
     }
@@ -456,6 +647,44 @@ fn render(chart: &Chart, new: &Table, out_dir: &Path) {
     } else {
         draw_bars(&data, 0.0..(max * 1.15).max(1.0));
     }
+}
+
+/// Renders the same-workload recall comparison at 100k and 1M operations.
+fn render_database_scale(new: &Table, out_dir: &Path) {
+    let path = out_dir.join("database-recall-scale-100k-1m.svg");
+    let mut categories = Vec::new();
+    let mut bars = Vec::new();
+    let mut max = 0.0f64;
+    for &(label, structure, metric) in DATABASE_SCALE_ROWS {
+        let mut row = Vec::new();
+        for &size in ["database-100k", "database-1m"].iter() {
+            let key = (
+                size.into(),
+                "native".into(),
+                structure.into(),
+                metric.into(),
+            );
+            let value = avg(new, &key);
+            if let Some(value) = value {
+                max = max.max(value);
+            }
+            row.push(value);
+        }
+        if row.iter().any(Option::is_some) {
+            categories.push(label.to_owned());
+            bars.push(row);
+        }
+    }
+    let data = BarData {
+        path: &path,
+        title: "file-backed database — recall p50 by corpus size",
+        y_title: "microseconds",
+        categories: &categories,
+        series: &DATABASE_SCALE_SERIES,
+        bars: &bars,
+        y_base: 0.0,
+    };
+    draw_bars(&data, 0.0..(max * 1.15).max(1.0));
 }
 
 /// Nearest enclosing powers of ten for a logarithmic axis, with at least
@@ -603,4 +832,66 @@ fn pretty(structure: &str) -> String {
         other => other,
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn database_labels_are_stable_for_common_sizes() {
+        assert_eq!(database_label_for("100000"), "database-100k");
+        assert_eq!(database_label_for("1000000"), "database-1m");
+        assert_eq!(database_label_for("123456"), "database-123456");
+        assert_eq!(database_label_for("not-a-number"), "database");
+    }
+
+    #[test]
+    fn database_headers_split_combined_runs_into_size_series() {
+        let table = parse(
+            "# plugmem database benchmark: operations=100000 dim=0\n\
+             #DB\tdatabase\tnative\twriter_diagnostic/text_only\tp50_us\t52.2\n\
+             # plugmem database benchmark: operations=1000000 dim=0\n\
+             #DB\tdatabase\tnative\twriter_diagnostic/text_only\tp50_us\t1907.9\n",
+        );
+        assert_eq!(
+            avg(
+                &table,
+                &(
+                    "database-100k".into(),
+                    "native".into(),
+                    "writer_diagnostic/text_only".into(),
+                    "p50_us".into()
+                )
+            ),
+            Some(52.2)
+        );
+        assert_eq!(
+            avg(
+                &table,
+                &(
+                    "database-1m".into(),
+                    "native".into(),
+                    "writer_diagnostic/text_only".into(),
+                    "p50_us".into()
+                )
+            ),
+            Some(1907.9)
+        );
+    }
+
+    #[test]
+    fn scale_chart_collects_only_its_recall_rows() {
+        let table = parse(
+            "# plugmem database benchmark: operations=100000 dim=0\n\
+             #DB\tdatabase\tnative\twriter_diagnostic/text_only\tp50_us\t52.2\n\
+             #DB\tdatabase\tnative\twriter_diagnostic/full_hybrid\tp50_us\t636.4\n\
+             # plugmem database benchmark: operations=1000000 dim=0\n\
+             #DB\tdatabase\tnative\twriter_diagnostic/text_only\tp50_us\t1907.9\n\
+             #DB\tdatabase\tnative\twriter_diagnostic/full_hybrid\tp50_us\t4891.6\n",
+        );
+        let cells = database_scale_cells(&table);
+        assert_eq!(cells.len(), 4);
+        assert!(cells.iter().all(|(key, _)| key.3 == "p50_us"));
+    }
 }

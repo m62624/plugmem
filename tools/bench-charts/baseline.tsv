@@ -104,3 +104,25 @@ core	native	BM25 (3 terms, 10k)	latency_us	67.1
 core	native	HNSW (30k, d384)	latency_us	177.0
 core	native	flat vector (24k, d384)	latency_us	226.9
 core	native	tags (3 lists, 100k)	latency_us	55.9
+database-100k	native	writer_diagnostic/full_hybrid	p50_us	636.4
+database-100k	native	writer_diagnostic/text_only	p50_us	52.2
+database-100k	native	writer_diagnostic/text_tag_range	p50_us	54.1
+database-1m	native	after_load	pool_bytes	401868402.0
+database-1m	native	after_maintain	pool_bytes	382016840.0
+database-1m	native	checkpoint	elapsed_ms	550.3
+database-1m	native	maintain	elapsed_ms	13847.5
+database-1m	native	mixed_stream	load_ops_per_sec	6742.1
+database-1m	native	readonly	elapsed_ms	202.7
+database-1m	native	readonly	pool_bytes	382016840.0
+database-1m	native	readonly/hybrid_recall	p50_us	4908.4
+database-1m	native	readonly/text_recall	p50_us	1887.6
+database-1m	native	readonly_scrub	elapsed_ms	49.7
+database-1m	native	readonly_verify	elapsed_ms	34.9
+database-1m	native	reopen	elapsed_ms	201.9
+database-1m	native	reopen_verify	elapsed_ms	34.9
+database-1m	native	writer/hybrid_recall	p50_us	4921.3
+database-1m	native	writer/text_recall	p50_us	1913.5
+database-1m	native	writer_diagnostic/full_hybrid	p50_us	4891.6
+database-1m	native	writer_diagnostic/text_only	p50_us	1907.9
+database-1m	native	writer_diagnostic/text_tag_range	p50_us	2108.2
+database-1m	native	writer_verify	elapsed_ms	34.9

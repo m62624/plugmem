@@ -40,6 +40,14 @@ fn same_seed_same_stream() {
 }
 
 #[test]
+fn iterator_matches_bounded_batch_generation() {
+    let profile = profile(8);
+    let batched = Gen::new(42, profile.clone()).ops(400);
+    let streamed: Vec<_> = Gen::new(42, profile).take(400).collect();
+    assert_eq!(batched, streamed);
+}
+
+#[test]
 fn different_seeds_differ() {
     let a = Gen::new(1, profile(0)).ops(50);
     let b = Gen::new(2, profile(0)).ops(50);

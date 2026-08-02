@@ -287,6 +287,13 @@ fn regression_canonical_token_from_ordinal_and_modifier_symbols() {
 }
 
 #[test]
+fn regression_canonical_token_with_a_leading_combining_mark() {
+    let emitted = tokens("׳ೳ.\u{300}º");
+    assert_eq!(emitted, ["o"]);
+    assert_eq!(tokens(&emitted[0]), emitted);
+}
+
+#[test]
 fn leading_joiners_after_marks_are_canonical() {
     let emitted = tokens("׳\u{363}_a");
     assert_eq!(emitted, ["a"]);
