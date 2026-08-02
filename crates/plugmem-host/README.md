@@ -129,15 +129,23 @@ println!("{}", out.rendered);
 ## Benchmarks
 
 ```text
+cargo run -p plugmem-host --example edge_lifecycle
+cargo run -p plugmem-host --example maintain_modes
 cargo run --release -p plugmem-host --example bench_database -- 100000 --diagnose-recall | tee database-benchmark-100k.tsv
 cargo run --release -p plugmem-host --example bench_database -- 1000000 --diagnose-recall | tee database-benchmark-1m.tsv
 cat database-benchmark-100k.tsv database-benchmark-1m.tsv > database-benchmark-scale.tsv
 cargo run -p plugmem-bench-charts -- database-benchmark-scale.tsv --force
+cargo run --release -p plugmem-host --example bench_edges -- 100000 | tee edge-benchmark-100k.tsv
+cargo run --release -p plugmem-host --example bench_edges -- 1000000 | tee edge-benchmark-1m.tsv
+cat edge-benchmark-100k.tsv edge-benchmark-1m.tsv > edge-benchmark-scale.tsv
+cargo run -p plugmem-bench-charts -- edge-benchmark-scale.tsv --force
 cargo bench -p plugmem-host
 ```
 
-The committed `assets/database-*.svg` charts are generated from the 1M run.
+The committed `assets/database-*.svg` charts are generated from the database
+runs; `assets/edge-lifecycle-*.svg` charts are generated from `bench_edges`.
 ![Recall latency at 100k versus 1M operations](assets/database-recall-scale-100k-1m.svg)
+![Edge lifecycle graph recall at 100k versus 1M edges](assets/edge-lifecycle-recall-100k-1m.svg)
 
 For the same-workload comparison between 100k and 1M, see the
 [measured scale table on GitHub](https://github.com/m62624/plugmem#measured-scale).

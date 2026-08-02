@@ -1,9 +1,9 @@
 //! Renders the benchmark `#TSV` rows into the README chart SVGs — the
 //! arena charts from the [`plugmem-bench-matrix`](../bench-matrix) stand
 //! and the core recall-latency chart from `plugmem-core`'s `bench_ops`
-//! example, plus the native file-backed database benchmark and its 100k-vs-1M
-//! recall comparison. A chart whose rows are absent from the input is left
-//! alone, so any source can be rendered on its own or all can be piped together.
+//! example, plus the native file-backed database and edge-lifecycle benchmarks.
+//! A chart whose rows are absent from the input is left alone, so any source can
+//! be rendered on its own or all can be piped together.
 //!
 //! Pure Rust: [plotters](https://github.com/plotters-rs/plotters) with its
 //! SVG backend, so there is no browser, no WebDriver and nothing downloaded
@@ -68,6 +68,15 @@ struct Chart {
     n: &'static str,
     metric: &'static str,
     structures: &'static [&'static str],
+    y_title: &'static str,
+    log: bool,
+}
+
+/// One same-workload size comparison chart.
+struct ScaleChart {
+    file: &'static str,
+    title: &'static str,
+    rows: &'static [(&'static str, &'static str, &'static str)],
     y_title: &'static str,
     log: bool,
 }
@@ -164,6 +173,75 @@ const DATABASE_SCALE_ROWS: &[(&str, &str, &str)] = &[
     ("text_only", "writer_diagnostic/text_only", "p50_us"),
     ("tag + range", "writer_diagnostic/text_tag_range", "p50_us"),
     ("full hybrid", "writer_diagnostic/full_hybrid", "p50_us"),
+];
+
+/// Like-for-like edge-lifecycle comparison series. Rows come from
+/// `plugmem-host/examples/bench_edges.rs`; the SVGs are rendered only when both
+/// 100k and 1M inputs are present.
+const EDGE_SCALE_SERIES: [(&str, RGBColor); 2] = [
+    ("100k edges", RGBColor(30, 58, 138)),
+    ("1M edges", RGBColor(190, 24, 93)),
+];
+const EDGE_LATENCY_ROWS: &[(&str, &str, &str)] = &[
+    ("link", "link", "latency_us_per_op"),
+    ("unlink", "unlink", "latency_us_per_op"),
+    ("full maintain", "full_maintain", "latency_us_per_op"),
+];
+const EDGE_RECALL_ROWS: &[(&str, &str, &str)] = &[
+    ("current open", "current_graph_recall/open_edges", "p50_us"),
+    (
+        "history as_of",
+        "historical_graph_recall/as_of_open",
+        "p50_us",
+    ),
+    (
+        "current after unlink",
+        "current_graph_recall/after_unlink",
+        "p50_us",
+    ),
+];
+const EDGE_GROWTH_ROWS: &[(&str, &str, &str)] = &[
+    ("current after link", "current_edges/after_link", "count"),
+    ("history after link", "edge_history/after_link", "count"),
+    (
+        "current after unlink",
+        "current_edges/after_unlink",
+        "count",
+    ),
+    ("history after unlink", "edge_history/after_unlink", "count"),
+    (
+        "current after maintain",
+        "current_edges/after_full_maintain",
+        "count",
+    ),
+    (
+        "history after maintain",
+        "edge_history/after_full_maintain",
+        "count",
+    ),
+];
+const EDGE_SCALE_CHARTS: &[ScaleChart] = &[
+    ScaleChart {
+        file: "edge-lifecycle-latency-100k-1m.svg",
+        title: "edge lifecycle — operation cost by corpus size",
+        rows: EDGE_LATENCY_ROWS,
+        y_title: "µs / edge",
+        log: true,
+    },
+    ScaleChart {
+        file: "edge-lifecycle-recall-100k-1m.svg",
+        title: "edge lifecycle — graph recall by corpus size",
+        rows: EDGE_RECALL_ROWS,
+        y_title: "microseconds",
+        log: true,
+    },
+    ScaleChart {
+        file: "edge-lifecycle-growth-100k-1m.svg",
+        title: "edge lifecycle — current edges vs retained history",
+        rows: EDGE_GROWTH_ROWS,
+        y_title: "records",
+        log: false,
+    },
 ];
 
 /// The arena chart set. Every structure name matches a row the bench
@@ -375,6 +453,43 @@ fn main() {
         }
     }
 
+    for chart in EDGE_SCALE_CHARTS {
+        let cells = edge_scale_cells(chart, &new);
+        if !scale_complete(&new, &["edge-100k", "edge-1m"], chart.rows) {
+            continue;
+        }
+        total += 1;
+        let verdict = if force {
+            Verdict::Render { max_delta: 0.0 }
+        } else {
+            decide(&cells, &base, cfg.threshold)
+        };
+        match verdict {
+            Verdict::Render { max_delta } => {
+                std::fs::create_dir_all(HOST_OUT)
+                    .unwrap_or_else(|e| panic!("creating {HOST_OUT}: {e}"));
+                render_edge_scale(chart, &new, Path::new(HOST_OUT));
+                for (key, value) in &cells {
+                    next_baseline.insert(key.clone(), (*value, 1));
+                }
+                updated += 1;
+                println!(
+                    "{:32} rewritten (Δmax {:.0}%)",
+                    chart.file,
+                    max_delta * 100.0
+                );
+            }
+            Verdict::Skip { max_delta } => {
+                println!(
+                    "{:32} unchanged (Δmax {:.0}% ≤ {:.0}%)",
+                    chart.file,
+                    max_delta * 100.0,
+                    cfg.threshold * 100.0
+                );
+            }
+        }
+    }
+
     let scale_cells = database_scale_cells(&new);
     let has_100k = scale_cells.iter().any(|(key, _)| key.0 == "database-100k");
     let has_1m = scale_cells.iter().any(|(key, _)| key.0 == "database-1m");
@@ -535,9 +650,22 @@ fn chart_cells(chart: &Chart, new: &Table) -> Vec<(Key, f64)> {
 
 /// Returns the rows consumed by the corpus-size comparison chart.
 fn database_scale_cells(new: &Table) -> Vec<(Key, f64)> {
+    scale_cells(new, &["database-100k", "database-1m"], DATABASE_SCALE_ROWS)
+}
+
+/// Returns the rows consumed by an edge-lifecycle size comparison chart.
+fn edge_scale_cells(chart: &ScaleChart, new: &Table) -> Vec<(Key, f64)> {
+    scale_cells(new, &["edge-100k", "edge-1m"], chart.rows)
+}
+
+fn scale_cells(
+    new: &Table,
+    sizes: &[&str],
+    rows: &[(&'static str, &'static str, &'static str)],
+) -> Vec<(Key, f64)> {
     let mut cells = Vec::new();
-    for &size in ["database-100k", "database-1m"].iter() {
-        for &(_, structure, metric) in DATABASE_SCALE_ROWS {
+    for &size in sizes {
+        for &(_, structure, metric) in rows {
             let key = (
                 size.into(),
                 "native".into(),
@@ -550,6 +678,23 @@ fn database_scale_cells(new: &Table) -> Vec<(Key, f64)> {
         }
     }
     cells
+}
+
+fn scale_complete(new: &Table, sizes: &[&str], rows: &[(&str, &str, &str)]) -> bool {
+    rows.iter().all(|&(_, structure, metric)| {
+        sizes.iter().all(|&size| {
+            avg(
+                new,
+                &(
+                    size.into(),
+                    "native".into(),
+                    structure.into(),
+                    metric.into(),
+                ),
+            )
+            .is_some()
+        })
+    })
 }
 
 /// Whether a chart moved enough to rewrite.
@@ -651,13 +796,60 @@ fn render(chart: &Chart, new: &Table, out_dir: &Path) {
 
 /// Renders the same-workload recall comparison at 100k and 1M operations.
 fn render_database_scale(new: &Table, out_dir: &Path) {
-    let path = out_dir.join("database-recall-scale-100k-1m.svg");
+    render_scale(
+        ScaleRender {
+            file: "database-recall-scale-100k-1m.svg",
+            title: "file-backed database — recall p50 by corpus size",
+            rows: DATABASE_SCALE_ROWS,
+            y_title: "microseconds",
+            log: false,
+        },
+        new,
+        out_dir,
+        &["database-100k", "database-1m"],
+        &DATABASE_SCALE_SERIES,
+    );
+}
+
+fn render_edge_scale(chart: &ScaleChart, new: &Table, out_dir: &Path) {
+    render_scale(
+        ScaleRender {
+            file: chart.file,
+            title: chart.title,
+            rows: chart.rows,
+            y_title: chart.y_title,
+            log: chart.log,
+        },
+        new,
+        out_dir,
+        &["edge-100k", "edge-1m"],
+        &EDGE_SCALE_SERIES,
+    );
+}
+
+struct ScaleRender {
+    file: &'static str,
+    title: &'static str,
+    rows: &'static [(&'static str, &'static str, &'static str)],
+    y_title: &'static str,
+    log: bool,
+}
+
+fn render_scale(
+    chart: ScaleRender,
+    new: &Table,
+    out_dir: &Path,
+    sizes: &[&str],
+    series: &[(&str, RGBColor)],
+) {
+    let path = out_dir.join(chart.file);
     let mut categories = Vec::new();
     let mut bars = Vec::new();
+    let mut min_pos = f64::INFINITY;
     let mut max = 0.0f64;
-    for &(label, structure, metric) in DATABASE_SCALE_ROWS {
+    for &(label, structure, metric) in chart.rows {
         let mut row = Vec::new();
-        for &size in ["database-100k", "database-1m"].iter() {
+        for &size in sizes {
             let key = (
                 size.into(),
                 "native".into(),
@@ -667,6 +859,9 @@ fn render_database_scale(new: &Table, out_dir: &Path) {
             let value = avg(new, &key);
             if let Some(value) = value {
                 max = max.max(value);
+                if value > 0.0 {
+                    min_pos = min_pos.min(value);
+                }
             }
             row.push(value);
         }
@@ -677,14 +872,23 @@ fn render_database_scale(new: &Table, out_dir: &Path) {
     }
     let data = BarData {
         path: &path,
-        title: "file-backed database — recall p50 by corpus size",
-        y_title: "microseconds",
+        title: chart.title,
+        y_title: chart.y_title,
         categories: &categories,
-        series: &DATABASE_SCALE_SERIES,
+        series,
         bars: &bars,
-        y_base: 0.0,
+        y_base: if chart.log {
+            log_bounds(min_pos, max).0
+        } else {
+            0.0
+        },
     };
-    draw_bars(&data, 0.0..(max * 1.15).max(1.0));
+    if chart.log {
+        let (lo, hi) = log_bounds(min_pos, max);
+        draw_bars(&data, (lo..hi).log_scale());
+    } else {
+        draw_bars(&data, 0.0..(max * 1.15).max(1.0));
+    }
 }
 
 /// Nearest enclosing powers of ten for a logarithmic axis, with at least
@@ -893,5 +1097,23 @@ mod tests {
         let cells = database_scale_cells(&table);
         assert_eq!(cells.len(), 4);
         assert!(cells.iter().all(|(key, _)| key.3 == "p50_us"));
+    }
+
+    #[test]
+    fn edge_lifecycle_charts_collect_their_rows() {
+        let table = parse(
+            "# plugmem edge lifecycle benchmark: edges=100000\n\
+             #DB\tedge-100k\tnative\tlink\tlatency_us_per_op\t24.2\n\
+             #DB\tedge-100k\tnative\tunlink\tlatency_us_per_op\t18.1\n\
+             #DB\tedge-100k\tnative\tfull_maintain\tlatency_us_per_op\t2.7\n\
+             #DB\tedge-100k\tnative\tcurrent_graph_recall/open_edges\tp50_us\t2200.0\n\
+             #DB\tedge-100k\tnative\thistorical_graph_recall/as_of_open\tp50_us\t7400.0\n\
+             #DB\tedge-100k\tnative\tcurrent_edges/after_unlink\tcount\t0\n\
+             #DB\tedge-100k\tnative\tedge_history/after_unlink\tcount\t100000\n",
+        );
+
+        assert_eq!(edge_scale_cells(&EDGE_SCALE_CHARTS[0], &table).len(), 3);
+        assert_eq!(edge_scale_cells(&EDGE_SCALE_CHARTS[1], &table).len(), 2);
+        assert_eq!(edge_scale_cells(&EDGE_SCALE_CHARTS[2], &table).len(), 2);
     }
 }

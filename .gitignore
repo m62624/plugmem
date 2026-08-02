@@ -22,6 +22,7 @@ pkg/
 *.journal
 scratch/
 bench-history/local-*
+*-benchmark-*.tsv
 
 # coverage reports (cargo tarpaulin)
 /coverage/
