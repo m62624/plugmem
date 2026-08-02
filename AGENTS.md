@@ -164,3 +164,23 @@ For a targeted package or example, prefer a focused command first, then run the 
 - Do not compare against another database without matching data, distance metric, index type, recall target, persistence mode, concurrency, and hardware.
 - Use `apply_patch` for manual file edits.
 - Avoid destructive commands such as `git reset --hard`, broad deletion, or overwriting unrelated work unless explicitly requested.
+
+## Release versioning
+
+- Keep the workspace, Cargo manifests, `Cargo.lock`, npm metadata, and the
+  checked-in skill marker at the current development version between releases.
+- Do not manually bump package versions in a feature or performance PR. The
+  release workflow derives the release version from the pushed `vX.Y.Z` tag,
+  updates the workspace and npm versions on its release-candidate branch, and
+  opens the synchronization PR back to `main`.
+- Skill content may be updated in any normal PR; the regular CI checks its
+  structure and frontmatter. Do not change the version marker merely because
+  the prose changed: the local NAPI test keeps it equal to the current
+  workspace version. When the release workflow creates `rc/vX.Y.Z` and
+  synchronizes package versions from the `pin/vX.Y.Z` trigger, update only the
+  `<!-- skill-version: X.Y.Z -->` marker in `skill/SKILL.md` on that RC branch
+  (and its documentation if the skill behavior changed). The release gate then
+  verifies the marker against the tag-derived package version.
+- Verify the release workflow when changing this policy: `.github/workflows/release.yml`
+  is the source of truth for tag parsing, version synchronization, and the
+  skill-version gate.
