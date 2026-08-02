@@ -17,6 +17,11 @@
   README and the crate's `assets/` directory together, so this remains valid in
   the workspace, on GitHub, and on crates.io. Do not use relative paths to
   workspace files or sibling crates.
+- Workspace-only branding, generated top-level documentation assets, and legacy
+  reference material belong under the root `assets/` directory. Keep legacy
+  opaque references under `assets/references/`; they are design/test material,
+  not published crate assets. Root `README.md` may link to these files with
+  relative paths such as `assets/logo.png`.
 
 ## Benchmark documentation
 

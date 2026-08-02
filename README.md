@@ -1,6 +1,10 @@
 # plugmem
 
 <p align="center">
+  <img src="assets/logo.png" alt="plugmem logo" width="360">
+</p>
+
+<p align="center">
   <a href="https://crates.io/crates/plugmem-host"><img src="https://img.shields.io/crates/v/plugmem-host?style=flat-square&logo=rust&label=crates.io&color=e37933" alt="crates.io"></a>
   <a href="https://docs.rs/plugmem-host"><img src="https://img.shields.io/docsrs/plugmem-host?style=flat-square&logo=docsdotrs&label=docs.rs" alt="docs.rs"></a>
   <a href="https://www.npmjs.com/package/plugmem"><img src="https://img.shields.io/npm/v/plugmem?style=flat-square&logo=npm&color=cb3837" alt="npm"></a>
