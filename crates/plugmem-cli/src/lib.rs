@@ -23,12 +23,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 use plugmem_host::{
-    Database, ExportedFact, FactId, HostError, LinkInput, ReadOnlyDatabase, RecallQuery,
-    RecallResult, RememberInput, RememberOutcome, Settings, Stats, UnlinkInput, VALID_TO_OPEN,
+    Database, ExportedFact, FactId, HostError, LinkInput, MaintenanceMode, MaintenanceOptions,
+    ReadOnlyDatabase, RecallQuery, RecallResult, RememberInput, RememberOutcome, Settings, Stats,
+    UnlinkInput, VALID_TO_OPEN,
 };
 use serde_json::json;
 
-use crate::cli::{Cli, Command, HelpTopic};
+use crate::cli::{Cli, Command, HelpTopic, MaintainMode};
 use crate::config::read_batch_size;
 
 /// Environment variable naming the database file (below the `--db` flag).
@@ -397,8 +398,8 @@ fn execute(
             db.export_each(|f| write_export_line(out, &f));
             Ok(0)
         }
-        Command::Maintain => {
-            let report = db.maintain(now)?;
+        Command::Maintain { mode } => {
+            let report = db.maintain_with_options(now, maintenance_options(*mode))?;
             if json {
                 writeln!(
                     out,
@@ -421,13 +422,16 @@ fn execute(
                         "hnsw_rebuilt": report.hnsw_rebuilt,
                         "hnsw_remapped": report.hnsw_remapped,
                         "hnsw_inserted": report.hnsw_inserted,
+                        "edges_compacted": report.edges_compacted,
+                        "edges_before": report.edges_before,
+                        "edge_versions_before": report.edge_versions_before,
                     })
                 )
                 .ok();
             } else {
                 writeln!(
                     out,
-                    "maintained: purged {}, {} -> {} bytes, hnsw +{}, bm25 {}{}",
+                    "maintained: purged {}, {} -> {} bytes, hnsw +{}, bm25 {}{}{}",
                     report.purged,
                     report.bytes_before,
                     report.bytes_after,
@@ -438,6 +442,11 @@ fn execute(
                         "compacted"
                     } else {
                         "unchanged"
+                    },
+                    if report.edges_compacted {
+                        ", edges repacked"
+                    } else {
+                        ""
                     },
                     if report.no_op { " (no-op)" } else { "" }
                 )
@@ -968,6 +977,21 @@ fn render_show(
         }
     }
     0
+}
+
+/// Translates the command-line mode into engine options.
+///
+/// `auto` keeps the bounded HNSW budget that makes it safe to run often;
+/// every explicit mode takes the budget the engine defines for it.
+fn maintenance_options(mode: MaintainMode) -> MaintenanceOptions {
+    match MaintenanceMode::from(mode) {
+        MaintenanceMode::Auto => MaintenanceOptions::auto(),
+        MaintenanceMode::Full => MaintenanceOptions::full(),
+        mode => MaintenanceOptions {
+            mode,
+            ..MaintenanceOptions::auto()
+        },
+    }
 }
 
 /// Renders engine size counters.
@@ -1689,7 +1713,14 @@ mod tests {
         let (_, out) = run_cmd(&db, &Command::Forget { id: 0 }, false, 2_100);
         assert!(out.contains("already gone"), "{out}");
 
-        let (code, out) = run_cmd(&db, &Command::Maintain, false, 3_000);
+        let (code, out) = run_cmd(
+            &db,
+            &Command::Maintain {
+                mode: MaintainMode::Auto,
+            },
+            false,
+            3_000,
+        );
         assert_eq!(code, 0);
         assert!(out.contains("purged 1"), "{out}");
     }
@@ -1829,7 +1860,14 @@ mod tests {
         let (_, out) = run_cmd(&db, &Command::Forget { id: 1 }, true, 2_500);
         let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
         assert_eq!(v["forgotten"], true);
-        let (_, out) = run_cmd(&db, &Command::Maintain, true, 3_000);
+        let (_, out) = run_cmd(
+            &db,
+            &Command::Maintain {
+                mode: MaintainMode::Auto,
+            },
+            true,
+            3_000,
+        );
         let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
         assert!(v["purged"].as_u64().unwrap() >= 1);
 

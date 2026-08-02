@@ -350,6 +350,28 @@ is pending, host maintenance stays disk-first: text and vector pools stream
 through scratch files, ordinary BM25 compaction filters existing postings, and
 HNSW work is bounded unless a full rebuild is explicitly requested.
 
+`maintain_with_options` selects the policy explicitly. No mode ever drops a
+fact revision or an edge version — what the heavier modes buy is bytes and
+index freshness, never less history.
+
+| mode | what it does | cost |
+|---|---|---|
+| `Auto` | only pending work; no-op when there is none | bounded |
+| `Compact` | purge tombstones, compact storage and indexes | O(live records) |
+| `ReindexText` | rebuild BM25 by re-tokenizing stored text | O(text) |
+| `OptimizeVectors` | build or advance the vector graph | O(vectors) |
+| `Full` | rebuild everything, fully optimize vectors, repack the edge arenas | O(database) |
+
+`Full` is the only mode that repacks the edge arenas. Relinking many relations
+fragments them — the incoming mirror is keyed by the far endpoint, so
+interleaved runs keep splitting pages in half — and rewriting them in key
+order packs the pages again. Measured over 200 relations relinked 1000 times
+(200k retained versions): 31.9 MB → 23.4 MB, 101 ms, every version kept.
+
+The same selection is exposed by `plugmem maintain --mode <mode>`, the
+`mode` argument of the MCP `plugmem_maintain` tool, and `maintain(mode?)` in
+the Node bindings.
+
 ## Embedders
 
 The `Embedder` trait is two methods (`dim`, batched `embed`).

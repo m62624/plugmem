@@ -150,7 +150,7 @@ sets `isError: true` so the model can read and react to it.
 | `plugmem_show` | one fact's full card by `id` |
 | `plugmem_stats` | engine size counters |
 | `plugmem_export` | every open fact as a JSON array |
-| `plugmem_maintain` | run policy-driven maintenance: no-op, compact, reindex or optimize vectors |
+| `plugmem_maintain` | run policy-driven maintenance: no-op, compact, reindex or optimize vectors. Optional `mode`: `auto` (default), `compact`, `reindex-text`, `optimize-vectors`, `full` |
 | `plugmem_checkpoint` | flush the journal into a fresh snapshot |
 | `plugmem_verify` | content-integrity check |
 | `plugmem_version` / `plugmem_about` | the running version; a pointer to the plugmem skill |

@@ -12,8 +12,8 @@
 use std::sync::{Mutex, RwLock};
 
 use plugmem_host::{
-    Database, Embedder, FactId, HostError, LinkInput, ReadOnlyDatabase, RecallQuery, RememberInput,
-    UnlinkInput,
+    Database, Embedder, FactId, HostError, LinkInput, MaintenanceMode, MaintenanceOptions,
+    ReadOnlyDatabase, RecallQuery, RememberInput, UnlinkInput,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -111,9 +111,12 @@ pub fn call(db: &Database, id: Value, params: Option<&Value>) -> Value {
         SHOW => show(db, id, args),
         STATS => rpc::tool_result(id, render(&db.stats(), format_arg(args)), false),
         EXPORT => rpc::tool_result(id, render(&db.export(), format_arg(args)), false),
-        MAINTAIN => match db.maintain(now_ms()) {
-            Ok(report) => rpc::tool_result(id, render(&report, format_arg(args)), false),
-            Err(e) => tool_error(id, &e),
+        MAINTAIN => match maintenance_options(args) {
+            Ok(options) => match db.maintain_with_options(now_ms(), options) {
+                Ok(report) => rpc::tool_result(id, render(&report, format_arg(args)), false),
+                Err(e) => tool_error(id, &e),
+            },
+            Err(message) => rpc::tool_result(id, message, true),
         },
         CHECKPOINT => match db.checkpoint(now_ms()) {
             Ok(()) => rpc::tool_result(id, render(&json!({ "ok": true }), format_arg(args)), false),
@@ -556,7 +559,58 @@ fn export_def() -> Value {
 }
 
 fn maintain_def() -> Value {
-    format_only_def(MAINTAIN, messages::MAINTAIN_TOOL)
+    json!({
+        "name": MAINTAIN,
+        "description": messages::MAINTAIN_TOOL,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": MAINTAIN_MODES,
+                    "description": messages::ARG_MAINTAIN_MODE
+                },
+                "format": format_prop()
+            }
+        }
+    })
+}
+
+/// The `mode` values `plugmem_maintain` accepts, in the order the schema
+/// advertises them.
+const MAINTAIN_MODES: [&str; 5] = [
+    "auto",
+    "compact",
+    "reindex-text",
+    "optimize-vectors",
+    "full",
+];
+
+/// Reads the optional `mode` argument. Absent means `auto`, which is what the
+/// tool did before the argument existed.
+fn maintenance_options(args: Option<&Value>) -> Result<MaintenanceOptions, String> {
+    let Some(mode) = arg_str(args, "mode") else {
+        return Ok(MaintenanceOptions::auto());
+    };
+    match mode {
+        "auto" => Ok(MaintenanceOptions::auto()),
+        "full" => Ok(MaintenanceOptions::full()),
+        "compact" => Ok(explicit(MaintenanceMode::Compact)),
+        "reindex-text" => Ok(explicit(MaintenanceMode::ReindexText)),
+        "optimize-vectors" => Ok(explicit(MaintenanceMode::OptimizeVectors)),
+        other => Err(format!(
+            "unknown maintenance mode `{other}`; expected one of {}",
+            MAINTAIN_MODES.join(", ")
+        )),
+    }
+}
+
+/// An explicitly named mode, keeping `auto`'s bounded vector budget.
+fn explicit(mode: MaintenanceMode) -> MaintenanceOptions {
+    MaintenanceOptions {
+        mode,
+        ..MaintenanceOptions::auto()
+    }
 }
 
 fn checkpoint_def() -> Value {

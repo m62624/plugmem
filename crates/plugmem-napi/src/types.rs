@@ -214,6 +214,49 @@ pub struct MaintainReport {
     pub hnsw_remapped: bool,
     /// Vector slots inserted into HNSW.
     pub hnsw_inserted: f64,
+    /// The edge arenas were rewritten page-dense (`full` only). No edge
+    /// version is ever dropped, so the version count is unchanged — only the
+    /// bytes shrink.
+    pub edges_compacted: bool,
+    /// Current edges before the pass.
+    pub edges_before: f64,
+    /// Historical edge versions before the pass.
+    pub edge_versions_before: f64,
+}
+
+/// How much work a `maintain` pass should do.
+#[napi(string_enum = "kebab-case")]
+pub enum MaintainMode {
+    /// Only pending work: purge tombstones, refresh a stale text index, and
+    /// advance the vector graph within a bounded budget. Cheap to run often.
+    Auto,
+    /// Physically purge tombstoned facts and compact storage and indexes.
+    Compact,
+    /// Rebuild the text index by re-reading and re-tokenizing every fact.
+    ReindexText,
+    /// Build or advance the vector graph without compacting anything else.
+    OptimizeVectors,
+    /// Rebuild every rebuildable structure, fully optimize vectors and repack
+    /// the edge arenas. O(database) work; no history is ever dropped.
+    Full,
+}
+
+impl From<MaintainMode> for plugmem_host::MaintenanceOptions {
+    fn from(mode: MaintainMode) -> Self {
+        use plugmem_host::MaintenanceMode as Engine;
+        let mode = match mode {
+            MaintainMode::Auto => return Self::auto(),
+            MaintainMode::Full => return Self::full(),
+            MaintainMode::Compact => Engine::Compact,
+            MaintainMode::ReindexText => Engine::ReindexText,
+            MaintainMode::OptimizeVectors => Engine::OptimizeVectors,
+        };
+        // An explicitly named mode keeps `auto`'s bounded vector budget.
+        Self {
+            mode,
+            ..Self::auto()
+        }
+    }
 }
 
 /// Convert a host result into its typed JS mirror via a serde round-trip: the

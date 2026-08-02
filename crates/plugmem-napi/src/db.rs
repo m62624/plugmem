@@ -21,12 +21,13 @@ use napi::bindgen_prelude::AsyncTask;
 use napi::{Env, Error, Result, Task};
 use napi_derive::napi;
 use plugmem_host::{
-    Database, FactId, HostError, LinkInput, ReadOnlyDatabase, RecallQuery, RememberInput, Settings,
-    SettingsError, UnlinkInput,
+    Database, FactId, HostError, LinkInput, MaintenanceOptions, ReadOnlyDatabase, RecallQuery,
+    RememberInput, Settings, SettingsError, UnlinkInput,
 };
 
 use crate::types::{
-    self, ExportedFact, FactSnapshot, MaintainReport, RecallResult, RememberOutcome, Stats,
+    self, ExportedFact, FactSnapshot, MaintainMode, MaintainReport, RecallResult, RememberOutcome,
+    Stats,
 };
 
 /// Options for [`Plugmem::new`].
@@ -328,11 +329,16 @@ impl Plugmem {
     /// **Async** (returns a `Promise`): the pass may do disk I/O (compaction,
     /// HNSW work), so it runs on a libuv worker thread and never blocks the
     /// event loop. @throws synchronously in read-only mode.
+    ///
+    /// `mode` defaults to `auto`, which does only what is pending. `full`
+    /// rebuilds everything and repacks the edge arenas — O(database) work, and
+    /// the only mode that reclaims edge-history page slack.
     #[napi(ts_return_type = "Promise<MaintainReport>")]
-    pub fn maintain(&self) -> Result<AsyncTask<MaintainTask>> {
+    pub fn maintain(&self, mode: Option<MaintainMode>) -> Result<AsyncTask<MaintainTask>> {
         Ok(AsyncTask::new(MaintainTask {
             db: self.writer()?.clone(),
             now: now_ms(),
+            options: mode.unwrap_or(MaintainMode::Auto).into(),
         }))
     }
 
@@ -407,6 +413,7 @@ impl Plugmem {
 pub struct MaintainTask {
     db: Database,
     now: u64,
+    options: MaintenanceOptions,
 }
 
 impl Task for MaintainTask {
@@ -414,7 +421,9 @@ impl Task for MaintainTask {
     type JsValue = MaintainReport;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        self.db.maintain(self.now).map_err(to_napi_err)
+        self.db
+            .maintain_with_options(self.now, self.options)
+            .map_err(to_napi_err)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {

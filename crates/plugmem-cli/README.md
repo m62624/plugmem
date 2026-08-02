@@ -131,7 +131,7 @@ engine keeps no clock, so `now` comes from the system clock at each call.
 | `unlink <SRC> <REL> <DST>` | close the current typed edge while preserving `--as-of` history |
 | `show <ID>` | one fact's full card — text, both time axes, state |
 | `stats` | engine size counters |
-| `maintain` | policy-driven maintenance: cheap no-op, tombstone compaction, text reindex or bounded HNSW work |
+| `maintain [--mode M]` | policy-driven maintenance: cheap no-op, tombstone compaction, text reindex or bounded HNSW work. `M` is `auto` (default), `compact`, `reindex-text`, `optimize-vectors` or `full`; only `full` repacks the edge arenas, and no mode drops history |
 | `checkpoint` | flush the journal into a fresh snapshot and clear it (leaves the database checkpointed) |
 | `verify` | check content integrity (text UTF-8, vector↔fact consistency); exit 2 on damage |
 | `scrub` | check the snapshot's byte-level container checksums; exit 2 on the first damaged section |
