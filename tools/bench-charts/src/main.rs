@@ -1,8 +1,9 @@
 //! Renders the benchmark `#TSV` rows into the README chart SVGs — the
 //! arena charts from the [`plugmem-bench-matrix`](../bench-matrix) stand
 //! and the core recall-latency chart from `plugmem-core`'s `bench_ops`
-//! example. A chart whose rows are absent from the input is left alone, so
-//! either source can be rendered on its own or both piped together.
+//! example, plus the native file-backed database benchmark. A chart whose rows
+//! are absent from the input is left alone, so any source can be rendered on
+//! its own or all can be piped together.
 //!
 //! Pure Rust: [plotters](https://github.com/plotters-rs/plotters) with its
 //! SVG backend, so there is no browser, no WebDriver and nothing downloaded
@@ -74,6 +75,7 @@ struct Chart {
 /// Where each chart set is written (fixed repo paths, not user config).
 const ARENA_OUT: &str = "crates/plugmem-arena/assets";
 const CORE_OUT: &str = "crates/plugmem-core/assets";
+const HOST_OUT: &str = "crates/plugmem-host/assets";
 
 /// The core (engine) chart: per-source recall latency, native only. Its
 /// rows come from `plugmem-core`'s `bench_ops` example (`n = core`,
@@ -92,6 +94,64 @@ const CORE_CHARTS: &[Chart] = &[Chart {
     y_title: "µs",
     log: false,
 }];
+
+/// Native file-backed database charts. Rows come from the
+/// `plugmem-host/examples/bench_database.rs` runner and use `n = database`.
+const DATABASE_CHARTS: &[Chart] = &[
+    Chart {
+        file: "database-throughput-1m.svg",
+        title: "file-backed database — streamed mixed-load throughput",
+        n: "database",
+        metric: "load_ops_per_sec",
+        structures: &["mixed_stream"],
+        y_title: "operations / second",
+        log: false,
+    },
+    Chart {
+        file: "database-phases-1m.svg",
+        title: "file-backed database — 1M lifecycle phase time",
+        n: "database",
+        metric: "elapsed_ms",
+        structures: &[
+            "mixed_stream",
+            "checkpoint",
+            "maintain",
+            "writer_verify",
+            "reopen",
+            "reopen_verify",
+            "readonly",
+            "readonly_verify",
+            "readonly_scrub",
+        ],
+        y_title: "milliseconds",
+        log: true,
+    },
+    Chart {
+        file: "database-recall-1m.svg",
+        title: "file-backed database — recall p50 at 1M",
+        n: "database",
+        metric: "p50_us",
+        structures: &[
+            "writer/text_recall",
+            "writer/hybrid_recall",
+            "writer/vector_recall",
+            "readonly/text_recall",
+            "readonly/hybrid_recall",
+            "readonly/vector_recall",
+        ],
+        y_title: "microseconds",
+        log: false,
+    },
+    Chart {
+        file: "database-memory-1m.svg",
+        title: "file-backed database — engine pool bytes at 1M",
+        n: "database",
+        metric: "pool_bytes",
+        structures: &["after_load", "after_maintain", "readonly"],
+        y_title: "bytes",
+        log: false,
+    },
+];
 
 /// The arena chart set. Every structure name matches a row the bench
 /// stand emits.
@@ -254,7 +314,11 @@ fn main() {
     let mut next_baseline = base.clone();
     let mut updated = 0usize;
     let mut total = 0usize;
-    for (out, charts) in [(ARENA_OUT, ARENA_CHARTS), (CORE_OUT, CORE_CHARTS)] {
+    for (out, charts) in [
+        (ARENA_OUT, ARENA_CHARTS),
+        (CORE_OUT, CORE_CHARTS),
+        (HOST_OUT, DATABASE_CHARTS),
+    ] {
         for chart in charts {
             let cells = chart_cells(chart, &new);
             if cells.is_empty() {
@@ -268,6 +332,7 @@ fn main() {
             };
             match verdict {
                 Verdict::Render { max_delta } => {
+                    std::fs::create_dir_all(out).unwrap_or_else(|e| panic!("creating {out}: {e}"));
                     render(chart, &new, Path::new(out));
                     for (key, v) in &cells {
                         next_baseline.insert(key.clone(), (*v, 1));
@@ -327,13 +392,37 @@ fn parse(raw: &str) -> Table {
     let mut table = Table::new();
     for line in raw.lines() {
         let c: Vec<&str> = line.split('\t').collect();
-        if c.len() != 5 {
-            continue;
-        }
-        let Ok(value) = c[4].parse::<f64>() else {
-            continue;
+        let (key, value): (Key, f64) = match c.as_slice() {
+            [n, runtime, structure, metric, value] => {
+                let Ok(value) = value.parse::<f64>() else {
+                    continue;
+                };
+                (
+                    (
+                        (*n).into(),
+                        (*runtime).into(),
+                        (*structure).into(),
+                        (*metric).into(),
+                    ),
+                    value,
+                )
+            }
+            ["#DB", n, runtime, structure, metric, value] => {
+                let Ok(value) = value.parse::<f64>() else {
+                    continue;
+                };
+                (
+                    (
+                        (*n).into(),
+                        (*runtime).into(),
+                        (*structure).into(),
+                        (*metric).into(),
+                    ),
+                    value,
+                )
+            }
+            _ => continue,
         };
-        let key = (c[0].into(), c[1].into(), c[2].into(), c[3].into());
         let cell = table.entry(key).or_insert((0.0, 0));
         cell.0 += value;
         cell.1 += 1;

@@ -1307,6 +1307,7 @@ dependencies = [
  "memmap2",
  "memory-stats",
  "plugmem-core",
+ "plugmem-testgen",
  "self_cell",
  "serde",
  "serde_json",

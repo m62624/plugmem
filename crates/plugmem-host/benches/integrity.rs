@@ -50,7 +50,17 @@ fn bench_scrub_mmap(c: &mut Criterion) {
         }
         db.checkpoint(4_001).unwrap();
     }
-    let total = std::fs::metadata(tmp.db()).unwrap().len();
+    let snapshot_prefix = format!("{}.snap.", tmp.db().file_name().unwrap().to_string_lossy());
+    let snapshot = std::fs::read_dir(&tmp.0)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(&snapshot_prefix))
+        })
+        .expect("checkpoint should create a snapshot generation");
+    let total = std::fs::metadata(snapshot).unwrap().len();
     eprintln!("scrub_mmap: snapshot is {total} bytes");
 
     let mut g = c.benchmark_group("scrub_mmap");

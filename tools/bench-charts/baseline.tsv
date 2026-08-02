@@ -104,3 +104,19 @@ core	native	BM25 (3 terms, 10k)	latency_us	67.1
 core	native	HNSW (30k, d384)	latency_us	177.0
 core	native	flat vector (24k, d384)	latency_us	226.9
 core	native	tags (3 lists, 100k)	latency_us	55.9
+database	native	after_load	pool_bytes	401868402.0
+database	native	after_maintain	pool_bytes	382016840.0
+database	native	checkpoint	elapsed_ms	539.0
+database	native	maintain	elapsed_ms	14485.0
+database	native	mixed_stream	load_ops_per_sec	6982.5
+database	native	readonly	elapsed_ms	201.9
+database	native	readonly	pool_bytes	382016840.0
+database	native	readonly/hybrid_recall	p50_us	194352.4
+database	native	readonly/text_recall	p50_us	1941.0
+database	native	readonly_scrub	elapsed_ms	48.1
+database	native	readonly_verify	elapsed_ms	35.6
+database	native	reopen	elapsed_ms	204.7
+database	native	reopen_verify	elapsed_ms	35.6
+database	native	writer/hybrid_recall	p50_us	194793.0
+database	native	writer/text_recall	p50_us	1849.1
+database	native	writer_verify	elapsed_ms	33.2

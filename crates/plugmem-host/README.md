@@ -123,6 +123,13 @@ println!("{}", out.rendered);
 # Ok::<(), plugmem_host::HostError>(())
 ```
 
+## Benchmarks
+
+```text
+cargo run --release -p plugmem-host --example bench_database -- 1000000
+cargo bench -p plugmem-host
+```
+
 Native builds are 64-bit, so a host process reads every capacity class
 of the shared file format: databases sized for the 32-bit wasm budget
 (≤ 2 GiB, the default) and databases with larger limits alike. Opening,

@@ -48,6 +48,7 @@ config = ["dep:toml"]
 memory-stats = { workspace = true }
 criterion = { workspace = true }
 serde_json = { workspace = true }
+plugmem-testgen = { workspace = true }
 
 [[bench]]
 name = "integrity"
