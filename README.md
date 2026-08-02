@@ -36,8 +36,8 @@ fusion; tags act as filters. What plugmem is actually about:
 
 - **bitemporal facts** — `revise`/`forget`, "what was true *then*" vs now,
   revision chains kept intact, physical erasure on `maintain`;
-- **an entity graph** — typed edges between entities, relational knowledge,
-  not just nearest-neighbor vectors;
+- **an entity graph** — typed edges between entities, with `link`/`unlink`
+  lifecycle and `as_of` graph recall, not just nearest-neighbor vectors;
 - **opaque per-fact metadata** — an optional key→value map (a URI to the real
   payload in another store, a mime type, an external key); the engine stores
   and returns it but never interprets it — big blobs live outside, by reference;
@@ -104,7 +104,7 @@ recency boost (tags filter; they are not a source):
 |---|---|---|
 | **Lexical** | [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) (Robertson idf) over a Unicode ([UAX #29](https://unicode.org/reports/tr29/)) tokenizer | exact terms / keyword overlap |
 | **Semantic** | int8-quantized cosine — a flat two-phase scan below a threshold, an [HNSW](https://arxiv.org/abs/1603.09320) graph above | meaning / nearest neighbours |
-| **Graph** | entity graph with typed edges, breadth-first from query anchors | relational knowledge |
+| **Graph** | entity graph with current typed edges on the hot path; `as_of` queries use edge history | relational knowledge |
 | **Temporal** | range scans over a `recorded_at`-ordered index; bitemporal validity | "what was true *then*", time windows |
 
 ## Measured scale

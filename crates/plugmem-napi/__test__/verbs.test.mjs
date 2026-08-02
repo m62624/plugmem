@@ -56,9 +56,15 @@ test("forget tombstones a live fact and reports freshness", () => {
   });
 });
 
-test("link upserts a typed edge", () => {
+test("link upserts and unlink closes a typed edge", () => {
   withDb((db) => {
     assert.doesNotThrow(() => db.link({ src: "user", rel: "works_at", dst: "acme" }));
+    assert.equal(db.stats().edges, 1);
+    assert.equal(db.stats().edgeVersions, 1);
+    assert.equal(db.unlink({ src: "user", rel: "works_at", dst: "acme" }), true);
+    assert.equal(db.unlink({ src: "user", rel: "works_at", dst: "acme" }), false);
+    assert.equal(db.stats().edges, 0);
+    assert.equal(db.stats().edgeVersions, 1);
   });
 });
 
@@ -105,7 +111,7 @@ test("typed outputs are fully populated (serde round-trip + camelCase)", async (
     assert.equal(typeof card.record.flags, "number");
 
     const s = db.stats();
-    for (const key of ["facts", "entities", "terms", "edges", "vectors", "nextFact", "nextEntity", "poolBytes"]) {
+    for (const key of ["facts", "entities", "terms", "edges", "edgeVersions", "vectors", "nextFact", "nextEntity", "nextEdge", "poolBytes"]) {
       assert.equal(typeof s[key], "number", `stats.${key}`);
     }
 

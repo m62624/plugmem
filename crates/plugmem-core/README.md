@@ -220,7 +220,10 @@ stays answerable through `as_of` queries. `forget` tombstones a fact
 immediately; the next `maintain` removes it physically, and its id is
 burned, never reissued. Entities form a graph through typed **edges**
 (`works_at`, `depends_on`, …) with a provenance link back to the fact
-that justified them.
+that justified them. `link` opens or replaces the current edge; `unlink`
+closes the current edge without deleting its history. Normal graph recall
+walks the compact current-edge indexes; `as_of` graph recall walks the
+historical edge indexes.
 
 | Verb | Effect |
 |---|---|
@@ -229,6 +232,7 @@ that justified them.
 | `revise` | close the predecessor, record the successor, keep the chain |
 | `forget` | immediate tombstone; physical purge at `maintain` |
 | `link` | upsert a typed edge between entities |
+| `unlink` | close the current typed edge while preserving `as_of` history |
 | `maintain` | policy-driven maintenance: no-op, compaction, text reindex, vector optimization or full rebuild |
 | `snapshot` | full image + journal reset |
 
@@ -450,7 +454,8 @@ pool strides — not estimates:
 | `facts` + `fact_aux` | one fact's record | 48 + 16 = **64 B** | u32 page × 4 KiB | 4.29 B facts (`u32` id) |
 | `temporal` | `recorded_at` index entry | **12 B** / fact | u32 page × 4 KiB | 16 TiB pool |
 | `entities` + `by_name` | one entity | 24 + 8 = **32 B** | u32 page × 4 KiB | 4.29 B entities |
-| `edges_out` + `edges_in` | one typed edge (both directions) | 16 + 16 = **32 B** | u32 page × 4 KiB | 16 TiB pool |
+| `edges_out` + `edges_in` | one current typed edge (both directions) | 16 + 16 = **32 B** | u32 page × 4 KiB | 16 TiB pool |
+| `edges_hist_out` + `edges_hist_in` | one historical edge version (both directions) | 48 + 48 = **96 B** | u32 page × 4 KiB | 16 TiB pool |
 | `texts` (blob heap) | **all** fact texts + entity names, concatenated | its text length | **usize byte offset** | **4 GiB on 32-bit; RAM-bound on 64-bit** |
 | `terms` (interner) | vocabulary: unique tokens, tags, relation names | deduped term length | **usize byte offset** | **4 GiB on 32-bit; RAM-bound on 64-bit** |
 | `tag_lists` + postings | tag/term/entity → fact lists | ~varint / entry | u32 chunk × 64 B | 256 GiB each |

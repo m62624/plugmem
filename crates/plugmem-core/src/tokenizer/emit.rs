@@ -27,6 +27,11 @@ pub(super) fn emit_truncated(token: &str, sink: &mut dyn FnMut(&str)) {
     {
         return;
     }
+    if let Some((start, end)) = invalid_apostrophe_joiner(token) {
+        emit_truncated(&token[..start], sink);
+        emit_truncated(&token[end..], sink);
+        return;
+    }
     let mut end = token.len().min(MAX_TOKEN_BYTES);
     while !token.is_char_boundary(end) {
         end -= 1;
@@ -100,4 +105,31 @@ fn trim_leading_contextual_chars(mut token: &str) -> &str {
         }
         token = next;
     }
+}
+
+fn invalid_apostrophe_joiner(token: &str) -> Option<(usize, usize)> {
+    let mut chars = token.char_indices().peekable();
+    while let Some((offset, c)) = chars.next() {
+        if c != '\'' && c != '\u{2019}' {
+            continue;
+        }
+        let left = previous_non_mark(&token[..offset]).is_some_and(is_letter);
+        let right = next_non_mark(chars.clone()).is_some_and(is_letter);
+        if !left || !right {
+            return Some((offset, offset + c.len_utf8()));
+        }
+    }
+    None
+}
+
+fn previous_non_mark(text: &str) -> Option<char> {
+    text.chars().rev().find(|&c| !UnicodeBackend::is_mark(c))
+}
+
+fn next_non_mark<'a>(chars: impl Iterator<Item = (usize, char)> + 'a) -> Option<char> {
+    chars.map(|(_, c)| c).find(|&c| !UnicodeBackend::is_mark(c))
+}
+
+fn is_letter(c: char) -> bool {
+    c.is_alphabetic() || UnicodeBackend::is_alphabetic(c)
 }

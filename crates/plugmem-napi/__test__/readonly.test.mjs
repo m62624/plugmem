@@ -48,6 +48,7 @@ test("read-only observes a writer's checkpointed snapshot", async () => {
     assert.throws(() => ro.revise(0, { text: "x" }), /read-only/);
     assert.throws(() => ro.forget(0), /read-only/);
     assert.throws(() => ro.link({ src: "a", rel: "r", dst: "b" }), /read-only/);
+    assert.throws(() => ro.unlink({ src: "a", rel: "r", dst: "b" }), /read-only/);
     assert.throws(() => ro.checkpoint(), /read-only/);
     assert.throws(() => ro.maintain(), /read-only/);
 

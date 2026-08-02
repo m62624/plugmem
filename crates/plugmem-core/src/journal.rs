@@ -151,6 +151,17 @@ pub enum Op<'a> {
         /// HNSW insertion budget, or `u32::MAX` for unlimited.
         max_hnsw_inserts: u32,
     },
+    /// Op 6: close the current typed edge between two entities.
+    Unlink {
+        /// Host timestamp of the operation.
+        now: u64,
+        /// Source entity name.
+        src: &'a str,
+        /// Relation term, verbatim.
+        rel: &'a str,
+        /// Destination entity name.
+        dst: &'a str,
+    },
 }
 
 /// Appends a length-prefixed string (`u32 LE` + bytes).
@@ -288,6 +299,13 @@ impl<'a> Op<'a> {
                 put_str(&mut payload, dst);
                 4
             }
+            Op::Unlink { now, src, rel, dst } => {
+                payload.extend_from_slice(&now.to_le_bytes());
+                put_str(&mut payload, src);
+                put_str(&mut payload, rel);
+                put_str(&mut payload, dst);
+                6
+            }
             Op::Maintain {
                 now,
                 mode,
@@ -404,6 +422,13 @@ impl<'a> Op<'a> {
                     mode,
                     max_hnsw_inserts,
                 }
+            }
+            6 => {
+                let now = take_u64(payload, at)?;
+                let src = take_str(payload, at)?;
+                let rel = take_str(payload, at)?;
+                let dst = take_str(payload, at)?;
+                Op::Unlink { now, src, rel, dst }
             }
             _ => return Err(Error::Corrupt("unknown journal op")),
         };

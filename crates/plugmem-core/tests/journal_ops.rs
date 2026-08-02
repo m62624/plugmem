@@ -53,6 +53,12 @@ fn sample_ops() -> Vec<Op<'static>> {
             dst: "plugmem",
             provenance: FactId::NONE,
         },
+        Op::Unlink {
+            now: 450,
+            src: "user",
+            rel: "works_on",
+            dst: "plugmem",
+        },
         Op::Maintain {
             now: 500,
             mode: 0,

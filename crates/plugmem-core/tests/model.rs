@@ -4,8 +4,9 @@
 //! roundtrip properties and the `as_of` liveness rule.
 
 use plugmem_arena::{Arena, ArenaCfg, ChunkPool, ChunkPoolCfg, ListHandle, ShardMode, Slot};
+use plugmem_core::model::{EdgeHistorySlot, edge_flags};
 use plugmem_core::{
-    BlobId, EdgeSlot, EntityByName, EntityId, EntityRecord, FactAux, FactId, FactRecord,
+    BlobId, EdgeId, EdgeSlot, EntityByName, EntityId, EntityRecord, FactAux, FactId, FactRecord,
     TemporalSlot, TermId, VALID_TO_OPEN, fact_flags,
 };
 #[cfg(not(target_family = "wasm"))]
@@ -129,6 +130,47 @@ fn edge_slot_reference_layout() {
 }
 
 #[test]
+fn edge_history_slot_reference_layout_and_liveness() {
+    let rec = EdgeHistorySlot {
+        a: EntityId(0x0102_0304),
+        rel: TermId(0x1112_1314),
+        b: EntityId(0x2122_2324),
+        edge: EdgeId(0x3132_3334),
+        fact: FactId(0x4142_4344),
+        flags: edge_flags::CLOSED,
+        kind: 0,
+        recorded_at: 0x5152_5354_5556_5758,
+        valid_from: 0x6162_6364_6566_6768,
+        valid_to: 0x7172_7374_7576_7778,
+    };
+    #[rustfmt::skip]
+    let want = [
+        0x01, 0x02, 0x03, 0x04,                         // a (key, BE)
+        0x11, 0x12, 0x13, 0x14,                         // rel (key, BE)
+        0x21, 0x22, 0x23, 0x24,                         // b (key, BE)
+        0x31, 0x32, 0x33, 0x34,                         // edge (key, BE)
+        0x41, 0x42, 0x43, 0x44,                         // fact
+        0x00, 0x01,                                     // flags: CLOSED
+        0x00, 0x00,                                     // kind (reserved)
+        0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, // recorded_at
+        0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, // valid_from
+        0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, // valid_to
+    ];
+    assert_eq!(bytes_of(&rec), want);
+    assert_eq!(EdgeHistorySlot::read(&want), rec);
+    assert!(!rec.is_open());
+    assert!(!rec.active_at(rec.valid_from - 1));
+    assert!(rec.active_at(rec.valid_from));
+    assert!(rec.active_at(rec.valid_to - 1));
+    assert!(!rec.active_at(rec.valid_to));
+
+    let mut open = rec;
+    open.valid_to = VALID_TO_OPEN;
+    open.flags = 0;
+    assert!(open.is_open());
+}
+
+#[test]
 fn temporal_slot_reference_layout() {
     let rec = TemporalSlot {
         recorded_at: 0x0102_0304_0506_0708,
@@ -202,6 +244,8 @@ fn records_store_and_sort_in_arenas() {
     let mut facts = Arena::<FactRecord>::new(ArenaCfg::new(4, ShardMode::Uniform)).unwrap();
     let mut by_name = Arena::<EntityByName>::new(ArenaCfg::new(1, ShardMode::Ordered)).unwrap();
     let mut edges = Arena::<EdgeSlot>::new(ArenaCfg::new(1, ShardMode::Ordered)).unwrap();
+    let mut edge_history =
+        Arena::<EdgeHistorySlot>::new(ArenaCfg::new(1, ShardMode::Ordered)).unwrap();
     for i in (0..64u32).rev() {
         facts
             .insert(&FactRecord {
@@ -229,6 +273,20 @@ fn records_store_and_sort_in_arenas() {
                 rel: TermId(i / 4),
                 b: EntityId(i),
                 fact: FactId(i),
+            })
+            .unwrap();
+        edge_history
+            .insert(&EdgeHistorySlot {
+                a: EntityId(i / 8),
+                rel: TermId(i / 4),
+                b: EntityId(i),
+                edge: EdgeId(i),
+                fact: FactId(i),
+                flags: 0,
+                kind: 0,
+                recorded_at: u64::from(i),
+                valid_from: u64::from(i),
+                valid_to: VALID_TO_OPEN,
             })
             .unwrap();
     }
@@ -261,6 +319,34 @@ fn records_store_and_sort_in_arenas() {
     })[..12]
         .to_vec();
     let hits: Vec<u32> = edges.range(&from, &to).map(|e| e.b.0).collect();
+    assert_eq!(hits, [20, 21, 22, 23]);
+    let from = bytes_of(&EdgeHistorySlot {
+        a: EntityId(2),
+        rel: TermId(5),
+        b: EntityId(0),
+        edge: EdgeId(0),
+        fact: FactId(0),
+        flags: 0,
+        kind: 0,
+        recorded_at: 0,
+        valid_from: 0,
+        valid_to: VALID_TO_OPEN,
+    })[..16]
+        .to_vec();
+    let to = bytes_of(&EdgeHistorySlot {
+        a: EntityId(2),
+        rel: TermId(6),
+        b: EntityId(0),
+        edge: EdgeId(0),
+        fact: FactId(0),
+        flags: 0,
+        kind: 0,
+        recorded_at: 0,
+        valid_from: 0,
+        valid_to: VALID_TO_OPEN,
+    })[..16]
+        .to_vec();
+    let hits: Vec<u32> = edge_history.range(&from, &to).map(|e| e.edge.0).collect();
     assert_eq!(hits, [20, 21, 22, 23]);
 }
 
@@ -331,6 +417,35 @@ proptest! {
         prop_assert_eq!(EdgeSlot::read(&bytes_of(&edge)), edge);
         let t = TemporalSlot { recorded_at: at, fact: FactId(fact) };
         prop_assert_eq!(TemporalSlot::read(&bytes_of(&t)), t);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn edge_history_roundtrip(
+        a in any::<u32>(),
+        rel in any::<u32>(),
+        b in any::<u32>(),
+        edge in any::<u32>(),
+        fact in any::<u32>(),
+        flags in any::<u16>(),
+        kind in any::<u16>(),
+        recorded_at in any::<u64>(),
+        valid_from in any::<u64>(),
+        valid_to in any::<u64>(),
+    ) {
+        let rec = EdgeHistorySlot {
+            a: EntityId(a),
+            rel: TermId(rel),
+            b: EntityId(b),
+            edge: EdgeId(edge),
+            fact: FactId(fact),
+            flags,
+            kind,
+            recorded_at,
+            valid_from,
+            valid_to,
+        };
+        prop_assert_eq!(EdgeHistorySlot::read(&bytes_of(&rec)), rec);
     }
 
     // Key ordering contract: byte comparison of encoded keys must equal

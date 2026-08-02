@@ -106,6 +106,8 @@ pub struct Stats {
     pub terms: f64,
     /// Directed edges.
     pub edges: f64,
+    /// Historical edge versions, including closed versions.
+    pub edge_versions: f64,
     /// Quantized vector slots.
     pub vectors: f64,
     /// Tombstoned fact records awaiting physical purge.
@@ -116,6 +118,8 @@ pub struct Stats {
     pub next_fact: f64,
     /// The next entity id to be assigned.
     pub next_entity: f64,
+    /// The next edge-version id to be assigned.
+    pub next_edge: f64,
     /// Total bytes held by the engine's pools.
     pub pool_bytes: f64,
 }

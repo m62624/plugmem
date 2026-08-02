@@ -8,9 +8,9 @@
 `plugmem-host` is the `std` host layer for the plugmem
 [temporal-memory engine](https://docs.rs/plugmem-core/latest). It supplies
 what the `no_std` engine does not own — files, locking, and network — so from
-this one crate a Rust program gets `remember / recall / revise / forget` backed
-by durable storage. It re-exports the engine, so **this one crate is all a Rust
-program needs.**
+this one crate a Rust program gets `remember / recall / revise / forget` plus
+graph `link`/`unlink`, backed by durable storage. It re-exports the engine, so
+**this one crate is all a Rust program needs.**
 
 ## Which crate do I need?
 

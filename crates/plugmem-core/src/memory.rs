@@ -19,20 +19,20 @@ use alloc::vec::Vec;
 
 use plugmem_arena::{
     Arena, ArenaCfg, BlobHeap, BlobHeapCfg, BlobId, ChunkPool, ChunkPoolCfg, Interner, ListHandle,
-    ShardMode, TermId, key,
+    ShardMode, Slot, TermId, key,
 };
 
 use crate::config::Config;
 use crate::error::Error;
-use crate::id::{EntityId, FactId, NONE_U32};
+use crate::id::{EdgeId, EntityId, FactId, NONE_U32};
 use crate::index::IdListIndex;
 use crate::index::bm25::Bm25Index;
 use crate::index::hnsw::HnswGraph;
 use crate::index::vecpool::VecPool;
 use crate::journal::{JournalScan, Op, scan};
 use crate::model::{
-    EdgeSlot, EntityByName, EntityRecord, FactAux, FactRecord, TemporalSlot, VALID_TO_OPEN,
-    fact_flags,
+    EdgeHistorySlot, EdgeSlot, EntityByName, EntityRecord, FactAux, FactRecord, TemporalSlot,
+    VALID_TO_OPEN, edge_flags, fact_flags,
 };
 use crate::storage::Storage;
 use crate::tokenizer::Tokenizer;
@@ -104,6 +104,20 @@ pub struct LinkInput<'a> {
     pub dst: &'a str,
     /// Optional provenance fact.
     pub provenance: Option<FactId>,
+}
+
+/// Input of `unlink`.
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct UnlinkInput<'a> {
+    /// Host timestamp, unix milliseconds.
+    pub now: u64,
+    /// Source entity name.
+    pub src: &'a str,
+    /// Relation term, verbatim.
+    pub rel: &'a str,
+    /// Destination entity name.
+    pub dst: &'a str,
 }
 
 /// Result of `remember`/`revise`.
@@ -190,6 +204,8 @@ pub struct Stats {
     /// Directed edges (each `(src, rel, dst)` counted once; the mirrored
     /// in-arena is an internal detail).
     pub edges: usize,
+    /// Historical edge versions, including closed versions.
+    pub edge_versions: usize,
     /// Quantized vector slots.
     pub vectors: usize,
     /// Tombstoned fact records awaiting physical purge.
@@ -202,6 +218,8 @@ pub struct Stats {
     pub next_fact: u32,
     /// The next entity id to be assigned.
     pub next_entity: u32,
+    /// The next edge-version id to be assigned.
+    pub next_edge: u32,
     /// The database lineage identity ([`Config::db_uuid`]); `0` for an
     /// unnamed database.
     pub db_uuid: u128,
@@ -237,6 +255,8 @@ pub struct Memory<'a> {
     by_name: Arena<'a, EntityByName>,
     edges_out: Arena<'a, EdgeSlot>,
     edges_in: Arena<'a, EdgeSlot>,
+    edges_hist_out: Arena<'a, EdgeHistorySlot>,
+    edges_hist_in: Arena<'a, EdgeHistorySlot>,
     temporal: Arena<'a, TemporalSlot>,
     /// Fact texts and canonical entity names.
     texts: BlobHeap<'a>,
@@ -263,6 +283,7 @@ pub struct Memory<'a> {
     // -- id allocation (derived from the arenas on load) --
     next_fact: u32,
     next_entity: u32,
+    next_edge: u32,
     // -- maintenance state --
     tombstones: usize,
     bm25_tokenizer_version: u32,
@@ -295,6 +316,8 @@ impl<'a> Memory<'a> {
             by_name: Arena::new(ord(cfg.shards_entities))?,
             edges_out: Arena::new(ord(cfg.shards_edges))?,
             edges_in: Arena::new(ord(cfg.shards_edges))?,
+            edges_hist_out: Arena::new(ord(cfg.shards_edges))?,
+            edges_hist_in: Arena::new(ord(cfg.shards_edges))?,
             temporal: Arena::new(ord(cfg.shards_temporal))?,
             texts: BlobHeap::new(blob),
             metas: BlobHeap::new(blob),
@@ -307,6 +330,7 @@ impl<'a> Memory<'a> {
             hnsw: HnswGraph::new(cfg.hnsw_m, cfg.hnsw_m0, cfg.max_bytes)?,
             next_fact: 0,
             next_entity: 0,
+            next_edge: 0,
             tombstones: 0,
             bm25_tokenizer_version: maintain::TOKENIZER_INDEX_VERSION,
             tokenizer: Tokenizer::new(),
@@ -473,6 +497,10 @@ impl<'a> Memory<'a> {
                     provenance,
                 } => {
                     self.apply_link(now, src, rel, dst, provenance)?;
+                    report.replayed += 1;
+                }
+                Op::Unlink { now, src, rel, dst } => {
+                    self.apply_unlink(now, src, rel, dst)?;
                     report.replayed += 1;
                 }
                 Op::Maintain {
@@ -690,6 +718,28 @@ impl<'a> Memory<'a> {
         Ok(())
     }
 
+    /// Closes the current typed edge between two entities. Returns `false`
+    /// when the edge is already absent.
+    pub fn unlink<S: Storage>(
+        &mut self,
+        store: &mut S,
+        input: UnlinkInput<'_>,
+    ) -> Result<bool, Error> {
+        let fresh = self.apply_unlink(input.now, input.src, input.rel, input.dst)?;
+        let mut entry = Vec::new();
+        Op::Unlink {
+            now: input.now,
+            src: input.src,
+            rel: input.rel,
+            dst: input.dst,
+        }
+        .encode(&mut entry);
+        store
+            .append_journal(&entry)
+            .map_err(|e| Error::Storage(format!("{e:?}")))?;
+        Ok(fresh)
+    }
+
     /// Returns a fact unless it is tombstoned (closed facts are
     /// returned — their interval says so).
     pub fn get(&self, id: FactId) -> Option<FactView<'_>> {
@@ -802,11 +852,13 @@ impl<'a> Memory<'a> {
             entities: self.entities.len(),
             terms: self.terms.len(),
             edges: self.edges_out.len(),
+            edge_versions: self.edges_hist_out.len(),
             vectors: self.vecs.len(),
             tombstones: self.tombstones,
             hnsw_indexed: self.hnsw.indexed(),
             next_fact: self.next_fact,
             next_entity: self.next_entity,
+            next_edge: self.next_edge,
             db_uuid: self.cfg.db_uuid,
             pool_bytes: self.facts.pool_bytes()
                 + self.fact_aux.pool_bytes()
@@ -814,6 +866,8 @@ impl<'a> Memory<'a> {
                 + self.by_name.pool_bytes()
                 + self.edges_out.pool_bytes()
                 + self.edges_in.pool_bytes()
+                + self.edges_hist_out.pool_bytes()
+                + self.edges_hist_in.pool_bytes()
                 + self.temporal.pool_bytes()
                 + self.texts.pool_bytes()
                 + self.terms.pool_bytes()
@@ -976,7 +1030,7 @@ impl<'a> Memory<'a> {
             for &(rel, dst_name) in input.links {
                 let dst = self.resolve_or_create_entity(dst_name, input.now)?;
                 let rel = self.terms.intern(rel)?;
-                self.upsert_edge(src, rel, dst, id)?;
+                self.open_edge(input.now, src, rel, dst, id)?;
             }
             self.entity_facts.push(src.0, id, 0)?;
         }
@@ -1041,10 +1095,56 @@ impl<'a> Memory<'a> {
         let src = self.resolve_or_create_entity(src, now)?;
         let dst = self.resolve_or_create_entity(dst, now)?;
         let rel = self.terms.intern(rel)?;
-        self.upsert_edge(src, rel, dst, provenance)
+        self.open_edge(now, src, rel, dst, provenance)
     }
 
-    fn upsert_edge(
+    fn apply_unlink(&mut self, now: u64, src: &str, rel: &str, dst: &str) -> Result<bool, Error> {
+        let Some(src) = self.lookup_entity_name(src) else {
+            return Ok(false);
+        };
+        let Some(dst) = self.lookup_entity_name(dst) else {
+            return Ok(false);
+        };
+        let Some(rel) = self.terms.lookup(rel) else {
+            return Ok(false);
+        };
+        self.close_current_edge(now, src, rel, dst)
+    }
+
+    fn open_edge(
+        &mut self,
+        now: u64,
+        src: EntityId,
+        rel: TermId,
+        dst: EntityId,
+        fact: FactId,
+    ) -> Result<(), Error> {
+        if let Some(current) = self.current_edge(src, rel, dst) {
+            if current.fact == fact {
+                return Ok(());
+            }
+            self.close_current_edge(now, src, rel, dst)?;
+        }
+        let edge = EdgeId(self.next_edge);
+        let history = EdgeHistorySlot {
+            a: src,
+            rel,
+            b: dst,
+            edge,
+            fact,
+            flags: 0,
+            kind: 0,
+            recorded_at: now,
+            valid_from: now,
+            valid_to: VALID_TO_OPEN,
+        };
+        self.insert_history_edge(history)?;
+        self.insert_current_edge(src, rel, dst, fact)?;
+        self.next_edge += 1;
+        Ok(())
+    }
+
+    fn insert_current_edge(
         &mut self,
         src: EntityId,
         rel: TermId,
@@ -1068,6 +1168,95 @@ impl<'a> Memory<'a> {
         Ok(())
     }
 
+    fn insert_history_edge(&mut self, edge: EdgeHistorySlot) -> Result<(), Error> {
+        self.edges_hist_out.insert(&edge)?;
+        self.edges_hist_in.insert(&EdgeHistorySlot {
+            a: edge.b,
+            b: edge.a,
+            ..edge
+        })?;
+        Ok(())
+    }
+
+    fn close_current_edge(
+        &mut self,
+        now: u64,
+        src: EntityId,
+        rel: TermId,
+        dst: EntityId,
+    ) -> Result<bool, Error> {
+        let Some(current) = self.current_edge(src, rel, dst) else {
+            return Ok(false);
+        };
+        let edge = self
+            .unique_open_history_edge(src, rel, dst, current.fact)?
+            .ok_or(Error::Corrupt("current edge has no open history"))?;
+        let mut out_key = [0u8; 16];
+        write_edge_history_key(&mut out_key, src, rel, dst, edge);
+        let mut in_key = [0u8; 16];
+        write_edge_history_key(&mut in_key, dst, rel, src, edge);
+        let close_at = now.max(
+            self.edges_hist_out
+                .get_slot(&out_key)
+                .map(EdgeHistorySlot::read)
+                .map(|edge| edge.valid_from)
+                .unwrap_or(now),
+        );
+        close_history_payload(
+            self.edges_hist_out
+                .payload_mut(&out_key)
+                .ok_or(Error::Corrupt("missing outgoing edge history"))?,
+            close_at,
+        );
+        close_history_payload(
+            self.edges_hist_in
+                .payload_mut(&in_key)
+                .ok_or(Error::Corrupt("missing incoming edge history"))?,
+            close_at,
+        );
+        let mut out_current = [0u8; 12];
+        write_edge_key(&mut out_current, src, rel, dst);
+        let mut in_current = [0u8; 12];
+        write_edge_key(&mut in_current, dst, rel, src);
+        let out_removed = self.edges_out.remove(&out_current);
+        let in_removed = self.edges_in.remove(&in_current);
+        if out_removed != in_removed {
+            return Err(Error::Corrupt("edge mirrors disagree"));
+        }
+        Ok(out_removed)
+    }
+
+    fn current_edge(&self, src: EntityId, rel: TermId, dst: EntityId) -> Option<EdgeSlot> {
+        let mut key = [0u8; 12];
+        write_edge_key(&mut key, src, rel, dst);
+        self.edges_out.get_slot(&key).map(EdgeSlot::read)
+    }
+
+    fn unique_open_history_edge(
+        &self,
+        src: EntityId,
+        rel: TermId,
+        dst: EntityId,
+        fact: FactId,
+    ) -> Result<Option<EdgeId>, Error> {
+        let mut from = [0u8; 16];
+        write_edge_history_prefix(&mut from, src, rel, dst);
+        let to = edge_history_key_after(&from);
+        let mut found = None;
+        for edge in self
+            .edges_hist_out
+            .range(&from, &to)
+            .filter(|edge| edge.fact == fact && edge.is_open())
+        {
+            if found.replace(edge.edge).is_some() {
+                return Err(Error::Corrupt(
+                    "current edge has multiple open history records",
+                ));
+            }
+        }
+        Ok(found)
+    }
+
     /// Looks an entity up by its already-normalized name (read-only:
     /// neither the vocabulary nor the arenas change on a miss).
     fn lookup_entity_by_norm(&self, norm: &str) -> Option<EntityId> {
@@ -1078,6 +1267,16 @@ impl<'a> Memory<'a> {
         key::write_u32(&mut to, term.0);
         to[4..].copy_from_slice(&u32::MAX.to_be_bytes());
         self.by_name.range(&from, &to).next().map(|e| e.id)
+    }
+
+    fn lookup_entity_name(&mut self, name: &str) -> Option<EntityId> {
+        let mut norm = core::mem::take(&mut self.name_scratch);
+        normalize_name(&mut self.tokenizer, name, &mut norm);
+        let result = (!norm.is_empty())
+            .then(|| self.lookup_entity_by_norm(&norm))
+            .flatten();
+        self.name_scratch = norm;
+        result
     }
 
     fn resolve_or_create_entity(&mut self, name: &str, now: u64) -> Result<EntityId, Error> {
@@ -1137,6 +1336,38 @@ impl<'a> Memory<'a> {
             .append_journal(&entry)
             .map_err(|e| Error::Storage(format!("{e:?}")))
     }
+}
+
+fn write_edge_key(out: &mut [u8; 12], a: EntityId, rel: TermId, b: EntityId) {
+    key::write_u32(out, a.0);
+    key::write_u32(&mut out[4..], rel.0);
+    key::write_u32(&mut out[8..], b.0);
+}
+
+fn write_edge_history_prefix(out: &mut [u8; 16], a: EntityId, rel: TermId, b: EntityId) {
+    key::write_u32(out, a.0);
+    key::write_u32(&mut out[4..], rel.0);
+    key::write_u32(&mut out[8..], b.0);
+    key::write_u32(&mut out[12..], 0);
+}
+
+fn write_edge_history_key(out: &mut [u8; 16], a: EntityId, rel: TermId, b: EntityId, edge: EdgeId) {
+    key::write_u32(out, a.0);
+    key::write_u32(&mut out[4..], rel.0);
+    key::write_u32(&mut out[8..], b.0);
+    key::write_u32(&mut out[12..], edge.0);
+}
+
+fn edge_history_key_after(prefix: &[u8; 16]) -> [u8; 16] {
+    let mut to = *prefix;
+    to[12..].copy_from_slice(&u32::MAX.to_be_bytes());
+    to
+}
+
+fn close_history_payload(payload: &mut [u8], valid_to: u64) {
+    let flags = u16::from_be_bytes(payload[4..6].try_into().unwrap()) | edge_flags::CLOSED;
+    payload[4..6].copy_from_slice(&flags.to_be_bytes());
+    payload[24..32].copy_from_slice(&valid_to.to_be_bytes());
 }
 
 impl core::fmt::Debug for Memory<'_> {

@@ -38,7 +38,7 @@ pub(crate) struct Cli {
 /// The `--help` long description.
 const LONG_ABOUT: &str = "\
 A local memory an agent talks to in four verbs — remember / recall / revise / forget — \
-plus link / show / stats / maintain / checkpoint / export / import, integrity: verify / \
+plus link / unlink / show / stats / maintain / checkpoint / export / import, integrity: verify / \
 scrub / recover, and an interactive `repl` (one open handle, host speed). Recall fuses lexical \
 (BM25), vector, entity-graph and temporal evidence into one \
 ranked, token-budgeted block. One database is a single snapshot file plus a journal; point \
@@ -132,6 +132,15 @@ pub(crate) enum Command {
     },
     /// Upsert a typed edge between two entities.
     Link {
+        /// Source entity.
+        src: String,
+        /// Relation.
+        rel: String,
+        /// Destination entity.
+        dst: String,
+    },
+    /// Close the current typed edge between two entities.
+    Unlink {
         /// Source entity.
         src: String,
         /// Relation.

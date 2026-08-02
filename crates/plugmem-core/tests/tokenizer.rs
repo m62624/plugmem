@@ -367,6 +367,15 @@ fn nonspacing_marks_with_zero_combining_class_are_canonical() {
     assert_eq!(tokens(&emitted[0]), emitted);
 }
 
+#[test]
+fn apostrophe_joiner_requires_letters_after_folding() {
+    let emitted = tokens("a'\u{115F}0");
+    assert_eq!(emitted, ["a", "0"]);
+    for token in emitted {
+        assert_eq!(tokens(&token), [token]);
+    }
+}
+
 #[cfg(not(target_family = "wasm"))]
 #[test]
 fn combining_marks_after_joiners_are_canonical() {

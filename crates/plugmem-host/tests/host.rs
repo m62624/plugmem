@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use plugmem_host::{
     Config, Database, Embedder, FactId, FsyncPolicy, HostError, NullEmbedder, OpenAiCompatEmbedder,
-    ReadOnlyDatabase, RecallQuery, RememberInput,
+    ReadOnlyDatabase, RecallQuery, RememberInput, UnlinkInput,
 };
 
 /// A unique temp directory per test; removed on drop.
@@ -71,15 +71,39 @@ fn open_remember_reopen_replays_the_journal() {
             provenance: Some(out.id),
         })
         .unwrap();
+        assert!(
+            db.unlink(UnlinkInput {
+                now: 2_500,
+                src: "user",
+                rel: "works_on",
+                dst: "plugmem",
+            })
+            .unwrap()
+        );
         out.id
     }; // drop releases the lock
 
     let (db, report) = Database::open(tmp.db(), cfg()).unwrap();
-    assert_eq!(report.replayed, 2, "the journal replays on reopen");
+    assert_eq!(report.replayed, 3, "the journal replays on reopen");
     let fact = db.get(id).expect("the fact survived the reopen");
     assert_eq!(fact.text, "prefers tokio");
     let out = db.recall(RecallQuery::text(3_000, "tokio")).unwrap();
     assert!(out.rendered.contains("prefers tokio"));
+    let current = db
+        .recall(RecallQuery {
+            entities: &["user"],
+            ..RecallQuery::text(3_000, "")
+        })
+        .unwrap();
+    assert!(current.edges.is_empty());
+    let historical = db
+        .recall(RecallQuery {
+            entities: &["user"],
+            as_of: Some(2_250),
+            ..RecallQuery::text(3_000, "")
+        })
+        .unwrap();
+    assert_eq!(historical.edges.len(), 1);
 }
 
 #[test]

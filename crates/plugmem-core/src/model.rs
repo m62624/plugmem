@@ -14,7 +14,7 @@
 
 use plugmem_arena::{BlobId, ListHandle, Slot, TermId, key};
 
-use crate::id::{EntityId, FactId, NONE_U32};
+use crate::id::{EdgeId, EntityId, FactId, NONE_U32};
 
 /// `valid_to` value of an open fact ("true now").
 pub const VALID_TO_OPEN: u64 = u64::MAX;
@@ -292,6 +292,89 @@ impl Slot for EdgeSlot {
     }
 }
 
+/// A temporal typed graph edge version (48-byte slot, Ordered arena, key
+/// `[a BE | rel BE | b BE | edge BE]`).
+///
+/// Stored twice, in two mirrored history arenas with the same orientation as
+/// [`EdgeSlot`]. The hot current graph still uses [`EdgeSlot`]; this record is
+/// the source of truth for historical `as_of` traversal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct EdgeHistorySlot {
+    /// First key component (out-arena: source; in-arena: destination).
+    pub a: EntityId,
+    /// Interned relation term.
+    pub rel: TermId,
+    /// Second key component (out-arena: destination; in-arena: source).
+    pub b: EntityId,
+    /// Edge-version id.
+    pub edge: EdgeId,
+    /// Provenance fact, or [`FactId::NONE`].
+    pub fact: FactId,
+    /// Edge flags; see [`edge_flags`].
+    pub flags: u16,
+    /// Reserved for future lifecycle states.
+    pub kind: u16,
+    /// Knowledge axis: when the edge version was recorded.
+    pub recorded_at: u64,
+    /// Truth axis: start of the edge validity interval.
+    pub valid_from: u64,
+    /// Truth axis: end of the edge validity interval; [`VALID_TO_OPEN`] =
+    /// current.
+    pub valid_to: u64,
+}
+
+impl EdgeHistorySlot {
+    /// `true` when the edge version is active at `t`.
+    pub fn active_at(&self, t: u64) -> bool {
+        self.valid_from <= t && t < self.valid_to
+    }
+
+    /// `true` when this version is the current open edge.
+    pub fn is_open(&self) -> bool {
+        self.valid_to == VALID_TO_OPEN
+    }
+}
+
+/// Bit flags of [`EdgeHistorySlot::flags`].
+pub mod edge_flags {
+    /// The edge validity interval is closed (`valid_to < u64::MAX`).
+    pub const CLOSED: u16 = 1;
+}
+
+impl Slot for EdgeHistorySlot {
+    const SIZE: usize = 48;
+    const KEY_LEN: usize = 16;
+
+    fn write(&self, out: &mut [u8]) {
+        key::write_u32(out, self.a.0);
+        key::write_u32(&mut out[4..], self.rel.0);
+        key::write_u32(&mut out[8..], self.b.0);
+        key::write_u32(&mut out[12..], self.edge.0);
+        key::write_u32(&mut out[16..], self.fact.0);
+        out[20..22].copy_from_slice(&self.flags.to_be_bytes());
+        out[22..24].copy_from_slice(&self.kind.to_be_bytes());
+        key::write_u64(&mut out[24..], self.recorded_at);
+        key::write_u64(&mut out[32..], self.valid_from);
+        key::write_u64(&mut out[40..], self.valid_to);
+    }
+
+    fn read(bytes: &[u8]) -> Self {
+        Self {
+            a: EntityId(key::read_u32(bytes)),
+            rel: TermId(key::read_u32(&bytes[4..])),
+            b: EntityId(key::read_u32(&bytes[8..])),
+            edge: EdgeId(key::read_u32(&bytes[12..])),
+            fact: FactId(key::read_u32(&bytes[16..])),
+            flags: u16::from_be_bytes(bytes[20..22].try_into().unwrap()),
+            kind: u16::from_be_bytes(bytes[22..24].try_into().unwrap()),
+            recorded_at: key::read_u64(&bytes[24..]),
+            valid_from: key::read_u64(&bytes[32..]),
+            valid_to: key::read_u64(&bytes[40..]),
+        }
+    }
+}
+
 /// Temporal index record (12-byte slot, Ordered arena, the whole
 /// slot is the key: `[recorded_at BE | fact BE]`, no payload).
 ///
@@ -331,6 +414,7 @@ const _: () = {
     assert!(EntityRecord::SIZE == 24 && EntityRecord::KEY_LEN == 4);
     assert!(EntityByName::SIZE == 8 && EntityByName::KEY_LEN == 8);
     assert!(EdgeSlot::SIZE == 16 && EdgeSlot::KEY_LEN == 12);
+    assert!(EdgeHistorySlot::SIZE == 48 && EdgeHistorySlot::KEY_LEN == 16);
     assert!(TemporalSlot::SIZE == 12 && TemporalSlot::KEY_LEN == 12);
     // NONE sentinels must agree across the id kinds and the raw fields.
     assert!(NONE_U32 == u32::MAX);

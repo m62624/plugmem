@@ -19,8 +19,8 @@ pub const ARG_FORMAT: &str = "Output format. \"json\" (default) returns compact 
 \"human\" returns the same data pretty-printed for eyeballing.";
 
 /// `plugmem_stats` tool description.
-pub const STATS_TOOL: &str = "Return engine size counters for the memory: facts, entities, terms, edges, vectors, and the \
-database uuid. A cheap health/size probe.";
+pub const STATS_TOOL: &str = "Return engine size counters for the memory: facts, entities, terms, current edges, edge \
+history versions, vectors, HNSW coverage, ids, and the database uuid. A cheap health/size probe.";
 
 /// `plugmem_version` tool description — the MCP analog of `plugmem-cli --version`.
 pub const VERSION_TOOL: &str = "Return the running plugmem version (e.g. \"plugmem 0.1.0\"). Call \
@@ -70,6 +70,10 @@ fact is not an error.";
 /// `plugmem_link` tool description.
 pub const LINK_TOOL: &str = "Upsert a typed edge `src -rel-> dst` between two entities (created \
 lazily). Edges feed the graph recall source. Time is the server's wall clock.";
+
+/// `plugmem_unlink` tool description.
+pub const UNLINK_TOOL: &str = "Close the current typed edge `src -rel-> dst` between two \
+entities. Historical `as_of` recall can still traverse the edge while it was active. Idempotent.";
 
 /// `plugmem_show` tool description.
 pub const SHOW_TOOL: &str = "Return one fact's full card by id — text, both time axes \

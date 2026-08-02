@@ -206,14 +206,16 @@ fn writer_verbs_round_trip() {
             r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"plugmem_revise","arguments":{"id":0,"text":"prefers async-std","entity":"user"}}}"#,
             // link two entities
             r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"plugmem_link","arguments":{"src":"user","rel":"works_at","dst":"acme"}}}"#,
+            // close that current edge
+            r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"plugmem_unlink","arguments":{"src":"user","rel":"works_at","dst":"acme"}}}"#,
             // export the open facts
-            r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"plugmem_export","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"plugmem_export","arguments":{}}}"#,
             // operational verbs
-            r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"plugmem_maintain","arguments":{}}}"#,
-            r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"plugmem_checkpoint","arguments":{}}}"#,
-            r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"plugmem_verify","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"plugmem_maintain","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"plugmem_checkpoint","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"plugmem_verify","arguments":{}}}"#,
             // forget the (revised) successor fact 1
-            r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"plugmem_forget","arguments":{"id":1}}}"#,
+            r#"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"plugmem_forget","arguments":{"id":1}}}"#,
         ],
     );
 
@@ -246,19 +248,24 @@ fn writer_verbs_round_trip() {
     // link ok.
     assert_eq!(resps[4]["result"]["isError"], false);
 
+    // unlink ok.
+    let unlinked: Value =
+        serde_json::from_str(resps[5]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(unlinked["unlinked"], true);
+
     // export → a JSON array of the open facts (>=1).
     let exported: Value =
-        serde_json::from_str(resps[5]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        serde_json::from_str(resps[6]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert!(exported.as_array().map(|a| !a.is_empty()).unwrap_or(false));
 
     // maintain/checkpoint/verify all succeed.
-    assert_eq!(resps[6]["result"]["isError"], false);
     assert_eq!(resps[7]["result"]["isError"], false);
     assert_eq!(resps[8]["result"]["isError"], false);
+    assert_eq!(resps[9]["result"]["isError"], false);
 
     // forget the live successor → forgotten: true.
     let forgotten: Value =
-        serde_json::from_str(resps[9]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        serde_json::from_str(resps[10]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(forgotten["forgotten"], true);
 }
 
