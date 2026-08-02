@@ -116,6 +116,11 @@ service is involved). Recall values are p50 latencies after the database has
 been checkpointed and maintained; the 1M SVGs live in
 [`plugmem-host/assets`](crates/plugmem-host/assets).
 
+Both columns of this table, and both of the edge table below, were measured in
+one session on one machine, so the sizes compare to each other. They do **not**
+compare to the arena and core-recall charts, which were measured earlier on
+faster hardware — only numbers inside the same table are like-for-like.
+
 The size labels refer to ingested operations, not the final number of live
 facts. After maintenance, the two runs contain approximately 86k and 860k
 active facts respectively.
@@ -123,19 +128,21 @@ active facts respectively.
 | Measurement | 100k operations | 1M operations |
 |---|---:|---:|
 | Active facts after `maintain` | 86,010 | 860,204 |
-| Pool bytes after `maintain` | 56.8 MB | 382.0 MB |
-| Streaming load | 9.45 s (10,584 ops/s) | 159.63 s (6,265 ops/s) |
-| Text-only recall p50 | 55 µs | 1.77 ms |
-| Full hybrid recall p50 | 635 µs | 4.55 ms |
-| Checkpoint | 70 ms | 519 ms |
-| `maintain` | 0.26 s | 8.60 s |
+| Pool bytes after `maintain` | 66.4 MB | 425.1 MB |
+| Streaming load | 9.39 s (10,649 ops/s) | 143.2 s (6,985 ops/s) |
+| Text-only recall p50 | 65 µs | 1.66 ms |
+| Full hybrid recall p50 | 235 µs | 2.40 ms |
+| Checkpoint | 122 ms | 1.08 s |
+| `maintain` | 0.25 s | 2.55 s |
 
 ![Recall latency at 100k versus 1M operations](crates/plugmem-host/assets/database-recall-scale-100k-1m.svg)
 
-The 1M run holds roughly 10× as many active facts while the pool is 6.7×
-larger. Total load time is 16.9× higher, but the per-operation load cost grows
-by 1.7×; full hybrid recall grows by 7.2×. These are machine-specific trend
-measurements, not release guarantees. Reproduce both columns with:
+The 1M run holds roughly 10× as many active facts while the pool is 6.4×
+larger. Total load time is 15.3× higher, but the per-operation load cost grows
+by 1.5×; full hybrid recall grows by 10.2×. The 1M column averages two runs —
+at that size single-run recall p50s move by tens of percent. These are
+machine-specific trend measurements, not release guarantees. Reproduce both
+columns with:
 
 ```text
 cargo run --release -p plugmem-host --example bench_database -- 100000 --diagnose-recall | tee database-benchmark-100k.tsv
@@ -143,6 +150,9 @@ cargo run --release -p plugmem-host --example bench_database -- 1000000 --diagno
 cat database-benchmark-100k.tsv database-benchmark-1m.tsv > database-benchmark-scale.tsv
 cargo run -p plugmem-bench-charts -- database-benchmark-scale.tsv --force
 ```
+
+The chart tool averages repeated rows, so feeding it several runs of the same
+size gives a steadier picture than any single one.
 
 Edge lifecycle has a focused file-backed benchmark for `link`, `unlink`,
 retained history, current graph recall, historical `as_of` graph recall, and
@@ -160,12 +170,25 @@ edges are unlinked while history is retained.
 
 | Edge lifecycle measurement | 100k edges | 1M edges |
 |---|---:|---:|
-| `link` latency | 22.8 µs/edge | 355.4 µs/edge |
-| `unlink` latency | 22.7 µs/edge | 486.9 µs/edge |
-| Current graph recall p50 while edges are open | 1.17 ms | 14.1 ms |
-| Historical `as_of` graph recall p50 after unlink | 1.74 ms | 26.7 ms |
-| Full `maintain` after unlink | 0.79 s | 133.2 s |
+| `link` latency | 1.5 µs/edge | 1.7 µs/edge |
+| `unlink` latency | 1.6 µs/edge | 1.8 µs/edge |
+| Current graph recall p50 while edges are open | 51 µs | 69 µs |
+| Historical `as_of` graph recall p50 after unlink | 49 µs | 69 µs |
+| Full `maintain` after unlink | 0.33 s | 3.64 s |
 | Retained edge-history records after unlink | 100,000 | 1,000,000 |
+
+Per-edge cost is flat across the range rather than growing with it, and graph
+recall is bounded by the expansion caps rather than by the size of the hub.
+A second benchmark covers the other axis — a few relations relinked over and
+over, which is what stresses historical traversal:
+
+```text
+cargo run --release -p plugmem-host --example bench_edge_churn -- 200 1000
+```
+
+At 200k retained versions over 200 relations: current graph recall 34 µs,
+`as_of` recall 35 µs, and a full `maintain` repacks the edge arenas from
+31.9 MB to 23.4 MB in 101 ms without dropping a single version.
 
 ![Edge lifecycle operation cost at 100k versus 1M edges](crates/plugmem-host/assets/edge-lifecycle-latency-100k-1m.svg)
 ![Edge lifecycle graph recall at 100k versus 1M edges](crates/plugmem-host/assets/edge-lifecycle-recall-100k-1m.svg)
