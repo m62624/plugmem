@@ -12,6 +12,8 @@
 //!
 //! [`Arena`]: plugmem_arena::Arena
 
+use core::mem::size_of;
+
 use plugmem_arena::{BlobId, ListHandle, Slot, TermId, key};
 
 use crate::id::{EdgeId, EntityId, FactId, NONE_U32};
@@ -248,14 +250,36 @@ impl Slot for EntityByName {
     }
 }
 
-/// A typed graph edge (16-byte slot, Ordered arena, key
-/// `[a BE | rel BE | b BE]`, payload `fact`).
+/// Byte layout of [`EdgeSlot`]. Every offset is the previous field's offset
+/// plus its width, so a field cannot be moved by editing one number: the
+/// layout is a chain, and `SIZE`/`KEY_LEN` fall out of it.
+mod edge_at {
+    use core::mem::size_of;
+
+    pub(super) const A: usize = 0;
+    pub(super) const REL: usize = A + size_of::<u32>();
+    pub(super) const B: usize = REL + size_of::<u32>();
+    /// End of the key: `(a, rel, b)` identifies a current edge.
+    pub(super) const KEY_LEN: usize = B + size_of::<u32>();
+    pub(super) const FACT: usize = KEY_LEN;
+    pub(super) const EDGE: usize = FACT + size_of::<u32>();
+    pub(super) const VALID_FROM: usize = EDGE + size_of::<u32>();
+    pub(super) const SIZE: usize = VALID_FROM + size_of::<u64>();
+}
+
+/// A typed graph edge, currently open (28-byte slot, Ordered arena, key
+/// `[a BE | rel BE | b BE]`, payload `fact | edge | valid_from`).
 ///
 /// Stored twice, in two mirrored arenas: the out-arena keys by
 /// `(src, rel, dst)`, the in-arena by `(dst, rel, src)` — `a`/`b` are
 /// whichever end comes first in that arena's key. Neighbor traversal is a
 /// prefix range scan. An edge is unique per `(src, rel, dst)`; re-linking
-/// updates the provenance payload.
+/// closes this version and opens a new one.
+///
+/// The slot carries the identity of its open [`EdgeHistorySlot`] version —
+/// `edge` and `valid_from` are exactly that record's key tail — so closing an
+/// edge addresses its history record directly instead of searching for the
+/// open version among the triple's other versions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EdgeSlot {
@@ -269,35 +293,82 @@ pub struct EdgeSlot {
     /// [`FactRecord::revises`], it may name a burned id once the
     /// provenance fact has been forgotten and purged.
     pub fact: FactId,
+    /// The open edge version this slot mirrors.
+    pub edge: EdgeId,
+    /// Start of the open version's validity — with `edge`, the key tail of
+    /// its [`EdgeHistorySlot`].
+    pub valid_from: u64,
 }
 
 impl Slot for EdgeSlot {
-    const SIZE: usize = 16;
-    const KEY_LEN: usize = 12;
+    const SIZE: usize = edge_at::SIZE;
+    const KEY_LEN: usize = edge_at::KEY_LEN;
 
     fn write(&self, out: &mut [u8]) {
-        key::write_u32(out, self.a.0);
-        key::write_u32(&mut out[4..], self.rel.0);
-        key::write_u32(&mut out[8..], self.b.0);
-        key::write_u32(&mut out[12..], self.fact.0);
+        key::write_u32(&mut out[edge_at::A..], self.a.0);
+        key::write_u32(&mut out[edge_at::REL..], self.rel.0);
+        key::write_u32(&mut out[edge_at::B..], self.b.0);
+        key::write_u32(&mut out[edge_at::FACT..], self.fact.0);
+        key::write_u32(&mut out[edge_at::EDGE..], self.edge.0);
+        key::write_u64(&mut out[edge_at::VALID_FROM..], self.valid_from);
     }
 
     fn read(bytes: &[u8]) -> Self {
         Self {
-            a: EntityId(key::read_u32(bytes)),
-            rel: TermId(key::read_u32(&bytes[4..])),
-            b: EntityId(key::read_u32(&bytes[8..])),
-            fact: FactId(key::read_u32(&bytes[12..])),
+            a: EntityId(key::read_u32(&bytes[edge_at::A..])),
+            rel: TermId(key::read_u32(&bytes[edge_at::REL..])),
+            b: EntityId(key::read_u32(&bytes[edge_at::B..])),
+            fact: FactId(key::read_u32(&bytes[edge_at::FACT..])),
+            edge: EdgeId(key::read_u32(&bytes[edge_at::EDGE..])),
+            valid_from: key::read_u64(&bytes[edge_at::VALID_FROM..]),
         }
     }
 }
 
+/// The key of a current edge: `[a | rel | b]`.
+pub(crate) fn edge_key(a: EntityId, rel: TermId, b: EntityId) -> [u8; edge_at::KEY_LEN] {
+    let mut out = [0u8; edge_at::KEY_LEN];
+    key::write_u32(&mut out[edge_at::A..], a.0);
+    key::write_u32(&mut out[edge_at::REL..], rel.0);
+    key::write_u32(&mut out[edge_at::B..], b.0);
+    out
+}
+
+/// Byte layout of [`EdgeHistorySlot`], derived field by field like
+/// [`edge_at`].
+mod edge_hist_at {
+    use core::mem::size_of;
+
+    pub(super) const A: usize = 0;
+    pub(super) const VALID_FROM: usize = A + size_of::<u32>();
+    pub(super) const EDGE: usize = VALID_FROM + size_of::<u64>();
+    /// End of the key: `(a, valid_from, edge)` orders an entity's versions by
+    /// the instant they became true, `edge` breaking ties.
+    pub(super) const KEY_LEN: usize = EDGE + size_of::<u32>();
+    pub(super) const REL: usize = KEY_LEN;
+    pub(super) const B: usize = REL + size_of::<u32>();
+    pub(super) const FACT: usize = B + size_of::<u32>();
+    pub(super) const FLAGS: usize = FACT + size_of::<u32>();
+    pub(super) const KIND: usize = FLAGS + size_of::<u16>();
+    pub(super) const RECORDED_AT: usize = KIND + size_of::<u16>();
+    pub(super) const VALID_TO: usize = RECORDED_AT + size_of::<u64>();
+    pub(super) const SIZE: usize = VALID_TO + size_of::<u64>();
+}
+
 /// A temporal typed graph edge version (48-byte slot, Ordered arena, key
-/// `[a BE | rel BE | b BE | edge BE]`).
+/// `[a BE | valid_from BE | edge BE]`).
 ///
 /// Stored twice, in two mirrored history arenas with the same orientation as
 /// [`EdgeSlot`]. The hot current graph still uses [`EdgeSlot`]; this record is
 /// the source of truth for historical `as_of` traversal.
+///
+/// The key is **time-ordered per entity**, not grouped by relation. An
+/// `as_of(t)` traversal wants the versions valid at one instant, and at most
+/// one version of a `(a, rel, b)` triple is valid at any instant, so grouping
+/// by triple forces a walk through every version of every triple to find the
+/// few that answer. Ordering by `valid_from` instead lets the traversal start
+/// at `t` and walk backwards through the versions that most recently became
+/// true — the candidates — and stop when it has enough.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EdgeHistorySlot {
@@ -343,36 +414,97 @@ pub mod edge_flags {
 }
 
 impl Slot for EdgeHistorySlot {
-    const SIZE: usize = 48;
-    const KEY_LEN: usize = 16;
+    const SIZE: usize = edge_hist_at::SIZE;
+    const KEY_LEN: usize = edge_hist_at::KEY_LEN;
 
     fn write(&self, out: &mut [u8]) {
-        key::write_u32(out, self.a.0);
-        key::write_u32(&mut out[4..], self.rel.0);
-        key::write_u32(&mut out[8..], self.b.0);
-        key::write_u32(&mut out[12..], self.edge.0);
-        key::write_u32(&mut out[16..], self.fact.0);
-        out[20..22].copy_from_slice(&self.flags.to_be_bytes());
-        out[22..24].copy_from_slice(&self.kind.to_be_bytes());
-        key::write_u64(&mut out[24..], self.recorded_at);
-        key::write_u64(&mut out[32..], self.valid_from);
-        key::write_u64(&mut out[40..], self.valid_to);
+        key::write_u32(&mut out[edge_hist_at::A..], self.a.0);
+        key::write_u64(&mut out[edge_hist_at::VALID_FROM..], self.valid_from);
+        key::write_u32(&mut out[edge_hist_at::EDGE..], self.edge.0);
+        key::write_u32(&mut out[edge_hist_at::REL..], self.rel.0);
+        key::write_u32(&mut out[edge_hist_at::B..], self.b.0);
+        key::write_u32(&mut out[edge_hist_at::FACT..], self.fact.0);
+        let flags = edge_hist_at::FLAGS;
+        out[flags..flags + size_of::<u16>()].copy_from_slice(&self.flags.to_be_bytes());
+        let kind = edge_hist_at::KIND;
+        out[kind..kind + size_of::<u16>()].copy_from_slice(&self.kind.to_be_bytes());
+        key::write_u64(&mut out[edge_hist_at::RECORDED_AT..], self.recorded_at);
+        key::write_u64(&mut out[edge_hist_at::VALID_TO..], self.valid_to);
     }
 
     fn read(bytes: &[u8]) -> Self {
+        let flags = edge_hist_at::FLAGS;
+        let kind = edge_hist_at::KIND;
         Self {
-            a: EntityId(key::read_u32(bytes)),
-            rel: TermId(key::read_u32(&bytes[4..])),
-            b: EntityId(key::read_u32(&bytes[8..])),
-            edge: EdgeId(key::read_u32(&bytes[12..])),
-            fact: FactId(key::read_u32(&bytes[16..])),
-            flags: u16::from_be_bytes(bytes[20..22].try_into().unwrap()),
-            kind: u16::from_be_bytes(bytes[22..24].try_into().unwrap()),
-            recorded_at: key::read_u64(&bytes[24..]),
-            valid_from: key::read_u64(&bytes[32..]),
-            valid_to: key::read_u64(&bytes[40..]),
+            a: EntityId(key::read_u32(&bytes[edge_hist_at::A..])),
+            rel: TermId(key::read_u32(&bytes[edge_hist_at::REL..])),
+            b: EntityId(key::read_u32(&bytes[edge_hist_at::B..])),
+            edge: EdgeId(key::read_u32(&bytes[edge_hist_at::EDGE..])),
+            fact: FactId(key::read_u32(&bytes[edge_hist_at::FACT..])),
+            flags: u16::from_be_bytes(bytes[flags..flags + size_of::<u16>()].try_into().unwrap()),
+            kind: u16::from_be_bytes(bytes[kind..kind + size_of::<u16>()].try_into().unwrap()),
+            recorded_at: key::read_u64(&bytes[edge_hist_at::RECORDED_AT..]),
+            valid_from: key::read_u64(&bytes[edge_hist_at::VALID_FROM..]),
+            valid_to: key::read_u64(&bytes[edge_hist_at::VALID_TO..]),
         }
     }
+}
+
+/// The lowest key of `a`'s current-edge run — the inclusive lower bound of a
+/// neighbor scan.
+pub(crate) fn edge_floor(a: EntityId) -> [u8; edge_at::KEY_LEN] {
+    edge_key(a, TermId(0), EntityId(0))
+}
+
+/// The exclusive upper bound of `a`'s current-edge run. Saturating leaves the
+/// range empty for [`EntityId::NONE`], which is a sentinel and never names a
+/// stored entity.
+pub(crate) fn edge_end(a: EntityId) -> [u8; edge_at::KEY_LEN] {
+    edge_key(EntityId(a.0.saturating_add(1)), TermId(0), EntityId(0))
+}
+
+/// The key of one edge version: `[a | valid_from | edge]`.
+pub(crate) fn edge_history_key(
+    a: EntityId,
+    valid_from: u64,
+    edge: EdgeId,
+) -> [u8; edge_hist_at::KEY_LEN] {
+    let mut out = [0u8; edge_hist_at::KEY_LEN];
+    key::write_u32(&mut out[edge_hist_at::A..], a.0);
+    key::write_u64(&mut out[edge_hist_at::VALID_FROM..], valid_from);
+    key::write_u32(&mut out[edge_hist_at::EDGE..], edge.0);
+    out
+}
+
+/// The lowest key of `a`'s version run — the inclusive lower bound of a
+/// per-entity history scan.
+pub(crate) fn edge_history_floor(a: EntityId) -> [u8; edge_hist_at::KEY_LEN] {
+    edge_history_key(a, 0, EdgeId(0))
+}
+
+/// The exclusive upper bound of `a`'s versions that had already become true at
+/// `as_of`, i.e. everything with `valid_from <= as_of`.
+///
+/// Saturating past `u64::MAX` excludes only a version with
+/// `valid_from == u64::MAX`, which can never be valid at any instant: validity
+/// needs `t < valid_to <= u64::MAX` and `valid_from <= t`.
+pub(crate) fn edge_history_ceiling(a: EntityId, as_of: u64) -> [u8; edge_hist_at::KEY_LEN] {
+    edge_history_key(a, as_of.saturating_add(1), EdgeId(0))
+}
+
+/// Closes an edge version in place: sets [`edge_flags::CLOSED`] and
+/// `valid_to`. `payload` is the slot bytes *after* the key, exactly as
+/// [`Arena::payload_mut`](plugmem_arena::Arena::payload_mut) hands them over,
+/// so every offset is shifted by the key length here rather than at the call
+/// site.
+pub(crate) fn close_edge_history_payload(payload: &mut [u8], valid_to: u64) {
+    const KEY: usize = edge_hist_at::KEY_LEN;
+    const FLAGS: usize = edge_hist_at::FLAGS - KEY;
+    const VALID_TO: usize = edge_hist_at::VALID_TO - KEY;
+    let flags = u16::from_be_bytes(payload[FLAGS..FLAGS + size_of::<u16>()].try_into().unwrap())
+        | edge_flags::CLOSED;
+    payload[FLAGS..FLAGS + size_of::<u16>()].copy_from_slice(&flags.to_be_bytes());
+    key::write_u64(&mut payload[VALID_TO..], valid_to);
 }
 
 /// Temporal index record (12-byte slot, Ordered arena, the whole
@@ -413,7 +545,7 @@ const _: () = {
     assert!(FactAux::SIZE == 20 && FactAux::KEY_LEN == 4);
     assert!(EntityRecord::SIZE == 24 && EntityRecord::KEY_LEN == 4);
     assert!(EntityByName::SIZE == 8 && EntityByName::KEY_LEN == 8);
-    assert!(EdgeSlot::SIZE == 16 && EdgeSlot::KEY_LEN == 12);
+    assert!(EdgeSlot::SIZE == 28 && EdgeSlot::KEY_LEN == 12);
     assert!(EdgeHistorySlot::SIZE == 48 && EdgeHistorySlot::KEY_LEN == 16);
     assert!(TemporalSlot::SIZE == 12 && TemporalSlot::KEY_LEN == 12);
     // NONE sentinels must agree across the id kinds and the raw fields.

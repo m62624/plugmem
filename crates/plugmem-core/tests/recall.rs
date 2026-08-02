@@ -296,10 +296,14 @@ fn recall_is_deterministic_and_pure() {
 }
 
 /// Graph expansion stops once its caps are full instead of decoding a hub's
-/// whole edge list. The stop must be invisible: the answer has to stay the
-/// deterministic prefix an exhaustive walk produced — outgoing edges in
-/// ascending `(rel, dst)` order, then incoming ones — for both the current
-/// graph and a historical `as_of` view.
+/// whole edge list, and the prefix it keeps is the deterministic one each
+/// traversal order defines:
+///
+/// - the current graph is keyed by `(src, rel, dst)`, so it yields the
+///   lowest-id neighbours first;
+/// - `as_of` walks history backwards from the queried instant, so it yields
+///   the edges that most recently became true — the ones a caller asking
+///   "what was linked then" actually wants at the top.
 #[test]
 fn hub_expansion_is_capped_at_the_exhaustive_prefix() {
     const LEAVES: u32 = 400; // far past the 128-edge / 64-entity caps
@@ -340,7 +344,6 @@ fn hub_expansion_is_capped_at_the_exhaustive_prefix() {
             })
             .unwrap();
         let label = if as_of.is_some() { "as_of" } else { "current" };
-        // Exactly the cap, and exactly the first `cap` leaves in id order.
         assert_eq!(result.edges.len(), 128, "{label}: edge cap");
         let dsts: Vec<u32> = result.edges.iter().map(|e| e.dst.0).collect();
         let hub = result.edges[0].src;
@@ -348,9 +351,13 @@ fn hub_expansion_is_capped_at_the_exhaustive_prefix() {
             result.edges.iter().all(|e| e.src == hub),
             "{label}: every edge leaves the hub"
         );
-        // Leaf entities were created after the hub, in ascending id order.
-        let first_leaf = dsts[0];
-        let expected: Vec<u32> = (first_leaf..first_leaf + 128).collect();
+        // Leaf entities were created in ascending id order, one per round, so
+        // id order and time order are the same sequence read from either end.
+        let start = dsts[0];
+        let expected: Vec<u32> = match as_of {
+            None => (start..start + 128).collect(),
+            Some(_) => (start - 127..=start).rev().collect(),
+        };
         assert_eq!(dsts, expected, "{label}: prefix of the exhaustive walk");
     }
 }

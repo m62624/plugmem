@@ -201,10 +201,22 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     measure_query(&corpus, "as_of_oldest", || {
         db.recall(graph_query(now, Some(EPOCH), &anchors))
     })?;
-    // Between two rounds every triple is closed: nothing is valid, and the
-    // traversal has to establish that without reading the whole history.
-    measure_query(&corpus, "as_of_gap", || {
+    // Between two rounds every triple is closed, so nothing is valid and the
+    // traversal has to establish that. Early in the history only the first
+    // round precedes the instant, so the scan is short.
+    measure_query(&corpus, "as_of_gap_early", || {
         db.recall(graph_query(now, Some(EPOCH + ROUND_STEP / 2 + 1), &anchors))
+    })?;
+    // The same question late in the history is the worst case a time-ordered
+    // index still has: every version ever opened precedes the instant, every
+    // one of them is closed by it, and there is no valid edge to stop at — so
+    // the backward walk reads them all.
+    measure_query(&corpus, "as_of_gap_late", || {
+        db.recall(graph_query(
+            now,
+            Some(last_round - ROUND_STEP + ROUND_STEP / 2 + 1),
+            &anchors,
+        ))
     })?;
 
     Ok(())

@@ -38,7 +38,9 @@ use crate::index::bm25::Bm25Scratch;
 use crate::index::hnsw::HnswScratch;
 use crate::index::vecpool::{VecScratch, dot_i8};
 use crate::index::{IntersectScratch, intersect};
-use crate::model::{FactRecord, VALID_TO_OPEN};
+use crate::model::{
+    FactRecord, VALID_TO_OPEN, edge_end, edge_floor, edge_history_ceiling, edge_history_floor,
+};
 use crate::tokenizer::Tokenizer;
 
 use super::Memory;
@@ -650,24 +652,32 @@ impl Memory<'_> {
         visit: &mut impl FnMut(EntityId, TermId, bool, FactId) -> bool,
     ) {
         if historical {
-            let mut from = [0u8; 16];
-            plugmem_arena::key::write_u32(&mut from, entity.0);
-            let mut to = [0u8; 16];
-            plugmem_arena::key::write_u32(&mut to, entity.0 + 1);
+            // History is keyed `[a | valid_from | edge]`, so walking backwards
+            // from `as_of` yields the entity's versions newest-first: those
+            // that most recently became true, and so the ones most likely to
+            // still be valid. The range already enforces `valid_from <= as_of`;
+            // `as_of < valid_to` is the other half of the validity test.
+            //
+            // The walk stops as soon as the caller has enough valid edges, so
+            // a deep history costs nothing extra for the usual question. The
+            // exception is an instant at which the entity had *no* valid edge
+            // at all: there is nothing to stop at, so proving the absence
+            // reads every version that had already begun. Answering that in
+            // sublinear time needs an interval index, not an ordering.
+            let from = edge_history_floor(entity);
+            let to = edge_history_ceiling(entity, as_of);
             for (arena, entity_is_src) in
                 [(&self.edges_hist_out, true), (&self.edges_hist_in, false)]
             {
-                for e in arena.range(&from, &to) {
-                    if e.active_at(as_of) && !visit(e.b, e.rel, entity_is_src, e.fact) {
+                for e in arena.range_rev(&from, &to) {
+                    if as_of < e.valid_to && !visit(e.b, e.rel, entity_is_src, e.fact) {
                         return;
                     }
                 }
             }
         } else {
-            let mut from = [0u8; 12];
-            plugmem_arena::key::write_u32(&mut from, entity.0);
-            let mut to = [0u8; 12];
-            plugmem_arena::key::write_u32(&mut to, entity.0 + 1);
+            let from = edge_floor(entity);
+            let to = edge_end(entity);
             for (arena, entity_is_src) in [(&self.edges_out, true), (&self.edges_in, false)] {
                 for e in arena.range(&from, &to) {
                     if !visit(e.b, e.rel, entity_is_src, e.fact) {

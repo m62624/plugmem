@@ -32,7 +32,7 @@ use crate::index::vecpool::VecPool;
 use crate::journal::{JournalScan, Op, scan};
 use crate::model::{
     EdgeHistorySlot, EdgeSlot, EntityByName, EntityRecord, FactAux, FactRecord, TemporalSlot,
-    VALID_TO_OPEN, edge_flags, fact_flags,
+    VALID_TO_OPEN, close_edge_history_payload, edge_history_key, edge_key, fact_flags,
 };
 use crate::storage::Storage;
 use crate::tokenizer::Tokenizer;
@@ -41,6 +41,7 @@ use crate::tokenizer::Tokenizer;
 const SIMILAR_CANDIDATE_CAP: usize = 32;
 
 mod maintain;
+mod migrations;
 mod persist;
 mod recall;
 
@@ -1139,7 +1140,7 @@ impl<'a> Memory<'a> {
             valid_to: VALID_TO_OPEN,
         };
         self.insert_history_edge(history)?;
-        self.insert_current_edge(src, rel, dst, fact)?;
+        self.insert_current_edge(src, rel, dst, fact, edge, now)?;
         self.next_edge += 1;
         Ok(())
     }
@@ -1150,19 +1151,28 @@ impl<'a> Memory<'a> {
         rel: TermId,
         dst: EntityId,
         fact: FactId,
+        edge: EdgeId,
+        valid_from: u64,
     ) -> Result<(), Error> {
         for (arena, a, b) in [
             (&mut self.edges_out, src, dst),
             (&mut self.edges_in, dst, src),
         ] {
-            let slot = EdgeSlot { a, rel, b, fact };
+            let slot = EdgeSlot {
+                a,
+                rel,
+                b,
+                fact,
+                edge,
+                valid_from,
+            };
             if !arena.insert(&slot)? {
-                let mut kb = [0u8; 12];
-                key::write_u32(&mut kb, a.0);
-                key::write_u32(&mut kb[4..], rel.0);
-                key::write_u32(&mut kb[8..], b.0);
-                let payload = arena.payload_mut(&kb).expect("insert reported a duplicate");
-                payload.copy_from_slice(&fact.0.to_be_bytes());
+                let payload = arena
+                    .payload_mut(&edge_key(a, rel, b))
+                    .expect("insert reported a duplicate");
+                let mut full = [0u8; EdgeSlot::SIZE];
+                slot.write(&mut full);
+                payload.copy_from_slice(&full[EdgeSlot::KEY_LEN..]);
             }
         }
         Ok(())
@@ -1178,6 +1188,11 @@ impl<'a> Memory<'a> {
         Ok(())
     }
 
+    /// Closes the open version of `(src, rel, dst)` and drops it from the
+    /// current graph. Returns `false` when there is no such edge.
+    ///
+    /// The current slot names its own history record — `edge` and `valid_from`
+    /// are that record's key tail — so both mirrors are addressed directly.
     fn close_current_edge(
         &mut self,
         now: u64,
@@ -1188,38 +1203,25 @@ impl<'a> Memory<'a> {
         let Some(current) = self.current_edge(src, rel, dst) else {
             return Ok(false);
         };
-        let edge = self
-            .unique_open_history_edge(src, rel, dst, current.fact)?
-            .ok_or(Error::Corrupt("current edge has no open history"))?;
-        let mut out_key = [0u8; 16];
-        write_edge_history_key(&mut out_key, src, rel, dst, edge);
-        let mut in_key = [0u8; 16];
-        write_edge_history_key(&mut in_key, dst, rel, src, edge);
-        let close_at = now.max(
-            self.edges_hist_out
-                .get_slot(&out_key)
-                .map(EdgeHistorySlot::read)
-                .map(|edge| edge.valid_from)
-                .unwrap_or(now),
-        );
-        close_history_payload(
+        // A version never ends before it began, even if the caller's clock
+        // moved backwards between the link and the unlink.
+        let close_at = now.max(current.valid_from);
+        let out_key = edge_history_key(src, current.valid_from, current.edge);
+        let in_key = edge_history_key(dst, current.valid_from, current.edge);
+        close_edge_history_payload(
             self.edges_hist_out
                 .payload_mut(&out_key)
                 .ok_or(Error::Corrupt("missing outgoing edge history"))?,
             close_at,
         );
-        close_history_payload(
+        close_edge_history_payload(
             self.edges_hist_in
                 .payload_mut(&in_key)
                 .ok_or(Error::Corrupt("missing incoming edge history"))?,
             close_at,
         );
-        let mut out_current = [0u8; 12];
-        write_edge_key(&mut out_current, src, rel, dst);
-        let mut in_current = [0u8; 12];
-        write_edge_key(&mut in_current, dst, rel, src);
-        let out_removed = self.edges_out.remove(&out_current);
-        let in_removed = self.edges_in.remove(&in_current);
+        let out_removed = self.edges_out.remove(&edge_key(src, rel, dst));
+        let in_removed = self.edges_in.remove(&edge_key(dst, rel, src));
         if out_removed != in_removed {
             return Err(Error::Corrupt("edge mirrors disagree"));
         }
@@ -1227,34 +1229,9 @@ impl<'a> Memory<'a> {
     }
 
     fn current_edge(&self, src: EntityId, rel: TermId, dst: EntityId) -> Option<EdgeSlot> {
-        let mut key = [0u8; 12];
-        write_edge_key(&mut key, src, rel, dst);
-        self.edges_out.get_slot(&key).map(EdgeSlot::read)
-    }
-
-    fn unique_open_history_edge(
-        &self,
-        src: EntityId,
-        rel: TermId,
-        dst: EntityId,
-        fact: FactId,
-    ) -> Result<Option<EdgeId>, Error> {
-        let mut from = [0u8; 16];
-        write_edge_history_prefix(&mut from, src, rel, dst);
-        let to = edge_history_key_after(&from);
-        let mut found = None;
-        for edge in self
-            .edges_hist_out
-            .range(&from, &to)
-            .filter(|edge| edge.fact == fact && edge.is_open())
-        {
-            if found.replace(edge.edge).is_some() {
-                return Err(Error::Corrupt(
-                    "current edge has multiple open history records",
-                ));
-            }
-        }
-        Ok(found)
+        self.edges_out
+            .get_slot(&edge_key(src, rel, dst))
+            .map(EdgeSlot::read)
     }
 
     /// Looks an entity up by its already-normalized name (read-only:
@@ -1336,38 +1313,6 @@ impl<'a> Memory<'a> {
             .append_journal(&entry)
             .map_err(|e| Error::Storage(format!("{e:?}")))
     }
-}
-
-fn write_edge_key(out: &mut [u8; 12], a: EntityId, rel: TermId, b: EntityId) {
-    key::write_u32(out, a.0);
-    key::write_u32(&mut out[4..], rel.0);
-    key::write_u32(&mut out[8..], b.0);
-}
-
-fn write_edge_history_prefix(out: &mut [u8; 16], a: EntityId, rel: TermId, b: EntityId) {
-    key::write_u32(out, a.0);
-    key::write_u32(&mut out[4..], rel.0);
-    key::write_u32(&mut out[8..], b.0);
-    key::write_u32(&mut out[12..], 0);
-}
-
-fn write_edge_history_key(out: &mut [u8; 16], a: EntityId, rel: TermId, b: EntityId, edge: EdgeId) {
-    key::write_u32(out, a.0);
-    key::write_u32(&mut out[4..], rel.0);
-    key::write_u32(&mut out[8..], b.0);
-    key::write_u32(&mut out[12..], edge.0);
-}
-
-fn edge_history_key_after(prefix: &[u8; 16]) -> [u8; 16] {
-    let mut to = *prefix;
-    to[12..].copy_from_slice(&u32::MAX.to_be_bytes());
-    to
-}
-
-fn close_history_payload(payload: &mut [u8], valid_to: u64) {
-    let flags = u16::from_be_bytes(payload[4..6].try_into().unwrap()) | edge_flags::CLOSED;
-    payload[4..6].copy_from_slice(&flags.to_be_bytes());
-    payload[24..32].copy_from_slice(&valid_to.to_be_bytes());
 }
 
 impl core::fmt::Debug for Memory<'_> {
