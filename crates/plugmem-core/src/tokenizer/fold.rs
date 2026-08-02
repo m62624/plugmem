@@ -2,7 +2,7 @@
 
 use alloc::string::String;
 
-use unicode_normalization::char::{decompose_canonical, is_combining_mark};
+use unicode_normalization::char::decompose_canonical;
 
 use super::emit::emit_truncated;
 use super::policy::TokenizerPolicy;
@@ -56,7 +56,7 @@ fn fold_into(
     if is_ignorable_format(c) {
         return false;
     }
-    if is_combining_mark(c) {
+    if UnicodeBackend::is_mark(c) {
         *needs_nfkc_again = true;
         if !out.ends_with(|previous: char| previous.is_ascii_alphanumeric()) {
             out.push(c);
@@ -91,7 +91,7 @@ fn fold_into(
         && parts[0].is_ascii_alphanumeric()
     {
         for &decomposed in &parts[..count] {
-            if !is_combining_mark(decomposed) {
+            if !UnicodeBackend::is_mark(decomposed) {
                 out.push(decomposed);
             }
         }
@@ -101,8 +101,8 @@ fn fold_into(
     false
 }
 
-/// Re-normalizes a folded token only when lowercasing exposed combining
-/// marks. Lowercase can change a base character while leaving a mark sequence
+/// Re-normalizes a folded token only when lowercasing exposed Unicode marks.
+/// Lowercase can change a base character while leaving a mark sequence
 /// whose canonical order is visible only after folding.
 fn emit_folded(
     token: &mut String,

@@ -360,6 +360,13 @@ fn marks_after_trailing_joiners_are_canonical() {
     assert_eq!(tokens(&emitted[0]), emitted);
 }
 
+#[test]
+fn nonspacing_marks_with_zero_combining_class_are_canonical() {
+    let emitted = tokens("a_\u{D81}_🌀");
+    assert_eq!(emitted, ["a"]);
+    assert_eq!(tokens(&emitted[0]), emitted);
+}
+
 #[cfg(not(target_family = "wasm"))]
 #[test]
 fn combining_marks_after_joiners_are_canonical() {
