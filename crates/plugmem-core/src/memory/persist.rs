@@ -33,7 +33,8 @@ use crate::index::vecpool::VecPool;
 use crate::memory::FactFault;
 use crate::memory::migrations::{self, STATE_LEN};
 use crate::model::{
-    EntityRecord, FactAux, FactRecord, TemporalSlot, VALID_TO_OPEN, edge_history_key, edge_key,
+    EdgeHistorySlot, EdgeSlot, EntityRecord, FactAux, FactRecord, TemporalSlot, VALID_TO_OPEN,
+    edge_history_key, edge_key,
 };
 use crate::snapshot::{Prefix, SectionMeta, Snapshot, SnapshotSink, build_prefix, pad_len};
 use xxhash_rust::xxh3::Xxh3;
@@ -107,10 +108,15 @@ type SectionFn<'f> = dyn FnMut(u16, &[&[u8]]) -> Result<(), Error> + 'f;
 /// everything `maintain` recompacts. Bundled behind references so one emit path
 /// serves both the live engine (`self`'s own structures, [`Memory::sections`])
 /// and the disk-first rebuild (freshly rebuilt metadata + graph, with the two
-/// big pools borrowing a `Scratch`). The ride-through structures —
-/// the interner, the by-name index, the edges, and the id counters — are read
-/// straight from `self` in [`Memory::emit_sections_from`]; `maintain` never
-/// touches them, so they are the same on both paths.
+/// big pools borrowing a `Scratch`). The genuinely ride-through structures —
+/// the interner, the by-name index and the id counters — are read straight
+/// from `self` in [`Memory::emit_sections_from`]; `maintain` never touches
+/// them, so they are the same on both paths.
+///
+/// The edge arenas are here rather than read from `self` because
+/// [`MaintenanceMode::Full`](super::MaintenanceMode::Full) repacks them: the
+/// disk-first path has to emit the rebuilt ones, and an ordinary snapshot the
+/// engine's own.
 pub(crate) struct Sections<'r, 'a> {
     pub(crate) facts: &'r Arena<'a, FactRecord>,
     pub(crate) fact_aux: &'r Arena<'a, FactAux>,
@@ -124,6 +130,10 @@ pub(crate) struct Sections<'r, 'a> {
     pub(crate) entity_facts: &'r IdListIndex<'a>,
     pub(crate) vecs: &'r VecPool<'a>,
     pub(crate) hnsw: &'r HnswGraph<'a>,
+    pub(crate) edges_out: &'r Arena<'a, EdgeSlot>,
+    pub(crate) edges_in: &'r Arena<'a, EdgeSlot>,
+    pub(crate) edges_hist_out: &'r Arena<'a, EdgeHistorySlot>,
+    pub(crate) edges_hist_in: &'r Arena<'a, EdgeHistorySlot>,
 }
 
 /// Dumps an arena as its `(meta, pool)` section pair.
@@ -391,6 +401,10 @@ impl<'a> Memory<'a> {
             entity_facts: &self.entity_facts,
             vecs: &self.vecs,
             hnsw: &self.hnsw,
+            edges_out: &self.edges_out,
+            edges_in: &self.edges_in,
+            edges_hist_out: &self.edges_hist_out,
+            edges_hist_in: &self.edges_hist_in,
         }
     }
 
@@ -420,22 +434,22 @@ impl<'a> Memory<'a> {
             (
                 kind::EDGES_OUT_META,
                 kind::EDGES_OUT_POOL,
-                arena_sections(&self.edges_out),
+                arena_sections(s.edges_out),
             ),
             (
                 kind::EDGES_IN_META,
                 kind::EDGES_IN_POOL,
-                arena_sections(&self.edges_in),
+                arena_sections(s.edges_in),
             ),
             (
                 kind::EDGE_HIST_OUT_META,
                 kind::EDGE_HIST_OUT_POOL,
-                arena_sections(&self.edges_hist_out),
+                arena_sections(s.edges_hist_out),
             ),
             (
                 kind::EDGE_HIST_IN_META,
                 kind::EDGE_HIST_IN_POOL,
-                arena_sections(&self.edges_hist_in),
+                arena_sections(s.edges_hist_in),
             ),
             (
                 kind::TEMPORAL_META,

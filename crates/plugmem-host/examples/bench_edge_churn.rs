@@ -21,7 +21,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use plugmem_host::{
-    Config, Database, FsyncPolicy, LinkInput, RecallQuery, RememberInput, Stats, UnlinkInput,
+    Config, Database, FsyncPolicy, LinkInput, MaintenanceOptions, RecallQuery, RememberInput,
+    Stats, UnlinkInput,
 };
 
 const DEFAULT_TRIPLES: usize = 200;
@@ -217,6 +218,30 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
             Some(last_round - ROUND_STEP + ROUND_STEP / 2 + 1),
             &anchors,
         ))
+    })?;
+
+    // Churn fragments the edge arenas: the incoming mirror is keyed by the
+    // far endpoint, so interleaved relations keep landing mid-page and pages
+    // split in half. `Full` rewrites them in key order.
+    let maintain_start = Instant::now();
+    let report = db.maintain_with_options(now + 1, MaintenanceOptions::full())?;
+    let maintain_elapsed = maintain_start.elapsed();
+    emit_ms(&corpus, "full_maintain", "elapsed_ms", maintain_elapsed);
+    emit_f64(
+        &corpus,
+        "full_maintain",
+        "latency_us_per_version",
+        maintain_elapsed.as_secs_f64() * 1_000_000.0 / versions as f64,
+    );
+    emit_usize(
+        &corpus,
+        "full_maintain",
+        "edges_compacted",
+        usize::from(report.edges_compacted),
+    );
+    emit_stats(&corpus, "after_full_maintain", db.stats());
+    measure_query(&corpus, "as_of_recent_after_maintain", || {
+        db.recall(graph_query(now, Some(last_round - ROUND_STEP), &anchors))
     })?;
 
     Ok(())
