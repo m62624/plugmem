@@ -87,6 +87,38 @@ test("stats / export / maintain / checkpoint / verify", async () => {
   }
 });
 
+test("maintain takes an explicit mode and full repacks the edges", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-"));
+  try {
+    const db = new Plugmem(join(dir, "m.plugmem"));
+    db.remember({ text: "anchor", entity: "hub" });
+    for (let round = 0; round < 4; round += 1) {
+      for (let target = 0; target < 8; target += 1) {
+        db.link({ src: "hub", rel: "assigned_to", dst: `t-${target}` });
+        db.unlink({ src: "hub", rel: "assigned_to", dst: `t-${target}` });
+      }
+    }
+    const versions = db.stats().edgeVersions;
+    assert.equal(versions, 32);
+
+    // The default is still `auto`, which does not touch the edge arenas.
+    const auto = await db.maintain();
+    assert.equal(auto.edgesCompacted, false);
+
+    const full = await db.maintain("full");
+    assert.equal(full.edgesCompacted, true);
+    assert.equal(full.edgeVersionsBefore, versions);
+    // History is never dropped by any mode.
+    assert.equal(db.stats().edgeVersions, versions);
+    assert.doesNotThrow(() => db.verify());
+
+    // An unknown mode is rejected at the boundary, before any work starts.
+    assert.throws(() => db.maintain("nonsense"), /MaintainMode/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("typed outputs are fully populated (serde round-trip + camelCase)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-"));
   try {

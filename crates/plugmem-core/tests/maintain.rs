@@ -383,6 +383,95 @@ fn maintain_preserves_ids_chains_and_edges() {
     assert!(out.rendered.contains("depends_on"));
 }
 
+/// `Full` rewrites the edge arenas page-dense. Two things must hold: not one
+/// version is lost — history has no retention policy — and the bytes actually
+/// shrink on the workload that fragments them, a churn of relations whose
+/// incoming mirror is keyed by the far endpoint and so lands mid-page.
+#[test]
+fn full_maintain_repacks_edges_without_dropping_history() {
+    const TARGETS: u32 = 24;
+    const ROUNDS: u64 = 40;
+    let (mut mem, mut store) = (Memory::new(cfg(0)).unwrap(), MemStorage::new());
+    let names: Vec<String> = (0..TARGETS).map(|i| format!("target-{i}")).collect();
+    for round in 0..ROUNDS {
+        for name in &names {
+            mem.link(
+                &mut store,
+                LinkInput {
+                    now: (round + 1) * DAY,
+                    src: "hub",
+                    rel: "assigned_to",
+                    dst: name,
+                    provenance: None,
+                },
+            )
+            .unwrap();
+            if round + 1 < ROUNDS {
+                mem.unlink(
+                    &mut store,
+                    plugmem_core::UnlinkInput {
+                        now: (round + 1) * DAY + DAY / 2,
+                        src: "hub",
+                        rel: "assigned_to",
+                        dst: name,
+                    },
+                )
+                .unwrap();
+            }
+        }
+    }
+    let before = mem.stats();
+    assert_eq!(before.edge_versions, TARGETS as usize * ROUNDS as usize);
+    let graph_before = |mem: &Memory<'_>, as_of: Option<u64>| {
+        mem.recall(RecallQuery {
+            entities: &["hub"],
+            as_of,
+            k: 64,
+            ..RecallQuery::text(ROUNDS * DAY + DAY, "")
+        })
+        .unwrap()
+        .edges
+    };
+    let current = graph_before(&mem, None);
+    let historical = graph_before(&mem, Some(5 * DAY));
+
+    let report = mem
+        .maintain_with_options(&mut store, ROUNDS * DAY + DAY, MaintenanceOptions::full())
+        .unwrap();
+
+    assert!(report.edges_compacted, "Full must repack the edge arenas");
+    assert_eq!(report.edges_before, before.edges);
+    assert_eq!(report.edge_versions_before, before.edge_versions);
+    let after = mem.stats();
+    assert_eq!(after.edges, before.edges, "current edges are preserved");
+    assert_eq!(
+        after.edge_versions, before.edge_versions,
+        "no version is ever dropped"
+    );
+    assert!(
+        report.bytes_after < report.bytes_before,
+        "repack reclaimed nothing: {} -> {}",
+        report.bytes_before,
+        report.bytes_after
+    );
+    // Both graph answers are identical across the rewrite.
+    assert_eq!(graph_before(&mem, None), current);
+    assert_eq!(graph_before(&mem, Some(5 * DAY)), historical);
+    mem.verify().unwrap();
+
+    // A second pass finds the arenas already dense, so it cannot grow them.
+    let packed = report.bytes_after;
+    let again = mem
+        .maintain_with_options(
+            &mut store,
+            ROUNDS * DAY + 2 * DAY,
+            MaintenanceOptions::full(),
+        )
+        .unwrap();
+    assert!(again.bytes_after <= packed);
+    assert_eq!(mem.stats().edge_versions, before.edge_versions);
+}
+
 #[test]
 fn maintain_compacts_vectors() {
     let dim = 48;

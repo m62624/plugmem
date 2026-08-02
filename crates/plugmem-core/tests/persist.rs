@@ -2,9 +2,12 @@
 //! roundtrip, snapshot + journal-tail replay, config compatibility gates,
 //! and corruption rejection.
 
+use plugmem_arena::{Arena, ArenaCfg, ShardMode, Slot};
+use plugmem_core::model::EdgeHistorySlot;
 use plugmem_core::{
-    Config, Error, FactId, LinkInput, MemScratch, MemStorage, Memory, RecallQuery, RememberInput,
-    Scratch, Storage, UnlinkInput, snapshot::SnapshotWriter,
+    Config, EdgeSlot, Error, FactId, LinkInput, MemScratch, MemStorage, Memory, RecallQuery,
+    RememberInput, Scratch, Storage, UnlinkInput,
+    snapshot::{Snapshot, SnapshotWriter},
 };
 
 fn cfg() -> Config {
@@ -26,10 +29,36 @@ const SNAP_SECTION_COUNT_AT: usize = 8;
 const SNAP_CONFIG_LEN_AT: usize = 16;
 const SNAP_CREATED_AT: usize = 28;
 const KIND_ENGINE_STATE: u16 = 36;
-const KIND_EDGE_HIST_OUT_META: u16 = 46;
-const KIND_EDGE_HIST_OUT_POOL: u16 = 47;
-const KIND_EDGE_HIST_IN_META: u16 = 48;
-const KIND_EDGE_HIST_IN_POOL: u16 = 49;
+const KIND_EDGES_OUT_META: u16 = 50;
+const KIND_EDGES_OUT_POOL: u16 = 51;
+const KIND_EDGES_IN_META: u16 = 52;
+const KIND_EDGES_IN_POOL: u16 = 53;
+const KIND_EDGE_HIST_OUT_META: u16 = 54;
+const KIND_EDGE_HIST_OUT_POOL: u16 = 55;
+const KIND_EDGE_HIST_IN_META: u16 = 56;
+const KIND_EDGE_HIST_IN_POOL: u16 = 57;
+/// The eight sections a current image writes for the graph.
+const KIND_EDGE_SECTIONS: [u16; 8] = [
+    KIND_EDGES_OUT_META,
+    KIND_EDGES_OUT_POOL,
+    KIND_EDGES_IN_META,
+    KIND_EDGES_IN_POOL,
+    KIND_EDGE_HIST_OUT_META,
+    KIND_EDGE_HIST_OUT_POOL,
+    KIND_EDGE_HIST_IN_META,
+    KIND_EDGE_HIST_IN_POOL,
+];
+/// The section kinds older images used for the graph: current edges keyed by
+/// triple, and (from the version that introduced history) versions keyed by
+/// triple plus edge id.
+const LEGACY_KIND_EDGES_OUT_META: u16 = 9;
+const LEGACY_KIND_EDGES_OUT_POOL: u16 = 10;
+const LEGACY_KIND_EDGES_IN_META: u16 = 11;
+const LEGACY_KIND_EDGES_IN_POOL: u16 = 12;
+const LEGACY_KIND_EDGE_HIST_OUT_META: u16 = 46;
+const LEGACY_KIND_EDGE_HIST_OUT_POOL: u16 = 47;
+const LEGACY_KIND_EDGE_HIST_IN_META: u16 = 48;
+const LEGACY_KIND_EDGE_HIST_IN_POOL: u16 = 49;
 const STATE_V2_LEN: usize = 32;
 
 /// A workload touching every structure: entities, tags, links, revisions,
@@ -380,15 +409,9 @@ fn incomplete_edge_history_sections_are_rejected() {
     retag_section(&mut bytes, KIND_EDGE_HIST_IN_POOL, 60_000);
 
     let err = Memory::from_bytes(Some(&bytes), &[], cfg()).unwrap_err();
-    assert_eq!(
-        err,
-        Error::Corrupt("snapshot has incomplete edge history sections")
-    );
+    assert_eq!(err, Error::Corrupt("snapshot has incomplete edge sections"));
     let err = Memory::from_bytes_borrowed(&bytes, &[], cfg()).unwrap_err();
-    assert_eq!(
-        err,
-        Error::Corrupt("snapshot has incomplete edge history sections")
-    );
+    assert_eq!(err, Error::Corrupt("snapshot has incomplete edge sections"));
 }
 
 #[test]
@@ -415,16 +438,12 @@ fn current_snapshot_with_edges_requires_edge_history_sections() {
         retag_section(&mut bytes, kind, kind + 60_000);
     }
 
+    // The current-edge halves survive, so this is not an older image — it is
+    // a current one missing half its graph.
     let err = Memory::from_bytes(Some(&bytes), &[], cfg()).unwrap_err();
-    assert_eq!(
-        err,
-        Error::Corrupt("snapshot is missing edge history sections")
-    );
+    assert_eq!(err, Error::Corrupt("snapshot has incomplete edge sections"));
     let err = Memory::from_bytes_borrowed(&bytes, &[], cfg()).unwrap_err();
-    assert_eq!(
-        err,
-        Error::Corrupt("snapshot is missing edge history sections")
-    );
+    assert_eq!(err, Error::Corrupt("snapshot has incomplete edge sections"));
 }
 
 #[test]
@@ -471,8 +490,9 @@ fn legacy_snapshot_without_edge_history_migrates_current_edges() {
         },
     )
     .unwrap();
-    let legacy = legacy_snapshot_without_edge_history(&mem.snapshot_bytes(0));
+    let legacy = legacy_snapshot(&mem.snapshot_bytes(0), LegacyShape::EdgesOnly);
     let (loaded, _) = Memory::from_bytes(Some(&legacy), &[], cfg()).unwrap();
+    loaded.verify().unwrap();
 
     let stats = loaded.stats();
     assert_eq!(stats.edges, 1);
@@ -497,6 +517,101 @@ fn legacy_snapshot_without_edge_history_migrates_current_edges() {
     let borrowed = Memory::from_bytes_borrowed(&legacy, &[], cfg()).unwrap();
     assert_eq!(borrowed.stats().edges, 1);
     assert_eq!(borrowed.stats().edge_versions, 1);
+}
+
+/// The 0.3.0 shape: history exists but is keyed by triple. Re-keying it by
+/// `valid_from` has to preserve every version, every interval, and the
+/// current graph — which is re-derived from the versions still open.
+#[test]
+fn legacy_triple_keyed_history_migrates_to_the_time_ordered_layout() {
+    let (mut mem, mut store) = (Memory::new(cfg()).unwrap(), MemStorage::new());
+    // Two triples, one relinked twice and left closed, one left open, plus a
+    // third that is opened, closed and reopened — so the fixture carries
+    // several versions per triple and both interval shapes.
+    for (round, dst) in [(1u64, "runtime"), (2, "compiler"), (3, "runtime")] {
+        mem.link(
+            &mut store,
+            LinkInput {
+                now: round * DAY,
+                src: "package",
+                rel: "depends_on",
+                dst,
+                provenance: None,
+            },
+        )
+        .unwrap();
+    }
+    mem.unlink(
+        &mut store,
+        UnlinkInput {
+            now: 4 * DAY,
+            src: "package",
+            rel: "depends_on",
+            dst: "compiler",
+        },
+    )
+    .unwrap();
+    let expected = mem.stats();
+    let current_before = mem
+        .recall(RecallQuery {
+            entities: &["package"],
+            ..RecallQuery::text(5 * DAY, "")
+        })
+        .unwrap();
+    let historical_before = mem
+        .recall(RecallQuery {
+            entities: &["package"],
+            as_of: Some(3 * DAY),
+            ..RecallQuery::text(5 * DAY, "")
+        })
+        .unwrap();
+
+    let legacy = legacy_snapshot(&mem.snapshot_bytes(0), LegacyShape::TripleKeyedHistory);
+    let (loaded, _) = Memory::from_bytes(Some(&legacy), &[], cfg()).unwrap();
+    loaded.verify().unwrap();
+
+    let stats = loaded.stats();
+    assert_eq!(stats.edges, expected.edges);
+    assert_eq!(stats.edge_versions, expected.edge_versions);
+    assert_eq!(stats.next_edge, expected.next_edge);
+    assert_eq!(
+        loaded
+            .recall(RecallQuery {
+                entities: &["package"],
+                ..RecallQuery::text(5 * DAY, "")
+            })
+            .unwrap()
+            .edges,
+        current_before.edges,
+    );
+    assert_eq!(
+        loaded
+            .recall(RecallQuery {
+                entities: &["package"],
+                as_of: Some(3 * DAY),
+                ..RecallQuery::text(5 * DAY, "")
+            })
+            .unwrap()
+            .edges,
+        historical_before.edges,
+    );
+
+    // Re-snapshotting the migrated engine writes the current layout, and that
+    // image loads without migrating again.
+    let upgraded = loaded.snapshot_bytes(0);
+    let snap = Snapshot::parse(&upgraded).unwrap();
+    for kind in KIND_EDGE_SECTIONS {
+        assert!(snap.section(kind).is_some(), "section {kind} was written");
+    }
+    for kind in [LEGACY_KIND_EDGES_OUT_META, LEGACY_KIND_EDGE_HIST_OUT_META] {
+        assert!(snap.section(kind).is_none(), "legacy {kind} was rewritten");
+    }
+    let (again, _) = Memory::from_bytes(Some(&upgraded), &[], cfg()).unwrap();
+    again.verify().unwrap();
+    assert_eq!(again.stats().edge_versions, expected.edge_versions);
+
+    let borrowed = Memory::from_bytes_borrowed(&legacy, &[], cfg()).unwrap();
+    assert_eq!(borrowed.stats().edge_versions, expected.edge_versions);
 }
 
 // The bitflip sweep relies on `catch_unwind` (unwinding) and is heavy — native
@@ -862,7 +977,174 @@ fn section_body(bytes: &[u8], want: u16) -> std::ops::Range<usize> {
     offset..offset + len
 }
 
-fn legacy_snapshot_without_edge_history(bytes: &[u8]) -> Vec<u8> {
+/// A current edge as older versions wrote it: key `[a | rel | b]`, payload
+/// `fact`, no link to its history version.
+#[derive(Clone, Copy)]
+struct LegacyEdgeSlot {
+    a: u32,
+    rel: u32,
+    b: u32,
+    fact: u32,
+}
+
+impl Slot for LegacyEdgeSlot {
+    const SIZE: usize = 16;
+    const KEY_LEN: usize = 12;
+
+    fn write(&self, out: &mut [u8]) {
+        out[0..4].copy_from_slice(&self.a.to_be_bytes());
+        out[4..8].copy_from_slice(&self.rel.to_be_bytes());
+        out[8..12].copy_from_slice(&self.b.to_be_bytes());
+        out[12..16].copy_from_slice(&self.fact.to_be_bytes());
+    }
+
+    fn read(b: &[u8]) -> Self {
+        let at = |i: usize| u32::from_be_bytes(b[i..i + 4].try_into().unwrap());
+        Self {
+            a: at(0),
+            rel: at(4),
+            b: at(8),
+            fact: at(12),
+        }
+    }
+}
+
+/// An edge version as the first history-carrying version wrote it: key
+/// `[a | rel | b | edge]`, so versions were grouped by triple.
+#[derive(Clone, Copy)]
+struct LegacyEdgeHistorySlot {
+    a: u32,
+    rel: u32,
+    b: u32,
+    edge: u32,
+    fact: u32,
+    flags: u16,
+    recorded_at: u64,
+    valid_from: u64,
+    valid_to: u64,
+}
+
+impl Slot for LegacyEdgeHistorySlot {
+    const SIZE: usize = 48;
+    const KEY_LEN: usize = 16;
+
+    fn write(&self, out: &mut [u8]) {
+        out[0..4].copy_from_slice(&self.a.to_be_bytes());
+        out[4..8].copy_from_slice(&self.rel.to_be_bytes());
+        out[8..12].copy_from_slice(&self.b.to_be_bytes());
+        out[12..16].copy_from_slice(&self.edge.to_be_bytes());
+        out[16..20].copy_from_slice(&self.fact.to_be_bytes());
+        out[20..22].copy_from_slice(&self.flags.to_be_bytes());
+        out[22..24].copy_from_slice(&0u16.to_be_bytes());
+        out[24..32].copy_from_slice(&self.recorded_at.to_be_bytes());
+        out[32..40].copy_from_slice(&self.valid_from.to_be_bytes());
+        out[40..48].copy_from_slice(&self.valid_to.to_be_bytes());
+    }
+
+    fn read(b: &[u8]) -> Self {
+        let u32_at = |i: usize| u32::from_be_bytes(b[i..i + 4].try_into().unwrap());
+        let u64_at = |i: usize| u64::from_be_bytes(b[i..i + 8].try_into().unwrap());
+        Self {
+            a: u32_at(0),
+            rel: u32_at(4),
+            b: u32_at(8),
+            edge: u32_at(12),
+            fact: u32_at(16),
+            flags: u16::from_be_bytes(b[20..22].try_into().unwrap()),
+            recorded_at: u64_at(24),
+            valid_from: u64_at(32),
+            valid_to: u64_at(40),
+        }
+    }
+}
+
+/// How much of the graph an older image carried.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LegacyShape {
+    /// Current edges only — before edge history existed.
+    EdgesOnly,
+    /// Current edges plus versions keyed by triple.
+    TripleKeyedHistory,
+}
+
+fn ordered_cfg() -> ArenaCfg {
+    ArenaCfg::new(cfg().shards_edges, ShardMode::Ordered)
+}
+
+fn arena_pair<T: Slot>(a: &Arena<'_, T>) -> (Vec<u8>, Vec<u8>) {
+    let (mut meta, mut pool) = (Vec::new(), Vec::new());
+    a.dump_meta(&mut meta);
+    a.dump_pool(&mut pool);
+    (meta, pool)
+}
+
+/// Rewrites a current snapshot into one an older version of this crate would
+/// have produced: the graph goes back into the legacy sections, in the legacy
+/// record layouts, and the engine state loses the fields that version did not
+/// have. The rest of the image is copied verbatim.
+///
+/// Deriving the fixture from a real snapshot — rather than hand-assembling
+/// one — keeps it honest: every other section is exactly what the engine
+/// writes, so the test exercises the migration and nothing else.
+fn legacy_snapshot(bytes: &[u8], shape: LegacyShape) -> Vec<u8> {
+    let snap = Snapshot::parse(bytes).expect("current snapshot parses");
+    let section = |kind: u16| snap.section(kind).expect("edge section is present");
+    let hist_out = Arena::<EdgeHistorySlot>::load(
+        ordered_cfg(),
+        section(KIND_EDGE_HIST_OUT_META),
+        section(KIND_EDGE_HIST_OUT_POOL),
+    )
+    .expect("history loads");
+    let current = Arena::<EdgeSlot>::load(
+        ordered_cfg(),
+        section(KIND_EDGES_OUT_META),
+        section(KIND_EDGES_OUT_POOL),
+    )
+    .expect("current edges load");
+
+    // Legacy current edges: the same triples, without the version link.
+    let mut legacy_out = Arena::<LegacyEdgeSlot>::new(ordered_cfg()).unwrap();
+    let mut legacy_in = Arena::<LegacyEdgeSlot>::new(ordered_cfg()).unwrap();
+    for edge in current.iter() {
+        let slot = LegacyEdgeSlot {
+            a: edge.a.0,
+            rel: edge.rel.0,
+            b: edge.b.0,
+            fact: edge.fact.0,
+        };
+        legacy_out.insert(&slot).unwrap();
+        legacy_in
+            .insert(&LegacyEdgeSlot {
+                a: slot.b,
+                b: slot.a,
+                ..slot
+            })
+            .unwrap();
+    }
+    let mut legacy_hist_out = Arena::<LegacyEdgeHistorySlot>::new(ordered_cfg()).unwrap();
+    let mut legacy_hist_in = Arena::<LegacyEdgeHistorySlot>::new(ordered_cfg()).unwrap();
+    for version in hist_out.iter() {
+        let slot = LegacyEdgeHistorySlot {
+            a: version.a.0,
+            rel: version.rel.0,
+            b: version.b.0,
+            edge: version.edge.0,
+            fact: version.fact.0,
+            flags: version.flags,
+            recorded_at: version.recorded_at,
+            valid_from: version.valid_from,
+            valid_to: version.valid_to,
+        };
+        legacy_hist_out.insert(&slot).unwrap();
+        legacy_hist_in
+            .insert(&LegacyEdgeHistorySlot {
+                a: slot.b,
+                b: slot.a,
+                ..slot
+            })
+            .unwrap();
+    }
+
     let flags = u16::from_le_bytes(bytes[SNAP_FLAGS_AT..SNAP_FLAGS_AT + 2].try_into().unwrap());
     let config_len = u32::from_le_bytes(
         bytes[SNAP_CONFIG_LEN_AT..SNAP_CONFIG_LEN_AT + 4]
@@ -877,21 +1159,33 @@ fn legacy_snapshot_without_edge_history(bytes: &[u8]) -> Vec<u8> {
     let config = &bytes[SNAP_HEADER..SNAP_HEADER + config_len];
     let mut writer = SnapshotWriter::new();
     for (_, kind, offset, len) in section_entries(bytes) {
-        if [
-            KIND_EDGE_HIST_OUT_META,
-            KIND_EDGE_HIST_OUT_POOL,
-            KIND_EDGE_HIST_IN_META,
-            KIND_EDGE_HIST_IN_POOL,
-        ]
-        .contains(&kind)
-        {
+        if KIND_EDGE_SECTIONS.contains(&kind) {
             continue;
         }
         let mut section = bytes[offset..offset + len].to_vec();
-        if kind == KIND_ENGINE_STATE {
+        if kind == KIND_ENGINE_STATE && shape == LegacyShape::EdgesOnly {
+            // That version had no edge-version counter.
             section.truncate(STATE_V2_LEN);
         }
         writer.section(kind, section).unwrap();
+    }
+    let (meta, pool) = arena_pair(&legacy_out);
+    writer.section(LEGACY_KIND_EDGES_OUT_META, meta).unwrap();
+    writer.section(LEGACY_KIND_EDGES_OUT_POOL, pool).unwrap();
+    let (meta, pool) = arena_pair(&legacy_in);
+    writer.section(LEGACY_KIND_EDGES_IN_META, meta).unwrap();
+    writer.section(LEGACY_KIND_EDGES_IN_POOL, pool).unwrap();
+    if shape == LegacyShape::TripleKeyedHistory {
+        let (meta, pool) = arena_pair(&legacy_hist_out);
+        writer
+            .section(LEGACY_KIND_EDGE_HIST_OUT_META, meta)
+            .unwrap();
+        writer
+            .section(LEGACY_KIND_EDGE_HIST_OUT_POOL, pool)
+            .unwrap();
+        let (meta, pool) = arena_pair(&legacy_hist_in);
+        writer.section(LEGACY_KIND_EDGE_HIST_IN_META, meta).unwrap();
+        writer.section(LEGACY_KIND_EDGE_HIST_IN_POOL, pool).unwrap();
     }
     writer.finish(config, flags, created_at, "0.2.0")
 }

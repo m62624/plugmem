@@ -130,7 +130,14 @@ remembers facts one at a time as the conversation goes.
 `maintain()` and `checkpoint()` can do real disk I/O (compaction, HNSW work,
 fsync), so they return a **`Promise`** and run on the **libuv** thread pool —
 they never block the event loop. A maintenance call may also return a no-op
-report when there is nothing to purge, reindex or optimize. Every other verb is
+report when there is nothing to purge, reindex or optimize.
+
+`maintain(mode?)` takes `"auto"` (the default), `"compact"`, `"reindex-text"`,
+`"optimize-vectors"` or `"full"`. No mode ever drops a fact revision or an edge
+version; the heavier ones buy bytes and index freshness. `"full"` is the only
+one that repacks the edge arenas, which a relink-heavy workload fragments.
+
+Every other verb is
 microsecond-fast in memory and stays synchronous (a Promise there would be pure
 overhead). There is no async runtime: the engine is CPU-bound, and the one thing
 that can wait — a remote embedder's HTTP call — happens outside the engine lock.

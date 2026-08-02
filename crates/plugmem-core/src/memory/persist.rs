@@ -18,12 +18,12 @@
 use alloc::vec::Vec;
 
 use plugmem_arena::{
-    Arena, ArenaCfg, BlobHeap, BlobHeapCfg, ChunkPool, ChunkPoolCfg, Interner, ShardMode, Slot, key,
+    Arena, ArenaCfg, BlobHeap, BlobHeapCfg, ChunkPool, ChunkPoolCfg, Interner, ShardMode, Slot,
 };
 
 use crate::config::Config;
 use crate::error::Error;
-use crate::id::{EdgeId, FactId, NONE_U32};
+use crate::id::{FactId, NONE_U32};
 use crate::index::IdListIndex;
 use crate::index::bm25::Bm25Index;
 use crate::index::hnsw::HnswGraph;
@@ -31,7 +31,11 @@ use crate::index::postings::PostingStore;
 use crate::index::varint::decode_u32;
 use crate::index::vecpool::VecPool;
 use crate::memory::FactFault;
-use crate::model::{EdgeHistorySlot, EntityRecord, FactAux, FactRecord, TemporalSlot};
+use crate::memory::migrations::{self, STATE_LEN};
+use crate::model::{
+    EdgeHistorySlot, EdgeSlot, EntityRecord, FactAux, FactRecord, TemporalSlot, VALID_TO_OPEN,
+    edge_history_key, edge_key,
+};
 use crate::snapshot::{Prefix, SectionMeta, Snapshot, SnapshotSink, build_prefix, pad_len};
 use xxhash_rust::xxh3::Xxh3;
 
@@ -48,10 +52,8 @@ mod kind {
     pub const ENTITIES_POOL: u16 = 6;
     pub const BY_NAME_META: u16 = 7;
     pub const BY_NAME_POOL: u16 = 8;
-    pub const EDGES_OUT_META: u16 = 9;
-    pub const EDGES_OUT_POOL: u16 = 10;
-    pub const EDGES_IN_META: u16 = 11;
-    pub const EDGES_IN_POOL: u16 = 12;
+    // 9..=12 and 46..=49 were the edge sections before the time-ordered
+    // history layout; see `migrations::legacy_kind`.
     pub const TEMPORAL_META: u16 = 13;
     pub const TEMPORAL_POOL: u16 = 14;
     pub const TEXTS_INDEX: u16 = 15;
@@ -85,18 +87,17 @@ mod kind {
     pub const HNSW_LISTS_POOL: u16 = 43;
     pub const METAS_INDEX: u16 = 44;
     pub const METAS_POOL: u16 = 45;
-    pub const EDGE_HIST_OUT_META: u16 = 46;
-    pub const EDGE_HIST_OUT_POOL: u16 = 47;
-    pub const EDGE_HIST_IN_META: u16 = 48;
-    pub const EDGE_HIST_IN_POOL: u16 = 49;
+    /// Current edges carrying their open version's identity.
+    pub const EDGES_OUT_META: u16 = 50;
+    pub const EDGES_OUT_POOL: u16 = 51;
+    pub const EDGES_IN_META: u16 = 52;
+    pub const EDGES_IN_POOL: u16 = 53;
+    /// Edge history keyed `[a | valid_from | edge]`.
+    pub const EDGE_HIST_OUT_META: u16 = 54;
+    pub const EDGE_HIST_OUT_POOL: u16 = 55;
+    pub const EDGE_HIST_IN_META: u16 = 56;
+    pub const EDGE_HIST_IN_POOL: u16 = 57;
 }
-
-/// Byte length of the original engine-state section.
-const STATE_V1_LEN: usize = 24;
-/// Byte length of the tokenizer-version engine-state section.
-const STATE_V2_LEN: usize = 32;
-/// Byte length of the current engine-state section.
-const STATE_LEN: usize = 40;
 
 /// The callback [`Memory::emit_sections_from`] drives once per snapshot
 /// section: the section `kind` and the byte pieces whose concatenation is its
@@ -107,10 +108,15 @@ type SectionFn<'f> = dyn FnMut(u16, &[&[u8]]) -> Result<(), Error> + 'f;
 /// everything `maintain` recompacts. Bundled behind references so one emit path
 /// serves both the live engine (`self`'s own structures, [`Memory::sections`])
 /// and the disk-first rebuild (freshly rebuilt metadata + graph, with the two
-/// big pools borrowing a `Scratch`). The ride-through structures —
-/// the interner, the by-name index, the edges, and the id counters — are read
-/// straight from `self` in [`Memory::emit_sections_from`]; `maintain` never
-/// touches them, so they are the same on both paths.
+/// big pools borrowing a `Scratch`). The genuinely ride-through structures —
+/// the interner, the by-name index and the id counters — are read straight
+/// from `self` in [`Memory::emit_sections_from`]; `maintain` never touches
+/// them, so they are the same on both paths.
+///
+/// The edge arenas are here rather than read from `self` because
+/// [`MaintenanceMode::Full`](super::MaintenanceMode::Full) repacks them: the
+/// disk-first path has to emit the rebuilt ones, and an ordinary snapshot the
+/// engine's own.
 pub(crate) struct Sections<'r, 'a> {
     pub(crate) facts: &'r Arena<'a, FactRecord>,
     pub(crate) fact_aux: &'r Arena<'a, FactAux>,
@@ -124,6 +130,10 @@ pub(crate) struct Sections<'r, 'a> {
     pub(crate) entity_facts: &'r IdListIndex<'a>,
     pub(crate) vecs: &'r VecPool<'a>,
     pub(crate) hnsw: &'r HnswGraph<'a>,
+    pub(crate) edges_out: &'r Arena<'a, EdgeSlot>,
+    pub(crate) edges_in: &'r Arena<'a, EdgeSlot>,
+    pub(crate) edges_hist_out: &'r Arena<'a, EdgeHistorySlot>,
+    pub(crate) edges_hist_in: &'r Arena<'a, EdgeHistorySlot>,
 }
 
 /// Dumps an arena as its `(meta, pool)` section pair.
@@ -134,51 +144,63 @@ fn arena_sections<T: Slot>(a: &Arena<'_, T>) -> (Vec<u8>, Vec<u8>) {
     (meta, pool)
 }
 
-fn edge_key(
-    out: &mut [u8; 12],
-    a: crate::id::EntityId,
-    rel: plugmem_arena::TermId,
-    b: crate::id::EntityId,
-) {
-    key::write_u32(out, a.0);
-    key::write_u32(&mut out[4..], rel.0);
-    key::write_u32(&mut out[8..], b.0);
-}
-
-fn edge_history_prefix(
-    out: &mut [u8; 16],
-    a: crate::id::EntityId,
-    rel: plugmem_arena::TermId,
-    b: crate::id::EntityId,
-) {
-    key::write_u32(out, a.0);
-    key::write_u32(&mut out[4..], rel.0);
-    key::write_u32(&mut out[8..], b.0);
-    key::write_u32(&mut out[12..], 0);
-}
-
-fn edge_history_key(
-    out: &mut [u8; 16],
-    a: crate::id::EntityId,
-    rel: plugmem_arena::TermId,
-    b: crate::id::EntityId,
-    edge: EdgeId,
-) {
-    key::write_u32(out, a.0);
-    key::write_u32(&mut out[4..], rel.0);
-    key::write_u32(&mut out[8..], b.0);
-    key::write_u32(&mut out[12..], edge.0);
-}
-
 /// Fetches a required section.
 fn section<'a>(snap: &Snapshot<'a>, kind: u16) -> Result<&'a [u8], Error> {
     snap.section(kind)
         .ok_or(Error::Corrupt("snapshot is missing a required section"))
 }
 
-/// Fetches an optional section.
-fn section_opt<'a>(snap: &Snapshot<'a>, kind: u16) -> Option<&'a [u8]> {
-    snap.section(kind)
+/// The eight current-format edge sections.
+struct EdgeSections<'a> {
+    out_meta: &'a [u8],
+    out_pool: &'a [u8],
+    in_meta: &'a [u8],
+    in_pool: &'a [u8],
+    hist_out_meta: &'a [u8],
+    hist_out_pool: &'a [u8],
+    hist_in_meta: &'a [u8],
+    hist_in_pool: &'a [u8],
+}
+
+/// Collects the current-format edge sections, or `None` when the image has
+/// none of them — an empty database, or one written before the time-ordered
+/// history layout, which [`Memory::migrate_edges`] then rebuilds. Present but
+/// incomplete is corruption: the eight sections are written together.
+fn edge_sections<'a>(snap: &Snapshot<'a>) -> Result<Option<EdgeSections<'a>>, Error> {
+    const KINDS: [u16; 8] = [
+        kind::EDGES_OUT_META,
+        kind::EDGES_OUT_POOL,
+        kind::EDGES_IN_META,
+        kind::EDGES_IN_POOL,
+        kind::EDGE_HIST_OUT_META,
+        kind::EDGE_HIST_OUT_POOL,
+        kind::EDGE_HIST_IN_META,
+        kind::EDGE_HIST_IN_POOL,
+    ];
+    let found = KINDS.map(|k| snap.section(k));
+    if found.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    let [
+        out_meta,
+        out_pool,
+        in_meta,
+        in_pool,
+        hist_out_meta,
+        hist_out_pool,
+        hist_in_meta,
+        hist_in_pool,
+    ] = found.map(|s| s.ok_or(Error::Corrupt("snapshot has incomplete edge sections")));
+    Ok(Some(EdgeSections {
+        out_meta: out_meta?,
+        out_pool: out_pool?,
+        in_meta: in_meta?,
+        in_pool: in_pool?,
+        hist_out_meta: hist_out_meta?,
+        hist_out_pool: hist_out_pool?,
+        hist_in_meta: hist_in_meta?,
+        hist_in_pool: hist_in_pool?,
+    }))
 }
 
 impl<'a, const TF: bool> PostingStore<'a, TF> {
@@ -350,9 +372,9 @@ impl<'a> Bm25Index<'a> {
         snap: &Snapshot<'_>,
     ) -> Result<Self, Error> {
         let state = section(snap, kind::ENGINE_STATE)?;
-        if state.len() != STATE_V1_LEN && state.len() != STATE_V2_LEN && state.len() != STATE_LEN {
-            return Err(Error::Corrupt("engine state section has a wrong length"));
-        }
+        // Validates the width for every layout this crate has written; the
+        // corpus totals sit in the prefix all of them share.
+        migrations::decode_engine_state(state)?;
         let total_docs = u64::from_le_bytes(state[8..16].try_into().unwrap());
         let total_len = u64::from_le_bytes(state[16..24].try_into().unwrap());
         if total_docs != doc_len.len() as u64 {
@@ -379,6 +401,10 @@ impl<'a> Memory<'a> {
             entity_facts: &self.entity_facts,
             vecs: &self.vecs,
             hnsw: &self.hnsw,
+            edges_out: &self.edges_out,
+            edges_in: &self.edges_in,
+            edges_hist_out: &self.edges_hist_out,
+            edges_hist_in: &self.edges_hist_in,
         }
     }
 
@@ -408,22 +434,22 @@ impl<'a> Memory<'a> {
             (
                 kind::EDGES_OUT_META,
                 kind::EDGES_OUT_POOL,
-                arena_sections(&self.edges_out),
+                arena_sections(s.edges_out),
             ),
             (
                 kind::EDGES_IN_META,
                 kind::EDGES_IN_POOL,
-                arena_sections(&self.edges_in),
+                arena_sections(s.edges_in),
             ),
             (
                 kind::EDGE_HIST_OUT_META,
                 kind::EDGE_HIST_OUT_POOL,
-                arena_sections(&self.edges_hist_out),
+                arena_sections(s.edges_hist_out),
             ),
             (
                 kind::EDGE_HIST_IN_META,
                 kind::EDGE_HIST_IN_POOL,
-                arena_sections(&self.edges_hist_in),
+                arena_sections(s.edges_hist_in),
             ),
             (
                 kind::TEMPORAL_META,
@@ -647,32 +673,21 @@ impl<'a> Memory<'a> {
             section(&snap, kind::BY_NAME_META)?,
             section(&snap, kind::BY_NAME_POOL)?,
         )?;
-        mem.edges_out = Arena::load(
-            ord(cfg.shards_edges),
-            section(&snap, kind::EDGES_OUT_META)?,
-            section(&snap, kind::EDGES_OUT_POOL)?,
-        )?;
-        mem.edges_in = Arena::load(
-            ord(cfg.shards_edges),
-            section(&snap, kind::EDGES_IN_META)?,
-            section(&snap, kind::EDGES_IN_POOL)?,
-        )?;
-        if let (Some(out_meta), Some(out_pool), Some(in_meta), Some(in_pool)) = (
-            section_opt(&snap, kind::EDGE_HIST_OUT_META),
-            section_opt(&snap, kind::EDGE_HIST_OUT_POOL),
-            section_opt(&snap, kind::EDGE_HIST_IN_META),
-            section_opt(&snap, kind::EDGE_HIST_IN_POOL),
-        ) {
-            mem.edges_hist_out = Arena::load(ord(cfg.shards_edges), out_meta, out_pool)?;
-            mem.edges_hist_in = Arena::load(ord(cfg.shards_edges), in_meta, in_pool)?;
-        } else if section_opt(&snap, kind::EDGE_HIST_OUT_META).is_some()
-            || section_opt(&snap, kind::EDGE_HIST_OUT_POOL).is_some()
-            || section_opt(&snap, kind::EDGE_HIST_IN_META).is_some()
-            || section_opt(&snap, kind::EDGE_HIST_IN_POOL).is_some()
-        {
-            return Err(Error::Corrupt(
-                "snapshot has incomplete edge history sections",
-            ));
+        // Absent edge sections mean an image older than the time-ordered
+        // layout (or an empty database); `finish_load` migrates it.
+        if let Some(edges) = edge_sections(&snap)? {
+            mem.edges_out = Arena::load(ord(cfg.shards_edges), edges.out_meta, edges.out_pool)?;
+            mem.edges_in = Arena::load(ord(cfg.shards_edges), edges.in_meta, edges.in_pool)?;
+            mem.edges_hist_out = Arena::load(
+                ord(cfg.shards_edges),
+                edges.hist_out_meta,
+                edges.hist_out_pool,
+            )?;
+            mem.edges_hist_in = Arena::load(
+                ord(cfg.shards_edges),
+                edges.hist_in_meta,
+                edges.hist_in_pool,
+            )?;
         }
         mem.temporal = Arena::load(
             ord(cfg.shards_temporal),
@@ -772,32 +787,24 @@ impl<'a> Memory<'a> {
             section(&snap, kind::BY_NAME_META)?,
             section(&snap, kind::BY_NAME_POOL)?,
         )?;
-        mem.edges_out = Arena::load_borrowed(
-            ord(cfg.shards_edges),
-            section(&snap, kind::EDGES_OUT_META)?,
-            section(&snap, kind::EDGES_OUT_POOL)?,
-        )?;
-        mem.edges_in = Arena::load_borrowed(
-            ord(cfg.shards_edges),
-            section(&snap, kind::EDGES_IN_META)?,
-            section(&snap, kind::EDGES_IN_POOL)?,
-        )?;
-        if let (Some(out_meta), Some(out_pool), Some(in_meta), Some(in_pool)) = (
-            section_opt(&snap, kind::EDGE_HIST_OUT_META),
-            section_opt(&snap, kind::EDGE_HIST_OUT_POOL),
-            section_opt(&snap, kind::EDGE_HIST_IN_META),
-            section_opt(&snap, kind::EDGE_HIST_IN_POOL),
-        ) {
-            mem.edges_hist_out = Arena::load_borrowed(ord(cfg.shards_edges), out_meta, out_pool)?;
-            mem.edges_hist_in = Arena::load_borrowed(ord(cfg.shards_edges), in_meta, in_pool)?;
-        } else if section_opt(&snap, kind::EDGE_HIST_OUT_META).is_some()
-            || section_opt(&snap, kind::EDGE_HIST_OUT_POOL).is_some()
-            || section_opt(&snap, kind::EDGE_HIST_IN_META).is_some()
-            || section_opt(&snap, kind::EDGE_HIST_IN_POOL).is_some()
-        {
-            return Err(Error::Corrupt(
-                "snapshot has incomplete edge history sections",
-            ));
+        // A legacy image's edges are rebuilt owned by `finish_load` rather
+        // than borrowed: their bytes have to be re-keyed, so there is nothing
+        // to map. Everything else still borrows.
+        if let Some(edges) = edge_sections(&snap)? {
+            mem.edges_out =
+                Arena::load_borrowed(ord(cfg.shards_edges), edges.out_meta, edges.out_pool)?;
+            mem.edges_in =
+                Arena::load_borrowed(ord(cfg.shards_edges), edges.in_meta, edges.in_pool)?;
+            mem.edges_hist_out = Arena::load_borrowed(
+                ord(cfg.shards_edges),
+                edges.hist_out_meta,
+                edges.hist_out_pool,
+            )?;
+            mem.edges_hist_in = Arena::load_borrowed(
+                ord(cfg.shards_edges),
+                edges.hist_in_meta,
+                edges.hist_in_pool,
+            )?;
         }
         mem.temporal = Arena::load_borrowed(
             ord(cfg.shards_temporal),
@@ -903,27 +910,16 @@ impl<'a> Memory<'a> {
     /// panic-free on any bytes regardless (checked `from_utf8`, bounds-checked
     /// vector reads). Shared by both load paths.
     fn finish_load(mut mem: Self, snap: &Snapshot<'_>) -> Result<Self, Error> {
-        let state = section(snap, kind::ENGINE_STATE)?;
-        if state.len() != STATE_V1_LEN && state.len() != STATE_V2_LEN && state.len() != STATE_LEN {
-            return Err(Error::Corrupt("engine state section has a wrong length"));
-        }
-        mem.next_fact = u32::from_le_bytes(state[0..4].try_into().unwrap());
-        mem.next_entity = u32::from_le_bytes(state[4..8].try_into().unwrap());
-        mem.bm25_tokenizer_version = if state.len() >= STATE_V2_LEN {
-            u32::from_le_bytes(state[24..28].try_into().unwrap())
-        } else {
-            crate::memory::maintain::TOKENIZER_INDEX_VERSION
-        };
-        mem.next_edge = if state.len() >= STATE_LEN {
-            u32::from_le_bytes(state[32..36].try_into().unwrap())
-        } else {
-            0
-        };
-        if mem.edges_hist_out.is_empty() && !mem.edges_out.is_empty() {
-            if state.len() >= STATE_LEN {
-                return Err(Error::Corrupt("snapshot is missing edge history sections"));
-            }
-            mem.migrate_edge_history_from_current()?;
+        let state = migrations::decode_engine_state(section(snap, kind::ENGINE_STATE)?)?;
+        mem.next_fact = state.next_fact;
+        mem.next_entity = state.next_entity;
+        mem.bm25_tokenizer_version = state.bm25_tokenizer_version;
+        mem.next_edge = state.next_edge;
+        // Current-format edge sections were absent: either the image predates
+        // the time-ordered layout, or it has no edges at all.
+        let cfg = mem.cfg.clone();
+        if mem.edges_hist_out.is_empty() && mem.edges_out.is_empty() {
+            mem.migrate_edges(snap, &cfg)?;
         }
         let derived_next_edge = mem
             .edges_hist_out
@@ -933,7 +929,7 @@ impl<'a> Memory<'a> {
             .map(|edge| edge.saturating_add(1))
             .unwrap_or(0);
         if mem.next_edge < derived_next_edge {
-            if state.len() >= STATE_LEN {
+            if !state.predates_edge_versions {
                 return Err(Error::Corrupt("engine edge id counter below record count"));
             }
             mem.next_edge = derived_next_edge;
@@ -946,32 +942,6 @@ impl<'a> Memory<'a> {
         mem.tombstones = mem.facts.iter().filter(|fact| fact.is_tombstone()).count();
         mem.validate_references()?;
         Ok(mem)
-    }
-
-    fn migrate_edge_history_from_current(&mut self) -> Result<(), Error> {
-        for edge in self.edges_out.iter() {
-            let edge_id = EdgeId(self.next_edge);
-            self.next_edge = self.next_edge.saturating_add(1);
-            let history = EdgeHistorySlot {
-                a: edge.a,
-                rel: edge.rel,
-                b: edge.b,
-                edge: edge_id,
-                fact: edge.fact,
-                flags: 0,
-                kind: 0,
-                recorded_at: 0,
-                valid_from: 0,
-                valid_to: crate::model::VALID_TO_OPEN,
-            };
-            self.edges_hist_out.insert(&history)?;
-            self.edges_hist_in.insert(&EdgeHistorySlot {
-                a: history.b,
-                b: history.a,
-                ..history
-            })?;
-        }
-        Ok(())
     }
 
     /// Range-checks every stored id so the engine's panicking accessors
@@ -1045,6 +1015,7 @@ impl<'a> Memory<'a> {
                 if edge.a.0 >= self.next_entity
                     || edge.b.0 >= self.next_entity
                     || edge.rel.0 >= terms
+                    || edge.edge.0 >= self.next_edge
                     || (edge.fact.0 != NONE_U32 && edge.fact.0 >= self.next_fact)
                     || !self.entities.contains(&edge.a.0.to_be_bytes())
                     || !self.entities.contains(&edge.b.0.to_be_bytes())
@@ -1059,13 +1030,21 @@ impl<'a> Memory<'a> {
             return Err(Error::Corrupt("edge mirrors disagree"));
         }
         for edge in self.edges_out.iter() {
-            let mut mirror = [0u8; 12];
-            edge_key(&mut mirror, edge.b, edge.rel, edge.a);
-            if !self.edges_in.contains(&mirror) {
+            if !self.edges_in.contains(&edge_key(edge.b, edge.rel, edge.a)) {
                 return Err(Error::Corrupt("edge mirrors disagree"));
             }
-            if !self.has_open_edge_history(edge.a, edge.rel, edge.b, edge.fact) {
-                return Err(Error::Corrupt("current edge has no open history"));
+            // The current slot names its open version directly, so this is a
+            // point lookup rather than a search through the triple's history.
+            let version = self
+                .edges_hist_out
+                .get(&edge_history_key(edge.a, edge.valid_from, edge.edge))
+                .ok_or(Error::Corrupt("current edge has no history record"))?;
+            if version.valid_to != VALID_TO_OPEN
+                || version.rel != edge.rel
+                || version.b != edge.b
+                || version.fact != edge.fact
+            {
+                return Err(Error::Corrupt("current edge disagrees with its history"));
             }
         }
         for edge in self.edges_hist_out.iter() {
@@ -1081,10 +1060,19 @@ impl<'a> Memory<'a> {
             {
                 return Err(Error::Corrupt("edge history references out of range"));
             }
-            let mut mirror = [0u8; 16];
-            edge_history_key(&mut mirror, edge.b, edge.rel, edge.a, edge.edge);
-            if !self.edges_hist_in.contains(&mirror) {
+            if !self
+                .edges_hist_in
+                .contains(&edge_history_key(edge.b, edge.valid_from, edge.edge))
+            {
                 return Err(Error::Corrupt("edge history mirrors disagree"));
+            }
+            // An open version must be reachable as a current edge: the two
+            // structures are one fact stored twice, and recall trusts the
+            // current graph to be exactly the open versions.
+            if edge.valid_to == VALID_TO_OPEN
+                && !self.edges_out.contains(&edge_key(edge.a, edge.rel, edge.b))
+            {
+                return Err(Error::Corrupt("open edge version is not a current edge"));
             }
         }
         for slot in self.temporal.iter() {
@@ -1093,22 +1081,6 @@ impl<'a> Memory<'a> {
             }
         }
         Ok(())
-    }
-
-    fn has_open_edge_history(
-        &self,
-        a: crate::id::EntityId,
-        rel: plugmem_arena::TermId,
-        b: crate::id::EntityId,
-        fact: FactId,
-    ) -> bool {
-        let mut from = [0u8; 16];
-        edge_history_prefix(&mut from, a, rel, b);
-        let mut to = from;
-        to[12..].copy_from_slice(&u32::MAX.to_be_bytes());
-        self.edges_hist_out
-            .range(&from, &to)
-            .any(|edge| edge.fact == fact && edge.valid_to == crate::model::VALID_TO_OPEN)
     }
 
     /// Runs the integrity checks that `open` **defers** for speed and memory

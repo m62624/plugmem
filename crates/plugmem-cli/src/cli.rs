@@ -4,7 +4,8 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use plugmem_host::MaintenanceMode;
 
 /// `plugmem` — a temporal memory for LLM agents in a single file.
 #[derive(Parser)]
@@ -156,7 +157,15 @@ pub(crate) enum Command {
     /// Print engine size counters and identity.
     Stats,
     /// Run a maintenance pass now (no-op, compact, reindex or optimize).
-    Maintain,
+    Maintain {
+        /// How much work to do. `auto` (the default) does only what is
+        /// pending: purge tombstones, refresh a stale text index, and advance
+        /// the vector graph within a bounded budget. `full` rebuilds
+        /// everything and repacks the edge arenas — offline-grade work, and
+        /// the only mode that reclaims edge-history page slack.
+        #[arg(long, value_enum, default_value_t = MaintainMode::Auto)]
+        mode: MaintainMode,
+    },
     /// Flush the journal into a fresh snapshot now and clear it. Leaves the
     /// database checkpointed, so the read-only path (`scrub`, and any
     /// shared-lock open) can proceed without a dirty-journal `NeedsCheckpoint`.
@@ -209,6 +218,39 @@ pub(crate) enum Command {
         #[arg(long)]
         read_only: bool,
     },
+}
+
+/// The `maintain --mode` values, mirroring [`MaintenanceMode`] one to one.
+///
+/// A separate enum so the command line owns its own spelling and help text;
+/// the engine's variants are not a CLI contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum MaintainMode {
+    /// Only pending work: purge tombstones, refresh a stale text index, and
+    /// advance the vector graph within a bounded budget. Cheap and safe to
+    /// run often; a no-op when nothing is pending.
+    Auto,
+    /// Physically purge tombstoned facts and compact storage and indexes.
+    Compact,
+    /// Rebuild the text index by re-reading and re-tokenizing every fact.
+    ReindexText,
+    /// Build or advance the vector graph without compacting anything else.
+    OptimizeVectors,
+    /// Rebuild every rebuildable structure, fully optimize vectors, and
+    /// repack the edge arenas. O(database) work; no history is ever dropped.
+    Full,
+}
+
+impl From<MaintainMode> for MaintenanceMode {
+    fn from(mode: MaintainMode) -> Self {
+        match mode {
+            MaintainMode::Auto => Self::Auto,
+            MaintainMode::Compact => Self::Compact,
+            MaintainMode::ReindexText => Self::ReindexText,
+            MaintainMode::OptimizeVectors => Self::OptimizeVectors,
+            MaintainMode::Full => Self::Full,
+        }
+    }
 }
 
 /// Detailed help topics that are intentionally separate from ordinary `--help`.
