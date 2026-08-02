@@ -106,6 +106,55 @@ jobs:
       - name: Tests (${{ matrix.feature_name }})
         run: cargo test --workspace ${{ matrix.feature_args }}
 
+  # Fuzzing the two untrusted files: a snapshot and a journal are bytes on disk
+  # that anything could have written, and a crash can truncate the journal
+  # mid-record. The engine's read accessors panic on contract violations by
+  # design; what makes that sound is the load path range-checking every
+  # persisted id first, so the strength of that argument is exactly the
+  # strength of the checking — and these targets attack the checking.
+  #
+  # One runner, no OS matrix: this exercises format parsing, which is
+  # endianness-explicit and platform-independent, so a second OS would re-run
+  # identical work. The three targets share the job because installing
+  # cargo-fuzz costs more than running them. Short bounded runs seeded from the
+  # committed corpus of real images — enough to catch a regression on a PR;
+  # a real campaign is a manual long run, not something every push pays for.
+  fuzz:
+    name: fuzz (snapshot + journal parsers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Fuzz the parsers
+        # `-rss_limit_mb` turns a memory blow-up from a malformed header into a
+        # reported finding instead of a hung runner.
+        run: |
+          for target in snapshot_open journal_replay snapshot_scrub; do
+            echo "::group::$target"
+            # The corpus directory is the fuzzer's own working set and is not
+            # in git, so a fresh checkout has to create it. The committed
+            # seeds go second, read-only: libFuzzer writes new finds into the
+            # first directory only, so a run never rewrites what is tracked.
+            mkdir -p "fuzz/corpus/$target"
+            cargo +nightly fuzz run "$target" \
+              "fuzz/corpus/$target" "fuzz/seeds/$target" -- \
+              -max_total_time=60 -rss_limit_mb=4096
+            echo "::endgroup::"
+          done
+      - name: Upload the failing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+
   # --- portability checks, in parallel with the lint+test matrix above -------
 
   no_std:
@@ -334,7 +383,7 @@ jobs:
   ci-pass:
     name: CI passed
     if: always()
-    needs: [format, check, no_std, wasm-suite, wasm-equivalence, skill-lint, napi-npm, dist-plan]
+    needs: [format, check, fuzz, no_std, wasm-suite, wasm-equivalence, skill-lint, napi-npm, dist-plan]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any required job did not succeed
@@ -343,6 +392,7 @@ jobs:
           echo "A required CI job failed or was cancelled:"
           echo "  format           = ${{ needs.format.result }}"
           echo "  check            = ${{ needs.check.result }}"
+          echo "  fuzz             = ${{ needs.fuzz.result }}"
           echo "  no_std           = ${{ needs.no_std.result }}"
           echo "  wasm-suite       = ${{ needs.wasm-suite.result }}"
           echo "  wasm-equivalence = ${{ needs.wasm-equivalence.result }}"

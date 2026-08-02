@@ -1,0 +1,40 @@
+# Its own workspace: the fuzz targets build on nightly with a sanitizer
+# runtime, which must not leak into the ordinary workspace's lockfile or lints.
+[workspace]
+
+[package]
+name = "plugmem-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+plugmem-core = { path = "../crates/plugmem-core" }
+
+[[bin]]
+name = "snapshot_open"
+path = "fuzz_targets/snapshot_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "journal_replay"
+path = "fuzz_targets/journal_replay.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "snapshot_scrub"
+path = "fuzz_targets/snapshot_scrub.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = true

@@ -109,6 +109,14 @@ Node.js N-API bindings. Treat it as a boundary layer; measure FFI overhead separ
 
 Utilities for generating deterministic test data and scenarios. It is not part of the production storage path.
 
+### `fuzz`
+
+`cargo-fuzz` targets for the two untrusted files, the snapshot and the journal.
+Its own workspace (nightly plus a sanitizer runtime), excluded from the main
+one. The seed corpus is committed real images — without seeds the fuzzer never
+gets past the magic number. CI runs each target briefly on every pull request;
+a real campaign is a manual long run. See `fuzz/README.md`.
+
 ### `tools/bench-matrix`
 
 Benchmark matrix runner and result collection. Results must identify the component, data shape, configuration, and units being measured.
@@ -173,20 +181,25 @@ For a targeted package or example, prefer a focused command first, then run the 
 ## Release versioning
 
 - Keep the workspace, Cargo manifests, `Cargo.lock`, and npm metadata at the
-  current development version between releases. The only manual release-prep
-  version edit is the `skill/SKILL.md` marker in its dedicated release commit.
+  current development version between releases. The `skill/SKILL.md` marker is
+  the one version string a human edits by hand.
 - Do not manually bump package versions in a feature or performance PR. The
   release workflow derives the release version from the pushed `vX.Y.Z` tag,
   updates the workspace and npm versions on its release-candidate branch, and
   opens the synchronization PR back to `main`.
-- Skill content may be updated in any normal PR; regular CI checks its
-  structure, frontmatter, and that the marker is well formed, but does not
-  compare it with the development package version. When the release workflow
-  creates `rc/vX.Y.Z` and synchronizes package versions from the `pin/vX.Y.Z`
-  trigger, update only the `<!-- skill-version: X.Y.Z -->` marker in
-  `skill/SKILL.md` on that RC branch (and its documentation if the skill
-  behavior changed). The release gate is the only version-equality check and
-  verifies the marker against the tag-derived package version.
+- Skill content may be updated in any normal PR, and so may the
+  `<!-- skill-version: X.Y.Z -->` marker — bump it to the version you are
+  heading for in whichever PR before that release is a natural place for it.
+  No rule reserves it for a release branch.
+- The marker exists so the skill cannot quietly fall behind the engine.
+  `skill/SKILL.md` is what an agent reads instead of the source, so a release
+  that changed verbs, flags or behavior has to be checked against it: read the
+  skill, confirm it still describes what shipped, update it if not, then set
+  the marker. The release gate compares the marker with the tag-derived
+  package version and fails when they differ — that failure is the reminder to
+  do the reading, not a versioning chore. Regular CI only checks the marker is
+  well formed and never compares it with the development version, so a bumped
+  marker sits on `main` until the release catches up with it.
 - Verify the release workflow when changing this policy: `.github/workflows/release.yml`
   is the source of truth for tag parsing, version synchronization, and the
   skill-version gate.

@@ -57,3 +57,9 @@ cargo bench -p plugmem-core --bench engine
 ```
 
 Relevant regression suites include `journal*`, `snapshot`, `persist`, `maintain`, `recall`, `vectors`, `hnsw_engine`, `metadata`, `tokenizer`, `zero_alloc`, and `perf_gates`. Do not relax `#![forbid(unsafe_code)]` or bypass zero-allocation/performance gates to make a test pass.
+
+The snapshot and journal parsers are also fuzzed: `fuzz/` holds `cargo-fuzz`
+targets that feed both untrusted files arbitrary bytes and then exercise the
+accessors that trust the load. Changing the load path, a record layout or the
+section set means running them — the load path is what makes this crate's
+contract panics sound. See `fuzz/README.md`.
