@@ -118,37 +118,13 @@ fn emit_folded(
         let mut boundary = false;
         for c in canonical.chars() {
             if fold_into(c, token, policy, &mut boundary) {
-                drop_leading_marks_before_base(token);
                 emit_truncated(token, sink);
                 token.clear();
                 boundary = false;
             }
         }
-        drop_leading_marks_before_base(token);
         emit_truncated(token, sink);
     } else {
         emit_truncated(token, sink);
-    }
-}
-
-/// Removes combining marks that precede a real token character. A mark-only
-/// token remains valid for compatibility with the existing tokenizer.
-fn drop_leading_marks_before_base(token: &mut String) {
-    let mut prefix = 0usize;
-    for (offset, c) in token.char_indices() {
-        if is_combining_mark(c) {
-            prefix = offset + c.len_utf8();
-        } else {
-            break;
-        }
-    }
-    if prefix == token.len() {
-        if !token.chars().any(char::is_alphanumeric) {
-            token.clear();
-        }
-        return;
-    }
-    if prefix < token.len() {
-        token.replace_range(..prefix, "");
     }
 }

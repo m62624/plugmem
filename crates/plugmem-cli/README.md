@@ -240,7 +240,7 @@ plugmem(ro)> exit
 Optional `config.toml`, found by `--config PATH`, then `$PLUGMEM_CONFIG`, then
 the platform config directory (all optional — the CLI works with none).
 Precedence overall is **explicit path/flag > environment > config file >
-platform default**. See the [full settings reference](../plugmem-host/SETTINGS.md)
+platform default**. See the [full settings reference](https://github.com/m62624/plugmem/blob/main/crates/plugmem-host/SETTINGS.md)
 for all fields and OS-specific paths.
 
 ```toml

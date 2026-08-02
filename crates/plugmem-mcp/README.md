@@ -223,7 +223,7 @@ monopolizing the box. Override it with `[server].workers` or `--workers`.
 Optional `config.toml`, found by `--config PATH`, then `$PLUGMEM_CONFIG`, then
 the platform config directory. The engine, database, embedder and maintenance
 sections are the **same** shared loader the CLI uses; MCP adds one `[server]`
-section. See the [full settings reference](../plugmem-host/SETTINGS.md) for
+section. See the [full settings reference](https://github.com/m62624/plugmem/blob/main/crates/plugmem-host/SETTINGS.md) for
 all fields and OS-specific paths.
 
 ```toml

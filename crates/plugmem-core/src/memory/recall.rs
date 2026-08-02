@@ -57,6 +57,10 @@ pub mod source {
 
 /// Per-source candidate cap.
 const SOURCE_CAP: usize = 128;
+/// Tag allow-sets up to this size are cheaper to inspect directly than to
+/// discover through a broad temporal scan. Larger sets keep the temporal-first
+/// path, which avoids materializing a large tag-side candidate list.
+const TEMPORAL_TAG_FIRST_MAX: usize = SOURCE_CAP * 64;
 
 /// Graph expansion caps.
 const GRAPH_ENTITY_CAP: usize = 64;
@@ -209,6 +213,7 @@ pub struct RecallScratch {
     hnsw_out: Vec<(u32, f32)>,
     graph_out: Vec<(FactId, f32)>,
     time_out: Vec<(FactId, f32)>,
+    time_tag: Vec<(FactId, u64)>,
     visited: Vec<(EntityId, f32)>,
     edges_tmp: Vec<(EntityId, TermId, bool, FactId)>,
     fused: hashbrown::HashMap<u32, (f32, u8), xxhash_rust::xxh3::Xxh3Builder>,
@@ -545,11 +550,15 @@ impl Memory<'_> {
     /// Temporal range source: facts recorded in `[from, to)`, most recent
     /// first.
     fn time_source(&self, q: &RecallQuery<'_>, as_of: u64, filtered: bool, s: &mut RecallScratch) {
+        s.time_out.clear();
+        let Some((from, to)) = q.range else { return };
+        if filtered && !s.allow.is_empty() && s.allow.len() <= TEMPORAL_TAG_FIRST_MAX {
+            self.time_source_from_tags(from, to, as_of, q.include_closed, s);
+            return;
+        }
         let RecallScratch {
             allow, time_out, ..
         } = s;
-        time_out.clear();
-        let Some((from, to)) = q.range else { return };
         let mut from_key = [0u8; 12];
         plugmem_arena::key::write_pair(&mut from_key, from, 0);
         let mut to_key = [0u8; 12];
@@ -574,6 +583,41 @@ impl Memory<'_> {
                 }
             }
         }
+    }
+
+    /// Tag-first temporal source used when the tag allow-set is smaller than
+    /// the recent temporal window. It preserves the temporal source's exact
+    /// newest-first ordering while avoiding a broad temporal scan.
+    fn time_source_from_tags(
+        &self,
+        from: u64,
+        to: u64,
+        as_of: u64,
+        include_closed: bool,
+        s: &mut RecallScratch,
+    ) {
+        let RecallScratch {
+            allow,
+            time_tag,
+            time_out,
+            ..
+        } = s;
+        time_tag.clear();
+        for &fact in allow.iter() {
+            let Some(record) = admit(&self.facts, &[], false, as_of, include_closed, fact) else {
+                continue;
+            };
+            if record.recorded_at >= from && record.recorded_at < to {
+                time_tag.push((fact, record.recorded_at));
+            }
+        }
+        time_tag.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+        time_out.extend(
+            time_tag
+                .iter()
+                .take(SOURCE_CAP)
+                .map(|&(fact, recorded_at)| (fact, recorded_at as f32)),
+        );
     }
 
     /// Collects the edges touching `entity` from both mirrored arenas

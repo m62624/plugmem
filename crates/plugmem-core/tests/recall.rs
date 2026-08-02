@@ -131,6 +131,31 @@ fn temporal_range_recalls_the_window_recent_first() {
 }
 
 #[test]
+fn tag_and_temporal_filters_intersect_exactly() {
+    let (mem, _) = fixture();
+    let r = mem
+        .recall(RecallQuery {
+            text: None,
+            tags: &["pref"],
+            range: Some((50 * DAY, 150 * DAY)),
+            ..RecallQuery::text(500 * DAY, "")
+        })
+        .unwrap();
+    assert_eq!(ids(&r), [0]);
+    assert!(r.facts.iter().all(|f| f.sources == source::TIME));
+
+    let r = mem
+        .recall(RecallQuery {
+            text: None,
+            tags: &["pref"],
+            range: Some((200 * DAY, 350 * DAY)),
+            ..RecallQuery::text(500 * DAY, "")
+        })
+        .unwrap();
+    assert!(r.facts.is_empty());
+}
+
+#[test]
 fn tag_filter_is_an_intersection_with_every_source() {
     let (mem, _) = fixture();
     let r = mem
