@@ -85,6 +85,7 @@ impl OpCounts {
 struct Options {
     operations: usize,
     dim: usize,
+    diagnose_recall: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -95,6 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn parse_options() -> Result<Options, String> {
     let mut operations = DEFAULT_OPS;
     let mut dim = 0usize;
+    let mut diagnose_recall = false;
     let mut positional_seen = false;
     let mut args = std::env::args().skip(1);
 
@@ -104,7 +106,8 @@ fn parse_options() -> Result<Options, String> {
                 println!(
                     "usage: bench_database [OPERATIONS] [--dim DIM]\n\n\
                      OPERATIONS defaults to 1000000. DIM defaults to 0; use\n\
-                     --dim 384 for deterministic synthetic vector generation."
+                     --dim 384 for deterministic synthetic vector generation.\n\
+                     Pass --diagnose-recall for per-source query timings."
                 );
                 std::process::exit(0);
             }
@@ -112,6 +115,7 @@ fn parse_options() -> Result<Options, String> {
             value if value.starts_with("--dim=") => {
                 dim = parse_value(&value["--dim=".len()..], "--dim")?;
             }
+            "--diagnose-recall" => diagnose_recall = true,
             value if !value.starts_with('-') && !positional_seen => {
                 operations = parse_value(value, "operations")?;
                 positional_seen = true;
@@ -126,7 +130,11 @@ fn parse_options() -> Result<Options, String> {
     if dim > 4096 {
         return Err("dim must be at most 4096".into());
     }
-    Ok(Options { operations, dim })
+    Ok(Options {
+        operations,
+        dim,
+        diagnose_recall,
+    })
 }
 
 fn parse_next(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<usize, String> {
@@ -259,6 +267,9 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     measure_queries("writer", &db, &queries)?;
+    if options.diagnose_recall {
+        measure_recall_matrix("writer_diagnostic", &db, &queries)?;
+    }
     drop(db);
 
     let reopen_start = Instant::now();
@@ -379,6 +390,92 @@ struct QuerySpec<'a> {
     tags: &'a [&'a str],
     range: (u64, u64),
     vector: Option<&'a [f32]>,
+}
+
+#[derive(Clone, Copy)]
+struct QueryVariant {
+    name: &'static str,
+    tags: bool,
+    entities: bool,
+    range: bool,
+}
+
+const RECALL_VARIANTS: &[QueryVariant] = &[
+    QueryVariant {
+        name: "text_only",
+        tags: false,
+        entities: false,
+        range: false,
+    },
+    QueryVariant {
+        name: "text_tag",
+        tags: true,
+        entities: false,
+        range: false,
+    },
+    QueryVariant {
+        name: "text_entity",
+        tags: false,
+        entities: true,
+        range: false,
+    },
+    QueryVariant {
+        name: "text_range",
+        tags: false,
+        entities: false,
+        range: true,
+    },
+    QueryVariant {
+        name: "text_tag_entity",
+        tags: true,
+        entities: true,
+        range: false,
+    },
+    QueryVariant {
+        name: "text_tag_range",
+        tags: true,
+        entities: false,
+        range: true,
+    },
+    QueryVariant {
+        name: "text_entity_range",
+        tags: false,
+        entities: true,
+        range: true,
+    },
+    QueryVariant {
+        name: "full_hybrid",
+        tags: true,
+        entities: true,
+        range: true,
+    },
+];
+
+impl QueryVariant {
+    fn request<'a>(self, query: &'a QuerySpec<'a>) -> RecallQuery<'a> {
+        let mut request = RecallQuery::text(query.now, query.text).with_k(8);
+        if self.tags {
+            request.tags = query.tags;
+        }
+        if self.entities {
+            request.entities = query.entities;
+        }
+        if self.range {
+            request.range = Some(query.range);
+        }
+        request
+    }
+}
+
+fn measure_recall_matrix(
+    phase: &str,
+    db: &Database,
+    query: &QuerySpec<'_>,
+) -> Result<(), plugmem_host::HostError> {
+    for &variant in RECALL_VARIANTS {
+        measure_query(phase, variant.name, || db.recall(variant.request(query)))?;
+    }
+    Ok(())
 }
 
 fn measure_queries(
