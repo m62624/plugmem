@@ -52,10 +52,13 @@ fusion; tags act as filters. What plugmem is actually about:
 
 **Where it fits — and where it doesn't.** plugmem holds the memory of a local
 agent or an embedded system: one process, one file, nothing to run. It targets a
-single machine — a design center of ~100k facts (where recall is
-benchmarked; the flat storage layer is benchmarked to a million entries) — not
-a distributed vector store. For nearest-neighbour search over tens of millions
-of embeddings, sharded across a cluster or behind a managed API, use a dedicated
+single machine, with ~100k active facts as the interactive design center and
+~1M facts as a tested upper-bound profile. At ~100k, the reference workload keeps
+full hybrid recall sub-millisecond; at ~1M, the database remains usable but
+hybrid recall and maintenance become materially slower. These are measured
+operating points, not hard format limits or release guarantees. It is not a
+distributed vector store. For nearest-neighbour search over tens of millions of
+embeddings, sharded across a cluster or behind a managed API, use a dedicated
 one ([Qdrant](https://qdrant.tech), [Milvus](https://milvus.io),
 [Weaviate](https://weaviate.io), [Pinecone](https://www.pinecone.io),
 [pgvector](https://github.com/pgvector/pgvector)). plugmem trades that scale for
@@ -111,6 +114,10 @@ deterministic synthetic workload at both sizes (`dim=0`, so no embedding
 service is involved). Recall values are p50 latencies after the database has
 been checkpointed and maintained; the 1M SVGs live in
 [`plugmem-host/assets`](crates/plugmem-host/assets).
+
+The size labels refer to ingested operations, not the final number of live
+facts. After maintenance, the two runs contain approximately 86k and 860k
+active facts respectively.
 
 | Measurement | 100k operations | 1M operations |
 |---|---:|---:|

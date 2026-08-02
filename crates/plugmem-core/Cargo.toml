@@ -25,15 +25,18 @@ icu-properties = { workspace = true }
 icu-segmenter = { workspace = true }
 writeable = { workspace = true }
 
-# Gated off wasm targets: proptest's harness (via wait-timeout) does not
-# compile there, and `cargo build --examples/--benches` for wasm would pull
-# dev-deps in.
+[dev-dependencies]
+serde_json = { workspace = true }
+
+# Gated off wasm targets: proptest's harness (via wait-timeout), Criterion,
+# Insta, and the test corpus generator do not belong in the wasm test build.
+# serde_json stays available to the wasm serde integration test; it is not part
+# of the library or normal build.
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 proptest = { workspace = true }
 criterion = { workspace = true }
 insta = { workspace = true }
 plugmem-testgen = { workspace = true }
-serde_json = { workspace = true }
 
 [[bench]]
 name = "engine"

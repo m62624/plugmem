@@ -15,13 +15,15 @@ thiserror = { workspace = true }
 xxhash-rust = { workspace = true }
 serde = { workspace = true, optional = true }
 
-# Test/bench harnesses are native-only: proptest's transitive deps do not
-# compile for wasm targets, and the wasm builds only need the library and
-# the dependency-free bench_repro example.
+[dev-dependencies]
+serde_json = { workspace = true }
+
+# Property-test and benchmark harnesses are native-only: proptest's transitive
+# deps do not compile for wasm targets. serde_json stays available to the
+# wasm serde integration test; it is not part of the library or normal build.
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 proptest = { workspace = true }
 criterion = { workspace = true }
-serde_json = { workspace = true }
 
 [[bench]]
 name = "storage"
