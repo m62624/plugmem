@@ -170,7 +170,7 @@ pub struct Counters {
 /// See the [crate-level documentation](crate) for the philosophy and the
 /// module documentation for the chain/split mechanics. Highlights:
 ///
-/// - all state is `pool` + three small arrays — persisting the arena is a
+/// - all state is `pool` + small metadata arrays — persisting the arena is a
 ///   `memcpy` of defined bytes;
 /// - every operation touches O(1) pages: a short chain walk (one first-key
 ///   peek per step), then binary search and shifts inside one 4 KiB page;
@@ -202,8 +202,15 @@ pub struct Arena<'a, T: Slot> {
     /// Page -> successor: the next page in a shard chain, or the next free
     /// page when the page sits in the free-list.
     next: Vec<u32>,
+    /// Page -> predecessor in a shard chain. Rebuilt from `next` on load and
+    /// kept in memory so ordered arenas can scan a range newest-first without
+    /// changing the on-disk metadata format.
+    prev: Vec<u32>,
     /// Page -> number of occupied slots.
     counts: Vec<u16>,
+    /// Shard -> last page of its chain (`NONE` when empty). Runtime-only
+    /// metadata paired with `heads` for reverse ordered scans.
+    tails: Vec<u32>,
     /// Head of the free-list of recycled pages (linked through `next`).
     free_head: u32,
     /// Total records across all shards.
@@ -256,7 +263,9 @@ impl<'a, T: Slot> Arena<'a, T> {
             pool: Paged::owned_empty(),
             heads: alloc::vec![NONE; cfg.shards],
             next: Vec::new(),
+            prev: Vec::new(),
             counts: Vec::new(),
+            tails: alloc::vec![NONE; cfg.shards],
             free_head: NONE,
             total: 0,
             scratch: Vec::new(),
@@ -327,6 +336,7 @@ impl<'a, T: Slot> Arena<'a, T> {
                 // Empty shard: allocate its first chain page.
                 let page = self.alloc_page()?;
                 self.heads[shard] = page;
+                self.tails[shard] = page;
                 Target { prev: NONE, page }
             }
         };
@@ -374,8 +384,16 @@ impl<'a, T: Slot> Arena<'a, T> {
         bump!(self, splits, 1);
 
         // Link the fresh page right after the split one.
-        self.next[fresh as usize] = self.next[page as usize];
+        let successor = self.next[page as usize];
+        self.next[fresh as usize] = successor;
+        self.prev[fresh as usize] = page;
         self.next[page as usize] = fresh;
+        if successor == NONE {
+            let shard = self.shard_of(self.first_key(page));
+            self.tails[shard] = fresh;
+        } else {
+            self.prev[successor as usize] = fresh;
+        }
 
         if spp == 1 {
             // Degenerate single-slot pages (T::SIZE > PAGE_BYTES / 2): the
@@ -519,7 +537,13 @@ impl<'a, T: Slot> Arena<'a, T> {
             } else {
                 self.next[prev as usize] = successor;
             }
+            if successor == NONE {
+                self.tails[shard] = prev;
+            } else {
+                self.prev[successor as usize] = prev;
+            }
             self.next[page as usize] = self.free_head;
+            self.prev[page as usize] = NONE;
             self.free_head = page;
         }
         true
@@ -593,6 +617,71 @@ impl<'a, T: Slot> Arena<'a, T> {
             page,
             idx,
             to,
+        }
+    }
+
+    /// Iterates records whose key prefix lies in `[from, to)` — `from`
+    /// inclusive, `to` exclusive — in descending key order.
+    ///
+    /// This is the bounded newest-first counterpart to [`Arena::range`]. It
+    /// is restricted to ordered arenas and keeps the predecessor links in
+    /// runtime metadata, so the on-disk arena format remains unchanged.
+    pub fn range_rev<'s>(&'s self, from: &'s [u8], to: &'s [u8]) -> RangeRev<'s, T> {
+        assert_eq!(
+            self.cfg.mode,
+            ShardMode::Ordered,
+            "reverse range scans require ShardMode::Ordered"
+        );
+        assert_eq!(
+            from.len(),
+            T::KEY_LEN,
+            "key length must equal Slot::KEY_LEN"
+        );
+        assert_eq!(to.len(), T::KEY_LEN, "key length must equal Slot::KEY_LEN");
+
+        if from >= to {
+            return RangeRev {
+                arena: self,
+                shard: 0,
+                page: NONE,
+                idx: 0,
+                from,
+            };
+        }
+
+        // Position immediately before `to`: an exact key is excluded, while
+        // an insertion point after the page's last key starts at that last
+        // key. If the covering page has no key below `to`, walk to its
+        // predecessor.
+        let shard = self.shard_of(to);
+        let mut page = NONE;
+        let mut idx = 0usize;
+        if let Some(t) = self.find_page(shard, to) {
+            let count = self.counts[t.page as usize] as usize;
+            let mut cmps = 0u64;
+            let pos = match self.search_in(t.page, count, to, &mut cmps) {
+                Ok(p) | Err(p) => p,
+            };
+            bump!(self, cmp_ops, cmps);
+            if pos > 0 {
+                page = t.page;
+                idx = pos;
+            } else {
+                page = self.prev[t.page as usize];
+                if page != NONE {
+                    idx = self.counts[page as usize] as usize;
+                }
+            }
+        }
+
+        RangeRev {
+            arena: self,
+            // The shard the iterator moves to once the current chain (if
+            // any) is exhausted.
+            shard,
+            page,
+            idx,
+            from,
         }
     }
 
@@ -781,6 +870,8 @@ impl<'a, T: Slot> Arena<'a, T> {
                 meta[at..at + COUNT_BYTES].try_into().unwrap(),
             ));
         }
+        let mut prev_links = alloc::vec![NONE; pages];
+        let mut tails = alloc::vec![NONE; shards];
 
         let spp = Self::slots_per_page();
         if counts.iter().any(|&c| c as usize > spp) {
@@ -794,7 +885,7 @@ impl<'a, T: Slot> Arena<'a, T> {
         let mut live = 0u64;
         for (shard, &head) in heads.iter().enumerate() {
             let mut page = head;
-            let mut prev: Option<u32> = None;
+            let mut predecessor = NONE;
             while page != NONE {
                 let p = page as usize;
                 if p >= pages {
@@ -812,14 +903,18 @@ impl<'a, T: Slot> Arena<'a, T> {
                 if arena.shard_of(first) != shard {
                     return Err(Error::Corrupt("arena page sits in the wrong shard"));
                 }
-                if let Some(pr) = prev {
-                    let last_at =
-                        pr as usize * PAGE_BYTES + (counts[pr as usize] as usize - 1) * T::SIZE;
+                if predecessor != NONE {
+                    let pr = predecessor as usize;
+                    let last_at = pr * PAGE_BYTES + (counts[pr] as usize - 1) * T::SIZE;
                     if pool[last_at..last_at + T::KEY_LEN] >= *first {
                         return Err(Error::Corrupt("arena chain pages out of key order"));
                     }
                 }
-                prev = Some(page);
+                prev_links[p] = predecessor;
+                if next[p] == NONE {
+                    tails[shard] = page;
+                }
+                predecessor = page;
                 page = next[p];
             }
         }
@@ -849,7 +944,9 @@ impl<'a, T: Slot> Arena<'a, T> {
         arena.pool = backing;
         arena.heads = heads;
         arena.next = next;
+        arena.prev = prev_links;
         arena.counts = counts;
+        arena.tails = tails;
         arena.free_head = free_head;
         arena.total = total as usize;
         Ok(arena)
@@ -938,6 +1035,7 @@ impl<'a, T: Slot> Arena<'a, T> {
             let page = self.free_head;
             self.free_head = self.next[page as usize];
             self.next[page as usize] = NONE;
+            self.prev[page as usize] = NONE;
             self.counts[page as usize] = 0;
             bump!(self, pages_allocated, 1);
             return Ok(page);
@@ -977,6 +1075,7 @@ impl<'a, T: Slot> Arena<'a, T> {
             tail.set_len(tail_len);
         }
         self.next.push(NONE);
+        self.prev.push(NONE);
         self.counts.push(0);
         bump!(self, pages_allocated, 1);
         Ok(page)
@@ -1111,6 +1210,61 @@ impl<T: Slot> Iterator for Range<'_, T> {
             }
             self.page = self.arena.next[self.page as usize];
             self.idx = 0;
+        }
+    }
+}
+
+/// Iterator over a key range of an [`Arena`] in descending order; see
+/// [`Arena::range_rev`].
+pub struct RangeRev<'a, T: Slot> {
+    arena: &'a Arena<'a, T>,
+    /// The current shard. Lower shards are visited after the current chain.
+    shard: usize,
+    /// Current chain page; `NONE` means "advance to the previous shard's
+    /// tail".
+    page: u32,
+    /// Exclusive upper slot index in the current page.
+    idx: usize,
+    /// Inclusive lower key bound.
+    from: &'a [u8],
+}
+
+impl<T: Slot> Iterator for RangeRev<'_, T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        loop {
+            if self.page == NONE {
+                if self.shard == 0 {
+                    return None;
+                }
+                self.shard -= 1;
+                self.page = self.arena.tails[self.shard];
+                self.idx = if self.page == NONE {
+                    0
+                } else {
+                    self.arena.counts[self.page as usize] as usize
+                };
+                continue;
+            }
+
+            if self.idx == 0 {
+                self.page = self.arena.prev[self.page as usize];
+                self.idx = if self.page == NONE {
+                    0
+                } else {
+                    self.arena.counts[self.page as usize] as usize
+                };
+                continue;
+            }
+
+            self.idx -= 1;
+            let rel = self.idx * T::SIZE;
+            let page = self.arena.pool.page(self.page);
+            if page[rel..rel + T::KEY_LEN] < *self.from {
+                return None;
+            }
+            return Some(T::read(&page[rel..rel + T::SIZE]));
         }
     }
 }

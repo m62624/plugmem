@@ -554,7 +554,7 @@ impl Memory<'_> {
         plugmem_arena::key::write_pair(&mut from_key, from, 0);
         let mut to_key = [0u8; 12];
         plugmem_arena::key::write_pair(&mut to_key, to, 0);
-        for slot in self.temporal.range(&from_key, &to_key) {
+        for slot in self.temporal.range_rev(&from_key, &to_key) {
             if admit(
                 &self.facts,
                 allow,
@@ -566,15 +566,14 @@ impl Memory<'_> {
             .is_some()
             {
                 time_out.push((slot.fact, slot.recorded_at as f32));
-                // Keep only the most recent SOURCE_CAP without unbounded
-                // growth on huge windows.
-                if time_out.len() > SOURCE_CAP * 2 {
-                    time_out.drain(..SOURCE_CAP);
+                // The reverse range starts at the newest record, so once the
+                // source cap is full the remaining entries cannot outrank
+                // these candidates by recency.
+                if time_out.len() == SOURCE_CAP {
+                    break;
                 }
             }
         }
-        time_out.reverse();
-        time_out.truncate(SOURCE_CAP);
     }
 
     /// Collects the edges touching `entity` from both mirrored arenas

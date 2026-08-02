@@ -69,6 +69,14 @@ fn arena_dump_reads_no_uninitialized_bytes() {
     let (meta, pool) = dump_arena(&a);
     let b = Arena::<Rec>::load(*a.cfg(), &meta, &pool).unwrap();
     assert_eq!(b.iter().collect::<Vec<_>>(), a.iter().collect::<Vec<_>>());
+    let mut from = [0u8; 8];
+    let mut to = [0u8; 8];
+    key::write_u64(&mut from, 5);
+    key::write_u64(&mut to, 35);
+    assert_eq!(
+        b.range_rev(&from, &to).collect::<Vec<_>>(),
+        a.range_rev(&from, &to).collect::<Vec<_>>()
+    );
     assert_eq!(dump_arena(&b), (meta, pool));
 }
 

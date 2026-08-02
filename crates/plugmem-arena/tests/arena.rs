@@ -447,6 +447,8 @@ fn range_scans_ordered_mode() {
         v
     };
     assert_eq!(got, want);
+    let got_rev: Vec<u32> = a.range_rev(&from, &to).map(|r| r.id).collect();
+    assert_eq!(got_rev, want.iter().rev().copied().collect::<Vec<_>>());
 
     // `from` inclusive, `to` exclusive.
     let exact_from = rec_key(want[0]);
@@ -462,8 +464,14 @@ fn range_scans_ordered_mode() {
     // Empty and inverted ranges yield nothing.
     assert_eq!(a.range(&rec_key(2), &rec_key(3)).count(), 0);
     assert_eq!(a.range(&to, &from).count(), 0);
+    assert_eq!(a.range_rev(&rec_key(2), &rec_key(3)).count(), 0);
+    assert_eq!(a.range_rev(&to, &from).count(), 0);
     // Full range covers everything.
     assert_eq!(a.range(&rec_key(0), &rec_key(u32::MAX)).count(), ids.len());
+    assert_eq!(
+        a.range_rev(&rec_key(0), &rec_key(u32::MAX)).count(),
+        ids.len()
+    );
 }
 
 #[test]
@@ -478,6 +486,11 @@ fn range_spans_page_chains_within_a_shard() {
         .map(|r| r.id)
         .collect();
     assert_eq!(got, (100..n - 100).collect::<Vec<_>>());
+    let got_rev: Vec<u32> = a
+        .range_rev(&rec_key(100), &rec_key(n - 100))
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(got_rev, (100..n - 100).rev().collect::<Vec<_>>());
 }
 
 #[test]
@@ -517,6 +530,13 @@ fn range_starting_past_the_covering_page_continues_or_ends() {
 fn range_on_uniform_mode_panics() {
     let a = Arena::<Rec>::new(ArenaCfg::new(64, ShardMode::Uniform)).unwrap();
     let _ = a.range(&rec_key(0), &rec_key(10));
+}
+
+#[test]
+#[should_panic(expected = "reverse range scans require ShardMode::Ordered")]
+fn reverse_range_on_uniform_mode_panics() {
+    let a = Arena::<Rec>::new(ArenaCfg::new(64, ShardMode::Uniform)).unwrap();
+    let _ = a.range_rev(&rec_key(0), &rec_key(10));
 }
 
 #[test]
