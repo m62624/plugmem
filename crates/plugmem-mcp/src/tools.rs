@@ -13,6 +13,7 @@ use std::sync::{Mutex, RwLock};
 
 use plugmem_host::{
     Database, Embedder, FactId, HostError, LinkInput, ReadOnlyDatabase, RecallQuery, RememberInput,
+    UnlinkInput,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -53,6 +54,7 @@ const RECALL: &str = "plugmem_recall";
 const REVISE: &str = "plugmem_revise";
 const FORGET: &str = "plugmem_forget";
 const LINK: &str = "plugmem_link";
+const UNLINK: &str = "plugmem_unlink";
 const SHOW: &str = "plugmem_show";
 const STATS: &str = "plugmem_stats";
 const EXPORT: &str = "plugmem_export";
@@ -77,6 +79,7 @@ pub fn definitions() -> Vec<Value> {
         revise_def(),
         forget_def(),
         link_def(),
+        unlink_def(),
         show_def(),
         stats_def(),
         export_def(),
@@ -104,6 +107,7 @@ pub fn call(db: &Database, id: Value, params: Option<&Value>) -> Value {
         REVISE => revise(db, id, args),
         FORGET => forget(db, id, args),
         LINK => link(db, id, args),
+        UNLINK => unlink(db, id, args),
         SHOW => show(db, id, args),
         STATS => rpc::tool_result(id, render(&db.stats(), format_arg(args)), false),
         EXPORT => rpc::tool_result(id, render(&db.export(), format_arg(args)), false),
@@ -352,6 +356,32 @@ fn link(db: &Database, id: Value, args: Option<&Value>) -> Value {
     }
 }
 
+fn unlink(db: &Database, id: Value, args: Option<&Value>) -> Value {
+    let (Some(src), Some(rel), Some(dst)) = (
+        arg_str(args, "src"),
+        arg_str(args, "rel"),
+        arg_str(args, "dst"),
+    ) else {
+        return rpc::tool_result(id, "unlink needs `src`, `rel` and `dst`".into(), true);
+    };
+    match db.unlink(UnlinkInput {
+        now: now_ms(),
+        src,
+        rel,
+        dst,
+    }) {
+        Ok(unlinked) => rpc::tool_result(
+            id,
+            render(
+                &json!({ "src": src, "rel": rel, "dst": dst, "unlinked": unlinked }),
+                format_arg(args),
+            ),
+            false,
+        ),
+        Err(e) => tool_error(id, &e),
+    }
+}
+
 // ── Read verbs ────────────────────────────────────────────────────────────
 
 /// `plugmem_recall`: `format:"human"` returns the engine's prompt-ready block;
@@ -493,9 +523,17 @@ fn id_only_def(name: &str, description: &str) -> Value {
 }
 
 fn link_def() -> Value {
+    edge_def(LINK, messages::LINK_TOOL)
+}
+
+fn unlink_def() -> Value {
+    edge_def(UNLINK, messages::UNLINK_TOOL)
+}
+
+fn edge_def(name: &str, description: &str) -> Value {
     json!({
-        "name": LINK,
-        "description": messages::LINK_TOOL,
+        "name": name,
+        "description": description,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -796,6 +834,7 @@ mod tests {
         };
         let w = names(definitions());
         assert_eq!(w[0], REMEMBER);
+        assert!(w.iter().any(|n| n == UNLINK));
         assert!(w.iter().any(|n| n == MAINTAIN) && w.iter().any(|n| n == CHECKPOINT));
         let ro = names(definitions_ro());
         assert!(ro.iter().any(|n| n == REFRESH) && ro.iter().any(|n| n == GENERATION));
@@ -920,6 +959,19 @@ mod tests {
             &db,
             json!(5),
             Some(&params("plugmem_link", json!({"src": "user"})))
+        )));
+        assert!(!is_error(&call(
+            &db,
+            json!(5),
+            Some(&params(
+                "plugmem_unlink",
+                json!({"src": "user", "rel": "works_at", "dst": "acme"})
+            ))
+        )));
+        assert!(is_error(&call(
+            &db,
+            json!(5),
+            Some(&params("plugmem_unlink", json!({"src": "user"})))
         )));
 
         // stats / export / maintain / checkpoint / verify.
@@ -1141,6 +1193,7 @@ mod tests {
             "plugmem_revise",
             "plugmem_forget",
             "plugmem_link",
+            "plugmem_unlink",
             "plugmem_maintain",
             "plugmem_checkpoint",
         ] {

@@ -6,18 +6,21 @@ description: >-
   project or past decisions (one fact = one statement, with optional entity,
   tags and validity time), and to RECALL them later as a compact ranked block
   ready for the prompt: hybrid retrieval fuses BM25 text search, optional
-  embedding vectors, an entity graph and time. When a new fact contradicts an
-  old one, the engine surfaces the conflict and YOU decide: revise (it
-  changed), keep both (compatible) or forget (it was wrong). Supports "what
-  was true then" (as-of) queries and episodic time ranges. Reach for it at the
-  start of a task (recall context) and whenever you learn something worth
-  keeping across sessions.
+  embedding vectors, an entity graph and time. Link entities with typed
+  relationships, and unlink relationships when they stop being true without
+  destroying their historical as-of answers. When a new fact contradicts an old
+  one, the engine surfaces the conflict and YOU decide: revise (it changed),
+  keep both (compatible) or forget (it was wrong). Supports "what was true
+  then" (as-of) queries and episodic time ranges. Reach for it at the start of
+  a task (recall context) and whenever you learn something worth keeping across
+  sessions.
 ---
 
 # plugmem — long-term memory for agents
 
 plugmem is an embedded memory engine (the SQLite model: a library plus one
-snapshot file and a journal — no server). You talk to it through four verbs:
+snapshot file and a journal — no server). You talk to it through these main
+verbs:
 
 - **remember** — store one durable fact: short text, optional subject entity,
   tags, optional embedding vector, optional `valid_from`.
@@ -26,6 +29,9 @@ snapshot file and a journal — no server). You talk to it through four verbs:
 - **revise** — close an old fact and chain its successor (history survives:
   "lived in Moscow (2023 → 2025)" stays answerable via `as_of`).
 - **forget** — tombstone a fact immediately; `maintain` purges it physically.
+- **link** — create or update a typed relationship between two entities.
+- **unlink** — close a typed relationship for current recall while preserving
+  its historical `as_of` interval.
 
 ## When to remember
 
@@ -45,7 +51,9 @@ current file, a transient value, anything re-derivable next turn).
   a ranking source, so don't stuff the query into a tag.
 - **Link related entities** with a typed edge (`--link works_at:acme`, or the
   standalone `link ada works_at acme`) — the graph source expands recall from
-  an anchor entity to its neighbours.
+  an anchor entity to its neighbours. When the relationship stops being true,
+  use `unlink ada works_at acme`; current recall stops using the edge, while
+  `recall --as-of <then>` can still see the historical relationship.
 - **Metadata is an opaque pointer, not content** (`--meta uri=s3://…/doc.pdf
   --meta mime=application/pdf`). The engine stores and returns it verbatim and
   never searches it — use it for a URI to the real payload in another store, or
@@ -126,6 +134,7 @@ MANDATORY.
   | `revise` | `revise <id> "<text>" [same flags as remember]` |
   | `forget` | `forget <id>` |
   | `link` | `link <src> <rel> <dst>` |
+  | `unlink` | `unlink <src> <rel> <dst>` |
   | `show` / `stats` | `show <id>` · `stats` |
   | upkeep | `maintain` · `checkpoint` · `verify` · `scrub` · `recover <dst>` |
   | bulk | `export` (JSONL to stdout) · `import <file> [--batch N]` |
@@ -136,7 +145,7 @@ MANDATORY.
 
 - **No shell, but your tools include `plugmem_recall` →** MCP. The server
   exposes, as tools: `plugmem_remember`, `plugmem_recall`, `plugmem_revise`,
-  `plugmem_forget`, `plugmem_link`, `plugmem_show`, `plugmem_stats`,
+  `plugmem_forget`, `plugmem_link`, `plugmem_unlink`, `plugmem_show`, `plugmem_stats`,
   `plugmem_export`, `plugmem_maintain`, `plugmem_checkpoint`, `plugmem_verify`,
   plus `plugmem_version` and `plugmem_about`. A read-only server adds
   `plugmem_generation` / `plugmem_refresh` and refuses the write verbs.

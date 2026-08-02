@@ -488,7 +488,7 @@ impl Memory<'_> {
             weight *= self.cfg.graph_decay;
             for at in frontier..depth_end {
                 let (entity, _) = visited[at];
-                self.neighbors(entity, edges_tmp);
+                self.neighbors(entity, as_of, q.as_of.is_some(), edges_tmp);
                 let batch = core::mem::take(edges_tmp);
                 for &(neighbor, rel, this_side_src, provenance) in &batch {
                     let (src, dst) = if this_side_src {
@@ -622,22 +622,47 @@ impl Memory<'_> {
 
     /// Collects the edges touching `entity` from both mirrored arenas
     /// into `out` as `(neighbor, rel, entity_is_src, provenance)`.
-    fn neighbors(&self, entity: EntityId, out: &mut Vec<(EntityId, TermId, bool, FactId)>) {
+    fn neighbors(
+        &self,
+        entity: EntityId,
+        as_of: u64,
+        historical: bool,
+        out: &mut Vec<(EntityId, TermId, bool, FactId)>,
+    ) {
         out.clear();
-        let mut from = [0u8; 12];
-        plugmem_arena::key::write_u32(&mut from, entity.0);
-        let mut to = [0u8; 12];
-        plugmem_arena::key::write_u32(&mut to, entity.0 + 1);
-        out.extend(
-            self.edges_out
-                .range(&from, &to)
-                .map(|e| (e.b, e.rel, true, e.fact)),
-        );
-        out.extend(
-            self.edges_in
-                .range(&from, &to)
-                .map(|e| (e.b, e.rel, false, e.fact)),
-        );
+        if historical {
+            let mut from = [0u8; 16];
+            plugmem_arena::key::write_u32(&mut from, entity.0);
+            let mut to = [0u8; 16];
+            plugmem_arena::key::write_u32(&mut to, entity.0 + 1);
+            out.extend(
+                self.edges_hist_out
+                    .range(&from, &to)
+                    .filter(|e| e.active_at(as_of))
+                    .map(|e| (e.b, e.rel, true, e.fact)),
+            );
+            out.extend(
+                self.edges_hist_in
+                    .range(&from, &to)
+                    .filter(|e| e.active_at(as_of))
+                    .map(|e| (e.b, e.rel, false, e.fact)),
+            );
+        } else {
+            let mut from = [0u8; 12];
+            plugmem_arena::key::write_u32(&mut from, entity.0);
+            let mut to = [0u8; 12];
+            plugmem_arena::key::write_u32(&mut to, entity.0 + 1);
+            out.extend(
+                self.edges_out
+                    .range(&from, &to)
+                    .map(|e| (e.b, e.rel, true, e.fact)),
+            );
+            out.extend(
+                self.edges_in
+                    .range(&from, &to)
+                    .map(|e| (e.b, e.rel, false, e.fact)),
+            );
+        }
     }
 
     /// Renders the compact prompt block (format fixed by golden tests).

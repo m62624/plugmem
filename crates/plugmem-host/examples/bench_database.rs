@@ -650,11 +650,13 @@ fn emit_stats(phase: &str, stats: plugmem_host::Stats, rss_delta: Option<(usize,
     emit_usize(phase, "entities", stats.entities);
     emit_usize(phase, "terms", stats.terms);
     emit_usize(phase, "edges", stats.edges);
+    emit_usize(phase, "edge_versions", stats.edge_versions);
     emit_usize(phase, "vectors", stats.vectors);
     emit_usize(phase, "tombstones", stats.tombstones);
     emit_u64(phase, "hnsw_indexed", u64::from(stats.hnsw_indexed));
     emit_usize(phase, "pool_bytes", stats.pool_bytes);
     emit_u64(phase, "next_fact", u64::from(stats.next_fact));
+    emit_u64(phase, "next_edge", u64::from(stats.next_edge));
     if let Some((after, before)) = rss_delta {
         emit_usize(phase, "rss_delta_bytes", after.saturating_sub(before));
     }

@@ -33,11 +33,11 @@ pub mod tokenizer;
 
 pub use config::Config;
 pub use error::Error;
-pub use id::{EntityId, FactId, NONE_U32};
+pub use id::{EdgeId, EntityId, FactId, NONE_U32};
 pub use memory::{
     FactFault, FactView, LinkInput, MaintainReport, MaintenanceMode, MaintenanceOptions, Memory,
     OpenReport, RecallQuery, RecallResult, RecallScratch, RecalledEdge, RecalledFact,
-    RememberInput, RememberOutcome, Similar, SimilarReason, Stats,
+    RememberInput, RememberOutcome, Similar, SimilarReason, Stats, UnlinkInput,
 };
 pub use model::{
     EdgeSlot, EntityByName, EntityRecord, FactAux, FactRecord, TemporalSlot, VALID_TO_OPEN,

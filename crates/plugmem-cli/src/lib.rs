@@ -24,7 +24,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::Parser;
 use plugmem_host::{
     Database, ExportedFact, FactId, HostError, LinkInput, ReadOnlyDatabase, RecallQuery,
-    RecallResult, RememberInput, RememberOutcome, Settings, Stats, VALID_TO_OPEN,
+    RecallResult, RememberInput, RememberOutcome, Settings, Stats, UnlinkInput, VALID_TO_OPEN,
 };
 use serde_json::json;
 
@@ -372,6 +372,22 @@ fn execute(
             }
             Ok(0)
         }
+        Command::Unlink { src, rel, dst } => {
+            let fresh = db.unlink(UnlinkInput { now, src, rel, dst })?;
+            if json {
+                writeln!(
+                    out,
+                    "{}",
+                    json!({ "src": src, "rel": rel, "dst": dst, "unlinked": fresh })
+                )
+                .ok();
+            } else if fresh {
+                writeln!(out, "unlinked {src} -{rel}-> {dst}").ok();
+            } else {
+                writeln!(out, "edge {src} -{rel}-> {dst} was already absent").ok();
+            }
+            Ok(0)
+        }
         Command::Show { id } => Ok(render_show(db.get(FactId(*id)), *id, json, out)),
         Command::Stats => {
             render_stats(&db.stats(), json, out);
@@ -614,7 +630,7 @@ fn run_repl(
         } else if line == "help" {
             writeln!(
                 out,
-                "verbs: remember recall revise forget link show stats maintain checkpoint \
+                "verbs: remember recall revise forget link unlink show stats maintain checkpoint \
                  verify export import  (scrub/recover stay one-shot)  exit"
             )
             .ok();
@@ -965,9 +981,12 @@ fn render_stats(s: &Stats, json: bool, out: &mut impl Write) {
                 "entities": s.entities,
                 "terms": s.terms,
                 "edges": s.edges,
+                "edge_versions": s.edge_versions,
                 "vectors": s.vectors,
+                "hnsw_indexed": s.hnsw_indexed,
                 "next_fact": s.next_fact,
                 "next_entity": s.next_entity,
+                "next_edge": s.next_edge,
                 "pool_bytes": s.pool_bytes,
             })
         )
@@ -977,8 +996,11 @@ fn render_stats(s: &Stats, json: bool, out: &mut impl Write) {
         writeln!(out, "entities    {}", s.entities).ok();
         writeln!(out, "terms       {}", s.terms).ok();
         writeln!(out, "edges       {}", s.edges).ok();
+        writeln!(out, "edge_vers   {}", s.edge_versions).ok();
         writeln!(out, "vectors     {}", s.vectors).ok();
+        writeln!(out, "hnsw_idx    {}", s.hnsw_indexed).ok();
         writeln!(out, "next_fact   {}", s.next_fact).ok();
+        writeln!(out, "next_edge   {}", s.next_edge).ok();
         writeln!(out, "pool_bytes  {}", s.pool_bytes).ok();
     }
 }
@@ -1689,12 +1711,24 @@ mod tests {
         let (code, out) = run_cmd(&db, &link, false, 2_000);
         assert_eq!(code, 0);
         assert!(out.contains("plugmem -depends_on-> tokio"), "{out}");
+        let unlink = Command::Unlink {
+            src: "plugmem".into(),
+            rel: "depends_on".into(),
+            dst: "tokio".into(),
+        };
+        let (code, out) = run_cmd(&db, &unlink, false, 2_500);
+        assert_eq!(code, 0);
+        assert!(
+            out.contains("unlinked plugmem -depends_on-> tokio"),
+            "{out}"
+        );
 
         let (code, out) = run_cmd(&db, &Command::Stats, true, 3_000);
         assert_eq!(code, 0);
         let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
         assert_eq!(v["facts"], 1);
-        assert!(v["edges"].as_u64().unwrap() >= 1);
+        assert_eq!(v["edges"], 0);
+        assert_eq!(v["edge_versions"], 1);
     }
 
     #[test]
@@ -1782,6 +1816,14 @@ mod tests {
         let (_, out) = run_cmd(&db, &link, true, 2_000);
         let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
         assert_eq!(v["rel"], "depends_on");
+        let unlink = Command::Unlink {
+            src: "plugmem".into(),
+            rel: "depends_on".into(),
+            dst: "tokio".into(),
+        };
+        let (_, out) = run_cmd(&db, &unlink, true, 2_100);
+        let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(v["unlinked"], true);
 
         // forget --json then maintain --json
         let (_, out) = run_cmd(&db, &Command::Forget { id: 1 }, true, 2_500);
@@ -1818,6 +1860,21 @@ mod tests {
         let (code, out) = run_cmd(&db, &Command::Stats, false, 2_000);
         assert_eq!(code, 0);
         assert!(out.contains("facts") && out.contains("pool_bytes"), "{out}");
+    }
+
+    #[test]
+    fn verify_command_renders_human_and_json() {
+        let (db, _t) = TempDb::open();
+        run_cmd(&db, &remember("clean", None, &[]), false, 1_000);
+
+        let (code, out) = run_cmd(&db, &Command::Verify, false, 2_000);
+        assert_eq!(code, 0);
+        assert_eq!(out.trim(), "integrity ok");
+
+        let (code, out) = run_cmd(&db, &Command::Verify, true, 2_100);
+        assert_eq!(code, 0);
+        let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(v["ok"], true);
     }
 
     #[test]
@@ -1862,6 +1919,14 @@ mod tests {
         assert!(output.contains("plugmem settings"));
         assert!(output.contains("[database]"));
         assert!(output.contains("path (path string"));
+
+        let cli = Cli::try_parse_from(["plugmem-cli", "--json", "help", "settings"]).unwrap();
+        let mut output = Vec::new();
+        assert_eq!(run_parsed(cli, &mut output), 0);
+        let output: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(output["topic"], "settings");
+        assert!(output["config_path_precedence"].is_array());
+        assert!(output["settings"].as_array().unwrap().len() > 10);
     }
 
     #[test]
@@ -1884,6 +1949,93 @@ mod tests {
         assert_eq!(code, 0);
         assert!(String::from_utf8(buf).unwrap().contains("facts"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recover_and_scrub_render_json_and_human_shapes() {
+        let (db, tmp) = TempDb::open();
+        let path = tmp.0.join("m.plugmem");
+        run_cmd(&db, &remember("recoverable fact", None, &[]), false, 1_000);
+        run_cmd(&db, &Command::Checkpoint, false, 2_000);
+        drop(db);
+
+        let settings = settings_with(None);
+        let mut out = Vec::new();
+        assert_eq!(do_scrub(&path, &settings, true, &mut out), 0);
+        let scrub: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(scrub["ok"], true);
+        assert!(scrub["bytes"].as_u64().unwrap() > 0);
+        let mut out = Vec::new();
+        assert_eq!(do_scrub(&path, &settings, false, &mut out), 0);
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("scrub ok:"), "{out}");
+
+        let json_dst = tmp.0.join("copy-json.plugmem");
+        let mut out = Vec::new();
+        assert_eq!(do_recover(&path, &json_dst, &settings, true, &mut out), 0);
+        let recover: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(recover["kept"], 1);
+        assert_eq!(recover["dropped_text"], 0);
+        assert_eq!(recover["dst"], json_dst.display().to_string());
+
+        let human_dst = tmp.0.join("copy-human.plugmem");
+        let mut out = Vec::new();
+        assert_eq!(do_recover(&path, &human_dst, &settings, false, &mut out), 0);
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("recovered to"), "{out}");
+        assert!(out.contains("kept 1"), "{out}");
+    }
+
+    #[test]
+    fn readonly_dispatcher_renders_every_read_shape() {
+        let (db, tmp) = TempDb::open();
+        let path = tmp.0.join("m.plugmem");
+        run_cmd(
+            &db,
+            &remember("readonly tokio fact", Some("plugmem"), &["pref"]),
+            false,
+            1_000,
+        );
+        run_cmd(&db, &Command::Checkpoint, false, 2_000);
+        let ro = Database::open_readonly(&path, Config::default()).unwrap();
+
+        let mut out = Vec::new();
+        assert_eq!(execute_ro(&ro, &Command::Stats, None, true, &mut out), 0);
+        let stats: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(stats["facts"], 1);
+
+        let mut out = Vec::new();
+        assert_eq!(
+            execute_ro(&ro, &Command::Show { id: 0 }, None, false, &mut out),
+            0
+        );
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("readonly tokio fact"), "{text}");
+
+        let mut out = Vec::new();
+        assert_eq!(execute_ro(&ro, &Command::Export, None, false, &mut out), 0);
+        let exported: serde_json::Value =
+            serde_json::from_str(String::from_utf8(out).unwrap().lines().next().unwrap()).unwrap();
+        assert_eq!(exported["text"], "readonly tokio fact");
+
+        let mut out = Vec::new();
+        let recall = Command::Recall {
+            query: Some("tokio".into()),
+            tags: vec!["pref".into()],
+            entities: vec!["plugmem".into()],
+            as_of: None,
+            range: None,
+            k: 1,
+            closed: false,
+        };
+        assert_eq!(execute_ro(&ro, &recall, None, false, &mut out), 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("tokio"), "{text}");
+
+        let mut out = Vec::new();
+        assert_eq!(execute_ro(&ro, &Command::Verify, None, true, &mut out), 0);
+        let verify: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(verify["ok"], true);
     }
 
     #[test]

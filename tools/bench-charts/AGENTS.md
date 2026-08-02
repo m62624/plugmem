@@ -2,7 +2,7 @@
 
 ## Role
 
-`plugmem-bench-charts` is a local pure-Rust TSV-to-SVG renderer. It uses Plotters' SVG and TTF backends; it does not run a browser or WebDriver. It renders arena charts and the existing core recall-latency chart into fixed repository asset directories.
+`plugmem-bench-charts` is a local pure-Rust TSV-to-SVG renderer. It uses Plotters' SVG and TTF backends; it does not run a browser or WebDriver. It renders arena, core recall, host database, and host edge-lifecycle charts into fixed repository asset directories.
 
 ## Input contract
 
@@ -20,7 +20,7 @@ Rows are accumulated and averaged by `(n, runtime, structure, metric)`. `Chart` 
 
 Charts absent from the input are left untouched. The baseline is rewritten in stable sorted order, carrying old values for charts not present in the current input. Review both SVG and TSV diffs before committing measurements.
 
-The tool writes fixed paths under `crates/plugmem-arena/assets` and `crates/plugmem-core/assets`. It is not a benchmark runner and must not invent or extrapolate missing measurements.
+The tool writes fixed paths under `crates/plugmem-arena/assets`, `crates/plugmem-core/assets`, and `crates/plugmem-host/assets`. It is not a benchmark runner and must not invent or extrapolate missing measurements.
 
 ## Checks and usage
 
@@ -29,6 +29,10 @@ cargo check -p plugmem-bench-charts
 cargo run -p plugmem-bench-charts -- bench.tsv
 cat bench.tsv | cargo run -p plugmem-bench-charts
 cargo run -p plugmem-bench-charts -- tools/bench-charts/baseline.tsv --force
+cargo run --release -p plugmem-host --example bench_edges -- 100000 | tee edge-benchmark-100k.tsv
+cargo run --release -p plugmem-host --example bench_edges -- 1000000 | tee edge-benchmark-1m.tsv
+cat edge-benchmark-100k.tsv edge-benchmark-1m.tsv > edge-benchmark-scale.tsv
+cargo run -p plugmem-bench-charts -- edge-benchmark-scale.tsv --force
 ```
 
 When changing chart scales, colors, titles, or structure lists, use `--force`, inspect generated SVGs, and keep the baseline/data units unchanged. `plotters` may require the system fontconfig development library on Linux.

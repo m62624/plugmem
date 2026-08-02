@@ -36,8 +36,8 @@ fusion; tags act as filters. What plugmem is actually about:
 
 - **bitemporal facts** — `revise`/`forget`, "what was true *then*" vs now,
   revision chains kept intact, physical erasure on `maintain`;
-- **an entity graph** — typed edges between entities, relational knowledge,
-  not just nearest-neighbor vectors;
+- **an entity graph** — typed edges between entities, with `link`/`unlink`
+  lifecycle and `as_of` graph recall, not just nearest-neighbor vectors;
 - **opaque per-fact metadata** — an optional key→value map (a URI to the real
   payload in another store, a mime type, an external key); the engine stores
   and returns it but never interprets it — big blobs live outside, by reference;
@@ -50,20 +50,21 @@ fusion; tags act as filters. What plugmem is actually about:
   zero-allocation recall after warm-up, one file, no server; built and
   tested on `wasm32v1-none` and a real 32-bit wasm runtime in CI.
 
-**Where it fits — and where it doesn't.** plugmem holds the memory of a local
-agent or an embedded system: one process, one file, nothing to run. It targets a
-single machine, with ~100k active facts as the interactive design center and
-~1M facts as a tested upper-bound profile. At ~100k, the reference workload keeps
-full hybrid recall sub-millisecond; at ~1M, the database remains usable but
-hybrid recall and maintenance become materially slower. These are measured
-operating points, not hard format limits or release guarantees. It is not a
-distributed vector store. For nearest-neighbour search over tens of millions of
-embeddings, sharded across a cluster or behind a managed API, use a dedicated
-one ([Qdrant](https://qdrant.tech), [Milvus](https://milvus.io),
-[Weaviate](https://weaviate.io), [Pinecone](https://www.pinecone.io),
-[pgvector](https://github.com/pgvector/pgvector)). plugmem trades that scale for
-zero infrastructure and recall that combines keyword, meaning, relationships and
-time, not vectors alone.
+**Where it fits — and where it doesn't.** plugmem is for local agent memory and
+embedded systems: one process, one file, no service to operate. Its interactive
+design center is about 100k active facts on one machine; the benchmark suite also
+tracks 1M-operation profiles to show how the same file-backed engine scales
+under heavier local workloads. These numbers are measured operating points, not
+format limits.
+
+plugmem is not designed for multi-million or tens-of-millions vector workloads,
+cluster sharding, multi-tenant serving, or managed nearest-neighbour search. For
+that, use a dedicated vector system such as [Qdrant](https://qdrant.tech),
+[Milvus](https://milvus.io), [Weaviate](https://weaviate.io),
+[Pinecone](https://www.pinecone.io), or
+[pgvector](https://github.com/pgvector/pgvector). plugmem's recall model is
+local and hybrid: keyword search, optional vectors, typed relationships, and
+time.
 
 ## Which crate do I need?
 
@@ -104,7 +105,7 @@ recency boost (tags filter; they are not a source):
 |---|---|---|
 | **Lexical** | [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) (Robertson idf) over a Unicode ([UAX #29](https://unicode.org/reports/tr29/)) tokenizer | exact terms / keyword overlap |
 | **Semantic** | int8-quantized cosine — a flat two-phase scan below a threshold, an [HNSW](https://arxiv.org/abs/1603.09320) graph above | meaning / nearest neighbours |
-| **Graph** | entity graph with typed edges, breadth-first from query anchors | relational knowledge |
+| **Graph** | entity graph with current typed edges on the hot path; `as_of` queries use edge history | relational knowledge |
 | **Temporal** | range scans over a `recorded_at`-ordered index; bitemporal validity | "what was true *then*", time windows |
 
 ## Measured scale
@@ -142,6 +143,33 @@ cargo run --release -p plugmem-host --example bench_database -- 1000000 --diagno
 cat database-benchmark-100k.tsv database-benchmark-1m.tsv > database-benchmark-scale.tsv
 cargo run -p plugmem-bench-charts -- database-benchmark-scale.tsv --force
 ```
+
+Edge lifecycle has a focused file-backed benchmark for `link`, `unlink`,
+retained history, current graph recall, historical `as_of` graph recall, and
+full maintenance after many closed edges:
+
+```text
+cargo run --release -p plugmem-host --example bench_edges -- 100000 | tee edge-benchmark-100k.tsv
+cargo run --release -p plugmem-host --example bench_edges -- 1000000 | tee edge-benchmark-1m.tsv
+cat edge-benchmark-100k.tsv edge-benchmark-1m.tsv > edge-benchmark-scale.tsv
+cargo run -p plugmem-bench-charts -- edge-benchmark-scale.tsv --force
+```
+
+The edge workload is a hub stress case: one entity links to every leaf, then all
+edges are unlinked while history is retained.
+
+| Edge lifecycle measurement | 100k edges | 1M edges |
+|---|---:|---:|
+| `link` latency | 22.8 µs/edge | 355.4 µs/edge |
+| `unlink` latency | 22.7 µs/edge | 486.9 µs/edge |
+| Current graph recall p50 while edges are open | 1.17 ms | 14.1 ms |
+| Historical `as_of` graph recall p50 after unlink | 1.74 ms | 26.7 ms |
+| Full `maintain` after unlink | 0.79 s | 133.2 s |
+| Retained edge-history records after unlink | 100,000 | 1,000,000 |
+
+![Edge lifecycle operation cost at 100k versus 1M edges](crates/plugmem-host/assets/edge-lifecycle-latency-100k-1m.svg)
+![Edge lifecycle graph recall at 100k versus 1M edges](crates/plugmem-host/assets/edge-lifecycle-recall-100k-1m.svg)
+![Edge lifecycle current edges versus history](crates/plugmem-host/assets/edge-lifecycle-growth-100k-1m.svg)
 
 The lexical tokenizer is ICU4X-backed: it applies Unicode NFKC normalization,
 locale-neutral lowercase mapping, UAX #29 word boundaries, language-aware

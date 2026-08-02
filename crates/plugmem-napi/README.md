@@ -70,6 +70,7 @@ card.metadata;                // Record<string,string> — keys sorted, {} when 
 
 db.revise(out.id, { text: "prefers async-std" });
 db.link({ src: "user", rel: "works_at", dst: "acme" });
+db.unlink({ src: "user", rel: "works_at", dst: "acme" }); // closes the current edge
 
 await db.checkpoint();        // async (see below)
 db.close();                   // release the file + lock explicitly
@@ -114,8 +115,8 @@ must agree. A `{ readOnly: true }` handle never auto-embeds — pass a vector.
 Method names mirror `plugmem-host`'s `Database` one-to-one.
 
 **Writer** (default): `remember`, `recall`, `revise(id, args)`, `forget(id)`,
-`link`, `get(id)`, `stats`, `export`, `verify`, and the two **async** verbs
-below. **Read-only** (`{ readOnly: true }`, observing another process's writer):
+`link`, `unlink`, `get(id)`, `stats`, `export`, `verify`, and the two **async**
+verbs below. **Read-only** (`{ readOnly: true }`, observing another process's writer):
 `recall`, `get`, `stats`, `export`, `verify`, plus `generation()` (the pinned
 snapshot generation) and `refresh()` (advance to the writer's latest checkpoint);
 the write verbs throw.

@@ -4,7 +4,7 @@
 
 use plugmem_core::{
     Config, Error, FactId, LinkInput, MemScratch, MemStorage, Memory, RecallQuery, RememberInput,
-    Scratch, Storage,
+    Scratch, Storage, UnlinkInput, snapshot::SnapshotWriter,
 };
 
 fn cfg() -> Config {
@@ -18,6 +18,19 @@ fn cfg() -> Config {
 }
 
 const DAY: u64 = 86_400_000;
+const SNAP_HEADER: usize = 64;
+const SNAP_ENTRY: usize = 32;
+const SNAP_ALIGN: usize = 64;
+const SNAP_FLAGS_AT: usize = 6;
+const SNAP_SECTION_COUNT_AT: usize = 8;
+const SNAP_CONFIG_LEN_AT: usize = 16;
+const SNAP_CREATED_AT: usize = 28;
+const KIND_ENGINE_STATE: u16 = 36;
+const KIND_EDGE_HIST_OUT_META: u16 = 46;
+const KIND_EDGE_HIST_OUT_POOL: u16 = 47;
+const KIND_EDGE_HIST_IN_META: u16 = 48;
+const KIND_EDGE_HIST_IN_POOL: u16 = 49;
+const STATE_V2_LEN: usize = 32;
 
 /// A workload touching every structure: entities, tags, links, revisions,
 /// tombstones.
@@ -52,16 +65,27 @@ fn workload(mem: &mut Memory<'_>, store: &mut MemStorage) {
         store,
         LinkInput {
             now: 62 * DAY,
-            src: "plugmem",
+            src: "package",
             rel: "depends_on",
-            dst: "tokio",
+            dst: "runtime",
             provenance: None,
+        },
+    )
+    .unwrap();
+    mem.unlink(
+        store,
+        UnlinkInput {
+            now: 63 * DAY,
+            src: "package",
+            rel: "depends_on",
+            dst: "runtime",
         },
     )
     .unwrap();
 }
 
 fn assert_equal(a: &mut Memory<'_>, b: &mut Memory<'_>) {
+    assert_eq!(a.stats(), b.stats());
     assert_eq!(a.facts_len(), b.facts_len());
     assert_eq!(a.entities_len(), b.entities_len());
     for id in 0..a.facts_len() as u32 {
@@ -82,6 +106,23 @@ fn assert_equal(a: &mut Memory<'_>, b: &mut Memory<'_>) {
         ..RecallQuery::text(100 * DAY, "работа tokio")
     };
     assert_eq!(a.recall(q).unwrap().rendered, b.recall(q).unwrap().rendered);
+    let current_graph = RecallQuery {
+        entities: &["package"],
+        ..RecallQuery::text(100 * DAY, "")
+    };
+    assert_eq!(
+        a.recall(current_graph).unwrap().edges,
+        b.recall(current_graph).unwrap().edges
+    );
+    let historical_graph = RecallQuery {
+        entities: &["package"],
+        as_of: Some(62 * DAY),
+        ..RecallQuery::text(100 * DAY, "")
+    };
+    assert_eq!(
+        a.recall(historical_graph).unwrap().edges,
+        b.recall(historical_graph).unwrap().edges
+    );
 }
 
 #[test]
@@ -193,6 +234,27 @@ fn overlay_open_replays_journal_and_matches_owned() {
     )
     .unwrap();
     mem.forget(&mut store, 102 * DAY, FactId(4)).unwrap();
+    mem.link(
+        &mut store,
+        LinkInput {
+            now: 103 * DAY,
+            src: "plugmem",
+            rel: "uses",
+            dst: "overlay",
+            provenance: None,
+        },
+    )
+    .unwrap();
+    mem.unlink(
+        &mut store,
+        UnlinkInput {
+            now: 104 * DAY,
+            src: "plugmem",
+            rel: "uses",
+            dst: "overlay",
+        },
+    )
+    .unwrap();
 
     let snap = store.read_snapshot().unwrap().unwrap();
     let journal = store.read_journal().unwrap();
@@ -202,6 +264,24 @@ fn overlay_open_replays_journal_and_matches_owned() {
     let (mut overlay, _) = Memory::from_bytes_overlay(&snap, &journal, cfg()).unwrap();
 
     assert_equal(&mut owned, &mut overlay);
+    assert_eq!(overlay.stats().edges, mem.stats().edges);
+    assert_eq!(overlay.stats().edge_versions, mem.stats().edge_versions);
+    let plugmem = overlay.entity("plugmem").expect("source entity exists");
+    let overlay_entity = overlay
+        .entity("overlay")
+        .expect("destination entity exists");
+    let historical_tail_edge = RecallQuery {
+        entities: &["plugmem"],
+        as_of: Some(103 * DAY),
+        ..RecallQuery::text(110 * DAY, "")
+    };
+    let edges = overlay.recall(historical_tail_edge).unwrap().edges;
+    assert!(
+        edges
+            .iter()
+            .any(|edge| edge.src == plugmem && edge.dst == overlay_entity),
+        "overlay replay keeps the closed post-snapshot edge history"
+    );
     // Canonical: overlay dumps byte-identically to owned, and to the live
     // engine that produced the snapshot + journal.
     assert_eq!(overlay.snapshot_bytes(0), owned.snapshot_bytes(0));
@@ -280,6 +360,143 @@ fn structural_corruption_is_a_typed_error_at_load() {
     let mut b = bytes.clone();
     b[10] = 1; // reserved header byte must be zero
     assert!(Memory::from_bytes(Some(&b), &[], cfg()).is_err());
+}
+
+#[test]
+fn incomplete_edge_history_sections_are_rejected() {
+    let (mut mem, mut store) = (Memory::new(cfg()).unwrap(), MemStorage::new());
+    mem.link(
+        &mut store,
+        LinkInput {
+            now: DAY,
+            src: "package",
+            rel: "depends_on",
+            dst: "runtime",
+            provenance: None,
+        },
+    )
+    .unwrap();
+    let mut bytes = mem.snapshot_bytes(0);
+    retag_section(&mut bytes, KIND_EDGE_HIST_IN_POOL, 60_000);
+
+    let err = Memory::from_bytes(Some(&bytes), &[], cfg()).unwrap_err();
+    assert_eq!(
+        err,
+        Error::Corrupt("snapshot has incomplete edge history sections")
+    );
+    let err = Memory::from_bytes_borrowed(&bytes, &[], cfg()).unwrap_err();
+    assert_eq!(
+        err,
+        Error::Corrupt("snapshot has incomplete edge history sections")
+    );
+}
+
+#[test]
+fn current_snapshot_with_edges_requires_edge_history_sections() {
+    let (mut mem, mut store) = (Memory::new(cfg()).unwrap(), MemStorage::new());
+    mem.link(
+        &mut store,
+        LinkInput {
+            now: DAY,
+            src: "package",
+            rel: "depends_on",
+            dst: "runtime",
+            provenance: None,
+        },
+    )
+    .unwrap();
+    let mut bytes = mem.snapshot_bytes(0);
+    for kind in [
+        KIND_EDGE_HIST_OUT_META,
+        KIND_EDGE_HIST_OUT_POOL,
+        KIND_EDGE_HIST_IN_META,
+        KIND_EDGE_HIST_IN_POOL,
+    ] {
+        retag_section(&mut bytes, kind, kind + 60_000);
+    }
+
+    let err = Memory::from_bytes(Some(&bytes), &[], cfg()).unwrap_err();
+    assert_eq!(
+        err,
+        Error::Corrupt("snapshot is missing edge history sections")
+    );
+    let err = Memory::from_bytes_borrowed(&bytes, &[], cfg()).unwrap_err();
+    assert_eq!(
+        err,
+        Error::Corrupt("snapshot is missing edge history sections")
+    );
+}
+
+#[test]
+fn snapshot_rejects_edge_counter_below_history_records() {
+    let (mut mem, mut store) = (Memory::new(cfg()).unwrap(), MemStorage::new());
+    mem.link(
+        &mut store,
+        LinkInput {
+            now: DAY,
+            src: "package",
+            rel: "depends_on",
+            dst: "runtime",
+            provenance: None,
+        },
+    )
+    .unwrap();
+    let mut bytes = mem.snapshot_bytes(0);
+    let state = section_body(&bytes, KIND_ENGINE_STATE);
+    bytes[state.start + 32..state.start + 36].copy_from_slice(&0u32.to_le_bytes());
+
+    let err = Memory::from_bytes(Some(&bytes), &[], cfg()).unwrap_err();
+    assert_eq!(
+        err,
+        Error::Corrupt("engine edge id counter below record count")
+    );
+    let err = Memory::from_bytes_borrowed(&bytes, &[], cfg()).unwrap_err();
+    assert_eq!(
+        err,
+        Error::Corrupt("engine edge id counter below record count")
+    );
+}
+
+#[test]
+fn legacy_snapshot_without_edge_history_migrates_current_edges() {
+    let (mut mem, mut store) = (Memory::new(cfg()).unwrap(), MemStorage::new());
+    mem.link(
+        &mut store,
+        LinkInput {
+            now: DAY,
+            src: "package",
+            rel: "depends_on",
+            dst: "runtime",
+            provenance: None,
+        },
+    )
+    .unwrap();
+    let legacy = legacy_snapshot_without_edge_history(&mem.snapshot_bytes(0));
+    let (loaded, _) = Memory::from_bytes(Some(&legacy), &[], cfg()).unwrap();
+
+    let stats = loaded.stats();
+    assert_eq!(stats.edges, 1);
+    assert_eq!(stats.edge_versions, 1);
+    assert_eq!(stats.next_edge, 1);
+    let current = loaded
+        .recall(RecallQuery {
+            entities: &["package"],
+            ..RecallQuery::text(2 * DAY, "")
+        })
+        .unwrap();
+    assert_eq!(current.edges.len(), 1);
+    let historical = loaded
+        .recall(RecallQuery {
+            entities: &["package"],
+            as_of: Some(DAY),
+            ..RecallQuery::text(2 * DAY, "")
+        })
+        .unwrap();
+    assert_eq!(historical.edges, current.edges);
+
+    let borrowed = Memory::from_bytes_borrowed(&legacy, &[], cfg()).unwrap();
+    assert_eq!(borrowed.stats().edges, 1);
+    assert_eq!(borrowed.stats().edge_versions, 1);
 }
 
 // The bitflip sweep relies on `catch_unwind` (unwinding) and is heavy — native
@@ -597,4 +814,84 @@ fn disk_first_propagates_a_scratch_error() {
         mem.snapshot_disk_first(1, &mut text, &mut vec, &mut out),
         Err(Error::Storage(_))
     ));
+}
+
+fn align_up(v: usize) -> usize {
+    v.div_ceil(SNAP_ALIGN) * SNAP_ALIGN
+}
+
+fn table_start(bytes: &[u8]) -> usize {
+    let config_len = u32::from_le_bytes(
+        bytes[SNAP_CONFIG_LEN_AT..SNAP_CONFIG_LEN_AT + 4]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    align_up(SNAP_HEADER + config_len)
+}
+
+fn section_count(bytes: &[u8]) -> usize {
+    u16::from_le_bytes(
+        bytes[SNAP_SECTION_COUNT_AT..SNAP_SECTION_COUNT_AT + 2]
+            .try_into()
+            .unwrap(),
+    ) as usize
+}
+
+fn section_entries(bytes: &[u8]) -> impl Iterator<Item = (usize, u16, usize, usize)> + '_ {
+    let start = table_start(bytes);
+    (0..section_count(bytes)).map(move |i| {
+        let at = start + i * SNAP_ENTRY;
+        let kind = u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap());
+        let offset = u64::from_le_bytes(bytes[at + 8..at + 16].try_into().unwrap()) as usize;
+        let len = u64::from_le_bytes(bytes[at + 16..at + 24].try_into().unwrap()) as usize;
+        (at, kind, offset, len)
+    })
+}
+
+fn retag_section(bytes: &mut [u8], old: u16, new: u16) {
+    let (at, _, _, _) = section_entries(bytes)
+        .find(|(_, kind, _, _)| *kind == old)
+        .expect("section exists");
+    bytes[at..at + 2].copy_from_slice(&new.to_le_bytes());
+}
+
+fn section_body(bytes: &[u8], want: u16) -> std::ops::Range<usize> {
+    let (_, _, offset, len) = section_entries(bytes)
+        .find(|(_, kind, _, _)| *kind == want)
+        .expect("section exists");
+    offset..offset + len
+}
+
+fn legacy_snapshot_without_edge_history(bytes: &[u8]) -> Vec<u8> {
+    let flags = u16::from_le_bytes(bytes[SNAP_FLAGS_AT..SNAP_FLAGS_AT + 2].try_into().unwrap());
+    let config_len = u32::from_le_bytes(
+        bytes[SNAP_CONFIG_LEN_AT..SNAP_CONFIG_LEN_AT + 4]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    let created_at = u64::from_le_bytes(
+        bytes[SNAP_CREATED_AT..SNAP_CREATED_AT + 8]
+            .try_into()
+            .unwrap(),
+    );
+    let config = &bytes[SNAP_HEADER..SNAP_HEADER + config_len];
+    let mut writer = SnapshotWriter::new();
+    for (_, kind, offset, len) in section_entries(bytes) {
+        if [
+            KIND_EDGE_HIST_OUT_META,
+            KIND_EDGE_HIST_OUT_POOL,
+            KIND_EDGE_HIST_IN_META,
+            KIND_EDGE_HIST_IN_POOL,
+        ]
+        .contains(&kind)
+        {
+            continue;
+        }
+        let mut section = bytes[offset..offset + len].to_vec();
+        if kind == KIND_ENGINE_STATE {
+            section.truncate(STATE_V2_LEN);
+        }
+        writer.section(kind, section).unwrap();
+    }
+    writer.finish(config, flags, created_at, "0.2.0")
 }

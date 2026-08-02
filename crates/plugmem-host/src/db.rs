@@ -48,7 +48,7 @@ use memmap2::Mmap;
 use plugmem_core::{
     Config, Error, FactFault, FactRecord, LinkInput, MaintainReport, MaintenanceMode,
     MaintenanceOptions, MemStorage, Memory, OpenReport, RecallQuery, RecallResult, RecallScratch,
-    RememberInput, RememberOutcome, Stats, Storage,
+    RememberInput, RememberOutcome, Stats, Storage, UnlinkInput,
 };
 
 thread_local! {
@@ -709,6 +709,15 @@ impl Database {
         engine.with(store, |mem, store| mem.link(store, input))?;
         self.after_mutation(&mut st, input.now)?;
         Ok(())
+    }
+
+    /// Closes a typed edge. Returns `false` when the edge is already absent.
+    pub fn unlink(&self, input: UnlinkInput<'_>) -> Result<bool, HostError> {
+        let mut st = self.write();
+        let State { engine, store, .. } = &mut *st;
+        let fresh = engine.with(store, |mem, store| mem.unlink(store, input))?;
+        self.after_mutation(&mut st, input.now)?;
+        Ok(fresh)
     }
 
     /// An owned copy of one fact, or `None` for unknown/tombstoned ids.

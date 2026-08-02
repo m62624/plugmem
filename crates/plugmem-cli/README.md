@@ -108,7 +108,7 @@ filter; they are not a source):
 |---|---|---|
 | **Lexical** | [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) (Robertson idf) over a Unicode ([UAX #29](https://unicode.org/reports/tr29/)) tokenizer | exact terms / keyword overlap |
 | **Semantic** | int8-quantized cosine — flat two-phase below a threshold, an [HNSW](https://arxiv.org/abs/1603.09320) graph above | meaning / nearest neighbours |
-| **Graph** | entity graph with typed edges, breadth-first from query anchors | relational knowledge |
+| **Graph** | entity graph with current typed edges on the hot path; `--as-of` walks edge history | relational knowledge |
 | **Temporal** | range scans over a `recorded_at`-ordered index; bitemporal validity | "what was true *then*", time windows |
 
 ## Usage
@@ -128,6 +128,7 @@ engine keeps no clock, so `now` comes from the system clock at each call.
 | `revise <ID> <TEXT> [same flags as remember]` | close the old fact, record the successor |
 | `forget <ID>` | tombstone a fact (purged physically at the next `maintain`) |
 | `link <SRC> <REL> <DST>` | upsert a typed edge between entities |
+| `unlink <SRC> <REL> <DST>` | close the current typed edge while preserving `--as-of` history |
 | `show <ID>` | one fact's full card — text, both time axes, state |
 | `stats` | engine size counters |
 | `maintain` | policy-driven maintenance: cheap no-op, tombstone compaction, text reindex or bounded HNSW work |

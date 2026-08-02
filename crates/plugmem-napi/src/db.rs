@@ -22,7 +22,7 @@ use napi::{Env, Error, Result, Task};
 use napi_derive::napi;
 use plugmem_host::{
     Database, FactId, HostError, LinkInput, ReadOnlyDatabase, RecallQuery, RememberInput, Settings,
-    SettingsError,
+    SettingsError, UnlinkInput,
 };
 
 use crate::types::{
@@ -264,6 +264,19 @@ impl Plugmem {
                 rel: &args.rel,
                 dst: &args.dst,
                 provenance: None,
+            })
+            .map_err(to_napi_err)
+    }
+
+    /// Closes the current typed edge `src -rel-> dst`. @throws in read-only mode.
+    #[napi]
+    pub fn unlink(&self, args: LinkArgs) -> Result<bool> {
+        self.writer()?
+            .unlink(UnlinkInput {
+                now: now_ms(),
+                src: &args.src,
+                rel: &args.rel,
+                dst: &args.dst,
             })
             .map_err(to_napi_err)
     }

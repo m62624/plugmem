@@ -125,7 +125,7 @@ filter; they are not a source):
 |---|---|---|
 | **Lexical** | [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) over a Unicode ([UAX #29](https://unicode.org/reports/tr29/)) tokenizer | exact terms / keyword overlap |
 | **Semantic** | int8-quantized cosine — flat below a threshold, an [HNSW](https://arxiv.org/abs/1603.09320) graph above | meaning / nearest neighbours |
-| **Graph** | entity graph with typed edges, breadth-first from query anchors | relational knowledge |
+| **Graph** | entity graph with current typed edges on the hot path; `as_of` walks edge history | relational knowledge |
 | **Temporal** | range scans over a `recorded_at`-ordered index; bitemporal validity | "what was true *then*", time windows |
 
 ## Tools
@@ -146,6 +146,7 @@ sets `isError: true` so the model can read and react to it.
 | `plugmem_revise` | close fact `id`, record the successor (same args as remember + `id`) |
 | `plugmem_forget` | tombstone fact `id` (purged at the next maintain) |
 | `plugmem_link` | upsert a typed edge `src -rel-> dst` |
+| `plugmem_unlink` | close the current typed edge `src -rel-> dst` while preserving `as_of` history |
 | `plugmem_show` | one fact's full card by `id` |
 | `plugmem_stats` | engine size counters |
 | `plugmem_export` | every open fact as a JSON array |

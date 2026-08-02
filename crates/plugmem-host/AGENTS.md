@@ -44,7 +44,11 @@ cargo test -p plugmem-host
 cargo test -p plugmem-host --all-features
 cargo test -p plugmem-host --test concurrency
 cargo run --release -p plugmem-host --example integrity
+cargo run -p plugmem-host --example edge_lifecycle
+cargo run -p plugmem-host --example maintain_modes
 cargo run --release -p plugmem-host --example recall_ollama
+cargo run --release -p plugmem-host --example bench_database -- 100000 --diagnose-recall
+cargo run --release -p plugmem-host --example bench_edges -- 100000
 cargo bench -p plugmem-host --bench integrity
 ```
 
