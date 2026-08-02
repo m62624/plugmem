@@ -587,6 +587,7 @@ fn disk_first_propagates_a_scratch_error() {
     let mut mem = Memory::new(c).unwrap();
     let mut store = MemStorage::new();
     vector_corpus(&mut mem, &mut store, 5);
+    mem.forget(&mut store, DAY, FactId(1)).unwrap();
 
     // The text scratch runs out mid-rebuild: the error propagates as Storage.
     let mut text = FailingScratch { budget: 10 };

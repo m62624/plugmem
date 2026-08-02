@@ -242,6 +242,37 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     emit_usize("maintain", "purged_facts", maintain.purged);
     emit_usize("maintain", "bytes_before", maintain.bytes_before);
     emit_usize("maintain", "bytes_after", maintain.bytes_after);
+    emit_usize("maintain", "no_op", usize::from(maintain.no_op));
+    emit_usize(
+        "maintain",
+        "structural_compacted",
+        usize::from(maintain.structural_compacted),
+    );
+    emit_usize(
+        "maintain",
+        "bm25_compacted",
+        usize::from(maintain.bm25_compacted),
+    );
+    emit_usize(
+        "maintain",
+        "bm25_reindexed",
+        usize::from(maintain.bm25_reindexed),
+    );
+    emit_usize(
+        "maintain",
+        "hnsw_rebuilt",
+        usize::from(maintain.hnsw_rebuilt),
+    );
+    emit_usize(
+        "maintain",
+        "hnsw_remapped",
+        usize::from(maintain.hnsw_remapped),
+    );
+    emit_u64(
+        "maintain",
+        "hnsw_inserted",
+        u64::from(maintain.hnsw_inserted),
+    );
 
     let after_maintain = db.stats();
     emit_stats("after_maintain", after_maintain, None);
@@ -620,6 +651,8 @@ fn emit_stats(phase: &str, stats: plugmem_host::Stats, rss_delta: Option<(usize,
     emit_usize(phase, "terms", stats.terms);
     emit_usize(phase, "edges", stats.edges);
     emit_usize(phase, "vectors", stats.vectors);
+    emit_usize(phase, "tombstones", stats.tombstones);
+    emit_u64(phase, "hnsw_indexed", u64::from(stats.hnsw_indexed));
     emit_usize(phase, "pool_bytes", stats.pool_bytes);
     emit_u64(phase, "next_fact", u64::from(stats.next_fact));
     if let Some((after, before)) = rss_delta {

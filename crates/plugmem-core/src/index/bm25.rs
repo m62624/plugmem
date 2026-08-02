@@ -131,6 +131,37 @@ impl<'a> Bm25Index<'a> {
         Ok(())
     }
 
+    /// Builds a compacted BM25 index by filtering this index's existing
+    /// postings and document lengths through `live`.
+    ///
+    /// This is the ordinary-maintenance path: it preserves the exact term ids
+    /// and term frequencies already indexed, so compaction does not have to
+    /// read and tokenize every live document again. A tokenizer migration must
+    /// use the text reindex path instead.
+    pub(crate) fn compact_live(
+        &self,
+        shards: usize,
+        max_bytes: usize,
+        mut live: impl FnMut(FactId) -> bool,
+    ) -> Result<Bm25Index<'static>, Error> {
+        let mut out = Bm25Index::new(shards, max_bytes)?;
+        for doc in self.doc_len.iter() {
+            if live(doc.fact) {
+                out.doc_len.insert(&doc)?;
+                out.total_docs += 1;
+                out.total_len += u64::from(doc.len);
+            }
+        }
+        for slot in self.postings.slots() {
+            for (fact, tf) in self.postings.entries(slot.key) {
+                if live(fact) {
+                    out.postings.push(slot.key, fact, tf)?;
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Document frequency of a term.
     pub fn df(&self, term: u32) -> u32 {
         self.postings.count(term)

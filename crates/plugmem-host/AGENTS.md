@@ -10,7 +10,7 @@ The public writer is `Database`; the zero-copy reader is `ReadOnlyDatabase`. Cor
 
 `FileStorage` keeps the published snapshot generations immutable and appends mutations to a journal. A manifest points to the current generation. Checkpoint writes a fresh image to a temporary generation, flushes according to `FsyncPolicy`, publishes it atomically, and clears the journal. Opening performs crash cleanup for unpublished/orphan staging files.
 
-Default maintenance thresholds are 1024 operations or a 4 MiB journal, unless configured through `DatabaseBuilder`/`Settings`. `maintain_every_forgets` is optional and physically purges tombstones/builds indexes when enabled.
+Default checkpoint thresholds are 1024 operations or a 4 MiB journal, unless configured through `DatabaseBuilder`/`Settings`. `maintain_every_forgets` is optional and triggers policy-driven maintenance after tombstones accumulate. The default `Auto` path is a cheap no-op when nothing is pending; tombstone compaction stays disk-first.
 
 Never overwrite a published generation in place. Preserve the temp-write, fsync, rename, manifest, and garbage-collection ordering when changing persistence code.
 

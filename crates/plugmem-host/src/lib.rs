@@ -52,8 +52,9 @@ pub use storage::{FileScratch, FileStorage, FsyncPolicy};
 // embedders need only this crate.
 pub use plugmem_core::snapshot::{DEFAULT_SCRUB_BUDGET, ScrubProgress};
 pub use plugmem_core::{
-    Config, EntityId, Error, FactId, FactRecord, LinkInput, MaintainReport, OpenReport,
-    RecallQuery, RecallResult, RecallScratch, RecalledEdge, RecalledFact, RememberInput,
-    RememberOutcome, Similar, SimilarReason, Stats, VALID_TO_OPEN, fact_flags,
+    Config, EntityId, Error, FactId, FactRecord, LinkInput, MaintainReport, MaintenanceMode,
+    MaintenanceOptions, OpenReport, RecallQuery, RecallResult, RecallScratch, RecalledEdge,
+    RecalledFact, RememberInput, RememberOutcome, Similar, SimilarReason, Stats, VALID_TO_OPEN,
+    fact_flags,
 };
 pub use plugmem_core::{MemScratch, Scratch};

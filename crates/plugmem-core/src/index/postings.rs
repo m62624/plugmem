@@ -162,6 +162,13 @@ impl<'a, const TF: bool> PostingStore<'a, TF> {
         self.handles.len()
     }
 
+    /// Iterates the per-key posting-list headers. This is an internal
+    /// maintenance hook: callers can rebuild/compact a store by walking each
+    /// list in place, without knowing the arena layout.
+    pub(crate) fn slots(&self) -> impl Iterator<Item = IdListSlot> + '_ {
+        self.handles.iter()
+    }
+
     /// Section dumps: handle-arena meta.
     pub(crate) fn handles_meta(&self) -> alloc::vec::Vec<u8> {
         let mut out = alloc::vec::Vec::new();

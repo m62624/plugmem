@@ -123,17 +123,17 @@ active facts respectively.
 |---|---:|---:|
 | Active facts after `maintain` | 86,010 | 860,204 |
 | Pool bytes after `maintain` | 56.8 MB | 382.0 MB |
-| Streaming load | 7.88 s (12,689 ops/s) | 148.32 s (6,742 ops/s) |
-| Text-only recall p50 | 52 µs | 1.91 ms |
-| Full hybrid recall p50 | 636 µs | 4.89 ms |
-| Checkpoint | 69 ms | 550 ms |
-| `maintain` | 0.68 s | 13.85 s |
+| Streaming load | 9.45 s (10,584 ops/s) | 159.63 s (6,265 ops/s) |
+| Text-only recall p50 | 55 µs | 1.77 ms |
+| Full hybrid recall p50 | 635 µs | 4.55 ms |
+| Checkpoint | 70 ms | 519 ms |
+| `maintain` | 0.26 s | 8.60 s |
 
 ![Recall latency at 100k versus 1M operations](crates/plugmem-host/assets/database-recall-scale-100k-1m.svg)
 
 The 1M run holds roughly 10× as many active facts while the pool is 6.7×
-larger. Total load time is 18.8× higher, but the per-operation load cost grows
-by 1.9×; full hybrid recall grows by 7.7×. These are machine-specific trend
+larger. Total load time is 16.9× higher, but the per-operation load cost grows
+by 1.7×; full hybrid recall grows by 7.2×. These are machine-specific trend
 measurements, not release guarantees. Reproduce both columns with:
 
 ```text

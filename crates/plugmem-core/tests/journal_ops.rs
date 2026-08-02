@@ -53,7 +53,11 @@ fn sample_ops() -> Vec<Op<'static>> {
             dst: "plugmem",
             provenance: FactId::NONE,
         },
-        Op::Maintain { now: 500 },
+        Op::Maintain {
+            now: 500,
+            mode: 0,
+            max_hnsw_inserts: u32::MAX,
+        },
     ]
 }
 
@@ -83,10 +87,12 @@ fn decode_survives_any_truncation_or_bitflip() {
         // itself a complete valid payload, a successful decode — the
         // trailing-bytes rule forbids that here by construction).
         for cut in 0..payload.len() {
-            assert!(
-                Op::decode(code, &payload[..cut]).is_err(),
-                "op {code}: prefix of {cut} accepted"
-            );
+            let got = Op::decode(code, &payload[..cut]);
+            if code == 5 && cut == 8 {
+                assert!(got.is_ok(), "old maintain marker payload remains valid");
+            } else {
+                assert!(got.is_err(), "op {code}: prefix of {cut} accepted");
+            }
         }
         // Bitflips either fail typed or decode into some other valid op —
         // never panic. (Content integrity is the checksum layer's job.)
@@ -187,7 +193,12 @@ fn replay_rejects_semantically_corrupt_journals() {
     assert_eq!(err, Error::Corrupt("journal forgets an unknown fact"));
 
     // A maintain marker alone replays as a no-op.
-    let mem = open_with(&[Op::Maintain { now: 1 }]).unwrap();
+    let mem = open_with(&[Op::Maintain {
+        now: 1,
+        mode: 0,
+        max_hnsw_inserts: u32::MAX,
+    }])
+    .unwrap();
     assert_eq!(mem.facts_len(), 0);
 
     // A duplicated tail (double-applied journal segment) is skipped

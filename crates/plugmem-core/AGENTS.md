@@ -10,7 +10,7 @@ The engine is single-threaded at this layer. Concurrency, file locking, mmap, an
 
 - `memory.rs` — `Memory`, remember/revise/forget/link, journal application, stats, and orchestration.
 - `memory/recall.rs` — `RecallQuery`, candidate sources, scratch buffers, filtering, fusion, and result rendering data.
-- `memory/maintain.rs` — purge/compaction and HNSW rebuild policy.
+- `memory/maintain.rs` — policy-driven no-op, purge/compaction, text reindex and HNSW optimization.
 - `memory/persist.rs` — loading and writing the arena-backed engine image.
 - `model.rs` — fixed-size fact/entity/edge/temporal records and flags.
 - `index/bm25.rs` and `index/postings.rs` — lexical search and postings.
@@ -32,7 +32,7 @@ Metadata keys are sorted and duplicate keys are rejected/canonicalized before be
 
 `Config::dim == 0` disables vector storage. When dimension is non-zero, input `f32` vectors are quantized into the vector pool; replay reconstructs the quantized representation rather than relying on nondeterministic floating-point state.
 
-Flat vector search scans the vector pool. `Config::flat_to_hnsw` selects the regime; the default is 24,000 slots. `remember` does not incrementally rebuild HNSW. Maintenance builds/rebuilds the graph and keeps newer slots in the flat tail when appropriate. Any performance statement must identify flat versus HNSW, dimension, `ef`, result count, and whether it measures the complete recall pipeline.
+Flat vector search scans the vector pool. `Config::flat_to_hnsw` selects the regime; the default is 24,000 slots. `remember` does not incrementally rebuild HNSW. Maintenance advances/rebuilds the graph and keeps newer slots in the flat tail when appropriate; `Auto` uses a bounded insertion budget. Any performance statement must identify flat versus HNSW, dimension, `ef`, result count, and whether it measures the complete recall pipeline.
 
 Recall may combine BM25, vector, entity graph, tags, and temporal sources. The final result uses filtering, RRF-style fusion, recency, closed-fact policy, and token budget. A source benchmark is not a mixed recall benchmark. Reuse `RecallScratch` for repeated queries instead of allocating per query.
 

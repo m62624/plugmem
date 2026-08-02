@@ -146,7 +146,7 @@ pub(crate) enum Command {
     },
     /// Print engine size counters and identity.
     Stats,
-    /// Run a maintenance pass now (purge tombstones, compact, build HNSW).
+    /// Run a maintenance pass now (no-op, compact, reindex or optimize).
     Maintain,
     /// Flush the journal into a fresh snapshot now and clear it. Leaves the
     /// database checkpointed, so the read-only path (`scrub`, and any

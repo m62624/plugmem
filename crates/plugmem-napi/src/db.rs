@@ -311,10 +311,10 @@ impl Plugmem {
         .map_err(to_napi_err)
     }
 
-    /// Purges tombstones, compacts, and builds the vector index; resolves with
-    /// the before/after report. **Async** (returns a `Promise`): the pass does
-    /// disk I/O (compaction, HNSW build), so it runs on a libuv worker thread and
-    /// never blocks the event loop. @throws synchronously in read-only mode.
+    /// Runs policy-driven maintenance; resolves with the before/after report.
+    /// **Async** (returns a `Promise`): the pass may do disk I/O (compaction,
+    /// HNSW work), so it runs on a libuv worker thread and never blocks the
+    /// event loop. @throws synchronously in read-only mode.
     #[napi(ts_return_type = "Promise<MaintainReport>")]
     pub fn maintain(&self) -> Result<AsyncTask<MaintainTask>> {
         Ok(AsyncTask::new(MaintainTask {

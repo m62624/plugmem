@@ -6,7 +6,8 @@
 //! workload is observation-equivalent before and after (proptest).
 
 use plugmem_core::{
-    Config, EntityId, FactId, LinkInput, MemStorage, Memory, RecallQuery, RememberInput,
+    Config, EntityId, FactId, LinkInput, MaintenanceMode, MaintenanceOptions, MemStorage, Memory,
+    RecallQuery, RememberInput, Storage,
 };
 #[cfg(not(target_family = "wasm"))]
 use proptest::prelude::*;
@@ -178,6 +179,107 @@ fn maintain_preserves_observable_state() {
         .remember(&mut store, RememberInput::text(90 * DAY, "fresh"))
         .unwrap();
     assert_eq!(out.id.0, next);
+}
+
+#[test]
+fn auto_maintain_noop_does_not_append_a_marker() {
+    let (mut mem, mut store) = (Memory::new(cfg(0)).unwrap(), MemStorage::new());
+    let report = mem.maintain(&mut store, DAY).unwrap();
+    assert!(report.no_op);
+    assert_eq!(report.purged, 0);
+    assert!(!report.structural_compacted);
+    assert_eq!(store.read_journal().unwrap().len(), 0);
+}
+
+#[test]
+fn ordinary_compaction_reuses_bm25_postings_without_reindexing() {
+    let (mut mem, mut store) = (Memory::new(cfg(0)).unwrap(), MemStorage::new());
+    let keep = mem
+        .remember(
+            &mut store,
+            RememberInput::text(DAY, "alpha beta searchable survivor"),
+        )
+        .unwrap()
+        .id;
+    let drop = mem
+        .remember(&mut store, RememberInput::text(DAY, "alpha beta removed"))
+        .unwrap()
+        .id;
+    mem.forget(&mut store, 2 * DAY, drop).unwrap();
+
+    let report = mem.maintain(&mut store, 3 * DAY).unwrap();
+    assert!(report.structural_compacted);
+    assert!(report.bm25_compacted);
+    assert!(!report.bm25_reindexed);
+    assert_eq!(report.purged, 1);
+    assert_eq!(report.tombstones_before, 1);
+    assert_eq!(mem.stats().tombstones, 0);
+
+    let out = mem
+        .recall(RecallQuery::text(4 * DAY, "searchable survivor"))
+        .unwrap();
+    assert_eq!(out.facts.first().map(|f| f.id), Some(keep));
+    assert!(out.facts.iter().all(|f| f.id != drop));
+}
+
+#[test]
+fn explicit_reindex_text_rebuilds_bm25_without_compacting_when_no_tombstones() {
+    let (mut mem, mut store) = (Memory::new(cfg(0)).unwrap(), MemStorage::new());
+    mem.remember(&mut store, RememberInput::text(DAY, "alpha beta gamma"))
+        .unwrap();
+    let report = mem
+        .maintain_with_options(
+            &mut store,
+            2 * DAY,
+            MaintenanceOptions {
+                mode: MaintenanceMode::ReindexText,
+                max_hnsw_inserts: Some(0),
+            },
+        )
+        .unwrap();
+    assert!(!report.no_op);
+    assert!(!report.structural_compacted);
+    assert!(report.bm25_reindexed);
+    assert!(!report.bm25_compacted);
+    assert_eq!(report.purged, 0);
+}
+
+#[test]
+fn vector_optimization_can_be_bounded() {
+    let dim = 16;
+    let mut c = cfg(dim);
+    c.flat_to_hnsw = 8;
+    let (mut mem, mut store) = (Memory::new(c).unwrap(), MemStorage::new());
+    let mut rng = Lcg(0xCAFE);
+    for i in 0..32u64 {
+        let v = rng.vector(dim);
+        mem.remember(
+            &mut store,
+            RememberInput {
+                vector: Some(&v),
+                ..RememberInput::text(i * DAY, "vector fact")
+            },
+        )
+        .unwrap();
+    }
+
+    let report = mem
+        .maintain_with_options(
+            &mut store,
+            40 * DAY,
+            MaintenanceOptions {
+                mode: MaintenanceMode::OptimizeVectors,
+                max_hnsw_inserts: Some(5),
+            },
+        )
+        .unwrap();
+    assert!(report.hnsw_rebuilt);
+    assert_eq!(report.hnsw_inserted, 5);
+    assert_eq!(mem.stats().hnsw_indexed, 5);
+    assert!(mem.maintenance_needed(MaintenanceOptions {
+        mode: MaintenanceMode::OptimizeVectors,
+        max_hnsw_inserts: Some(5),
+    }));
 }
 
 #[test]

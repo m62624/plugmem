@@ -79,7 +79,7 @@ Important source areas include:
 - `src/journal.rs` and `src/snapshot.rs` — persistence formats;
 - `examples/` — executable examples and focused experiments.
 
-For vector storage, the slot stride is the fixed header plus signature bytes plus the quantized vector dimension. With dimension 384, the raw vector slot is 440 bytes before other engine structures. Flat search scans all slots, so its latency is primarily controlled by the number of stored vectors rather than by the requested result count. HNSW is built by maintenance/configuration paths; `remember` does not automatically rebuild the graph on every write.
+For vector storage, the slot stride is the fixed header plus signature bytes plus the quantized vector dimension. With dimension 384, the raw vector slot is 440 bytes before other engine structures. Flat search scans all slots, so its latency is primarily controlled by the number of stored vectors rather than by the requested result count. HNSW is advanced by maintenance/configuration paths with bounded work in `Auto`; `remember` does not automatically rebuild the graph on every write.
 
 ### `crates/plugmem-host`
 

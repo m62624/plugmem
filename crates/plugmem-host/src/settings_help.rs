@@ -250,7 +250,7 @@ const DOCS: &[SettingDoc] = &[
         key: "maintain_every_forgets",
         value_type: "non-negative integer",
         default: "off",
-        description: "Run physical tombstone maintenance after this many forgets",
+        description: "Run policy maintenance after this many forgets",
         scope: SettingScope::Shared,
     },
     SettingDoc {
