@@ -7,7 +7,7 @@ use icu_locale_core::LanguageIdentifier;
 use icu_normalizer::ComposingNormalizerBorrowed;
 use icu_properties::{
     CodePointMapData, CodePointSetData,
-    props::{DefaultIgnorableCodePoint, Ideographic, Script},
+    props::{Alphabetic, DefaultIgnorableCodePoint, GeneralCategory, Ideographic, Script},
 };
 use icu_segmenter::{
     WordSegmenter, WordSegmenterBorrowed, iterators::WordBreakIterator,
@@ -70,6 +70,28 @@ impl UnicodeBackend {
     #[inline]
     pub(super) fn is_default_ignorable(c: char) -> bool {
         CodePointSetData::new::<DefaultIgnorableCodePoint>().contains(c)
+    }
+
+    /// Returns whether a character is Unicode-alphabetic, including marks
+    /// such as Tibetan U+0F71 that are valid standalone lexical terms but are
+    /// not considered alphanumeric by Rust's `char` predicate.
+    #[inline]
+    pub(super) fn is_alphabetic(c: char) -> bool {
+        CodePointSetData::new::<Alphabetic>().contains(c)
+    }
+
+    /// Returns whether a character has one of Unicode's three `Mark`
+    /// general categories. This is intentionally broader than canonical
+    /// combining class: some script marks, such as Sinhala U+0D81, are
+    /// `NonspacingMark` characters with combining class zero.
+    #[inline]
+    pub(super) fn is_mark(c: char) -> bool {
+        matches!(
+            CodePointMapData::<GeneralCategory>::new().get(c),
+            GeneralCategory::NonspacingMark
+                | GeneralCategory::SpacingMark
+                | GeneralCategory::EnclosingMark
+        )
     }
 
     /// Returns whether a character belongs to the CJK/Hiragana bigram policy.

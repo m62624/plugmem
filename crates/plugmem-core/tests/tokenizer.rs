@@ -79,6 +79,41 @@ fn full_unicode_text() -> impl Strategy<Value = String> {
         .prop_map(|chars| chars.into_iter().collect())
 }
 
+#[cfg(not(target_family = "wasm"))]
+fn cjk_boundary_char() -> impl Strategy<Value = char> {
+    prop_oneof![
+        2 => (0x3041u32..=0x309Fu32).prop_map(scalar_from_u32),
+        3 => (0x3400u32..=0x4DBFu32).prop_map(scalar_from_u32),
+        3 => (0x4E00u32..=0x9FFFu32).prop_map(scalar_from_u32),
+    ]
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn non_cjk_boundary_char() -> impl Strategy<Value = char> {
+    prop::sample::select(vec!['a', '7', 'é', 'က', 'ก', 'न', 'م', '한'])
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn mixed_policy_text() -> impl Strategy<Value = String> {
+    prop::collection::vec(
+        (cjk_boundary_char(), non_cjk_boundary_char(), any::<bool>()),
+        1..=64,
+    )
+    .prop_map(|runs| {
+        let mut text = String::new();
+        for (cjk, non_cjk, cjk_first) in runs {
+            if cjk_first {
+                text.push(cjk);
+                text.push(non_cjk);
+            } else {
+                text.push(non_cjk);
+                text.push(cjk);
+            }
+        }
+        text
+    })
+}
+
 #[test]
 fn prose_and_case() {
     let cases: &[(&str, &[&str])] = &[
@@ -287,6 +322,24 @@ fn regression_canonical_token_from_ordinal_and_modifier_symbols() {
 }
 
 #[test]
+fn mixed_cjk_and_myanmar_runs_are_canonical() {
+    for input in ["におက", "ကにお", "東京က大阪", "한東京က"] {
+        let emitted = tokens(input);
+        for token in emitted {
+            let retokenized = tokens(&token);
+            assert_eq!(retokenized.as_slice(), std::slice::from_ref(&token));
+        }
+    }
+
+    let emitted = tokens("におက");
+    assert_eq!(emitted, ["にお", "က"]);
+    for token in emitted {
+        let retokenized = tokens(&token);
+        assert_eq!(retokenized.as_slice(), std::slice::from_ref(&token));
+    }
+}
+
+#[test]
 fn regression_canonical_token_with_a_leading_combining_mark() {
     let emitted = tokens("׳ೳ.\u{300}º");
     assert_eq!(emitted, ["o"]);
@@ -303,6 +356,13 @@ fn leading_joiners_after_marks_are_canonical() {
 #[test]
 fn marks_after_trailing_joiners_are_canonical() {
     let emitted = tokens("a'\u{300}\u{200D}🌀");
+    assert_eq!(emitted, ["a"]);
+    assert_eq!(tokens(&emitted[0]), emitted);
+}
+
+#[test]
+fn nonspacing_marks_with_zero_combining_class_are_canonical() {
+    let emitted = tokens("a_\u{D81}_🌀");
     assert_eq!(emitted, ["a"]);
     assert_eq!(tokens(&emitted[0]), emitted);
 }
@@ -385,6 +445,21 @@ fn full_unicode_scalar_texts_are_canonical() {
     runner
         .run(&full_unicode_text(), |text| assert_canonical_tokens(&text))
         .expect("full Unicode property failed");
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn mixed_script_policy_runs_are_canonical() {
+    let config = ProptestConfig {
+        cases: 512,
+        max_shrink_iters: 4096,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    };
+    let mut runner = TestRunner::new(config);
+    runner
+        .run(&mixed_policy_text(), |text| assert_canonical_tokens(&text))
+        .expect("mixed script policy property failed");
 }
 
 #[cfg(not(target_family = "wasm"))]

@@ -40,28 +40,53 @@ env:
   WASMER_VERSION: "v7.2.0"
 
 jobs:
-  # --- linter + tests, fanned out across all three OSes in parallel ----------
-  # One matrix entry per OS, no cross-job `needs`, so Linux/Windows/macOS each
-  # run fmt + clippy + test independently and any single failure is visible at
-  # a glance (fail-fast off keeps the others going).
+  # --- formatting ------------------------------------------------------------
+  # Formatting is deterministic and platform-independent, so run it once
+  # instead of repeating the same check in every OS/feature job below.
+  format:
+    name: formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Formatting
+        run: cargo fmt --all --check
+
+  # --- linter + tests, fanned out across OSes and feature profiles -----------
+  # Each feature profile is its own matrix entry, so the three independent
+  # cargo checks no longer run sequentially inside one OS job. The default,
+  # counters, and serde profiles run on every OS; the combined all-features
+  # interaction profile runs once on Linux because it is not OS-specific.
   #
   # Features change which code compiles (specs/07 §8: clippy on one combo does
-  # not cover the others). Two feature axes alter the code surface: `counters`
-  # (the deterministic perf gates) and `serde` (Serialize/Deserialize derives),
-  # so clippy and tests run with each off and on. (There is no `std` feature:
-  # the core and arena are `no_std` unconditionally; the real no_std gate is the
-  # wasm32v1-none build job below.)
+  # not cover the others). `counters` enables deterministic perf gates and
+  # `serde` enables Serialize/Deserialize derives. The host's `config` feature
+  # is on by default and is also pulled in explicitly by the CLI, MCP, and NAPI
+  # packages. (There is no `std` feature: the core and arena are `no_std`
+  # unconditionally; the real no_std gate is the wasm32v1-none build job below.)
 
   check:
-    name: lint + test (${{ matrix.name }})
+    name: lint + test (${{ matrix.os_name }}, ${{ matrix.feature_name }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { name: Linux, os: ubuntu-latest }
-          - { name: Windows, os: windows-latest }
-          - { name: macOS, os: macos-latest }
+          - { os_name: Linux, os: ubuntu-latest, feature_name: default, feature_args: "" }
+          - { os_name: Linux, os: ubuntu-latest, feature_name: counters, feature_args: "--features counters" }
+          - { os_name: Linux, os: ubuntu-latest, feature_name: serde, feature_args: "--features serde" }
+          - { os_name: Linux, os: ubuntu-latest, feature_name: all-features, feature_args: "--all-features" }
+          - { os_name: Windows, os: windows-latest, feature_name: default, feature_args: "" }
+          - { os_name: Windows, os: windows-latest, feature_name: counters, feature_args: "--features counters" }
+          - { os_name: Windows, os: windows-latest, feature_name: serde, feature_args: "--features serde" }
+          - { os_name: macOS, os: macos-latest, feature_name: default, feature_args: "" }
+          - { os_name: macOS, os: macos-latest, feature_name: counters, feature_args: "--features counters" }
+          - { os_name: macOS, os: macos-latest, feature_name: serde, feature_args: "--features serde" }
     steps:
       - uses: actions/checkout@v7
         with:
@@ -76,26 +101,23 @@ jobs:
       - name: System deps for the chart tool (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
-      - name: Formatting
-        run: cargo fmt --all --check
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Clippy (counters — a different code surface)
-        run: cargo clippy --workspace --all-targets --features counters -- -D warnings
-      - name: Clippy (serde — a different code surface)
-        run: cargo clippy --workspace --all-targets --features serde -- -D warnings
-      - name: Tests (default)
-        run: cargo test --workspace
-      - name: Tests (counters — includes the deterministic perf gates)
-        run: cargo test --workspace --features counters
-      - name: Tests (serde — the JSON round-trip suite)
-        run: cargo test --workspace --features serde
+      - name: Clippy (${{ matrix.feature_name }})
+        run: cargo clippy --workspace --all-targets ${{ matrix.feature_args }} -- -D warnings
+      - name: Tests (${{ matrix.feature_name }})
+        run: cargo test --workspace ${{ matrix.feature_args }}
 
   # --- portability checks, in parallel with the lint+test matrix above -------
 
   no_std:
-    name: no_std build (wasm32v1-none)
+    name: no_std build (wasm32v1-none, ${{ matrix.feature_name }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { feature_name: default, feature_args: "" }
+          - { feature_name: counters, feature_args: "--features counters" }
+          - { feature_name: serde, feature_args: "--features serde" }
     steps:
       - uses: actions/checkout@v7
         with:
@@ -104,32 +126,29 @@ jobs:
         with:
           targets: wasm32v1-none
       - uses: Swatinem/rust-cache@v2
-      - name: Build libraries for a real no_std target
+      - name: Build libraries for a real no_std target (${{ matrix.feature_name }})
         run: >-
           cargo build -p plugmem-arena -p plugmem-core
-          --target wasm32v1-none
-      - name: Build again with counters (a different code surface)
-        run: >-
-          cargo build -p plugmem-arena -p plugmem-core
-          --features counters --target wasm32v1-none
-      - name: Build again with serde (proves serde works under no_std)
-        run: >-
-          cargo build -p plugmem-arena -p plugmem-core
-          --features serde --target wasm32v1-none
+          ${{ matrix.feature_args }} --target wasm32v1-none
 
   # The whole contract test suite of the core, executed on a REAL 32-bit
-  # target under both independent wasm runtimes, in both feature
-  # configurations. This is what caught the 32-bit journal allocation abort
+  # target under both independent wasm runtimes and each feature profile. This
+  # is what caught the 32-bit journal allocation abort
   # (specs/14 §5) that native 64-bit CI can never see. proptest sections are
   # native-only (gated in the test files); everything else runs.
   wasm-suite:
-    name: core suite on wasm32 (${{ matrix.runtime }}${{ matrix.features && ', counters' || '' }})
+    name: core suite on wasm32 (${{ matrix.runtime }}, ${{ matrix.feature_name }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        runtime: [wasmtime, wasmer]
-        features: ["", "--features counters"]
+        include:
+          - { runtime: wasmtime, feature_name: default, feature_args: "" }
+          - { runtime: wasmtime, feature_name: counters, feature_args: "--features counters" }
+          - { runtime: wasmtime, feature_name: serde, feature_args: "--features serde" }
+          - { runtime: wasmer, feature_name: default, feature_args: "" }
+          - { runtime: wasmer, feature_name: counters, feature_args: "--features counters" }
+          - { runtime: wasmer, feature_name: serde, feature_args: "--features serde" }
     steps:
       - uses: actions/checkout@v7
         with:
@@ -154,7 +173,7 @@ jobs:
         # Release: the torn-tail/bitflip matrices are byte-loops that crawl in
         # a debug interpreter-free JIT but still add minutes; release keeps the
         # whole suite in seconds.
-        run: cargo test --release -p plugmem-core --target wasm32-wasip1 ${{ matrix.features }}
+        run: cargo test --release -p plugmem-core --target wasm32-wasip1 ${{ matrix.feature_args }}
 
   # Build the pure-no_std probe for wasm32 AND wasm64 (WebAssembly 3.0
   # memory64), execute the artifacts in whichever runtime supports them, and
@@ -315,13 +334,14 @@ jobs:
   ci-pass:
     name: CI passed
     if: always()
-    needs: [check, no_std, wasm-suite, wasm-equivalence, skill-lint, napi-npm, dist-plan]
+    needs: [format, check, no_std, wasm-suite, wasm-equivalence, skill-lint, napi-npm, dist-plan]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any required job did not succeed
         if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
         run: |
           echo "A required CI job failed or was cancelled:"
+          echo "  format           = ${{ needs.format.result }}"
           echo "  check            = ${{ needs.check.result }}"
           echo "  no_std           = ${{ needs.no_std.result }}"
           echo "  wasm-suite       = ${{ needs.wasm-suite.result }}"
@@ -331,4 +351,4 @@ jobs:
           echo "  dist-plan        = ${{ needs.dist-plan.result }}"
           exit 1
       - name: All required jobs passed
-        run: echo "lint + test (3 OSes × feature matrix), no_std, wasm suite (wasmtime+wasmer), cross-target equivalence, skill, napi npm and dist-plan are green."
+        run: echo "format + lint/test (3 OSes × feature matrix), no_std, wasm suite (wasmtime+wasmer), cross-target equivalence, skill, napi npm and dist-plan are green."

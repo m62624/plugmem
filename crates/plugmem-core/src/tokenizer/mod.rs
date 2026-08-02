@@ -93,6 +93,8 @@ impl Tokenizer {
         let canonical = &mut self.canonical;
         let unicode = &self.unicode;
         let mut cjk_run = CjkRun::default();
+        let mut processor =
+            segment::SegmentProcessor::new(policy, unicode, &mut cjk_run, token, lower, canonical);
         let mut start = 0usize;
 
         for end in unicode.word_boundaries(&self.norm) {
@@ -101,20 +103,12 @@ impl Tokenizer {
             }
             let segment = &self.norm[start..end];
             if segment.chars().any(char::is_alphanumeric) {
-                if segment.chars().all(UnicodeBackend::is_cjk_unigram) {
-                    for character in segment.chars() {
-                        cjk_run.push(character, token, sink);
-                    }
-                } else {
-                    cjk_run.flush(token, sink);
-                    unicode.lowercase_into(segment, lower);
-                    fold::fold_segment(lower, token, canonical, policy, unicode, sink);
-                }
+                processor.process(segment, sink);
             } else {
-                cjk_run.flush(token, sink);
+                processor.flush(sink);
             }
             start = end;
         }
-        cjk_run.flush(token, sink);
+        processor.flush(sink);
     }
 }
