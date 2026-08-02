@@ -99,10 +99,14 @@ impl UnicodeBackend {
     /// `Ideographic` covers assigned Han ideographs, including compatibility
     /// ideographs, while `Script::Hiragana` retains the project's existing
     /// Japanese Hiragana bigram behavior without a hand-maintained range list.
+    /// Mark characters are excluded even if another Unicode property also
+    /// classifies them as ideographic: they have no standalone base glyph for
+    /// the CJK adjacency machine and would bypass canonical token emission.
     #[inline]
     pub(super) fn is_cjk_unigram(c: char) -> bool {
-        CodePointSetData::new::<Ideographic>().contains(c)
-            || CodePointMapData::<Script>::new().get(c) == Script::Hiragana
+        !Self::is_mark(c)
+            && (CodePointSetData::new::<Ideographic>().contains(c)
+                || CodePointMapData::<Script>::new().get(c) == Script::Hiragana)
     }
 }
 

@@ -368,6 +368,15 @@ fn nonspacing_marks_with_zero_combining_class_are_canonical() {
 }
 
 #[test]
+fn mark_only_filler_runs_are_not_contextual_tokens() {
+    let emitted = tokens("\u{363}\u{16FE4}");
+    for token in emitted {
+        assert_eq!(tokens(&token), [token]);
+    }
+    assert_eq!(tokens("\u{F71}"), ["\u{F71}"]);
+}
+
+#[test]
 fn apostrophe_joiner_requires_letters_after_folding() {
     let emitted = tokens("a'\u{115F}0");
     assert_eq!(emitted, ["a", "0"]);
