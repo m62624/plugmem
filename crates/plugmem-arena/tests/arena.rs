@@ -272,6 +272,41 @@ fn full_page_splits_instead_of_failing() {
     assert!(!a.insert(&Rec { id: 0, val: 1 }).unwrap());
 }
 
+/// Ascending keys — every id and timestamp this crate stores — must pack pages
+/// completely. Splitting a full page in half would strand the lower half
+/// forever, since nothing sorts into it again, and cost 2x the pages, the
+/// image bytes and the directory entries.
+#[test]
+fn ascending_inserts_pack_pages_completely() {
+    let mut a = ordered_arena(1);
+    let slots = Arena::<Rec>::slots_per_page();
+    let n = slots * 4;
+    for id in 0..n as u32 {
+        a.insert(&Rec { id, val: 0 }).unwrap();
+    }
+    assert_eq!(a.len(), n);
+    assert_eq!(
+        a.pool_bytes(),
+        4 * PAGE_BYTES,
+        "ascending inserts left pages half empty"
+    );
+    // Packing must not cost ordering or lookups.
+    let ids: Vec<u32> = a.iter().map(|r| r.id).collect();
+    assert_eq!(ids, (0..n as u32).collect::<Vec<_>>());
+    // A key landing *inside* a full page still splits it in half, so the
+    // insert has somewhere to go.
+    assert!(a.insert(&Rec { id: 0, val: 9 }).is_ok());
+    a.insert(&Rec {
+        id: u32::MAX,
+        val: 1,
+    })
+    .unwrap();
+    let mid = slots as u32 / 2;
+    assert!(a.remove(&rec_key(mid)));
+    assert!(a.insert(&Rec { id: mid, val: 2 }).unwrap());
+    assert_eq!(a.get(&rec_key(mid)).unwrap().val, 2);
+}
+
 #[test]
 // Heavy shift workload: minutes under the miri interpreter; the same
 // code paths are exercised by the small tests above.
@@ -712,14 +747,21 @@ mod counters {
         }
         let c = a.counters();
         assert_eq!(c.splits, 1, "filling one page past capacity splits once");
-        // Looking up a key in the second page walks one chain step.
-        a.reset_counters();
-        assert!(a.contains(&rec_key(n - 1)));
-        assert_eq!(a.counters().chain_steps, 1);
-        // First-page lookups take no chain steps.
-        a.reset_counters();
-        assert!(a.contains(&rec_key(0)));
-        assert_eq!(a.counters().chain_steps, 0);
+        // `chain_steps` counts the first-key peeks that locate a page. The
+        // directory's binary search skips the head page (it covers everything
+        // below the second page), so a two-page chain costs exactly one peek
+        // whichever page the key lives in.
+        for id in [n - 1, 0] {
+            a.reset_counters();
+            assert!(a.contains(&rec_key(id)));
+            assert_eq!(a.counters().chain_steps, 1, "locating the page for {id}");
+        }
+        // A single-page shard needs no peek at all.
+        let mut one = ordered_arena(1);
+        one.insert(&Rec { id: 7, val: 0 }).unwrap();
+        one.reset_counters();
+        assert!(one.contains(&rec_key(7)));
+        assert_eq!(one.counters().chain_steps, 0);
     }
 
     #[test]
