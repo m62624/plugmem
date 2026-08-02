@@ -132,6 +132,14 @@ cat database-benchmark-100k.tsv database-benchmark-1m.tsv > database-benchmark-s
 cargo run -p plugmem-bench-charts -- database-benchmark-scale.tsv --force
 ```
 
+The lexical tokenizer is ICU4X-backed: it applies Unicode NFKC normalization,
+locale-neutral lowercase mapping, UAX #29 word boundaries, language-aware
+segmentation for complex scripts, Latin search folding and CJK bigrams. Its
+generic Unicode path reuses scratch buffers and performs no tokenizer-internal
+allocations after warm-up. ICU4X's dictionary/LSTM path may allocate a
+temporary boundary cache for scripts such as Thai and Khmer in exchange for
+better word segmentation. The tokenizer emits canonical lexical terms; it
+does not perform stemming or lemmatization.
 ## Install
 
 Two binaries — the `plugmem-cli` CLI (crate `plugmem-cli`) and the `plugmem-mcp`
