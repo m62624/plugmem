@@ -54,6 +54,8 @@ serde = { version = "1.0.229", default-features = false, features = ["derive", "
 
 # Wrapper dependencies (std)
 clap = { version = "4.6.2", features = ["derive"] }
+# Canonical per-user config/data paths for Linux, macOS and Windows.
+directories = "6.0.0"
 # Cross-platform mmap for the host's zero-copy read-only open (specs/16).
 # 0.9.11: MSRV 1.65, MIT/Apache-2.0, covers linux/macos/windows ×
 # x86_64/aarch64. (The original `memmap` is unmaintained — RUSTSEC-2020-0077.)

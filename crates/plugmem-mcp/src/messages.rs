@@ -38,6 +38,12 @@ facts over time, then recalls the relevant ones for a prompt by fusing lexical (
 For the full verb loop and worked examples, load the matching plugmem skill or see the project: \
 https://github.com/m62624/plugmem";
 
+/// `plugmem_settings_help` tool description.
+pub const SETTINGS_HELP_TOOL: &str = "Return the complete config.toml settings catalogue, including \
+config-file precedence, the platform default config path, every supported key, its default and \
+which surface consumes it. Use this when configuration details are needed; ordinary about/help \
+responses stay short.";
+
 // ── Writer tools ──────────────────────────────────────────────────────────
 
 /// `plugmem_remember` tool description.

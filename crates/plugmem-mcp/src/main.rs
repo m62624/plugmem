@@ -29,17 +29,18 @@ use clap::Parser;
 
 /// Environment variable naming the database file (below the `--db` flag).
 const ENV_DB: &str = "PLUGMEM_DB";
-/// Default database file when neither flag nor env is given.
-const DEFAULT_DB: &str = "plugmem.db";
+/// MCP-owned config keys. The test below compares this inventory with the
+/// shared host help catalogue whenever the parser gains a new key.
+const MCP_SETTING_KEYS: &[(&str, &str)] = &[("server", "workers")];
 
 /// Command-line arguments. The host wires these once in its MCP config.
 #[derive(Parser)]
 #[command(name = "plugmem-mcp", version, about = messages::ABOUT_CLI)]
 struct Args {
-    /// Memory file to serve (else $PLUGMEM_DB, else ./plugmem.db).
+    /// Memory file to serve (else $PLUGMEM_DB, else the per-user data path).
     #[arg(long)]
     db: Option<PathBuf>,
-    /// config.toml path (else $PLUGMEM_CONFIG, else the XDG default).
+    /// config.toml path (else $PLUGMEM_CONFIG, else the platform default).
     #[arg(long)]
     config: Option<PathBuf>,
     /// Observe-only: open a shared snapshot of another process's writer. Serves
@@ -55,10 +56,9 @@ struct Args {
 
 fn main() -> ExitCode {
     let args = Args::parse();
-    let path = args
-        .db
-        .or_else(|| std::env::var_os(ENV_DB).map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_DB));
+    let cli_db = args.db;
+    let env_db = std::env::var_os(ENV_DB).map(PathBuf::from);
+    let use_config_or_default_db = cli_db.is_none() && env_db.is_none();
 
     // Read config.toml once: the shared loader builds the engine settings; the
     // server reads its own `[server].workers` from the same table. A failure
@@ -82,6 +82,22 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let path = cli_db
+        .or(env_db)
+        .or_else(|| settings.database_path.clone())
+        .or_else(plugmem_host::default_database_path)
+        .unwrap_or_else(|| PathBuf::from("plugmem.db"));
+
+    if use_config_or_default_db
+        && let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        eprintln!(
+            "plugmem-mcp: cannot create database directory {}: {e}",
+            parent.display()
+        );
+        return ExitCode::from(2);
+    }
 
     // Read-only: open a shared snapshot of another process's writer and keep the
     // embedder to embed recall queries (the read-only handle has none). Default:
@@ -114,9 +130,9 @@ fn main() -> ExitCode {
 /// a local embedder rather than monopolizing the machine.
 fn resolve_workers(table: Option<&toml::Table>) -> usize {
     table
-        .and_then(|t| t.get("server"))
+        .and_then(|t| t.get(MCP_SETTING_KEYS[0].0))
         .and_then(toml::Value::as_table)
-        .and_then(|s| s.get("workers"))
+        .and_then(|s| s.get(MCP_SETTING_KEYS[0].1))
         .and_then(toml::Value::as_integer)
         .filter(|n| *n > 0)
         .map(|n| n as usize)
@@ -147,5 +163,16 @@ mod tests {
         assert!(resolve_workers(Some(&zero)) >= 1);
 
         assert!(default_workers() >= 1);
+    }
+
+    #[test]
+    fn every_mcp_setting_is_documented() {
+        let docs = plugmem_host::settings_help().docs();
+        let documented: Vec<_> = docs
+            .iter()
+            .filter(|doc| doc.scope == plugmem_host::SettingScope::Mcp)
+            .map(|doc| (doc.section, doc.key))
+            .collect();
+        assert_eq!(documented.as_slice(), MCP_SETTING_KEYS);
     }
 }

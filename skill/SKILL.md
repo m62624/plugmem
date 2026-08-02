@@ -146,6 +146,40 @@ MANDATORY.
 - **Neither →** plugmem is not installed here. Say so; do not fabricate
   memories. Install: https://github.com/m62624/plugmem
 
+### Configuration — ask for it only when needed
+
+All three external surfaces share the same config model. Request detailed
+settings help only when configuration is relevant:
+
+- CLI: `plugmem-cli help settings` (or `plugmem-cli --json help settings`).
+- MCP: call `plugmem_settings_help` with `format:"json"` or `format:"human"`.
+- NAPI: call the exported `settingsHelp()` function.
+
+The config file itself resolves as `--config`/constructor `config`, then
+`$PLUGMEM_CONFIG`, then the platform config directory. Database-path precedence
+is an explicit `--db`/constructor path, then `$PLUGMEM_DB`, then
+`[database].path`, then the platform data directory.
+
+The common shape is:
+
+```toml
+[database]
+path = "/path/to/memory.plugmem" # optional
+
+[engine]
+dim = 0                         # 0 keeps vectors disabled
+
+[embedder]
+kind = "none"                  # or ollama/openai/lmstudio/vllm/llamacpp
+
+[maintenance]
+snapshot_every_ops = 1024
+snapshot_journal_bytes = 4194304
+```
+
+Do not invent provider URLs, model names or paths. Ask for settings help when
+the user needs to configure them, and otherwise rely on the platform default.
+
 ### Step 0b — smoke-test
 
 Before you trust the engine, prove one `remember` → `recall` round-trip against
