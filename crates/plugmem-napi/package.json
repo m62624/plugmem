@@ -1,6 +1,6 @@
 {
   "name": "plugmem",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "description": "Native Node.js addon for plugmem: an embedded long-term memory engine for LLM agents (remember / recall / revise / forget over one local file).",
   "repository": {
     "type": "git",
