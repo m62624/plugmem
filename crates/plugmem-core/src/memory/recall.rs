@@ -215,7 +215,6 @@ pub struct RecallScratch {
     time_out: Vec<(FactId, f32)>,
     time_tag: Vec<(FactId, u64)>,
     visited: Vec<(EntityId, f32)>,
-    edges_tmp: Vec<(EntityId, TermId, bool, FactId)>,
     fused: hashbrown::HashMap<u32, (f32, u8), xxhash_rust::xxh3::Xxh3Builder>,
     ranked: Vec<(FactId, f32, u8)>,
     tags_tmp: Vec<TermId>,
@@ -472,7 +471,6 @@ impl Memory<'_> {
             allow,
             graph_out,
             visited,
-            edges_tmp,
             ..
         } = s;
         graph_out.clear();
@@ -481,37 +479,51 @@ impl Memory<'_> {
         }
 
         // Breadth-first: `frontier` marks where the current depth starts.
+        //
+        // Both caps full means every further edge is a no-op — it can neither
+        // enter `out.edges` nor `visited` — so expansion stops there instead of
+        // decoding the rest of a hub's edge list. The visited prefix, and with
+        // it the result, is exactly what an exhaustive walk produced.
+        let full = |edges: &Vec<RecalledEdge>, visited: &Vec<(EntityId, f32)>| {
+            edges.len() >= GRAPH_EDGE_CAP && visited.len() >= GRAPH_ENTITY_CAP
+        };
         let mut frontier = 0usize;
         let mut weight = 1.0f32;
-        for _ in 0..self.cfg.graph_depth {
+        'expand: for _ in 0..self.cfg.graph_depth {
             let depth_end = visited.len();
             weight *= self.cfg.graph_decay;
             for at in frontier..depth_end {
-                let (entity, _) = visited[at];
-                self.neighbors(entity, as_of, q.as_of.is_some(), edges_tmp);
-                let batch = core::mem::take(edges_tmp);
-                for &(neighbor, rel, this_side_src, provenance) in &batch {
-                    let (src, dst) = if this_side_src {
-                        (entity, neighbor)
-                    } else {
-                        (neighbor, entity)
-                    };
-                    let edge = RecalledEdge {
-                        src,
-                        rel,
-                        dst,
-                        provenance,
-                    };
-                    if out.edges.len() < GRAPH_EDGE_CAP && !out.edges.contains(&edge) {
-                        out.edges.push(edge);
-                    }
-                    if visited.len() < GRAPH_ENTITY_CAP
-                        && !visited.iter().any(|&(e, _)| e == neighbor)
-                    {
-                        visited.push((neighbor, weight));
-                    }
+                if full(&out.edges, visited) {
+                    break 'expand;
                 }
-                *edges_tmp = batch;
+                let (entity, _) = visited[at];
+                self.neighbors(
+                    entity,
+                    as_of,
+                    q.as_of.is_some(),
+                    &mut |neighbor, rel, this_side_src, provenance| {
+                        let (src, dst) = if this_side_src {
+                            (entity, neighbor)
+                        } else {
+                            (neighbor, entity)
+                        };
+                        let edge = RecalledEdge {
+                            src,
+                            rel,
+                            dst,
+                            provenance,
+                        };
+                        if out.edges.len() < GRAPH_EDGE_CAP && !out.edges.contains(&edge) {
+                            out.edges.push(edge);
+                        }
+                        if visited.len() < GRAPH_ENTITY_CAP
+                            && !visited.iter().any(|&(e, _)| e == neighbor)
+                        {
+                            visited.push((neighbor, weight));
+                        }
+                        !full(&out.edges, visited)
+                    },
+                );
             }
             frontier = depth_end;
         }
@@ -620,48 +632,49 @@ impl Memory<'_> {
         );
     }
 
-    /// Collects the edges touching `entity` from both mirrored arenas
-    /// into `out` as `(neighbor, rel, entity_is_src, provenance)`.
+    /// Visits the edges touching `entity` in both mirrored arenas as
+    /// `(neighbor, rel, entity_is_src, provenance)` — outgoing in ascending
+    /// key order, then incoming.
+    ///
+    /// The walk is **lazy and interruptible**: `visit` returning `false` stops
+    /// it. A hub entity holds as many edges as the corpus has records, and
+    /// expansion consumes at most a fixed cap of them, so materializing the
+    /// whole list would make graph recall O(edges of the hub) for a bounded
+    /// answer. Stopping is a pure prefix of the same deterministic order, so
+    /// the caller's result is unchanged.
     fn neighbors(
         &self,
         entity: EntityId,
         as_of: u64,
         historical: bool,
-        out: &mut Vec<(EntityId, TermId, bool, FactId)>,
+        visit: &mut impl FnMut(EntityId, TermId, bool, FactId) -> bool,
     ) {
-        out.clear();
         if historical {
             let mut from = [0u8; 16];
             plugmem_arena::key::write_u32(&mut from, entity.0);
             let mut to = [0u8; 16];
             plugmem_arena::key::write_u32(&mut to, entity.0 + 1);
-            out.extend(
-                self.edges_hist_out
-                    .range(&from, &to)
-                    .filter(|e| e.active_at(as_of))
-                    .map(|e| (e.b, e.rel, true, e.fact)),
-            );
-            out.extend(
-                self.edges_hist_in
-                    .range(&from, &to)
-                    .filter(|e| e.active_at(as_of))
-                    .map(|e| (e.b, e.rel, false, e.fact)),
-            );
+            for (arena, entity_is_src) in
+                [(&self.edges_hist_out, true), (&self.edges_hist_in, false)]
+            {
+                for e in arena.range(&from, &to) {
+                    if e.active_at(as_of) && !visit(e.b, e.rel, entity_is_src, e.fact) {
+                        return;
+                    }
+                }
+            }
         } else {
             let mut from = [0u8; 12];
             plugmem_arena::key::write_u32(&mut from, entity.0);
             let mut to = [0u8; 12];
             plugmem_arena::key::write_u32(&mut to, entity.0 + 1);
-            out.extend(
-                self.edges_out
-                    .range(&from, &to)
-                    .map(|e| (e.b, e.rel, true, e.fact)),
-            );
-            out.extend(
-                self.edges_in
-                    .range(&from, &to)
-                    .map(|e| (e.b, e.rel, false, e.fact)),
-            );
+            for (arena, entity_is_src) in [(&self.edges_out, true), (&self.edges_in, false)] {
+                for e in arena.range(&from, &to) {
+                    if !visit(e.b, e.rel, entity_is_src, e.fact) {
+                        return;
+                    }
+                }
+            }
         }
     }
 
