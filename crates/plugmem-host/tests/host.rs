@@ -750,18 +750,32 @@ fn gc_reclaims_unpinned_generations_and_a_pin_keeps_one() {
     assert_eq!(generation_count(&tmp.db()), 1);
 }
 
-/// Open file descriptors for this process, via `/proc/self/fd` (Linux). On
-/// other platforms it returns 0, so the fd-growth assertion below is a no-op
-/// there — the generation-count bound still holds everywhere, and valgrind
-/// (Linux) supplies the authoritative heap/mapping verdict.
+/// Open file descriptors belonging to `base`, via `/proc/self/fd` (Linux).
+/// Restricting the count to this test's unique database matters: the Rust test
+/// harness runs tests in parallel, and the workspace tests deliberately keep
+/// a pool of unrelated databases open. Counting the whole process would turn
+/// that legitimate activity into a false leak report.
+///
+/// On other platforms it returns 0, so the fd-growth assertion below is a
+/// no-op there — the generation-count bound still holds everywhere, and
+/// valgrind (Linux) supplies the authoritative heap/mapping verdict.
 #[cfg(target_os = "linux")]
-fn open_fd_count() -> usize {
+fn open_fd_count(base: &std::path::Path) -> usize {
+    let prefix = base.to_string_lossy();
     std::fs::read_dir("/proc/self/fd")
-        .map(|d| d.count())
+        .map(|d| {
+            d.flatten()
+                .filter(|entry| {
+                    std::fs::read_link(entry.path())
+                        .map(|target| target.to_string_lossy().starts_with(&*prefix))
+                        .unwrap_or(false)
+                })
+                .count()
+        })
         .unwrap_or(0)
 }
 #[cfg(not(target_os = "linux"))]
-fn open_fd_count() -> usize {
+fn open_fd_count(_base: &std::path::Path) -> usize {
     0
 }
 
@@ -810,11 +824,11 @@ fn readers_and_checkpoints_do_not_leak_across_rounds() {
 
     // Two identical passes: comparing the second delta against the first cancels
     // any one-time initialization (lazily-built caches, allocator arenas).
-    let fds_start = open_fd_count();
+    let fds_start = open_fd_count(&tmp.db());
     churn(&db);
-    let fds_after_first = open_fd_count();
+    let fds_after_first = open_fd_count(&tmp.db());
     churn(&db);
-    let fds_after_second = open_fd_count();
+    let fds_after_second = open_fd_count(&tmp.db());
 
     // Generations never accumulate: readers are dropped each round, so GC
     // settles the disk to the single current generation.
