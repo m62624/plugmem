@@ -48,6 +48,48 @@ test("revise closes a fact and opens its successor", () => {
   });
 });
 
+test("rememberMany, tagsOf and exportEach cover batch/read/stream verbs", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-"));
+  try {
+    const db = new Plugmem(join(dir, "m.plugmem"));
+    const promise = db.rememberMany([
+      { text: "batch one", tags: ["batch", "one"], metadata: { source: "test" } },
+      { text: "batch two", tags: ["batch", "two"] },
+    ]);
+    assert.ok(promise instanceof Promise);
+    const outcomes = await promise;
+    assert.deepEqual(outcomes.map(({ id }) => id), [0, 1]);
+    assert.deepEqual(db.tagsOf(0), ["batch", "one"]);
+    assert.deepEqual(db.tagsOf(999), []);
+
+    const seen = [];
+    await db.exportEach((error, fact) => {
+      assert.equal(error, null);
+      seen.push(fact);
+    });
+    // The Promise marks the native scan/queue complete; TSFN callbacks drain
+    // separately on Node's event loop.
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(seen.map(({ text }) => text), ["batch one", "batch two"]);
+    assert.deepEqual(seen[0].metadata, { source: "test" });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("async tasks retain their host handle after close", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-"));
+  try {
+    const db = new Plugmem(join(dir, "m.plugmem"));
+    const pending = db.rememberMany([{ text: "survives close" }]);
+    db.close();
+    assert.deepEqual((await pending).map(({ id }) => id), [0]);
+    assert.throws(() => db.stats(), /closed/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("forget tombstones a live fact and reports freshness", () => {
   withDb((db) => {
     db.remember({ text: "the sky is blue", entity: "sky" });

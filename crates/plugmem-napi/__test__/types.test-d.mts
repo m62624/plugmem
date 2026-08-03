@@ -10,9 +10,11 @@ import {
   Plugmem,
   Workspace,
   type DbEntry,
+  type ExportedFact,
   type MaintainReport,
   type RecallResult,
   type ReindexReport,
+  type RememberOutcome,
   type Stats,
   type WorkspaceProblem,
 } from "../index.js";
@@ -33,6 +35,15 @@ assertType<Exact<typeof stats.facts, number>>(true);
 // The async verbs are promises, not callbacks.
 const maintained: Promise<MaintainReport> = db.maintain("auto");
 const checkpointed: Promise<void> = db.checkpoint();
+const rememberedMany: Promise<RememberOutcome[]> = db.rememberMany([
+  { text: "batch", tags: ["example"] },
+]);
+const tags: string[] = db.tagsOf(id);
+const exportedEach: Promise<void> = db.exportEach((error, fact) => {
+  if (error) throw error;
+  const exported: ExportedFact = fact;
+  void exported;
+});
 
 // A path is optional; options are optional; both may be omitted entirely.
 const defaulted = new Plugmem();
@@ -74,6 +85,9 @@ export const used = {
   rendered,
   maintained,
   checkpointed,
+  rememberedMany,
+  tags,
+  exportedEach,
   chat,
   names,
   entries,

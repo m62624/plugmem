@@ -115,28 +115,29 @@ must agree. A `{ readOnly: true }` handle never auto-embeds — pass a vector.
 Every method here is the identically-named `plugmem-host` `Database` verb; the
 engine logic is entirely the host's.
 
-**Writer** (default): `remember`, `recall`, `revise(id, args)`, `forget(id)`,
-`link`, `unlink`, `get(id)`, `stats`, `export`, `verify`, and the two **async**
-verbs below. **Read-only** (`{ readOnly: true }`, observing another process's writer):
-`recall`, `get`, `stats`, `export`, `verify`, plus `generation()` (the pinned
-snapshot generation) and `refresh()` (advance to the writer's latest checkpoint);
-the write verbs throw.
+**Writer** (default): `remember`, `rememberMany`, `recall`, `revise(id, args)`,
+`forget(id)`, `link`, `unlink`, `get(id)`, `tagsOf(id)`, `stats`, `export`,
+`exportEach(callback)`, `verify`, and the async maintenance verbs below.
+**Read-only** (`{ readOnly: true }`, observing another process's writer):
+`recall`, `get`, `tagsOf`, `stats`, `export`, `exportEach(callback)`, `verify`,
+plus `generation()` (the pinned snapshot generation) and `refresh()` (advance
+to the writer's latest checkpoint); the write verbs throw.
 
 ### What the host has and this does not
 
-The list above is the whole surface — it is not yet all of `Database`, and the
-gaps are named rather than left to be discovered:
+The list above is the whole supported `Plugmem` surface. The only host
+operation intentionally kept out of this boundary is path-level recovery:
 
-| host verb | why it is not here |
+| host verb | boundary note |
 |---|---|
 | `recover` | salvaging a damaged file is a path-level operation on the disk the process is running on — [`plugmem-cli recover`](https://docs.rs/plugmem-cli/latest)'s job, like `import` and `scrub`. |
-| `remember_many` | **not exposed yet.** It writes a batch with one embedding round-trip; without it, loading N facts from Node is N requests to the embedder rather than N/batch. Loop over `remember` until it lands. |
-| `export_each` | **not exposed yet.** `export()` collects every fact into one array, so a very large memory exports with a RAM spike instead of a stream. |
-| `tags_of` | **not exposed yet.** One fact's tags; `export()` carries them for every fact meanwhile. |
+| `remember_many` | Exposed as async `rememberMany(items)`. It writes a batch with one embedding round-trip and resolves with outcomes in input order. |
+| `export_each` | Exposed as async `exportEach(callback)`. It queues one fact at a time without materializing the full export array; the callback uses napi-rs' error-first shape `(error, fact)`. |
+| `tags_of` | Exposed as synchronous `tagsOf(id)`, returning one fact's tags or an empty array. |
 
 **No `import` verb** either — bulk-loading a `backup.jsonl` reads a file on disk,
-which is the CLI's job. An agent remembers facts one at a time as the
-conversation goes.
+which is the CLI's job. A Node host can use `rememberMany` for bounded batches
+when it already owns the input records.
 
 ## Many memories in one directory (optional)
 
@@ -180,22 +181,29 @@ from your code, so put the policy there.
 `reindex()` and `verify()` return promises: they open and read every memory in
 the directory, which is not work for the main thread.
 
-## Async and concurrency (no tokio)
+## Async and concurrency
 
-`maintain()` and `checkpoint()` can do real disk I/O (compaction, HNSW work,
-fsync), so they return a **`Promise`** and run on the **libuv** thread pool —
-they never block the event loop. A maintenance call may also return a no-op
-report when there is nothing to purge, reindex or optimize.
+Operations with unbounded storage or batch work use napi-rs `AsyncTask`: they
+return a **`Promise`** and run on Node's **libuv** worker pool, keeping the event
+loop available for application code. This includes `rememberMany`,
+`exportEach`, `maintain`, `checkpoint`, `reindex` and `verify`.
+
+`exportEach(callback)` delivers one fact at a time and resolves after the worker
+has queued the complete scan. Callback execution continues on the event loop;
+if a callback needs to write, it should do so after the export promise resolves.
+`rememberMany(items)` performs one batch embedding pass and one journal sync,
+then resolves with outcomes in input order. A maintenance call may also return
+a no-op report when there is nothing to purge, reindex or optimize.
 
 `maintain(mode?)` takes `"auto"` (the default), `"compact"`, `"reindex-text"`,
 `"optimize-vectors"` or `"full"`. No mode ever drops a fact revision or an edge
 version; the heavier ones buy bytes and index freshness. `"full"` is the only
 one that repacks the edge arenas, which a relink-heavy workload fragments.
 
-Every other verb is
-microsecond-fast in memory and stays synchronous (a Promise there would be pure
-overhead). There is no async runtime: the engine is CPU-bound, and the one thing
-that can wait — a remote embedder's HTTP call — happens outside the engine lock.
+Small single-record and read verbs stay synchronous for a direct API. A single
+write can still wait for the configured durability policy, and a configured
+embedder can perform a remote request; use `rememberMany` when that work should
+run away from the event loop.
 
 `close()` releases the file and its lock; every verb afterwards throws, and it is
 idempotent (the handle is also released on garbage collection, but `close()`

@@ -213,6 +213,18 @@ impl ReadOnlyDatabase {
         self.with_mem(|mem| mem.stats())
     }
 
+    /// One fact's tags, or an empty vector for an unknown or tombstoned id.
+    pub fn tags_of(&self, id: FactId) -> Vec<String> {
+        self.with_mem(|mem| {
+            let mut terms = Vec::new();
+            mem.tags_of(id, &mut terms);
+            terms
+                .iter()
+                .map(|term| mem.term(*term).to_string())
+                .collect()
+        })
+    }
+
     /// Runs the on-demand integrity check — the equivalent of
     /// SQLite's `integrity_check`. A read-only open validates only the metadata
     /// (the mapped text and vector pools stay non-resident); this sweeps them

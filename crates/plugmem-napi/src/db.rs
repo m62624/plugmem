@@ -3,9 +3,7 @@
 //!
 //! Every method wraps the identically-named host verb — the engine logic is
 //! 100% `plugmem-host`; this layer only marshals arguments and results across
-//! the Node boundary. It is not yet the *whole* of `Database`: `remember_many`,
-//! `export_each` and `tags_of` are not exposed (the crate README says so and
-//! what it costs), and `recover` is deliberately CLI-only alongside `import`
+//! the Node boundary. `recover` is deliberately CLI-only alongside `import`
 //! and `scrub` — salvage is a path-level operation on the host's own disk. Inputs are typed `#[napi(object)]` structs so napi emits
 //! precise TypeScript interfaces (autocomplete in a TS host like Pi); results
 //! come back as the typed mirrors in [`crate::types`]. A [`HostError`] becomes a
@@ -14,14 +12,15 @@
 //!
 //! Opened `readOnly`, the instance observes another process's writer over a
 //! shared snapshot: the read verbs answer, the write verbs throw, and the two
-//! freshness verbs (`generation`/`refresh`) become available. Async offloading
-//! lands in the next milestone.
+//! freshness verbs (`generation`/`refresh`) become available.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use napi::bindgen_prelude::AsyncTask;
-use napi::{Env, Error, Result, Task};
+use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
+use napi::{Env, Error, Result, Status, Task};
 use napi_derive::napi;
 use plugmem_host::{
     Database, FactId, HostError, LinkInput, MaintenanceOptions, ReadOnlyDatabase, RecallQuery,
@@ -116,12 +115,11 @@ pub struct LinkArgs {
 }
 
 /// The open handle behind a [`Plugmem`]: a read-write writer, or a read-only
-/// observer of another process's writer. `Reader` is boxed — a
-/// [`ReadOnlyDatabase`] owns a memory map and is far larger than the writer's
-/// `Arc` handle, so boxing keeps the two variants close in size.
+/// observer of another process's writer. The reader is reference-counted so an
+/// async export task can outlive the JS object that scheduled it.
 enum Handle {
     Writer(Database),
-    Reader(Box<ReadOnlyDatabase>),
+    Reader(Arc<ReadOnlyDatabase>),
 }
 
 /// A memory over one plugmem file — the napi mirror of [`plugmem_host::Database`]
@@ -192,7 +190,7 @@ impl Plugmem {
             // A read-only handle observes another writer's snapshot and never
             // auto-embeds; drop the embedder and open over `settings.config`.
             let ro = Database::open_readonly(&path, settings.config).map_err(to_napi_err)?;
-            Handle::Reader(Box::new(ro))
+            Handle::Reader(Arc::new(ro))
         } else {
             // The writer takes the embedder and maintenance policy from settings.
             let db = settings.open(&path).map_err(to_napi_err)?;
@@ -220,6 +218,19 @@ impl Plugmem {
     #[napi]
     pub fn remember(&self, args: RememberArgs) -> Result<RememberOutcome> {
         do_remember(self.writer()?, &args, None)
+    }
+
+    /// Stores a batch of facts and resolves with one outcome per input.
+    ///
+    /// A batch may call a remote embedder and always performs one journal sync,
+    /// so it runs on napi-rs' libuv worker pool.
+    #[napi(ts_return_type = "Promise<RememberOutcome[]>")]
+    pub fn remember_many(&self, args: Vec<RememberArgs>) -> Result<AsyncTask<RememberManyTask>> {
+        Ok(AsyncTask::new(RememberManyTask {
+            db: self.writer()?.clone(),
+            args,
+            now: now_ms(),
+        }))
     }
 
     /// Closes fact `id` and records `args` as its successor; returns the outcome.
@@ -330,6 +341,32 @@ impl Plugmem {
         types::to_typed(&facts)
     }
 
+    /// Streams facts to a JavaScript callback. The scan runs on a libuv worker
+    /// and callbacks are queued on Node's event loop through napi-rs
+    /// `ThreadsafeFunction`; the returned promise resolves after the scan has
+    /// queued every fact. The callback follows napi-rs' error-first convention:
+    /// `(error, fact)`.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn export_each(
+        &self,
+        callback: ThreadsafeFunction<ExportedFact>,
+    ) -> Result<AsyncTask<ExportEachTask>> {
+        let source = match self.handle()? {
+            Handle::Writer(db) => ExportSource::Writer(db.clone()),
+            Handle::Reader(db) => ExportSource::Reader(Arc::clone(db)),
+        };
+        Ok(AsyncTask::new(ExportEachTask { source, callback }))
+    }
+
+    /// One fact's tags, or an empty array for an unknown or tombstoned id.
+    #[napi]
+    pub fn tags_of(&self, id: u32) -> Result<Vec<String>> {
+        match self.handle()? {
+            Handle::Writer(db) => Ok(db.tags_of(FactId(id))),
+            Handle::Reader(db) => Ok(db.tags_of(FactId(id))),
+        }
+    }
+
     /// Content-integrity check; throws on the first inconsistency found.
     #[napi]
     pub fn verify(&self) -> Result<()> {
@@ -389,7 +426,12 @@ impl Plugmem {
     #[napi]
     pub fn refresh(&mut self) -> Result<bool> {
         match self.handle_mut()? {
-            Handle::Reader(db) => db.refresh().map_err(to_napi_err),
+            Handle::Reader(db) => Arc::get_mut(db)
+                .ok_or_else(|| {
+                    Error::from_reason("cannot refresh while an async export is running")
+                })?
+                .refresh()
+                .map_err(to_napi_err),
             Handle::Writer(_) => Err(writer_only_error("refresh")),
         }
     }
@@ -468,6 +510,118 @@ impl Task for CheckpointTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         self.db.checkpoint(self.now).map_err(to_napi_err)
+    }
+
+    fn resolve(&mut self, _env: Env, (): Self::Output) -> Result<Self::JsValue> {
+        Ok(())
+    }
+}
+
+/// The libuv-thread body of [`Plugmem::remember_many`].
+pub struct RememberManyTask {
+    db: Database,
+    args: Vec<RememberArgs>,
+    now: u64,
+}
+
+impl Task for RememberManyTask {
+    type Output = Vec<plugmem_host::RememberOutcome>;
+    type JsValue = Vec<RememberOutcome>;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let tags: Vec<Vec<&str>> = self.args.iter().map(|args| str_refs(&args.tags)).collect();
+        let links: Vec<Vec<(&str, &str)>> = self
+            .args
+            .iter()
+            .map(|args| {
+                args.links
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(|link| (link.rel.as_str(), link.entity.as_str()))
+                    .collect()
+            })
+            .collect();
+        let metadata: Vec<Vec<(&str, &str)>> = self
+            .args
+            .iter()
+            .map(|args| {
+                args.metadata
+                    .as_ref()
+                    .map(|metadata| {
+                        metadata
+                            .iter()
+                            .map(|(key, value)| (key.as_str(), value.as_str()))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        let inputs: Vec<RememberInput<'_>> = self
+            .args
+            .iter()
+            .enumerate()
+            .map(|(i, args)| RememberInput {
+                entity: args.entity.as_deref(),
+                tags: &tags[i],
+                links: &links[i],
+                metadata: (!metadata[i].is_empty()).then_some(metadata[i].as_slice()),
+                valid_from: args.valid_from.map(|value| value as u64),
+                ..RememberInput::text(self.now, &args.text)
+            })
+            .collect();
+
+        self.db.remember_many(inputs).map_err(to_napi_err)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        types::to_typed(&output)
+    }
+}
+
+enum ExportSource {
+    Writer(Database),
+    Reader(Arc<ReadOnlyDatabase>),
+}
+
+/// The libuv-thread body of [`Plugmem::export_each`].
+pub struct ExportEachTask {
+    source: ExportSource,
+    callback: ThreadsafeFunction<ExportedFact>,
+}
+
+impl Task for ExportEachTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let mut queue_error = None;
+        let mut emit = |fact: plugmem_host::ExportedFact| {
+            if queue_error.is_some() {
+                return;
+            }
+            let value = match types::to_typed::<ExportedFact>(&fact) {
+                Ok(value) => value,
+                Err(error) => {
+                    queue_error = Some(error.to_string());
+                    return;
+                }
+            };
+            let status = self
+                .callback
+                .call(Ok(value), ThreadsafeFunctionCallMode::NonBlocking);
+            if status != Status::Ok {
+                queue_error = Some(format!("export callback could not be queued: {status}"));
+            }
+        };
+        match &self.source {
+            ExportSource::Writer(db) => db.export_each(&mut emit),
+            ExportSource::Reader(db) => db.export_each(&mut emit),
+        }
+        if let Some(error) = queue_error {
+            return Err(Error::from_reason(error));
+        }
+        Ok(())
     }
 
     fn resolve(&mut self, _env: Env, (): Self::Output) -> Result<Self::JsValue> {

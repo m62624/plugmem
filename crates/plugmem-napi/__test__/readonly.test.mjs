@@ -35,8 +35,16 @@ test("read-only observes a writer's checkpointed snapshot", async () => {
     // Read verbs answer.
     assert.ok(Array.isArray(ro.recall({ query: "sky" }).facts));
     assert.match(ro.get(0).text, /sky/);
+    assert.deepEqual(ro.tagsOf(0), []);
     assert.equal(ro.stats().facts, 1);
     assert.equal(ro.export().length, 1);
+    const streamed = [];
+    await ro.exportEach((error, fact) => {
+      assert.equal(error, null);
+      streamed.push(fact.text);
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(streamed, ["the sky is blue"]);
     assert.doesNotThrow(() => ro.verify());
 
     // Freshness verbs work; nothing newer to adopt.
