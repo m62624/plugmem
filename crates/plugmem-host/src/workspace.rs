@@ -58,6 +58,28 @@ const REGISTRY_FILE: &str = "registry.plugmem";
 /// extension picks out base files and nothing else.
 const DB_EXT: &str = "plugmem";
 
+/// Names Windows resolves to devices rather than files, in every directory and
+/// **whatever extension is appended** — `con.plugmem` opens the console, not a
+/// file called `con.plugmem`.
+///
+/// Refused on every platform, not only on Windows. A workspace is a directory
+/// someone may copy between machines, and a memory that exists on Linux and
+/// silently becomes the printer port on Windows is the worst kind of portability
+/// bug: it appears at someone else's desk, on data that was already fine.
+///
+/// Written out rather than taken from a crate (`sanitize-filename` and friends
+/// exist) because those *rewrite* an arbitrary string into a safe filename,
+/// which is a different job: here the alphabet has already refused separators,
+/// dots, colons, `$`, control bytes, non-ASCII, uppercase and trailing spaces,
+/// and this list is the entire remainder. It is 22 strings, frozen by Windows
+/// for thirty years — `CONIN$` and the superscript `COM¹` forms cannot be
+/// spelled in the alphabet at all. A dependency would be carrying a sanitizer
+/// to do the part we already did.
+const RESERVED_DEVICE_NAMES: &[&str] = &[
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
 /// Why a string is not a usable database name.
 ///
 /// A typed reason rather than a message, so a caller (and a test) can react to
@@ -75,6 +97,9 @@ pub enum NameProblem {
     LeadingChar,
     /// Some character was outside `[a-z0-9_-]`.
     Character,
+    /// The name is a Windows device name (`con`, `nul`, `com1`, …). Refused
+    /// everywhere so a workspace stays portable between machines.
+    ReservedDevice,
 }
 
 impl fmt::Display for NameProblem {
@@ -86,6 +111,9 @@ impl fmt::Display for NameProblem {
             Self::Character => {
                 f.write_str("it may hold only lowercase letters, digits, '-' and '_'")
             }
+            Self::ReservedDevice => f.write_str(
+                "it is a Windows device name, which would open a device rather than a file there",
+            ),
         }
     }
 }
@@ -125,6 +153,9 @@ impl DbName {
         }
         if s.len() > MAX_DB_NAME {
             return bad(NameProblem::TooLong);
+        }
+        if RESERVED_DEVICE_NAMES.contains(&s) {
+            return bad(NameProblem::ReservedDevice);
         }
         Ok(DbName(s.to_string()))
     }
@@ -696,6 +727,18 @@ mod tests {
         for bad in ["a/b", "a\\b", "a.b", "a b", "aB", "a:b", "aчат", "a\0b"] {
             assert_eq!(problem(bad), NameProblem::Character, "{bad:?}");
         }
+
+        // Windows resolves these to devices in every directory, extension or
+        // no extension, so `con.plugmem` is the console. Refused everywhere,
+        // because a workspace directory is a thing people copy between
+        // machines.
+        for bad in ["con", "nul", "prn", "aux", "com1", "lpt9"] {
+            assert_eq!(problem(bad), NameProblem::ReservedDevice, "{bad:?}");
+        }
+        // Only the exact names — a memory called `console` is fine.
+        for ok in ["console", "con1", "com0", "com10", "nula"] {
+            assert!(DbName::parse(ok).is_ok(), "{ok:?}");
+        }
     }
 
     #[test]
@@ -708,6 +751,11 @@ mod tests {
         );
         assert!(NameProblem::LeadingChar.to_string().contains("start with"));
         assert!(NameProblem::Character.to_string().contains("lowercase"));
+        assert!(
+            NameProblem::ReservedDevice
+                .to_string()
+                .contains("Windows device name")
+        );
     }
 
     #[test]
