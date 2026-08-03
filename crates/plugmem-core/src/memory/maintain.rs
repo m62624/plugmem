@@ -65,7 +65,7 @@ use super::Memory;
 /// Bump this when a tokenizer change intentionally changes indexed tokens.
 /// Snapshots persist the value; a future mismatch can trigger explicit
 /// reindexing instead of silently compacting an index with stale semantics.
-pub(crate) const TOKENIZER_INDEX_VERSION: u32 = 1;
+pub(crate) const TOKENIZER_INDEX_VERSION: u32 = 2;
 
 const AUTO_HNSW_INSERT_BUDGET: usize = 4096;
 const NO_HNSW_INSERT_LIMIT: u32 = u32::MAX;

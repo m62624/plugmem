@@ -322,6 +322,19 @@ fn regression_canonical_token_from_ordinal_and_modifier_symbols() {
 }
 
 #[test]
+fn russian_yo_with_multiple_marks_is_canonical() {
+    let emitted = tokens("ё\u{308}\u{300}");
+    for token in emitted {
+        let retokenized = tokens(&token);
+        assert_eq!(
+            retokenized.as_slice(),
+            std::slice::from_ref(&token),
+            "emitted token must be a fixed point"
+        );
+    }
+}
+
+#[test]
 fn mixed_cjk_and_myanmar_runs_are_canonical() {
     for input in ["におက", "ကにお", "東京က大阪", "한東京က"] {
         let emitted = tokens(input);

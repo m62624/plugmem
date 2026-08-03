@@ -101,9 +101,14 @@ fn fold_into(
     false
 }
 
-/// Re-normalizes a folded token only when lowercasing exposed Unicode marks.
-/// Lowercase can change a base character while leaving a mark sequence
-/// whose canonical order is visible only after folding.
+/// Re-normalizes a folded token when folding exposed Unicode marks.
+///
+/// One pass is not always enough: a policy fold can expose a new composition,
+/// and that composition can expose another foldable mark sequence. For
+/// example, `ё + diaeresis + grave` becomes `е + grave`, which NFKC composes
+/// to `ѐ` on the next pass. Keep applying the pass until the fold no longer
+/// changes the normalized spelling. If the mark is not composable, the
+/// normalized and folded buffers are already equal and the loop stops.
 fn emit_folded(
     token: &mut String,
     canonical: &mut String,
@@ -112,19 +117,25 @@ fn emit_folded(
     unicode: &UnicodeBackend,
     sink: &mut dyn FnMut(&str),
 ) {
-    if needs_nfkc_again {
+    let mut needs_nfkc_again = needs_nfkc_again;
+    while needs_nfkc_again {
         unicode.normalize_into(token, canonical);
         token.clear();
-        let mut boundary = false;
+        needs_nfkc_again = false;
         for c in canonical.chars() {
-            if fold_into(c, token, policy, &mut boundary) {
+            if fold_into(c, token, policy, &mut needs_nfkc_again) {
                 emit_truncated(token, sink);
                 token.clear();
-                boundary = false;
+                needs_nfkc_again = false;
             }
         }
-        emit_truncated(token, sink);
-    } else {
-        emit_truncated(token, sink);
+
+        // A non-composable mark remains after NFKC. Folding it again would
+        // produce the same token forever, so equality is the fixed-point
+        // condition for the remaining mark path.
+        if needs_nfkc_again && token == canonical {
+            needs_nfkc_again = false;
+        }
     }
+    emit_truncated(token, sink);
 }
