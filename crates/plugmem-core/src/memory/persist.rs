@@ -67,8 +67,8 @@ mod kind {
     pub const BM25_HANDLES_POOL: u16 = 23;
     pub const BM25_CHUNKS_META: u16 = 24;
     pub const BM25_CHUNKS_POOL: u16 = 25;
-    pub const BM25_DOCLEN_META: u16 = 26;
-    pub const BM25_DOCLEN_POOL: u16 = 27;
+    // 26..=27 were the per-document BM25 records before they carried the
+    // term-set summary; see `migrations::legacy_kind`.
     pub const TAGS_HANDLES_META: u16 = 28;
     pub const TAGS_HANDLES_POOL: u16 = 29;
     pub const TAGS_CHUNKS_META: u16 = 30;
@@ -97,6 +97,9 @@ mod kind {
     pub const EDGE_HIST_OUT_POOL: u16 = 55;
     pub const EDGE_HIST_IN_META: u16 = 56;
     pub const EDGE_HIST_IN_POOL: u16 = 57;
+    /// Per-document BM25 records carrying the term-set summary.
+    pub const BM25_DOCLEN_META: u16 = 58;
+    pub const BM25_DOCLEN_POOL: u16 = 59;
 }
 
 /// The callback [`Memory::emit_sections_from`] drives once per snapshot
@@ -336,12 +339,18 @@ impl<'a> Bm25Index<'a> {
             section(snap, kind::BM25_CHUNKS_META)?,
             section(snap, kind::BM25_CHUNKS_POOL)?,
         )?;
-        let doc_len = Arena::load(
-            ArenaCfg::new(cfg.shards_postings, ShardMode::Uniform).with_max_bytes(cfg.max_bytes),
-            section(snap, kind::BM25_DOCLEN_META)?,
-            section(snap, kind::BM25_DOCLEN_POOL)?,
-        )?;
-        Self::assemble(postings, doc_len, snap)
+        let (doc_len, migrated) = match migrations::legacy_doc_len(snap, cfg)? {
+            Some(upgraded) => (upgraded, true),
+            None => (
+                Arena::load(
+                    migrations::doc_len_cfg(cfg),
+                    section(snap, kind::BM25_DOCLEN_META)?,
+                    section(snap, kind::BM25_DOCLEN_POOL)?,
+                )?,
+                false,
+            ),
+        };
+        Self::assemble(postings, doc_len, snap, migrated)
     }
 
     /// Zero-copy sibling of [`Bm25Index::load_from`]: the postings and
@@ -355,12 +364,20 @@ impl<'a> Bm25Index<'a> {
             section(snap, kind::BM25_CHUNKS_META)?,
             section(snap, kind::BM25_CHUNKS_POOL)?,
         )?;
-        let doc_len = Arena::load_borrowed(
-            ArenaCfg::new(cfg.shards_postings, ShardMode::Uniform).with_max_bytes(cfg.max_bytes),
-            section(snap, kind::BM25_DOCLEN_META)?,
-            section(snap, kind::BM25_DOCLEN_POOL)?,
-        )?;
-        Self::assemble(postings, doc_len, snap)
+        // A pre-signature image cannot be aliased: the slot widened, so the
+        // migration hands back an owned arena even here.
+        let (doc_len, migrated) = match migrations::legacy_doc_len(snap, cfg)? {
+            Some(upgraded) => (upgraded, true),
+            None => (
+                Arena::load_borrowed(
+                    migrations::doc_len_cfg(cfg),
+                    section(snap, kind::BM25_DOCLEN_META)?,
+                    section(snap, kind::BM25_DOCLEN_POOL)?,
+                )?,
+                false,
+            ),
+        };
+        Self::assemble(postings, doc_len, snap, migrated)
     }
 
     /// Reconciles the corpus totals from the engine-state section and
@@ -370,6 +387,7 @@ impl<'a> Bm25Index<'a> {
         postings: PostingStore<'a, true>,
         doc_len: Arena<'a, crate::index::bm25::DocLenSlot>,
         snap: &Snapshot<'_>,
+        migrated: bool,
     ) -> Result<Self, Error> {
         let state = section(snap, kind::ENGINE_STATE)?;
         // Validates the width for every layout this crate has written; the
@@ -380,7 +398,11 @@ impl<'a> Bm25Index<'a> {
         if total_docs != doc_len.len() as u64 {
             return Err(Error::Corrupt("bm25 document total disagrees with doc_len"));
         }
-        Ok(Self::from_parts(postings, doc_len, total_docs, total_len))
+        let mut index = Self::from_parts(postings, doc_len, total_docs, total_len);
+        if migrated {
+            index.mark_unsummarized();
+        }
+        Ok(index)
     }
 }
 

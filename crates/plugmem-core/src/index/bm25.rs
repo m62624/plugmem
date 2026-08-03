@@ -28,8 +28,45 @@ use crate::error::Error;
 use crate::id::FactId;
 use crate::index::postings::PostingStore;
 
-/// Per-document length record: `[fact 4 | len u16 | pad 2]`, Uniform
-/// arena.
+/// Byte layout of [`DocLenSlot`]. Every offset is the previous field's offset
+/// plus its width, so a field cannot be moved by editing one number.
+mod doclen_at {
+    use core::mem::size_of;
+
+    pub(super) const FACT: usize = 0;
+    pub(super) const KEY_LEN: usize = FACT + size_of::<u32>();
+    pub(super) const LEN: usize = KEY_LEN;
+    pub(super) const DISTINCT: usize = LEN + size_of::<u16>();
+    pub(super) const SIG: usize = DISTINCT + size_of::<u16>();
+    pub(super) const SIZE: usize = SIG + size_of::<u64>();
+}
+
+/// Width of a [`DocLenSlot::sig`] signature in bits.
+const SIG_BITS: u32 = 64;
+/// Fibonacci hashing multiplier — the same constant the arena shards with, so
+/// term ids scatter over the signature's bits without a second hash family.
+const SIG_MULT: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// The signature bit a term claims. Distinct terms may collide; that is what
+/// makes [`DocLenSlot::sig`] an over-approximation and never an
+/// under-approximation of a document's term set.
+pub(crate) fn sig_bit(term: u32) -> u64 {
+    // The top `log2(SIG_BITS)` bits of the multiplied word, so the index is in
+    // range by construction.
+    let index = u64::from(term).wrapping_mul(SIG_MULT) >> (64 - SIG_BITS.trailing_zeros());
+    1u64 << index
+}
+
+/// Per-document record: `[fact 4 | len u16 | distinct u16 | sig u64]`,
+/// Uniform arena.
+///
+/// Beyond the length BM25 scores with, the slot carries a summary of the
+/// document's *term set*: how many distinct terms it has, and one bit per
+/// term hashed into a 64-bit word. That summary is what lets the write path
+/// bound the term-set overlap of two facts without re-reading and
+/// re-tokenizing their texts (see `Memory::find_similar`). It is written when
+/// the document is indexed, where the term set is already in hand, so it
+/// costs nothing to produce.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DocLenSlot {
@@ -37,22 +74,62 @@ pub struct DocLenSlot {
     pub fact: FactId,
     /// Token count of the document, saturated at `u16::MAX`.
     pub len: u16,
+    /// Number of distinct terms, saturated at `u16::MAX`. Zero means
+    /// "unknown": a document indexed before the signature existed, read
+    /// through the legacy migration.
+    pub distinct: u16,
+    /// Union of [`sig_bit`] over the document's distinct terms. A term absent
+    /// from this word is definitely absent from the document; a term present
+    /// may still be absent (bits collide). Zero alongside `distinct == 0`
+    /// means "unknown".
+    pub sig: u64,
+}
+
+impl DocLenSlot {
+    /// Whether the term-set summary is present. A legacy document carries
+    /// none, and callers must fall back to reading its text.
+    pub fn has_signature(&self) -> bool {
+        self.distinct != 0
+    }
+
+    /// An upper bound on how many of `terms` this document also holds.
+    ///
+    /// Exact in the direction that matters: a term whose bit is clear cannot
+    /// be in the document, so the true intersection is never larger than the
+    /// count returned here. Callers use it to rule overlap *out*.
+    pub fn overlap_bound(&self, terms: &[u32]) -> usize {
+        terms
+            .iter()
+            .filter(|&&term| self.sig & sig_bit(term) != 0)
+            .count()
+    }
 }
 
 impl Slot for DocLenSlot {
-    const SIZE: usize = 8;
-    const KEY_LEN: usize = 4;
+    const SIZE: usize = doclen_at::SIZE;
+    const KEY_LEN: usize = doclen_at::KEY_LEN;
 
     fn write(&self, out: &mut [u8]) {
-        key::write_u32(out, self.fact.0);
-        out[4..6].copy_from_slice(&self.len.to_be_bytes());
-        out[6..8].copy_from_slice(&[0, 0]);
+        key::write_u32(&mut out[doclen_at::FACT..], self.fact.0);
+        out[doclen_at::LEN..doclen_at::DISTINCT].copy_from_slice(&self.len.to_be_bytes());
+        out[doclen_at::DISTINCT..doclen_at::SIG].copy_from_slice(&self.distinct.to_be_bytes());
+        out[doclen_at::SIG..doclen_at::SIZE].copy_from_slice(&self.sig.to_be_bytes());
     }
 
     fn read(bytes: &[u8]) -> Self {
         Self {
-            fact: FactId(key::read_u32(bytes)),
-            len: u16::from_be_bytes(bytes[4..6].try_into().unwrap()),
+            fact: FactId(key::read_u32(&bytes[doclen_at::FACT..])),
+            len: u16::from_be_bytes(
+                bytes[doclen_at::LEN..doclen_at::DISTINCT]
+                    .try_into()
+                    .unwrap(),
+            ),
+            distinct: u16::from_be_bytes(
+                bytes[doclen_at::DISTINCT..doclen_at::SIG]
+                    .try_into()
+                    .unwrap(),
+            ),
+            sig: u64::from_be_bytes(bytes[doclen_at::SIG..doclen_at::SIZE].try_into().unwrap()),
         }
     }
 }
@@ -105,6 +182,10 @@ pub struct Bm25Index<'a> {
     /// should never cost one.
     #[cfg(feature = "counters")]
     admitted: Cell<u64>,
+    /// Some documents arrived without a term-set summary — this index came out
+    /// of a pre-signature image. Derived at load, never persisted: the next
+    /// compaction fills the summaries in and clears it.
+    unsummarized: bool,
 }
 
 impl<'a> Bm25Index<'a> {
@@ -124,6 +205,7 @@ impl<'a> Bm25Index<'a> {
             scored: Cell::new(0),
             #[cfg(feature = "counters")]
             admitted: Cell::new(0),
+            unsummarized: false,
         })
     }
 
@@ -138,17 +220,43 @@ impl<'a> Bm25Index<'a> {
     /// for the whole operation (journal replay rebuilds consistently).
     pub fn index_doc(&mut self, fact: FactId, term_tfs: &[(u32, u8)]) -> Result<(), Error> {
         let mut len = 0u32;
+        let mut sig = 0u64;
         for &(term, tf) in term_tfs {
             self.postings.push(term, fact, tf)?;
             len += u32::from(tf);
+            sig |= sig_bit(term);
         }
         self.doc_len.insert(&DocLenSlot {
             fact,
             len: u16::try_from(len).unwrap_or(u16::MAX),
+            // The caller's pairs are already unique per term, so their count
+            // is the distinct-term count.
+            distinct: u16::try_from(term_tfs.len()).unwrap_or(u16::MAX),
+            sig,
         })?;
         self.total_docs += 1;
         self.total_len += u64::from(len);
         Ok(())
+    }
+
+    /// The per-document record of `fact`, or `None` when the document is not
+    /// indexed. Carries the term-set summary the write path bounds overlap
+    /// with — see [`DocLenSlot`].
+    pub fn doc(&self, fact: FactId) -> Option<DocLenSlot> {
+        self.doc_len.get(&fact.0.to_be_bytes())
+    }
+
+    /// Whether this index holds documents with no term-set summary, which
+    /// compaction can fill in from the postings. True only after opening a
+    /// pre-signature image.
+    pub(crate) fn needs_resummarize(&self) -> bool {
+        self.unsummarized
+    }
+
+    /// Marks the index as holding unsummarized documents (the load path, after
+    /// a legacy migration).
+    pub(crate) fn mark_unsummarized(&mut self) {
+        self.unsummarized = true;
     }
 
     /// Builds a compacted BM25 index by filtering this index's existing
@@ -165,21 +273,88 @@ impl<'a> Bm25Index<'a> {
         mut live: impl FnMut(FactId) -> bool,
     ) -> Result<Bm25Index<'static>, Error> {
         let mut out = Bm25Index::new(shards, max_bytes)?;
+        // Documents carried over from a pre-signature image, and the id range
+        // they span. Compaction is the cheapest place to fill their term-set
+        // summaries in: it already walks every posting, which is the transpose
+        // of what a signature needs, so no text is read and nothing is
+        // tokenized.
+        let mut legacy = 0usize;
+        let mut max_fact = 0u32;
         for doc in self.doc_len.iter() {
             if live(doc.fact) {
                 out.doc_len.insert(&doc)?;
                 out.total_docs += 1;
                 out.total_len += u64::from(doc.len);
-            }
-        }
-        for slot in self.postings.slots() {
-            for (fact, tf) in self.postings.entries(slot.key) {
-                if live(fact) {
-                    out.postings.push(slot.key, fact, tf)?;
+                if !doc.has_signature() {
+                    legacy += 1;
+                    max_fact = max_fact.max(doc.fact.0);
                 }
             }
         }
+        // `(sig, distinct)` per fact id, dense because the transpose visits
+        // facts in posting order rather than document order. Allocated only
+        // when there is something to fill, and dropped with this call.
+        //
+        // The length is computed through `checked_add` because `usize` is 32
+        // bits on wasm32: a fact id near `u32::MAX` would wrap there. Failing
+        // that check skips the rebuild, which costs speed and nothing else —
+        // an unsummarized document simply keeps reading its text.
+        let mut rebuilt = match usize::try_from(max_fact)
+            .ok()
+            .and_then(|m| m.checked_add(1))
+        {
+            Some(len) if legacy > 0 => alloc::vec![(0u64, 0u16); len],
+            _ => Vec::new(),
+        };
+        for slot in self.postings.slots() {
+            for (fact, tf) in self.postings.entries(slot.key) {
+                if !live(fact) {
+                    continue;
+                }
+                out.postings.push(slot.key, fact, tf)?;
+                if let Some(entry) = rebuilt.get_mut(fact.0 as usize) {
+                    entry.0 |= sig_bit(slot.key);
+                    entry.1 = entry.1.saturating_add(1);
+                }
+            }
+        }
+        if !rebuilt.is_empty() {
+            out.fill_missing_signatures(&rebuilt);
+        }
         Ok(out)
+    }
+
+    /// Writes the recomputed term-set summaries of [`Self::compact_live`]
+    /// into the documents that arrived without one. Documents that already
+    /// carry a signature keep it: it was written from the exact term set the
+    /// indexer saw, and the transpose can only reproduce it.
+    ///
+    /// The compacted index never inherits [`Self::unsummarized`]. A document
+    /// still unsummarized after this pass has no indexed terms at all, so no
+    /// later pass could summarize it either — carrying the flag forward would
+    /// make every future `maintain` recompact for work that cannot be done.
+    fn fill_missing_signatures(&mut self, rebuilt: &[(u64, u16)]) {
+        let stale: Vec<DocLenSlot> = self
+            .doc_len
+            .iter()
+            .filter(|doc| !doc.has_signature())
+            .collect();
+        for mut doc in stale {
+            let Some(&(sig, distinct)) = rebuilt.get(doc.fact.0 as usize) else {
+                continue;
+            };
+            if distinct == 0 {
+                continue; // a document with no indexed terms has nothing to summarize
+            }
+            doc.sig = sig;
+            doc.distinct = distinct;
+            let Some(payload) = self.doc_len.payload_mut(&doc.fact.0.to_be_bytes()) else {
+                continue;
+            };
+            let mut full = [0u8; DocLenSlot::SIZE];
+            doc.write(&mut full);
+            payload.copy_from_slice(&full[DocLenSlot::KEY_LEN..]);
+        }
     }
 
     /// Document frequency of a term.
@@ -313,6 +488,7 @@ impl<'a> Bm25Index<'a> {
             scored: Cell::new(0),
             #[cfg(feature = "counters")]
             admitted: Cell::new(0),
+            unsummarized: false,
         }
     }
 

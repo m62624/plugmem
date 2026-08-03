@@ -618,6 +618,107 @@ fn similar_detection_surfaces_conflicts_but_never_acts() {
     );
 }
 
+/// The similar-detection prefilter must not change the answer.
+///
+/// `find_similar` skips reading a candidate's text when the term-set summary
+/// proves the overlap cannot reach `similar_jaccard`. This checks that claim
+/// against the definition rather than against the previous implementation:
+/// the expected hints are recomputed here from the raw Jaccard of the
+/// tokenized texts, so a prefilter that dropped one — or invented one — shows
+/// up as a mismatch.
+///
+/// The corpus is built to land *on* the interesting region: every text shares
+/// a prefix with the query text and differs by a growing tail, so the overlaps
+/// sweep from well above the threshold down through it to well below.
+#[test]
+fn similar_prefilter_matches_exhaustive_jaccard() {
+    use plugmem_core::tokenizer::Tokenizer;
+    use std::collections::BTreeSet;
+
+    let mut tokenizer = Tokenizer::new();
+    let terms = |tokenizer: &mut Tokenizer, text: &str| -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        tokenizer.tokenize(text, &mut |token| {
+            out.insert(token.to_owned());
+        });
+        out
+    };
+
+    const SHARED: &str = "alpha beta gamma delta epsilon zeta eta theta";
+    let extras = [
+        "",
+        "iota",
+        "iota kappa",
+        "iota kappa lambda",
+        "iota kappa lambda mu",
+    ];
+    // Truncated prefixes of the shared part, so overlaps also shrink from the
+    // other direction.
+    let heads: Vec<&str> = vec![
+        SHARED,
+        "alpha beta gamma delta epsilon zeta",
+        "alpha beta gamma delta",
+        "alpha beta",
+        "alpha",
+    ];
+    let mut texts = Vec::new();
+    for head in &heads {
+        for extra in &extras {
+            texts.push(if extra.is_empty() {
+                (*head).to_owned()
+            } else {
+                format!("{head} {extra}")
+            });
+        }
+    }
+
+    let (mut mem, mut store) = engine();
+    let threshold = cfg().similar_jaccard;
+    // Fact id -> its term set, for the reference computation.
+    let mut inserted: Vec<(FactId, BTreeSet<String>)> = Vec::new();
+    let mut hinted_at_all = 0usize;
+
+    for (i, text) in texts.iter().enumerate() {
+        let new_terms = terms(&mut tokenizer, text);
+        // What an exhaustive comparison against every live earlier fact of the
+        // entity would report, in the engine's own order.
+        let mut expected: Vec<(FactId, f32)> = inserted
+            .iter()
+            .filter_map(|(id, cand)| {
+                let both = cand.intersection(&new_terms).count();
+                let union = cand.len() + new_terms.len() - both;
+                let jaccard = both as f32 / union as f32;
+                (jaccard > threshold).then_some((*id, jaccard))
+            })
+            .collect();
+        expected.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        expected.truncate(8);
+
+        let out = mem
+            .remember(
+                &mut store,
+                RememberInput {
+                    entity: Some("subject"),
+                    ..RememberInput::text(1000 + i as u64, text)
+                },
+            )
+            .unwrap();
+        let got: Vec<(FactId, f32)> = out.similar.iter().map(|s| (s.id, s.score)).collect();
+        assert_eq!(got, expected, "hints for {text:?} diverged from Jaccard");
+        if !got.is_empty() {
+            hinted_at_all += 1;
+        }
+        inserted.push((out.id, new_terms));
+    }
+
+    // A corpus that never triggers a hint would pass the comparison while
+    // proving nothing about the prefilter's ability to let one through.
+    assert!(
+        hinted_at_all >= 5,
+        "the corpus must exercise the accepting side too, got {hinted_at_all}"
+    );
+}
+
 #[test]
 fn remember_batch_imports_and_skips_similar() {
     let (mut mem, mut store) = engine();

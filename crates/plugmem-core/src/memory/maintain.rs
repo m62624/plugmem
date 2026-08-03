@@ -548,12 +548,21 @@ impl Memory<'_> {
     fn work_plan(&self, options: MaintenanceOptions) -> WorkPlan {
         let tokenizer_stale = self.bm25_tokenizer_version != TOKENIZER_INDEX_VERSION;
         let has_tombstones = self.tombstones != 0;
+        // A migrated image holds documents with no term-set summary. Filling
+        // them in is compaction's job — it already transposes the postings —
+        // so an image that needs it counts as pending work even with nothing
+        // to purge. One pass settles it: the compacted index never asks again.
+        //
+        // Only the `compact` decision keys off this. Nothing is purged, so no
+        // fact id moves, and the vector graph stays valid — remapping it here
+        // would be work for a mapping that did not change.
+        let compaction_due = has_tombstones || self.bm25.needs_resummarize();
         let graph_tail = self.cfg.dim != 0
             && self.vecs.len() >= self.cfg.flat_to_hnsw
             && self.hnsw.indexed() < self.vecs.len() as u32;
         match options.mode {
             MaintenanceMode::Auto => WorkPlan {
-                compact: has_tombstones,
+                compact: compaction_due,
                 bm25_reindex: tokenizer_stale,
                 optimize_vectors: graph_tail,
                 hnsw_full_rebuild: false,
@@ -561,7 +570,7 @@ impl Memory<'_> {
                 max_hnsw_inserts: options.max_hnsw_inserts,
             },
             MaintenanceMode::Compact => WorkPlan {
-                compact: has_tombstones,
+                compact: compaction_due,
                 bm25_reindex: tokenizer_stale,
                 optimize_vectors: has_tombstones && self.hnsw.indexed() != 0,
                 hnsw_full_rebuild: false,
@@ -569,7 +578,7 @@ impl Memory<'_> {
                 max_hnsw_inserts: options.max_hnsw_inserts,
             },
             MaintenanceMode::ReindexText => WorkPlan {
-                compact: has_tombstones,
+                compact: compaction_due,
                 bm25_reindex: true,
                 optimize_vectors: has_tombstones && self.hnsw.indexed() != 0,
                 hnsw_full_rebuild: false,

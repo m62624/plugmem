@@ -37,6 +37,8 @@ use crate::model::{
 use crate::storage::Storage;
 use crate::tokenizer::Tokenizer;
 
+use maintain::TOKENIZER_INDEX_VERSION;
+
 /// Most recent same-entity facts examined by similar-detection.
 const SIMILAR_CANDIDATE_CAP: usize = 32;
 
@@ -565,8 +567,23 @@ impl<'a> Memory<'a> {
     /// entity whose term sets overlap the new fact's above the
     /// `similar_jaccard` threshold. Bounded: the entity's most recent
     /// [`SIMILAR_CANDIDATE_CAP`] facts are compared (a hub's full list is
-    /// not re-tokenized), candidate texts are tokenized against the
-    /// term-frequency scratch the new fact just filled.
+    /// not re-tokenized).
+    ///
+    /// Comparing two term sets exactly means having both, and only the new
+    /// fact's is at hand — the candidate's would have to be recovered by
+    /// reading its text and running it back through the tokenizer. Doing that
+    /// for every candidate of every write is what the term-set summary in
+    /// [`DocLenSlot`](crate::index::bm25::DocLenSlot) exists to avoid: it
+    /// bounds the overlap from above, and a bound below the threshold settles
+    /// the question, because Jaccard rises with the intersection. Only a
+    /// candidate that survives the bound is read and tokenized, so the
+    /// answer is the same one the exhaustive comparison gives.
+    ///
+    /// The bound is trusted only while the index was built by the current
+    /// tokenizer. A stale index may hold terms today's tokenizer would not
+    /// produce, which would make the summary describe a different term set
+    /// than the comparison uses; then every candidate is read, exactly as
+    /// before the summary existed.
     fn find_similar(&mut self, outcome: &mut RememberOutcome) {
         let Some(entity) = outcome.entity else { return };
         // The new fact's term set is still in tf_scratch (apply_remember
@@ -589,6 +606,7 @@ impl<'a> Memory<'a> {
                 n += 1;
             }
         }
+        let summaries_trustworthy = self.bm25_tokenizer_version == TOKENIZER_INDEX_VERSION;
         let mut cand_terms: Vec<u32> = Vec::new();
         for &fact in ring.iter().take(n.min(SIMILAR_CANDIDATE_CAP)) {
             let Some(record) = self.fact(fact) else {
@@ -603,6 +621,7 @@ impl<'a> Memory<'a> {
             // Deferred validation: a load no longer scans the
             // text pool, so an unreadable text simply yields no lexical signal.
             if !new_terms.is_empty()
+                && self.overlap_possible(fact, &new_terms, summaries_trustworthy)
                 && let Ok(text) = core::str::from_utf8(self.texts.get(record.text))
             {
                 cand_terms.clear();
@@ -653,6 +672,40 @@ impl<'a> Memory<'a> {
             .similar
             .sort_unstable_by(|a, b| b.score.total_cmp(&a.score).then(a.id.cmp(&b.id)));
         outcome.similar.truncate(8);
+    }
+
+    /// Whether `candidate` could possibly overlap `new_terms` above
+    /// `similar_jaccard` — the cheap half of [`Memory::find_similar`].
+    ///
+    /// `false` is a proof, not a guess. The candidate's summary marks a term
+    /// absent only when it really is absent, so the terms it *might* share is
+    /// an upper bound `u` on the true intersection `i`. Jaccard
+    /// `i / (|A| + |B| - i)` is increasing in `i`, so `u` at or below the
+    /// threshold puts the true value there too. `true` means "unknown" and
+    /// sends the caller to the exact comparison — which is also what an
+    /// unsummarized document and an untrustworthy index return.
+    fn overlap_possible(&self, candidate: FactId, new_terms: &[u32], trust_summary: bool) -> bool {
+        if !trust_summary {
+            return true;
+        }
+        let Some(doc) = self.bm25.doc(candidate) else {
+            return true;
+        };
+        if !doc.has_signature() {
+            return true;
+        }
+        let bound = doc.overlap_bound(new_terms);
+        // `overlap_bound` counts a subset of `new_terms`, so the subtraction
+        // is grouped to happen where it provably cannot go below zero. The
+        // union is then at least `distinct`, which `has_signature` just
+        // established is non-zero — no underflow and no division by zero, on a
+        // 64-bit `usize` or a 32-bit one.
+        debug_assert!(
+            bound <= new_terms.len(),
+            "the overlap bound counts query terms, so it cannot exceed them"
+        );
+        let union = (new_terms.len() - bound) + usize::from(doc.distinct);
+        bound as f32 / union as f32 > self.cfg.similar_jaccard
     }
 
     /// Revises `target`: closes its validity at the new fact's
