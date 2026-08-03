@@ -67,14 +67,19 @@ fn bm25_decode_work_is_bounded() {
     assert_eq!(df_sum, 1_399, "corpus drifted: Σ df changed");
 }
 
-/// The two counters that separate cheap work from expensive work.
+/// The counters that separate cheap work from expensive work.
 ///
 /// `decoded` is varint arithmetic over a contiguous chunk chain — nanoseconds
-/// per entry, and it is legitimately O(Σ df). `scored` and `admitted` are the
-/// random probes: a document-length lookup and a fact-record lookup, each into
-/// an arena whose depth and cache behavior degrade with the corpus. Those two
-/// are what make a lexical query cost milliseconds instead of microseconds, so
-/// they get their own ceilings, lowered-only.
+/// per entry, and it is legitimately O(Σ df). `admitted` is not: every call is
+/// a fact-record lookup in the engine's arena, a random probe that deepens with
+/// the corpus. Only `k` documents can be returned, so a query that asks about
+/// more than `k` is doing work it can never use — and that is what made the
+/// degenerate query cost milliseconds.
+///
+/// `scored` stays at Σ df by design: a document length is still needed per
+/// posting. What changed is where it comes from — a flat array rather than an
+/// arena probe — so the count is the gate against *extra* scoring work, not
+/// against the cost of scoring itself.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn bm25_probe_work_is_bounded() {
@@ -84,49 +89,59 @@ fn bm25_probe_work_is_bounded() {
     }
     let mut scratch = Bm25Scratch::new();
     let mut out = Vec::new();
+    let k = 8;
 
     // The ordinary query shape: one common + one mid + one rare term.
     idx.reset_query_counters();
     idx.search(
         (1.2, 0.75),
         &[1, 400, 2500],
-        8,
+        k,
         &mut |_| true,
         &mut scratch,
         &mut out,
     );
-    assert!(!out.is_empty());
-    assert!(
-        idx.scored() <= 1_399,
-        "documents scored: {} > 1399",
-        idx.scored()
-    );
-    assert!(
-        idx.admitted() <= 1_394,
-        "live predicate calls: {} > 1394",
-        idx.admitted()
+    assert_eq!(out.len(), k);
+    assert_eq!(idx.scored(), 1_399, "a length per posting, no more");
+    assert_eq!(
+        idx.admitted(),
+        k as u64,
+        "with everything live, the filter is asked exactly k times"
     );
 
     // The degenerate query: the single most frequent term of the corpus, whose
-    // posting list is most of the corpus. Only `k` documents can be returned,
-    // so the probe counters must not scale with `df` — this is the ceiling
-    // that the millisecond worst case shows up in.
+    // posting list covers nearly half of it. The filter cost must not follow
+    // `df` — this is the ceiling the millisecond worst case showed up in.
     idx.reset_query_counters();
-    idx.search((1.2, 0.75), &[0], 8, &mut |_| true, &mut scratch, &mut out);
-    assert!(!out.is_empty());
+    idx.search((1.2, 0.75), &[0], k, &mut |_| true, &mut scratch, &mut out);
+    assert_eq!(out.len(), k);
     assert_eq!(
         u64::from(idx.df(0)),
         4_388,
         "corpus drifted: df of the most common term"
     );
-    assert!(
-        idx.scored() <= 4_388,
-        "documents scored for one common term: {} > 4388",
-        idx.scored()
+    assert_eq!(idx.scored(), 4_388, "a length per posting, no more");
+    assert_eq!(
+        idx.admitted(),
+        k as u64,
+        "a common term must not cost one filter call per posting"
     );
+
+    // A filter that rejects most of the ranking still terminates on the
+    // survivors, and still never exceeds the candidate count.
+    idx.reset_query_counters();
+    idx.search(
+        (1.2, 0.75),
+        &[0],
+        k,
+        &mut |id| id.0.is_multiple_of(500),
+        &mut scratch,
+        &mut out,
+    );
+    assert_eq!(out.len(), k);
     assert!(
         idx.admitted() <= 4_388,
-        "live predicate calls for one common term: {} > 4388",
+        "filtered fallback must not exceed the candidates: {}",
         idx.admitted()
     );
 }

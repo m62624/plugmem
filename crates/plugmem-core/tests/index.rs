@@ -239,4 +239,80 @@ proptest! {
             prop_assert_eq!(tf_idx.df(key) as usize, want.len());
         }
     }
+
+    /// The ranking must be exactly what a definition-following scorer
+    /// produces — same documents, same order, same `f32` bits.
+    ///
+    /// The index does not evaluate the definition directly: it merges sorted
+    /// posting runs instead of accumulating into a map, and it asks the `live`
+    /// predicate only about documents in contention rather than about every
+    /// candidate. Both are supposed to be invisible from outside, and the
+    /// exact score equality is deliberate — a merge that summed terms in a
+    /// different order would still be "correct" and would still show up here.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn bm25_search_matches_a_naive_scorer(
+        docs in proptest::collection::vec(
+            proptest::collection::vec((0u32..12, 1u8..=6), 1..7),
+            1..40,
+        ),
+        query in proptest::collection::vec(0u32..16, 0..6),
+        k in 1usize..12,
+        live_mod in 1u32..5,
+    ) {
+        // Unique terms per document is the indexer's contract.
+        let docs: Vec<Vec<(u32, u8)>> = docs
+            .into_iter()
+            .map(|terms| {
+                let mut seen: BTreeMap<u32, u8> = BTreeMap::new();
+                for (term, tf) in terms {
+                    seen.entry(term).or_insert(tf);
+                }
+                seen.into_iter().collect()
+            })
+            .collect();
+
+        let mut idx = Bm25Index::new(4, usize::MAX).unwrap();
+        for (fact, terms) in docs.iter().enumerate() {
+            idx.index_doc(FactId(fact as u32), terms).unwrap();
+        }
+
+        // The definition, evaluated straight: for each query term, add its
+        // contribution to every document that holds it, in query order.
+        let (k1, b) = (1.2f32, 0.75f32);
+        let total_docs = docs.len() as u64;
+        let total_len: u64 = docs
+            .iter()
+            .map(|d| d.iter().map(|&(_, tf)| u64::from(tf)).sum::<u64>())
+            .sum();
+        let avg_len = total_len as f32 / total_docs as f32;
+        let mut want: Vec<(u32, f32)> = (0..docs.len() as u32).map(|id| (id, 0.0)).collect();
+        for &term in &query {
+            let df = docs.iter().filter(|d| d.iter().any(|&(t, _)| t == term)).count() as u32;
+            if df == 0 {
+                continue;
+            }
+            let idf = idx.idf(df);
+            for (id, doc) in docs.iter().enumerate() {
+                let Some(&(_, tf)) = doc.iter().find(|&&(t, _)| t == term) else {
+                    continue;
+                };
+                let len: u32 = doc.iter().map(|&(_, tf)| u32::from(tf)).sum();
+                let tf = f32::from(tf);
+                let norm = tf * (k1 + 1.0)
+                    / (tf + k1 * (1.0 - b + b * (len.min(u32::from(u16::MAX)) as f32) / avg_len));
+                want[id].1 += idf * norm;
+            }
+        }
+        let live = |id: u32| id.is_multiple_of(live_mod);
+        want.retain(|&(id, score)| score != 0.0 && live(id));
+        want.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        want.truncate(k);
+
+        let mut scratch = Bm25Scratch::new();
+        let mut out = Vec::new();
+        idx.search((k1, b), &query, k, &mut |f| live(f.0), &mut scratch, &mut out);
+        let got: Vec<(u32, f32)> = out.iter().map(|&(id, s)| (id.0, s)).collect();
+        prop_assert_eq!(&got, &want);
+    }
 }
