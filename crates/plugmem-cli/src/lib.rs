@@ -1340,6 +1340,10 @@ mod tests {
             snapshot_every_ops: None,
             snapshot_journal_bytes: None,
             maintain_every_forgets: None,
+            workspace: plugmem_host::WorkspaceSettings {
+                dir: None,
+                limits: plugmem_host::WorkspaceLimits::default(),
+            },
         }
     }
 

@@ -84,6 +84,35 @@ workers = 4
 |---|---:|---|
 | `path` | platform data path | Persistent snapshot path. It is overridden by an explicit path and `$PLUGMEM_DB`. |
 
+### `[workspace]`
+
+**Omit this section unless you need it.** Without it there is one database,
+addressed by path, and nothing below applies — that is the default and the
+common case. A workspace is for one process serving many independent memories
+(a database per chat, per tenant), where each request says which one it means.
+
+| Key | Default | Meaning |
+|---|---:|---|
+| `dir` | unset | Directory of named databases. Setting it is what turns a workspace on. |
+| `max_open` | `16` | Databases kept open at once; the least recently used is closed to make room. Must be between 1 and 240 — one open database costs several file descriptors, so an unbounded value would exhaust them somewhere else in the program. |
+| `idle_timeout_ms` | `60000` | Close a database unused this long. `0` never closes. |
+
+The layout under `dir` is fixed:
+
+```text
+<dir>/registry.plugmem      the registry — an ordinary plugmem database
+<dir>/db/<name>.plugmem     the databases themselves
+```
+
+A name is `[a-z0-9][a-z0-9_-]*`, at most 64 bytes. It is not a path and cannot
+become one: separators, dots and leading dashes are not names, so a name can
+only ever resolve to one file directly inside `<dir>/db`.
+
+`idle_timeout_ms` is about **reachability, not memory**. An open database holds
+an exclusive file lock, so a long-running server that never let go would make
+its databases permanently unreachable from the CLI. The timeout is what returns
+them.
+
 ### `[engine]`
 
 These are the size-bearing fields accepted from TOML. BM25, fusion, graph and

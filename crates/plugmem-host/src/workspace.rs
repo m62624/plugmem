@@ -327,12 +327,46 @@ pub const DEFAULT_MAX_OPEN: usize = 16;
 /// Default idle window before a pooled handle is closed.
 pub const DEFAULT_IDLE_TIMEOUT_MS: u64 = 60_000;
 
+/// Descriptors one open database occupies: its lock, its journal, the mapped
+/// generation, and room for the staging file a checkpoint writes.
+const FILES_PER_OPEN_DATABASE: usize = 4;
+
+/// The lowest per-process descriptor limit worth planning for — the usual POSIX
+/// soft limit.
+const ASSUMED_FD_LIMIT: usize = 1024;
+
+/// Descriptors left for the rest of the process: stdio, the config file, the
+/// registry, and the embedder's sockets.
+const RESERVED_FDS: usize = 64;
+
+/// Most databases a pool will hold open, whatever it is configured with.
+///
+/// Derived rather than picked: `max_open` can come from a config file, and a
+/// file must not be able to talk a process into running itself out of file
+/// descriptors. Exceeding this would not fail at the pool — it would fail at
+/// some unrelated `open` elsewhere in the program, which is the worst place to
+/// find out.
+pub const MAX_OPEN_CEILING: usize = (ASSUMED_FD_LIMIT - RESERVED_FDS) / FILES_PER_OPEN_DATABASE;
+
+const _: () = {
+    assert!(MAX_OPEN_CEILING > DEFAULT_MAX_OPEN);
+};
+
 impl Default for WorkspaceLimits {
     fn default() -> Self {
         Self {
             max_open: DEFAULT_MAX_OPEN,
             idle_timeout_ms: DEFAULT_IDLE_TIMEOUT_MS,
         }
+    }
+}
+
+impl WorkspaceLimits {
+    /// The effective ceiling: at least one, never more than
+    /// [`MAX_OPEN_CEILING`]. Clamped here, in one place, because `max_open` can
+    /// arrive from a config file and neither end of the range is safe to trust.
+    pub fn ceiling(&self) -> usize {
+        self.max_open.clamp(1, MAX_OPEN_CEILING)
     }
 }
 
@@ -489,7 +523,7 @@ impl Workspace {
         }
 
         // Make room *before* opening, so the ceiling counts this database too.
-        let ceiling = self.limits.max_open.max(1);
+        let ceiling = self.limits.ceiling();
         while pool.len() >= ceiling {
             let lru = Self::least_recently_used(&pool);
             pool.remove(lru);
