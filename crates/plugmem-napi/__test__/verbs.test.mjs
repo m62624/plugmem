@@ -48,7 +48,7 @@ test("revise closes a fact and opens its successor", () => {
   });
 });
 
-test("rememberMany, tagsOf and exportEach cover batch/read/stream verbs", async () => {
+test("rememberMany and tagsOf cover the host batch/read verbs", async () => {
   const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-"));
   try {
     const db = new Plugmem(join(dir, "m.plugmem"));
@@ -62,16 +62,40 @@ test("rememberMany, tagsOf and exportEach cover batch/read/stream verbs", async 
     assert.deepEqual(db.tagsOf(0), ["batch", "one"]);
     assert.deepEqual(db.tagsOf(999), []);
 
-    const seen = [];
-    await db.exportEach((error, fact) => {
-      assert.equal(error, null);
-      seen.push(fact);
-    });
-    // The Promise marks the native scan/queue complete; TSFN callbacks drain
-    // separately on Node's event loop.
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.deepEqual(seen.map(({ text }) => text), ["batch one", "batch two"]);
-    assert.deepEqual(seen[0].metadata, { source: "test" });
+    const page = await db.exportPage();
+    assert.equal(page.nextCursor, undefined);
+    assert.deepEqual(page.facts.map(({ text }) => text), ["batch one", "batch two"]);
+    assert.deepEqual(page.facts[0].metadata, { source: "test" });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("exportPage is bounded, pull-driven and releases the lock between pages", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-"));
+  try {
+    const db = new Plugmem(join(dir, "m.plugmem"));
+    await db.rememberMany(
+      Array.from({ length: 260 }, (_, i) => ({ text: `page fact ${i}` })),
+    );
+
+    const first = await db.exportPage();
+    assert.equal(first.facts.length, 128);
+    assert.equal(typeof first.nextCursor, "number");
+
+    // The native read guard is gone when the Promise resolves. A write between
+    // pulls therefore progresses instead of forming a callback/read-lock cycle.
+    assert.equal(db.remember({ text: "written between pages" }).id, 260);
+
+    const second = await db.exportPage(first.nextCursor);
+    const third = await db.exportPage(second.nextCursor);
+    assert.equal(second.facts.length, 128);
+    assert.equal(third.facts.length, 5);
+    assert.equal(third.nextCursor, undefined);
+    assert.equal(
+      new Set([...first.facts, ...second.facts, ...third.facts].map(({ text }) => text)).size,
+      261,
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -85,6 +109,11 @@ test("async tasks retain their host handle after close", async () => {
     db.close();
     assert.deepEqual((await pending).map(({ id }) => id), [0]);
     assert.throws(() => db.stats(), /closed/);
+
+    const reopened = new Plugmem(join(dir, "m.plugmem"));
+    const page = reopened.exportPage();
+    reopened.close();
+    assert.deepEqual((await page).facts.map(({ text }) => text), ["survives close"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

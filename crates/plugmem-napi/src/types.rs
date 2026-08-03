@@ -2,10 +2,11 @@
 //! napi emits precise TypeScript interfaces (a TS host like Pi gets autocomplete
 //! and checking on what a verb returns, not `any`).
 //!
-//! Each struct also derives `Deserialize` with **host field names**, so a result
+//! Most structs also derive `Deserialize` with **host field names**, so a result
 //! is converted by a serde round-trip ([`to_typed`]) — no hand-written per-field
-//! mapping, no second source of truth to drift. napi renders the Rust snake_case
-//! fields as camelCase on the TS side (`recorded_at` → `recordedAt`).
+//! mapping, no second source of truth to drift. The hot export path maps its
+//! owned strings directly instead. napi renders Rust snake_case fields as
+//! camelCase on the TS side (`recorded_at` → `recordedAt`).
 //!
 //! Numeric policy: every count/id/timestamp is a JS `number` (`f64`). Ids and
 //! counts are exact; unix-millisecond timestamps are exact well past any real
@@ -44,6 +45,30 @@ pub struct RememberOutcome {
     /// Similar / potentially-conflicting live facts (best first; the engine
     /// never merges on its own — the caller decides).
     pub similar: Vec<Similar>,
+}
+
+impl From<plugmem_host::Similar> for Similar {
+    fn from(similar: plugmem_host::Similar) -> Self {
+        let reason = match similar.reason {
+            plugmem_host::SimilarReason::LexicalOverlap => "LexicalOverlap",
+            plugmem_host::SimilarReason::VectorCosine => "VectorCosine",
+        };
+        Self {
+            id: f64::from(similar.id.0),
+            score: f64::from(similar.score),
+            reason: reason.to_string(),
+        }
+    }
+}
+
+impl From<plugmem_host::RememberOutcome> for RememberOutcome {
+    fn from(outcome: plugmem_host::RememberOutcome) -> Self {
+        Self {
+            id: f64::from(outcome.id.0),
+            entity: outcome.entity.map(|entity| f64::from(entity.0)),
+            similar: outcome.similar.into_iter().map(Similar::from).collect(),
+        }
+    }
 }
 
 /// One recalled fact.
@@ -174,6 +199,37 @@ pub struct ExportedFact {
     pub recorded_at: f64,
     /// Validity start (unix ms; preserved on import).
     pub valid_from: f64,
+}
+
+impl From<plugmem_host::ExportedFact> for ExportedFact {
+    fn from(fact: plugmem_host::ExportedFact) -> Self {
+        Self {
+            text: fact.text,
+            entity: fact.entity,
+            tags: fact.tags,
+            metadata: fact.metadata,
+            recorded_at: fact.recorded_at as f64,
+            valid_from: fact.valid_from as f64,
+        }
+    }
+}
+
+/// One bounded page returned by `exportPage`.
+#[napi(object)]
+pub struct ExportPage {
+    /// Open facts in fact-id order; never longer than the native page bound.
+    pub facts: Vec<ExportedFact>,
+    /// Pass this opaque cursor to the next call; absent when the scan is done.
+    pub next_cursor: Option<f64>,
+}
+
+impl From<plugmem_host::ExportPage> for ExportPage {
+    fn from(page: plugmem_host::ExportPage) -> Self {
+        Self {
+            facts: page.facts.into_iter().map(ExportedFact::from).collect(),
+            next_cursor: page.next_cursor.map(f64::from),
+        }
+    }
 }
 
 /// The report of a `maintain` pass.
@@ -313,4 +369,36 @@ pub(crate) fn to_typed<T: DeserializeOwned>(v: &impl Serialize) -> napi::Result<
         .map_err(|e| napi::Error::from_reason(format!("serialization error: {e}")))?;
     serde_json::from_value(value)
         .map_err(|e| napi::Error::from_reason(format!("result shape error: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use plugmem_host::{EntityId, FactId, SimilarReason};
+
+    #[test]
+    fn direct_remember_mapping_preserves_ids_scores_and_reason_names() {
+        let mapped = RememberOutcome::from(plugmem_host::RememberOutcome {
+            id: FactId(7),
+            entity: Some(EntityId(3)),
+            similar: vec![
+                plugmem_host::Similar {
+                    id: FactId(1),
+                    score: 0.75,
+                    reason: SimilarReason::LexicalOverlap,
+                },
+                plugmem_host::Similar {
+                    id: FactId(2),
+                    score: 0.875,
+                    reason: SimilarReason::VectorCosine,
+                },
+            ],
+        });
+
+        assert_eq!(mapped.id, 7.0);
+        assert_eq!(mapped.entity, Some(3.0));
+        assert_eq!(mapped.similar[0].reason, "LexicalOverlap");
+        assert_eq!(mapped.similar[1].reason, "VectorCosine");
+        assert_eq!(mapped.similar[1].score, 0.875);
+    }
 }

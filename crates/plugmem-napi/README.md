@@ -117,9 +117,9 @@ engine logic is entirely the host's.
 
 **Writer** (default): `remember`, `rememberMany`, `recall`, `revise(id, args)`,
 `forget(id)`, `link`, `unlink`, `get(id)`, `tagsOf(id)`, `stats`, `export`,
-`exportEach(callback)`, `verify`, and the async maintenance verbs below.
+`exportPage(cursor?)`, `verify`, and the async maintenance verbs below.
 **Read-only** (`{ readOnly: true }`, observing another process's writer):
-`recall`, `get`, `tagsOf`, `stats`, `export`, `exportEach(callback)`, `verify`,
+`recall`, `get`, `tagsOf`, `stats`, `export`, `exportPage(cursor?)`, `verify`,
 plus `generation()` (the pinned snapshot generation) and `refresh()` (advance
 to the writer's latest checkpoint); the write verbs throw.
 
@@ -132,7 +132,7 @@ operation intentionally kept out of this boundary is path-level recovery:
 |---|---|
 | `recover` | salvaging a damaged file is a path-level operation on the disk the process is running on — [`plugmem-cli recover`](https://docs.rs/plugmem-cli/latest)'s job, like `import` and `scrub`. |
 | `remember_many` | Exposed as async `rememberMany(items)`. It writes a batch with one embedding round-trip and resolves with outcomes in input order. |
-| `export_each` | Exposed as async `exportEach(callback)`. It queues one fact at a time without materializing the full export array; the callback uses napi-rs' error-first shape `(error, fact)`. |
+| `export_each` | Exposed as pull-based `exportPage(cursor?)`. Each Promise returns at most 128 facts and releases the native read lock before JS processes them; this gives Node backpressure without a cross-thread callback. |
 | `tags_of` | Exposed as synchronous `tagsOf(id)`, returning one fact's tags or an empty array. |
 
 **No `import` verb** either — bulk-loading a `backup.jsonl` reads a file on disk,
@@ -186,11 +186,27 @@ the directory, which is not work for the main thread.
 Operations with unbounded storage or batch work use napi-rs `AsyncTask`: they
 return a **`Promise`** and run on Node's **libuv** worker pool, keeping the event
 loop available for application code. This includes `rememberMany`,
-`exportEach`, `maintain`, `checkpoint`, `reindex` and `verify`.
+`exportPage`, `maintain`, `checkpoint`, `reindex` and `verify`.
 
-`exportEach(callback)` delivers one fact at a time and resolves after the worker
-has queued the complete scan. Callback execution continues on the event loop;
-if a callback needs to write, it should do so after the export promise resolves.
+For a bounded export, call `exportPage()` once, process its `facts`, then pass
+`nextCursor` to the next call until it is absent:
+
+```ts
+let cursor: number | undefined;
+do {
+  const page = await db.exportPage(cursor);
+  for (const fact of page.facts) {
+    await destination.write(fact);
+  }
+  cursor = page.nextCursor;
+} while (cursor !== undefined);
+```
+
+The Promise is the completion boundary for that page: no callback remains
+queued, and no database lock is held while the loop body runs. Each page has at
+most 128 facts. A read-only handle pages one immutable checkpoint; when paging a
+writer for a snapshot-style backup, do not mutate it between calls.
+
 `rememberMany(items)` performs one batch embedding pass and one journal sync,
 then resolves with outcomes in input order. A maintenance call may also return
 a no-op report when there is nothing to purge, reindex or optimize.

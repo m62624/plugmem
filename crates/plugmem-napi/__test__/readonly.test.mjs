@@ -25,7 +25,7 @@ test("read-only observes a writer's checkpointed snapshot", async () => {
   await withDir(async (path) => {
     // Writer stores + checkpoints (clears the journal) + closes (drops the lock).
     const w = new Plugmem(path);
-    w.remember({ text: "the sky is blue", entity: "sky" });
+    w.remember({ text: "the sky is blue", entity: "sky", tags: ["color"] });
     await w.checkpoint(); // async — must finish before close/reopen
     w.close();
 
@@ -35,16 +35,12 @@ test("read-only observes a writer's checkpointed snapshot", async () => {
     // Read verbs answer.
     assert.ok(Array.isArray(ro.recall({ query: "sky" }).facts));
     assert.match(ro.get(0).text, /sky/);
-    assert.deepEqual(ro.tagsOf(0), []);
+    assert.deepEqual(ro.tagsOf(0), ["color"]);
     assert.equal(ro.stats().facts, 1);
     assert.equal(ro.export().length, 1);
-    const streamed = [];
-    await ro.exportEach((error, fact) => {
-      assert.equal(error, null);
-      streamed.push(fact.text);
-    });
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.deepEqual(streamed, ["the sky is blue"]);
+    const page = await ro.exportPage();
+    assert.deepEqual(page.facts.map(({ text }) => text), ["the sky is blue"]);
+    assert.equal(page.nextCursor, undefined);
     assert.doesNotThrow(() => ro.verify());
 
     // Freshness verbs work; nothing newer to adopt.

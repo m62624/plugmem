@@ -4,6 +4,7 @@
 
 use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use plugmem_host::{
@@ -550,6 +551,36 @@ fn export_each_streams_the_same_facts_as_export() {
 }
 
 #[test]
+fn export_pages_are_bounded_and_advance_across_closed_and_tombstoned_ids() {
+    let tmp = TempDir::new("export-page");
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    db.remember(RememberInput::text(1, "alpha")).unwrap();
+    let beta = db.remember(RememberInput::text(2, "beta")).unwrap();
+    db.revise(beta.id, RememberInput::text(3, "beta prime"))
+        .unwrap();
+    let gone = db.remember(RememberInput::text(4, "gone")).unwrap();
+    db.forget(5, gone.id).unwrap();
+    db.remember(RememberInput::text(6, "omega")).unwrap();
+
+    let expected = db.export();
+    let mut cursor = 0;
+    let mut paged = Vec::new();
+    loop {
+        let page = db.export_page(cursor, NonZeroUsize::new(1).unwrap());
+        assert!(page.facts.len() <= 1, "the requested bound is hard");
+        paged.extend(page.facts);
+        let Some(next) = page.next_cursor else { break };
+        assert!(next > cursor, "a non-terminal page must make progress");
+        cursor = next;
+    }
+    assert_eq!(paged, expected);
+
+    let beyond_end = db.export_page(u32::MAX, NonZeroUsize::new(4).unwrap());
+    assert!(beyond_end.facts.is_empty());
+    assert_eq!(beyond_end.next_cursor, None);
+}
+
+#[test]
 fn embedder_transport_and_shape_errors_are_typed() {
     // A refused connection is a typed Embed error.
     let mut refused = OpenAiCompatEmbedder::new("http://127.0.0.1:1/v1", "m", 4);
@@ -1014,6 +1045,9 @@ fn open_readonly_matches_read_write() {
     assert_eq!(ro.stats().facts, facts);
     assert_eq!(ro.recall(q).unwrap().rendered, rendered);
     assert_eq!(ro.get(FactId(1)), Some(got1));
+    let page = ro.export_page(0, NonZeroUsize::new(1).unwrap());
+    assert_eq!(page.facts.len(), 1);
+    assert!(page.next_cursor.is_some());
     assert_eq!(ro.path(), tmp.db());
     // Debug is a summary, never the contents.
     assert!(format!("{ro:?}").contains("ReadOnlyDatabase"));

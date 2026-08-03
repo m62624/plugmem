@@ -38,7 +38,7 @@ mod settings_help;
 mod storage;
 mod workspace;
 
-pub use db::{Database, DatabaseBuilder, ExportedFact, FactSnapshot, RecoverReport};
+pub use db::{Database, DatabaseBuilder, ExportPage, ExportedFact, FactSnapshot, RecoverReport};
 pub use embedder::{Embedder, NullEmbedder, OpenAiCompatEmbedder, SharedEmbedder};
 pub use error::HostError;
 pub use paths::{default_config_dir, default_config_path, default_data_dir, default_database_path};

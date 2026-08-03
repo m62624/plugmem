@@ -285,6 +285,14 @@ impl ReadOnlyDatabase {
         self.with_mem(|mem| crate::db::export_facts_each(mem, f));
     }
 
+    /// Returns at most `limit` open facts starting at the opaque fact-id
+    /// `cursor`. The mapped generation is immutable, so paging this handle is a
+    /// snapshot-consistent bounded export. Pass the returned `next_cursor` to
+    /// continue; `None` means the scan is complete.
+    pub fn export_page(&self, cursor: u32, limit: std::num::NonZeroUsize) -> crate::db::ExportPage {
+        self.with_mem(|mem| crate::db::export_facts_page(mem, cursor, limit.get()))
+    }
+
     /// The database base path.
     pub fn path(&self) -> &Path {
         &self.path

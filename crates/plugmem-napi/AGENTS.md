@@ -8,14 +8,14 @@
 
 ## Public boundary
 
-The `Plugmem` constructor accepts a path and optional open options, including read-only mode and config. Methods cover remember, revise, recall, forget, link, get, stats, export, verify, maintain, checkpoint, generation, refresh, and close.
+The `Plugmem` constructor accepts a path and optional open options, including read-only mode and config. Methods cover remember, remember-many, revise, recall, forget, link, get, tags, collected and paged export, verify, maintain, checkpoint, generation, refresh, and close.
 
 The wrapper has two internal modes:
 
 - writer: owns `plugmem_host::Database`;
 - reader: owns `ReadOnlyDatabase` and must reject write operations.
 
-Async `maintain` and `checkpoint` use napi-rs async tasks/libuv. Preserve the rule that the task owns the necessary database handle and that errors cross the boundary as JS exceptions/promises rather than panics.
+Async `rememberMany`, `exportPage`, `maintain`, and `checkpoint` use napi-rs async tasks/libuv. Preserve the rule that the task owns the necessary database handle and that errors cross the boundary as JS exceptions/promises rather than panics. Paged export is pull-based and item-bounded; do not replace it with an unbounded threadsafe-function callback queue or wait for JavaScript while holding the host read lock.
 
 ## Type and error rules
 

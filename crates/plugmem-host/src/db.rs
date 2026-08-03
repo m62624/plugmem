@@ -193,6 +193,20 @@ pub struct ExportedFact {
     pub valid_from: u64,
 }
 
+/// One bounded page of currently-open facts.
+///
+/// `next_cursor` is the next fact id to inspect, not an offset into `facts`:
+/// closed, tombstoned, and purged ids are skipped without making the caller
+/// rescan them. `None` means the scan reached the database's current end.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ExportPage {
+    /// The open facts found in this page, in fact-id order.
+    pub facts: Vec<ExportedFact>,
+    /// Pass this to the next [`Database::export_page`] call.
+    pub next_cursor: Option<u32>,
+}
+
 /// The outcome of a [`Database::recover`] salvage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -226,33 +240,63 @@ pub(crate) fn metadata_map(mem: &Memory, id: plugmem_core::FactId) -> BTreeMap<S
         .collect()
 }
 
+fn exported_fact(
+    mem: &Memory,
+    id: plugmem_core::FactId,
+    terms: &mut Vec<plugmem_core::TermId>,
+) -> Option<ExportedFact> {
+    use plugmem_core::{EntityId, VALID_TO_OPEN};
+    let view = mem.get(id)?;
+    if view.record.valid_to != VALID_TO_OPEN {
+        return None; // a closed revision — export the current state only
+    }
+    let entity = (view.record.entity != EntityId::NONE)
+        .then(|| mem.entity_name(view.record.entity))
+        .flatten()
+        .map(str::to_string);
+    terms.clear();
+    mem.tags_of(id, terms);
+    let tags = terms.iter().map(|t| mem.term(*t).to_string()).collect();
+    Some(ExportedFact {
+        text: view.text.to_string(),
+        entity,
+        tags,
+        metadata: metadata_map(mem, id),
+        recorded_at: view.record.recorded_at,
+        valid_from: view.record.valid_from,
+    })
+}
+
 pub(crate) fn export_facts_each(mem: &Memory, mut f: impl FnMut(ExportedFact)) {
-    use plugmem_core::{EntityId, FactId, VALID_TO_OPEN};
+    use plugmem_core::FactId;
     let next = mem.stats().next_fact;
     let mut terms = Vec::new();
     for i in 0..next {
-        let id = FactId(i);
-        let Some(view) = mem.get(id) else {
-            continue; // unknown or tombstoned
-        };
-        if view.record.valid_to != VALID_TO_OPEN {
-            continue; // a closed revision — export the current state only
+        if let Some(fact) = exported_fact(mem, FactId(i), &mut terms) {
+            f(fact);
         }
-        let entity = (view.record.entity != EntityId::NONE)
-            .then(|| mem.entity_name(view.record.entity))
-            .flatten()
-            .map(str::to_string);
-        terms.clear();
-        mem.tags_of(id, &mut terms);
-        let tags = terms.iter().map(|t| mem.term(*t).to_string()).collect();
-        f(ExportedFact {
-            text: view.text.to_string(),
-            entity,
-            tags,
-            metadata: metadata_map(mem, id),
-            recorded_at: view.record.recorded_at,
-            valid_from: view.record.valid_from,
-        });
+    }
+}
+
+pub(crate) fn export_facts_page(mem: &Memory, cursor: u32, limit: usize) -> ExportPage {
+    use plugmem_core::FactId;
+    let end = mem.stats().next_fact;
+    let mut cursor = cursor.min(end);
+    let stop = cursor
+        .saturating_add(limit.min(u32::MAX as usize) as u32)
+        .min(end);
+    let mut terms = Vec::new();
+    let mut facts = Vec::with_capacity((stop - cursor) as usize);
+    while cursor < stop {
+        let id = FactId(cursor);
+        cursor += 1;
+        if let Some(fact) = exported_fact(mem, id, &mut terms) {
+            facts.push(fact);
+        }
+    }
+    ExportPage {
+        facts,
+        next_cursor: (cursor < end).then_some(cursor),
     }
 }
 
@@ -779,6 +823,22 @@ impl Database {
     /// See [`ExportedFact`].
     pub fn export_each(&self, f: impl FnMut(ExportedFact)) {
         self.read().engine.read(|mem| export_facts_each(mem, f));
+    }
+
+    /// Inspects at most `limit` fact ids starting at `cursor` and returns the
+    /// ones that are currently open. A sparse page may therefore contain fewer
+    /// facts, including zero, while still carrying a `next_cursor`.
+    ///
+    /// This is the pull-based counterpart to [`export_each`](Self::export_each):
+    /// it releases the database read guard before returning, so a boundary
+    /// caller can process the page, apply backpressure, or write to the database
+    /// without a callback running under this lock. Mutations between page calls
+    /// are visible to later pages; use a stable read-only checkpoint when
+    /// snapshot-consistent paging is required.
+    pub fn export_page(&self, cursor: u32, limit: std::num::NonZeroUsize) -> ExportPage {
+        self.read()
+            .engine
+            .read(|mem| export_facts_page(mem, cursor, limit.get()))
     }
 
     /// Runs a maintenance pass now (cheap no-op, purge/compaction, text

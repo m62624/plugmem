@@ -10,6 +10,7 @@ import {
   Plugmem,
   Workspace,
   type DbEntry,
+  type ExportPage,
   type ExportedFact,
   type MaintainReport,
   type RecallResult,
@@ -39,11 +40,10 @@ const rememberedMany: Promise<RememberOutcome[]> = db.rememberMany([
   { text: "batch", tags: ["example"] },
 ]);
 const tags: string[] = db.tagsOf(id);
-const exportedEach: Promise<void> = db.exportEach((error, fact) => {
-  if (error) throw error;
-  const exported: ExportedFact = fact;
-  void exported;
-});
+const exportedPage: Promise<ExportPage> = db.exportPage();
+const exportedPageAfter: Promise<ExportPage> = db.exportPage(128);
+type PageFact = ExportPage["facts"][number];
+assertType<Exact<PageFact, ExportedFact>>(true);
 
 // A path is optional; options are optional; both may be omitted entirely.
 const defaulted = new Plugmem();
@@ -87,7 +87,8 @@ export const used = {
   checkpointed,
   rememberedMany,
   tags,
-  exportedEach,
+  exportedPage,
+  exportedPageAfter,
   chat,
   names,
   entries,

@@ -15,12 +15,12 @@
 //! freshness verbs (`generation`/`refresh`) become available.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use napi::bindgen_prelude::AsyncTask;
-use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
-use napi::{Env, Error, Result, Status, Task};
+use napi::{Env, Error, Result, Task};
 use napi_derive::napi;
 use plugmem_host::{
     Database, FactId, HostError, LinkInput, MaintenanceOptions, ReadOnlyDatabase, RecallQuery,
@@ -28,9 +28,14 @@ use plugmem_host::{
 };
 
 use crate::types::{
-    self, ExportedFact, FactSnapshot, MaintainMode, MaintainReport, RecallResult, RememberOutcome,
-    Stats,
+    self, ExportPage, ExportedFact, FactSnapshot, MaintainMode, MaintainReport, RecallResult,
+    RememberOutcome, Stats,
 };
+
+/// Keep one native→JS transfer bounded. This matches the workspace's existing
+/// conservative batch grain (CLI import) without exposing a tuning knob that
+/// would let callers accidentally reconstruct an unbounded export.
+const EXPORT_PAGE_LIMIT: NonZeroUsize = NonZeroUsize::new(128).unwrap();
 
 /// Options for [`Plugmem::new`].
 #[napi(object)]
@@ -338,24 +343,27 @@ impl Plugmem {
             Handle::Writer(db) => db.export(),
             Handle::Reader(db) => db.export(),
         };
-        types::to_typed(&facts)
+        Ok(facts.into_iter().map(ExportedFact::from).collect())
     }
 
-    /// Streams facts to a JavaScript callback. The scan runs on a libuv worker
-    /// and callbacks are queued on Node's event loop through napi-rs
-    /// `ThreadsafeFunction`; the returned promise resolves after the scan has
-    /// queued every fact. The callback follows napi-rs' error-first convention:
-    /// `(error, fact)`.
-    #[napi(ts_return_type = "Promise<void>")]
-    pub fn export_each(
-        &self,
-        callback: ThreadsafeFunction<ExportedFact>,
-    ) -> Result<AsyncTask<ExportEachTask>> {
+    /// Returns at most 128 inspected fact ids' open facts on a libuv worker
+    /// thread. A sparse page can be empty and still carry `nextCursor`.
+    ///
+    /// Pass `nextCursor` back as `cursor` until it is absent. Each Promise owns
+    /// exactly one bounded page and resolves only after its native scan has
+    /// completed; there is no callback queue and no database lock held while JS
+    /// processes the result. A writer may change between page calls, so do not
+    /// mutate it during a snapshot-style backup; a read-only handle is stable.
+    #[napi(ts_return_type = "Promise<ExportPage>")]
+    pub fn export_page(&self, cursor: Option<u32>) -> Result<AsyncTask<ExportPageTask>> {
         let source = match self.handle()? {
             Handle::Writer(db) => ExportSource::Writer(db.clone()),
             Handle::Reader(db) => ExportSource::Reader(Arc::clone(db)),
         };
-        Ok(AsyncTask::new(ExportEachTask { source, callback }))
+        Ok(AsyncTask::new(ExportPageTask {
+            source,
+            cursor: cursor.unwrap_or(0),
+        }))
     }
 
     /// One fact's tags, or an empty array for an unknown or tombstoned id.
@@ -428,7 +436,7 @@ impl Plugmem {
         match self.handle_mut()? {
             Handle::Reader(db) => Arc::get_mut(db)
                 .ok_or_else(|| {
-                    Error::from_reason("cannot refresh while an async export is running")
+                    Error::from_reason("cannot refresh while an export page is running")
                 })?
                 .refresh()
                 .map_err(to_napi_err),
@@ -575,7 +583,7 @@ impl Task for RememberManyTask {
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        types::to_typed(&output)
+        Ok(output.into_iter().map(RememberOutcome::from).collect())
     }
 }
 
@@ -584,48 +592,25 @@ enum ExportSource {
     Reader(Arc<ReadOnlyDatabase>),
 }
 
-/// The libuv-thread body of [`Plugmem::export_each`].
-pub struct ExportEachTask {
+/// The libuv-thread body of [`Plugmem::export_page`].
+pub struct ExportPageTask {
     source: ExportSource,
-    callback: ThreadsafeFunction<ExportedFact>,
+    cursor: u32,
 }
 
-impl Task for ExportEachTask {
-    type Output = ();
-    type JsValue = ();
+impl Task for ExportPageTask {
+    type Output = plugmem_host::ExportPage;
+    type JsValue = ExportPage;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        let mut queue_error = None;
-        let mut emit = |fact: plugmem_host::ExportedFact| {
-            if queue_error.is_some() {
-                return;
-            }
-            let value = match types::to_typed::<ExportedFact>(&fact) {
-                Ok(value) => value,
-                Err(error) => {
-                    queue_error = Some(error.to_string());
-                    return;
-                }
-            };
-            let status = self
-                .callback
-                .call(Ok(value), ThreadsafeFunctionCallMode::NonBlocking);
-            if status != Status::Ok {
-                queue_error = Some(format!("export callback could not be queued: {status}"));
-            }
-        };
-        match &self.source {
-            ExportSource::Writer(db) => db.export_each(&mut emit),
-            ExportSource::Reader(db) => db.export_each(&mut emit),
-        }
-        if let Some(error) = queue_error {
-            return Err(Error::from_reason(error));
-        }
-        Ok(())
+        Ok(match &self.source {
+            ExportSource::Writer(db) => db.export_page(self.cursor, EXPORT_PAGE_LIMIT),
+            ExportSource::Reader(db) => db.export_page(self.cursor, EXPORT_PAGE_LIMIT),
+        })
     }
 
-    fn resolve(&mut self, _env: Env, (): Self::Output) -> Result<Self::JsValue> {
-        Ok(())
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(ExportPage::from(output))
     }
 }
 
@@ -665,7 +650,7 @@ fn do_remember(
         None => db.remember(input),
     }
     .map_err(to_napi_err)?;
-    types::to_typed(&outcome)
+    Ok(RememberOutcome::from(outcome))
 }
 
 /// Borrow an optional `Vec<String>` as `&[&str]` (empty when absent).
