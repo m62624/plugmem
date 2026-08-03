@@ -1804,3 +1804,40 @@ fn metadata_round_trips_through_get_and_export_sorted() {
         "import preserves metadata"
     );
 }
+
+/// A growing database re-shards itself. Nothing else would: automatic
+/// maintenance is opt-in, so without this trigger a database would keep the
+/// layout it was created with until somebody ran `maintain` by hand, paying
+/// for it in memory the whole time.
+#[test]
+fn a_growing_database_reshards_itself_without_being_asked() {
+    let tmp = TempDir::new("reshard");
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    let floor = db.stats().shards;
+
+    // Enough facts to push the fact arena one step past the floor. The rule
+    // sizes each group by its payload, so this follows from the slot width and
+    // the per-shard target rather than being a guessed number.
+    const FACT_SLOT: usize = 48;
+    const SHARD_TARGET: usize = 64 * 4096;
+    let n = floor.facts * SHARD_TARGET / FACT_SLOT + 1;
+    for i in 0..n {
+        db.remember(RememberInput::text(i as u64 + 1, "a short fact"))
+            .unwrap();
+    }
+
+    let grown = db.stats().shards;
+    assert!(
+        grown.facts > floor.facts,
+        "layout stayed at {floor:?} after {n} facts"
+    );
+    assert_eq!(db.stats().facts, n, "re-sharding is a rearrangement");
+
+    // It survives a reopen: the file records the layout, and the caller's
+    // config — still on the floor — does not override it.
+    drop(db);
+    let (reopened, _) = Database::open(tmp.db(), cfg()).unwrap();
+    assert_eq!(reopened.stats().shards, grown);
+    assert_eq!(reopened.stats().facts, n);
+    reopened.verify().unwrap();
+}

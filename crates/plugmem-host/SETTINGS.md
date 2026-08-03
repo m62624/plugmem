@@ -126,6 +126,18 @@ use the same OpenAI-compatible HTTP shape.
 | `maintain_every_forgets` | off | Run policy maintenance after this many forgets. |
 | `batch_size` | `128` | CLI-only `import` batch size; `--batch` overrides it. |
 
+One maintenance trigger has no key and is always on: a database that outgrows
+(or falls far below) its shard layout re-shards itself on the next write. It
+has to be automatic — the triggers above are opt-in, so otherwise a growing
+database would keep the layout it was created with until somebody ran
+`maintain` by hand. It is also self-limiting: the thresholds are a doubling up
+and a fourfold drop, so it fires a handful of times over a database's life.
+
+One consequence worth expecting: a database written by a version that used the
+old fixed layout is stale the moment it opens, so its **first write re-shards
+it**, at a cost proportional to its size. That happens once and leaves a
+permanently smaller file.
+
 ### `[server]`
 
 | Key | Default | Meaning |

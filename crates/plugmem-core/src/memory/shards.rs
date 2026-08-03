@@ -258,6 +258,23 @@ impl super::Memory<'_> {
     pub(crate) fn target_layout(&self) -> ShardLayout {
         ShardLayout::for_population(&self.population())
     }
+
+    /// Whether the arenas are laid out for a database this one is no longer.
+    ///
+    /// **O(1)** — every input is a stored record count, so a host may ask on
+    /// every write. That is the point: without a trigger of its own, a growing
+    /// database would keep the layout it was created with until somebody ran
+    /// `maintain` by hand, and the automatic maintenance that does exist
+    /// (`maintain_every_forgets`) is off by default.
+    ///
+    /// Self-limiting, which is what makes it safe to act on: the thresholds are
+    /// a doubling up and a fourfold drop, so this turns true a handful of times
+    /// over a database's whole life, not continuously.
+    pub fn shard_layout_is_stale(&self) -> bool {
+        let stored = ShardLayout::of_config(&self.cfg);
+        let target = self.target_layout();
+        stored.compacted_groups_earn_rebuild(&target) || stored.edges_earn_rebuild(&target)
+    }
 }
 
 #[cfg(test)]

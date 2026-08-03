@@ -344,6 +344,7 @@ threads, matching the engine's own philosophy:
 | `snapshot_every_ops` | 1024 | full snapshot + journal reset after N mutations |
 | `snapshot_journal_bytes` | 4 MiB | …or when the journal outgrows this |
 | `maintain_every_forgets` | off | optional auto-`maintain` (physical purge) |
+| — | always on | re-shard when the layout no longer fits the data |
 
 `maintain` is policy-driven. The default `Auto` path first checks whether
 anything is pending; with no tombstones, stale text index or vector tail to
