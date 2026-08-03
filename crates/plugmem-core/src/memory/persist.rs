@@ -1032,6 +1032,13 @@ impl<'a> Memory<'a> {
                 return Err(Error::Corrupt("by-name record references out of range"));
             }
         }
+        // Edges are range-checked, and only range-checked. Whether the two
+        // mirrors agree, and whether an open version is reachable as a current
+        // edge, are *consistency* properties: nothing an accessor indexes with
+        // depends on them, so a disagreement makes the graph wrong rather than
+        // unsafe. They cost a random lookup per edge, which on a
+        // million-record graph is most of an open, so they are checked by
+        // [`Memory::verify`] instead — with the rest of the deferred half.
         for arena in [&self.edges_out, &self.edges_in] {
             for edge in arena.iter() {
                 if edge.a.0 >= self.next_entity
@@ -1039,8 +1046,6 @@ impl<'a> Memory<'a> {
                     || edge.rel.0 >= terms
                     || edge.edge.0 >= self.next_edge
                     || (edge.fact.0 != NONE_U32 && edge.fact.0 >= self.next_fact)
-                    || !self.entities.contains(&edge.a.0.to_be_bytes())
-                    || !self.entities.contains(&edge.b.0.to_be_bytes())
                 {
                     return Err(Error::Corrupt("edge record references out of range"));
                 }
@@ -1051,24 +1056,6 @@ impl<'a> Memory<'a> {
         {
             return Err(Error::Corrupt("edge mirrors disagree"));
         }
-        for edge in self.edges_out.iter() {
-            if !self.edges_in.contains(&edge_key(edge.b, edge.rel, edge.a)) {
-                return Err(Error::Corrupt("edge mirrors disagree"));
-            }
-            // The current slot names its open version directly, so this is a
-            // point lookup rather than a search through the triple's history.
-            let version = self
-                .edges_hist_out
-                .get(&edge_history_key(edge.a, edge.valid_from, edge.edge))
-                .ok_or(Error::Corrupt("current edge has no history record"))?;
-            if version.valid_to != VALID_TO_OPEN
-                || version.rel != edge.rel
-                || version.b != edge.b
-                || version.fact != edge.fact
-            {
-                return Err(Error::Corrupt("current edge disagrees with its history"));
-            }
-        }
         for edge in self.edges_hist_out.iter() {
             if edge.a.0 >= self.next_entity
                 || edge.b.0 >= self.next_entity
@@ -1077,24 +1064,8 @@ impl<'a> Memory<'a> {
                 || edge.kind != 0
                 || edge.valid_from > edge.valid_to
                 || (edge.fact.0 != NONE_U32 && edge.fact.0 >= self.next_fact)
-                || !self.entities.contains(&edge.a.0.to_be_bytes())
-                || !self.entities.contains(&edge.b.0.to_be_bytes())
             {
                 return Err(Error::Corrupt("edge history references out of range"));
-            }
-            if !self
-                .edges_hist_in
-                .contains(&edge_history_key(edge.b, edge.valid_from, edge.edge))
-            {
-                return Err(Error::Corrupt("edge history mirrors disagree"));
-            }
-            // An open version must be reachable as a current edge: the two
-            // structures are one fact stored twice, and recall trusts the
-            // current graph to be exactly the open versions.
-            if edge.valid_to == VALID_TO_OPEN
-                && !self.edges_out.contains(&edge_key(edge.a, edge.rel, edge.b))
-            {
-                return Err(Error::Corrupt("open edge version is not a current edge"));
             }
         }
         for slot in self.temporal.iter() {
@@ -1108,24 +1079,34 @@ impl<'a> Memory<'a> {
     /// Runs the integrity checks that `open` **defers** for speed and memory
     /// — the on-demand equivalent of SQLite's `integrity_check`.
     ///
-    /// A load (owned, overlay or read-only) validates only the metadata, so
-    /// the large byte pools stay non-resident on an mmap'd base — an overlay
-    /// open of a multi-gigabyte database faults in only what it must. This
-    /// method sweeps the deferred pools and confirms the whole image is
-    /// well-formed: every stored text is valid UTF-8, the vector pool is
-    /// self-consistent, and facts flagged with a vector map one-to-one onto
-    /// pool slots that name them back. It reads the text and vector pools in
-    /// full, so it costs one linear pass over them (and residents them).
+    /// A load (owned, overlay or read-only) validates only what an accessor
+    /// could be unsafe without: every stored id is in range, so nothing can
+    /// index past its structure. Two further classes are left to this method.
+    ///
+    /// The large byte pools stay untouched at open, so an mmap'd base faults
+    /// in only what it must; here every stored text is confirmed valid UTF-8,
+    /// every metadata blob confirmed well-formed, and facts flagged with a
+    /// vector confirmed to map one-to-one onto pool slots that name them back.
+    ///
+    /// The graph's *consistency* is checked here too: that the two edge
+    /// mirrors hold the same edges, that a current edge agrees with its open
+    /// history version, and that every open version is reachable as a current
+    /// edge. Those are cross-references between structures, not bounds — each
+    /// costs a random lookup per edge, which on a million-record graph is most
+    /// of the cost of opening the database, and being wrong about them makes
+    /// recall return a wrong graph rather than makes anything unsafe.
     ///
     /// Skipping it is safe: the accessors that read these pools tolerate bad
     /// bytes on their own (invalid text hides the fact, vector reads are
-    /// bounds-checked), so a corrupt image never panics — `verify` only turns
-    /// that latent corruption into an explicit [`Error::Corrupt`].
+    /// bounds-checked, an edge naming an unknown entity is skipped when
+    /// rendered), so a corrupt image never panics — `verify` only turns that
+    /// latent corruption into an explicit [`Error::Corrupt`].
     ///
     /// # Errors
     ///
     /// [`Error::Corrupt`] for the first inconsistency found.
     pub fn verify(&self) -> Result<(), Error> {
+        self.verify_graph()?;
         // Text: every stored blob is valid UTF-8. Accessors already tolerate
         // invalid text gracefully; this is the eager confirmation.
         for (_, text) in self.texts.iter() {
@@ -1161,6 +1142,62 @@ impl<'a> Memory<'a> {
         }
         if with_vec != vslots {
             return Err(Error::Corrupt("vector pool has orphan slots"));
+        }
+        Ok(())
+    }
+
+    /// The graph half of [`Memory::verify`]: cross-references between the four
+    /// edge structures, each a random lookup per edge.
+    fn verify_graph(&self) -> Result<(), Error> {
+        for arena in [&self.edges_out, &self.edges_in] {
+            for edge in arena.iter() {
+                if !self.entities.contains(&edge.a.0.to_be_bytes())
+                    || !self.entities.contains(&edge.b.0.to_be_bytes())
+                {
+                    return Err(Error::Corrupt("edge names an entity that does not exist"));
+                }
+            }
+        }
+        for edge in self.edges_out.iter() {
+            if !self.edges_in.contains(&edge_key(edge.b, edge.rel, edge.a)) {
+                return Err(Error::Corrupt("edge mirrors disagree"));
+            }
+            // The current slot names its open version directly, so this is a
+            // point lookup rather than a search through the triple's history.
+            let version = self
+                .edges_hist_out
+                .get(&edge_history_key(edge.a, edge.valid_from, edge.edge))
+                .ok_or(Error::Corrupt("current edge has no history record"))?;
+            if version.valid_to != VALID_TO_OPEN
+                || version.rel != edge.rel
+                || version.b != edge.b
+                || version.fact != edge.fact
+            {
+                return Err(Error::Corrupt("current edge disagrees with its history"));
+            }
+        }
+        for edge in self.edges_hist_out.iter() {
+            if !self.entities.contains(&edge.a.0.to_be_bytes())
+                || !self.entities.contains(&edge.b.0.to_be_bytes())
+            {
+                return Err(Error::Corrupt(
+                    "edge history names an entity that does not exist",
+                ));
+            }
+            if !self
+                .edges_hist_in
+                .contains(&edge_history_key(edge.b, edge.valid_from, edge.edge))
+            {
+                return Err(Error::Corrupt("edge history mirrors disagree"));
+            }
+            // An open version must be reachable as a current edge: the two
+            // structures are one fact stored twice, and recall trusts the
+            // current graph to be exactly the open versions.
+            if edge.valid_to == VALID_TO_OPEN
+                && !self.edges_out.contains(&edge_key(edge.a, edge.rel, edge.b))
+            {
+                return Err(Error::Corrupt("open edge version is not a current edge"));
+            }
         }
         Ok(())
     }

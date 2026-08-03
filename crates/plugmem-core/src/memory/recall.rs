@@ -803,14 +803,18 @@ impl Memory<'_> {
             out.rendered.push('\n');
         }
         for edge in &out.edges {
+            // Deferred validation, as for a fact's text and subject name: an
+            // edge whose endpoints do not resolve is rendered as nothing
+            // rather than as a panic. Only a corrupt image reaches this, and
+            // `verify` reports it explicitly.
+            let (Some(src), Some(dst)) = (self.entity_name(edge.src), self.entity_name(edge.dst))
+            else {
+                continue;
+            };
             let _ = writeln!(
                 out.rendered,
-                "- links: {} —{}→ {}",
-                self.entity_name(edge.src)
-                    .expect("edges reference existing entities"),
+                "- links: {src} —{}→ {dst}",
                 self.terms.resolve(edge.rel),
-                self.entity_name(edge.dst)
-                    .expect("edges reference existing entities"),
             );
         }
     }

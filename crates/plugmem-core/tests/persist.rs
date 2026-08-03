@@ -727,6 +727,157 @@ fn legacy_documents_migrate_unsummarized_and_maintain_fills_them_in() {
     assert!(snap.section(LEGACY_KIND_BM25_DOCLEN_META).is_none());
 }
 
+/// The graph's cross-references are checked by `verify`, not by `open`.
+///
+/// Whether the two edge mirrors hold the same edges, whether an open version
+/// is reachable as a current edge, and whether an edge's endpoints exist are
+/// consistency properties: an accessor indexes with none of them, so a
+/// disagreement makes recall wrong rather than unsafe, and checking them costs
+/// a random lookup per edge on every open. Each therefore has to behave the
+/// same way — the image opens, reading it does not panic, and `verify` names
+/// the problem.
+#[test]
+fn broken_graph_cross_references_open_and_are_reported_by_verify() {
+    let mut store = MemStorage::new();
+    let mut mem = Memory::new(cfg()).unwrap();
+    for (i, (src, dst)) in [("a", "b"), ("b", "c"), ("c", "d")].iter().enumerate() {
+        mem.link(
+            &mut store,
+            LinkInput {
+                now: (i as u64 + 1) * DAY,
+                src,
+                rel: "knows",
+                dst,
+                provenance: None,
+            },
+        )
+        .unwrap();
+    }
+    let healthy = mem.snapshot_bytes(0);
+    Memory::from_bytes(Some(&healthy), &[], cfg())
+        .unwrap()
+        .0
+        .verify()
+        .unwrap();
+
+    // One mirror loses an edge and gains an unrelated one, so the counts still
+    // match but the correspondence does not.
+    let mut mirrored = load_edges(&healthy, KIND_EDGES_IN_META, KIND_EDGES_IN_POOL);
+    let victim = mirrored.iter().next().expect("edges exist");
+    let mut swapped = Arena::<EdgeSlot>::new(ordered_cfg()).unwrap();
+    for edge in mirrored.iter() {
+        if edge.a == victim.a && edge.b == victim.b {
+            swapped
+                .insert(&EdgeSlot {
+                    a: plugmem_core::EntityId(victim.a.0),
+                    b: plugmem_core::EntityId(victim.b.0 + 1),
+                    ..victim
+                })
+                .unwrap();
+        } else {
+            swapped.insert(&edge).unwrap();
+        }
+    }
+    mirrored = swapped;
+    let (meta, pool) = arena_pair(&mirrored);
+    let broken = rewrite_sections(
+        &healthy,
+        &[(KIND_EDGES_IN_META, meta), (KIND_EDGES_IN_POOL, pool)],
+    );
+    assert_reported(&broken, "edge mirrors disagree");
+
+    // Both current mirrors lose the same edge, so their counts still match and
+    // its history version is left open with nothing to reach it from.
+    let mut out = Arena::<EdgeSlot>::new(ordered_cfg()).unwrap();
+    let mut inn = Arena::<EdgeSlot>::new(ordered_cfg()).unwrap();
+    let full_out = load_edges(&healthy, KIND_EDGES_OUT_META, KIND_EDGES_OUT_POOL);
+    let dropped = full_out.iter().next().expect("edges exist");
+    for edge in full_out.iter() {
+        if edge.a == dropped.a && edge.b == dropped.b {
+            continue;
+        }
+        out.insert(&edge).unwrap();
+        inn.insert(&EdgeSlot {
+            a: edge.b,
+            b: edge.a,
+            ..edge
+        })
+        .unwrap();
+    }
+    let (out_meta, out_pool) = arena_pair(&out);
+    let (in_meta, in_pool) = arena_pair(&inn);
+    let orphaned = rewrite_sections(
+        &healthy,
+        &[
+            (KIND_EDGES_OUT_META, out_meta),
+            (KIND_EDGES_OUT_POOL, out_pool),
+            (KIND_EDGES_IN_META, in_meta),
+            (KIND_EDGES_IN_POOL, in_pool),
+        ],
+    );
+    assert_reported(&orphaned, "open edge version is not a current edge");
+}
+
+/// Opens `bytes`, confirms reading it is panic-free, and that `verify` fails
+/// with `message`.
+fn assert_reported(bytes: &[u8], message: &'static str) {
+    let (mem, _) =
+        Memory::from_bytes(Some(bytes), &[], cfg()).expect("a corrupt graph still opens");
+    // Rendering walks the edges the graph source returned; an endpoint that
+    // does not resolve is skipped, never unwrapped.
+    let recalled = mem
+        .recall(RecallQuery {
+            entities: &["a", "b", "c", "d"],
+            k: 64,
+            ..RecallQuery::text(10 * DAY, "")
+        })
+        .unwrap();
+    let _ = recalled.rendered;
+    for id in 0..mem.facts_len() as u32 + 1 {
+        let _ = mem.get(FactId(id));
+    }
+    assert_eq!(mem.verify(), Err(Error::Corrupt(message)));
+}
+
+fn load_edges(bytes: &[u8], meta: u16, pool: u16) -> Arena<'static, EdgeSlot> {
+    let snap = Snapshot::parse(bytes).expect("snapshot parses");
+    Arena::load(
+        ordered_cfg(),
+        snap.section(meta).expect("edge section"),
+        snap.section(pool).expect("edge section"),
+    )
+    .expect("edges load")
+}
+
+/// Copies `bytes` with the named sections replaced.
+fn rewrite_sections(bytes: &[u8], replacements: &[(u16, Vec<u8>)]) -> Vec<u8> {
+    let flags = u16::from_le_bytes(bytes[SNAP_FLAGS_AT..SNAP_FLAGS_AT + 2].try_into().unwrap());
+    let config_len = u32::from_le_bytes(
+        bytes[SNAP_CONFIG_LEN_AT..SNAP_CONFIG_LEN_AT + 4]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    let created_at = u64::from_le_bytes(
+        bytes[SNAP_CREATED_AT..SNAP_CREATED_AT + 8]
+            .try_into()
+            .unwrap(),
+    );
+    let mut writer = SnapshotWriter::new();
+    for (_, kind, offset, len) in section_entries(bytes) {
+        let body = match replacements.iter().find(|(k, _)| *k == kind) {
+            Some((_, replacement)) => replacement.clone(),
+            None => bytes[offset..offset + len].to_vec(),
+        };
+        writer.section(kind, body).unwrap();
+    }
+    writer.finish(
+        &bytes[SNAP_HEADER..SNAP_HEADER + config_len],
+        flags,
+        created_at,
+        "0.2.0",
+    )
+}
+
 /// `(fact, distinct, sig)` of every per-document record in a snapshot.
 fn document_summaries(bytes: &[u8]) -> Vec<(u32, u16, u64)> {
     let snap = Snapshot::parse(bytes).expect("snapshot parses");
