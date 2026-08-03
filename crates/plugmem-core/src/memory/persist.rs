@@ -1229,7 +1229,7 @@ impl<'a> Memory<'a> {
         let metas = self.metas.len() as u32;
         let mut pairs = Vec::new();
         let mut out = Vec::new();
-        for i in 0..self.next_fact {
+        for i in self.fact_ids_ascending() {
             let id = FactId(i);
             let Some(record) = self.fact(id) else {
                 continue; // unknown or tombstoned

@@ -1,7 +1,7 @@
 //! Config validation tests: the defaults pass, and every documented range
 //! check fires with its own message (each `validate` branch is reachable).
 
-use plugmem_core::{Config, Error, MAX_SHARDS, ShardLayout};
+use plugmem_core::{Config, Error, MAX_HNSW_DEGREE, MAX_SHARDS, ShardLayout};
 
 /// Asserts that mutating one field trips `validate` with `msg`.
 fn rejects(mutate: impl FnOnce(&mut Config), msg: &str) {
@@ -118,6 +118,18 @@ fn every_range_check_fires() {
     );
     rejects(|c| c.hnsw_m = 1, "hnsw_m must be >= 2");
     rejects(|c| c.hnsw_m0 = 8, "hnsw_m0 must be >= hnsw_m");
+    rejects(
+        |c| {
+            c.hnsw_m = MAX_HNSW_DEGREE + 1;
+            c.hnsw_m0 = MAX_HNSW_DEGREE + 1;
+            c.hnsw_ef_construction = MAX_HNSW_DEGREE + 1;
+        },
+        "hnsw_m exceeds MAX_HNSW_DEGREE",
+    );
+    rejects(
+        |c| c.hnsw_m0 = MAX_HNSW_DEGREE + 1,
+        "hnsw_m0 exceeds MAX_HNSW_DEGREE",
+    );
     rejects(
         |c| c.hnsw_ef_construction = 4,
         "hnsw_ef_construction must be >= hnsw_m",

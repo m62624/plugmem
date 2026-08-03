@@ -2,6 +2,7 @@
 //! model against `Vec<Vec<Vec<u8>>>` (lists of values).
 
 use plugmem_arena::{CHUNK_BYTES, CHUNK_PAYLOAD, ChunkPool, ChunkPoolCfg, Error, ListHandle};
+#[cfg(not(target_family = "wasm"))]
 use proptest::prelude::*;
 
 /// Concatenated bytes of one list, as the consumers (varint decoders) see
@@ -236,6 +237,7 @@ enum Op {
     Free(usize),
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn op_strategy() -> impl Strategy<Value = Op> {
     prop_oneof![
         1 => Just(Op::New),
@@ -245,6 +247,7 @@ fn op_strategy() -> impl Strategy<Value = Op> {
     ]
 }
 
+#[cfg(not(target_family = "wasm"))]
 proptest! {
     /// The pool must behave exactly like independent `Vec<Vec<u8>>` lists:
     /// per list, the concatenated iterated bytes equal the concatenated

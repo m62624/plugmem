@@ -2,6 +2,7 @@
 //! against `Vec<Vec<u8>>`.
 
 use plugmem_arena::{BlobHeap, BlobHeapBuilder, BlobHeapCfg, BlobId, Error};
+#[cfg(not(target_family = "wasm"))]
 use proptest::prelude::*;
 
 #[test]
@@ -279,6 +280,7 @@ fn pool_offset_exceeds_4gib_on_64bit() {
     );
 }
 
+#[cfg(not(target_family = "wasm"))]
 proptest! {
     /// The heap must behave exactly like a `Vec<Vec<u8>>` under arbitrary
     /// push sequences: same ids, same contents, same iteration.

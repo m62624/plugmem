@@ -37,6 +37,18 @@ pub const PAGES_PER_SHARD: usize = 64;
 /// Payload bytes one shard is meant to hold: [`PAGES_PER_SHARD`] pages.
 pub const SHARD_TARGET_BYTES: usize = PAGES_PER_SHARD * PAGE_BYTES;
 
+/// Largest neighbour degree the vector graph accepts.
+///
+/// Derived, like [`MAX_SHARDS`]: a node's level-0 neighbour block is `degree`
+/// `u32`s, and this is the degree at which that block fills exactly one
+/// [`PAGE_BYTES`] page — the allocation unit the rest of the engine works in.
+/// It is also far past useful: HNSW degrees live in the tens, and a list this
+/// long turns each hop into a linear scan. The bound exists because the value
+/// arrives in a snapshot and then multiplies the node count into an allocation
+/// size, which on wasm32 wraps a 32-bit `usize` well before any pool ceiling
+/// would notice.
+pub const MAX_HNSW_DEGREE: usize = PAGE_BYTES / core::mem::size_of::<u32>();
+
 /// Fewest shards any arena gets.
 ///
 /// A shard is not free — it costs its own metadata and, once touched, a whole
@@ -323,6 +335,14 @@ impl Config {
         }
         if self.hnsw_m0 < self.hnsw_m {
             return Err(Error::ConfigMismatch("hnsw_m0 must be >= hnsw_m"));
+        }
+        // Checked here rather than where the graph is built: both degrees
+        // become factors of an allocation size, and a snapshot supplies them.
+        if self.hnsw_m > MAX_HNSW_DEGREE {
+            return Err(Error::ConfigMismatch("hnsw_m exceeds MAX_HNSW_DEGREE"));
+        }
+        if self.hnsw_m0 > MAX_HNSW_DEGREE {
+            return Err(Error::ConfigMismatch("hnsw_m0 exceeds MAX_HNSW_DEGREE"));
         }
         if self.hnsw_ef_construction < self.hnsw_m {
             return Err(Error::ConfigMismatch(

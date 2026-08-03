@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 
 use plugmem_arena::{Arena, ArenaCfg, ShardMode, Slot, key};
+#[cfg(not(target_family = "wasm"))]
 use proptest::prelude::*;
 
 /// Same 5-byte record as the boundary tests: 4-byte BE key + 1-byte payload.
@@ -47,6 +48,7 @@ enum Op {
     Update(u32, u8),
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn op_strategy() -> impl Strategy<Value = Op> {
     // A small key space (0..512) makes duplicates, removals of existing
     // keys and updates actually happen instead of being measure-zero.
@@ -111,6 +113,7 @@ fn run_model(mode: ShardMode, shards: usize, ops: Vec<Op>) {
     assert_eq!(got, want);
 }
 
+#[cfg(not(target_family = "wasm"))]
 proptest! {
     /// Uniform sharding: the general-purpose lookup configuration.
     #[test]

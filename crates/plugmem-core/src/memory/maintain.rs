@@ -158,6 +158,43 @@ impl MaintenanceOptions {
     }
 }
 
+/// Slack over the record count for a dense id-indexed array, so a database
+/// whose ids are sparse pays for its records rather than for its id space.
+const LIVE_DENSE_SLACK: usize = 8;
+
+impl<'a> Memory<'a> {
+    /// Every stored fact id, ascending.
+    ///
+    /// The obvious walk is `0..next_fact`, and that is what the rebuild loops
+    /// used to do. But `next_fact` counts ids ever *issued*, not records held:
+    /// a database that has purged most of its facts pays for the holes on
+    /// every pass, and a snapshot is free to claim a counter of four billion
+    /// over ten records — a counter the loader can only check from below,
+    /// since a legitimately long-lived database really does outrun its record
+    /// count. Trusting it turns a maintenance pass into a four-billion-step
+    /// spin. Walking the records costs one `u32` each and is bounded by data.
+    ///
+    /// Ascending order is not incidental: a rebuild must be byte-identical
+    /// between a live pass and the journal replay of that pass.
+    pub(super) fn fact_ids_ascending(&self) -> Vec<u32> {
+        let mut ids: Vec<u32> = self.facts.iter().map(|rec| rec.id.0).collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// How far a dense array indexed by fact id may reach before the caller
+    /// has to fall back to an arena lookup. Derived from the record count, not
+    /// from `next_fact`, for the reason above.
+    fn dense_id_span(&self) -> usize {
+        let cap = self
+            .facts
+            .len()
+            .saturating_add(1)
+            .saturating_mul(LIVE_DENSE_SLACK);
+        (self.next_fact as usize).min(cap)
+    }
+}
+
 /// Maps a [`Scratch`] error into the engine's storage-error variant.
 fn scratch_err<E: core::fmt::Debug>(e: E) -> Error {
     Error::Storage(format!("{e:?}"))
@@ -715,7 +752,7 @@ impl Memory<'_> {
         let mut bm25 = Bm25Index::new(cfg.shards_postings, cfg.max_bytes)?;
         let mut tokenizer = Tokenizer::new();
         let mut tf: Vec<(u32, u8)> = Vec::new();
-        for fid in 0..self.next_fact {
+        for fid in self.fact_ids_ascending() {
             let id = FactId(fid);
             let Some(rec) = self.facts.get(&fid.to_be_bytes()) else {
                 continue;
@@ -884,18 +921,28 @@ impl Memory<'_> {
         let mut facts = Arena::new(uni(layout.facts))?;
         let mut fact_aux = Arena::new(uni(layout.facts))?;
         let mut tag_lists = ChunkPool::new(ChunkPoolCfg::new().with_max_bytes(cfg.max_bytes));
-        let mut live = alloc::vec![false; self.next_fact as usize];
+        // A flat "is this fact live" bitmap, consulted once per posting entry,
+        // so it has to be O(1). Its length follows the records rather than
+        // `next_fact`; past the end the closure below asks the arena instead.
+        let dense = self.dense_id_span();
+        let mut live = alloc::vec![false; dense];
         for rec in self.facts.iter() {
-            if !rec.is_tombstone() {
-                live[rec.id.0 as usize] = true;
+            let at = rec.id.0 as usize;
+            if at < dense && !rec.is_tombstone() {
+                live[at] = true;
             }
         }
+        let is_live = |id: FactId| match live.get(id.0 as usize) {
+            Some(&flag) => flag,
+            None => self
+                .facts
+                .get(&id.0.to_be_bytes())
+                .is_some_and(|rec| !rec.is_tombstone()),
+        };
         let mut bm25 = match bm25_policy {
             Bm25Policy::Compact => {
                 self.bm25
-                    .compact_live(layout.postings, cfg.max_bytes, |id| {
-                        live.get(id.0 as usize).copied().unwrap_or(false)
-                    })?
+                    .compact_live(layout.postings, cfg.max_bytes, is_live)?
             }
             Bm25Policy::Reindex => Bm25Index::new(layout.postings, cfg.max_bytes)?,
         };
@@ -937,7 +984,7 @@ impl Memory<'_> {
         let mut vec_map = alloc::vec![NONE_U32; self.vecs.len()];
 
         let mut purged = 0usize;
-        for fid in 0..self.next_fact {
+        for fid in self.fact_ids_ascending() {
             let id = FactId(fid);
             // A missing record is an id burned by an earlier pass — legal
             // (: numbering holes after a purge are the norm).

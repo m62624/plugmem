@@ -1582,3 +1582,46 @@ fn legacy_snapshot(bytes: &[u8], shape: LegacyShape) -> Vec<u8> {
     }
     writer.finish(config, flags, created_at, "0.2.0")
 }
+
+/// `next_fact` counts ids ever issued, so the loader can only check it from
+/// below — a long-lived database legitimately outruns its record count. That
+/// makes it the wrong thing to size work with: a file is free to claim four
+/// billion over a handful of records, and every loop or array that trusted it
+/// became a four-billion-step spin or a multi-gigabyte allocation.
+#[test]
+fn an_inflated_id_counter_does_not_size_the_work() {
+    /// Offset of `next_fact` in the engine-state section: it is first.
+    const STATE_NEXT_FACT_AT: usize = 0;
+
+    let (mut mem, mut store) = (Memory::new(cfg()).unwrap(), MemStorage::new());
+    workload(&mut mem, &mut store);
+    let bytes = mem.snapshot_bytes(0);
+
+    let mut state = bytes[section_body(&bytes, KIND_ENGINE_STATE)].to_vec();
+    let honest = u32::from_le_bytes(state[..4].try_into().unwrap());
+    // Far above the record count, and far above what any array indexed by it
+    // could be allowed to reach.
+    let inflated = 4_000_000_000u32;
+    state[STATE_NEXT_FACT_AT..STATE_NEXT_FACT_AT + 4].copy_from_slice(&inflated.to_le_bytes());
+    let damaged = rewrite_sections(&bytes, &[(KIND_ENGINE_STATE, state)]);
+
+    // Opening is fine: the counter is above the records, which is legal.
+    let (mut loaded, _) = Memory::from_bytes(Some(&damaged), &[], cfg()).unwrap();
+    assert_eq!(loaded.stats().next_fact, inflated);
+    assert_eq!(loaded.stats().facts, mem.stats().facts);
+
+    // The passes that used to walk the id space now walk the records, so each
+    // of these returns instead of spinning through four billion ids or asking
+    // the allocator for an array that size.
+    assert_eq!(loaded.faulty_facts(), Vec::new());
+    loaded.verify().unwrap();
+    let mut fresh = MemStorage::new();
+    fresh.write_snapshot(&damaged).unwrap();
+    loaded
+        .maintain_with_options(&mut fresh, 200 * DAY, MaintenanceOptions::full())
+        .unwrap();
+    assert_eq!(loaded.stats().facts, mem.stats().facts - 1);
+    // The burned ids survive the pass: the counter is state, not a guess.
+    assert_eq!(loaded.stats().next_fact, inflated);
+    assert!(honest < inflated);
+}

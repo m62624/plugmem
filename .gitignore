@@ -40,3 +40,6 @@ bench-history/local-*
 # The seeds are committed inputs, not scratch — `*.journal` and `*.plugmem`
 # above would otherwise swallow them.
 !/fuzz/seeds/**
+
+# Local cargo config (the wasm32 test runner) — machine-specific.
+.cargo/

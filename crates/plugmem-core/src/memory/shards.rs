@@ -244,7 +244,11 @@ impl super::Memory<'_> {
     /// by exactly the amount just purged.
     pub(crate) fn population(&self) -> Population {
         Population {
-            facts: (self.facts.len() - self.tombstones) as u64,
+            // `saturating_sub` rather than `-`: the tombstone count is carried
+            // state, and a wrapped subtraction here would not be caught, it
+            // would be *acted on* — a huge count sends the rule straight to
+            // `MAX_SHARDS` and the next pass allocates for it.
+            facts: self.facts.len().saturating_sub(self.tombstones) as u64,
             entities: self.entities.len() as u64,
             edges: self.edges_out.len() as u64,
             edge_versions: self.edges_hist_out.len() as u64,
