@@ -46,9 +46,11 @@ mod maintain;
 mod migrations;
 mod persist;
 mod recall;
+mod shards;
 
 pub use maintain::{MaintainReport, MaintenanceMode, MaintenanceOptions};
 pub use recall::{RecallQuery, RecallResult, RecallScratch, RecalledEdge, RecalledFact, source};
+pub use shards::ShardLayout;
 
 /// Input of `remember` and `revise`.
 #[derive(Clone, Copy, Debug)]
@@ -229,6 +231,12 @@ pub struct Stats {
     /// Total bytes held by the engine's pools (arenas, blob heaps, chunk
     /// pools, the term dictionary and the vector pool).
     pub pool_bytes: usize,
+    /// How the arenas are currently sharded.
+    ///
+    /// The engine chooses this from what it holds and moves it during
+    /// `maintain`, so it is state to observe rather than a setting to pick —
+    /// see [`Config::shards_facts`](crate::Config::shards_facts).
+    pub shards: ShardLayout,
 }
 
 /// Report of an `open`: what the journal replay found.
@@ -940,6 +948,7 @@ impl<'a> Memory<'a> {
                 + self.entity_facts.pool_bytes()
                 + self.vecs.pool_bytes()
                 + self.hnsw.pool_bytes(),
+            shards: shards::ShardLayout::of_config(&self.cfg),
         }
     }
 

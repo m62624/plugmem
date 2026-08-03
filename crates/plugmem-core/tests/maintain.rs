@@ -7,7 +7,7 @@
 
 use plugmem_core::{
     Config, EntityId, FactId, LinkInput, MaintenanceMode, MaintenanceOptions, MemStorage, Memory,
-    RecallQuery, RememberInput, Storage,
+    RecallQuery, RememberInput, ShardLayout, Storage,
 };
 #[cfg(not(target_family = "wasm"))]
 use proptest::prelude::*;
@@ -15,14 +15,9 @@ use proptest::prelude::*;
 const DAY: u64 = 86_400_000;
 
 fn cfg(dim: usize) -> Config {
-    let mut c = Config::default();
-    c.dim = dim;
-    c.shards_facts = 16;
-    c.shards_entities = 8;
-    c.shards_edges = 8;
-    c.shards_temporal = 8;
-    c.shards_postings = 32;
-    c
+    let mut cfg = Config::default();
+    cfg.dim = dim;
+    cfg
 }
 
 /// A deterministic LCG for vector payloads.
@@ -724,4 +719,201 @@ fn purge_is_physical_and_ids_stay_burned() {
     let (loaded, _) = Memory::from_bytes(Some(&bytes), &[], cfg(0)).unwrap();
     assert_eq!(loaded.snapshot_bytes(0), bytes);
     assert_eq!(loaded.facts_len(), mem.facts_len());
+}
+
+// ---- shard layout ----
+
+/// Facts needed to push the fact arena past its floor, plus a margin. The
+/// rule sizes a group by its payload, so this is derived rather than guessed:
+/// the floor covers `MIN_SHARDS` shards' worth, and one record past that asks
+/// for the next power of two.
+fn facts_to_outgrow_the_floor() -> usize {
+    const FACT_SLOT: usize = 48;
+    const SHARD_TARGET: usize = 64 * 4096;
+    let floor = ShardLayout::default().facts;
+    floor * SHARD_TARGET / FACT_SLOT + 1
+}
+
+fn fill(mem: &mut Memory<'_>, store: &mut MemStorage, n: usize) {
+    for i in 0..n {
+        mem.remember(store, RememberInput::text(DAY + i as u64, "a short fact"))
+            .unwrap();
+    }
+}
+
+/// An oversized layout, as an older database or a hand-tuned config would
+/// leave one.
+fn oversized(dim: usize) -> Config {
+    let mut c = cfg(dim);
+    c.shards_facts = 1024;
+    c.shards_entities = 1024;
+    c.shards_edges = 1024;
+    c.shards_temporal = 1024;
+    c.shards_postings = 1024;
+    c
+}
+
+#[test]
+fn a_database_that_outgrows_its_layout_is_resharded_and_keeps_everything() {
+    let (mut mem, mut store) = (Memory::new(cfg(0)).unwrap(), MemStorage::new());
+    let before = mem.stats().shards;
+    assert_eq!(before, ShardLayout::default());
+
+    fill(&mut mem, &mut store, facts_to_outgrow_the_floor());
+    let facts = mem.stats().facts;
+    let sample = mem
+        .recall(RecallQuery::text(900 * DAY, "short fact"))
+        .unwrap()
+        .rendered;
+
+    let report = mem.maintain(&mut store, 900 * DAY).unwrap();
+    assert!(!report.no_op);
+    assert_eq!(report.shards_before, before);
+    assert!(
+        report.shards_after.facts > before.facts,
+        "{:?} did not grow past {:?}",
+        report.shards_after,
+        before
+    );
+    assert_eq!(mem.stats().shards, report.shards_after);
+    // Growing is a rearrangement, not a change: same facts, same answers.
+    assert_eq!(mem.stats().facts, facts);
+    assert_eq!(
+        mem.recall(RecallQuery::text(900 * DAY, "short fact"))
+            .unwrap()
+            .rendered,
+        sample
+    );
+    // And the new layout is stable: a second pass has nothing left to do.
+    assert!(mem.maintain(&mut store, 901 * DAY).unwrap().no_op);
+}
+
+#[test]
+fn a_database_far_below_its_layout_is_shrunk() {
+    let (mut mem, mut store) = (Memory::new(oversized(0)).unwrap(), MemStorage::new());
+    fill(&mut mem, &mut store, 20);
+    let before = mem.stats().shards;
+    assert_eq!(before.facts, 1024);
+
+    let report = mem.maintain(&mut store, 900 * DAY).unwrap();
+    assert!(!report.no_op);
+    assert_eq!(report.shards_after, ShardLayout::default());
+    assert_eq!(mem.stats().shards, ShardLayout::default());
+    assert_eq!(mem.stats().facts, 20);
+    assert!(mem.maintain(&mut store, 901 * DAY).unwrap().no_op);
+}
+
+/// Only a pass that rebuilds the arenas may move the layout. A pass that does
+/// not would leave the config describing a shape the file does not have — the
+/// loader would then read those arenas with the wrong shard count.
+#[test]
+fn a_pass_that_rebuilds_nothing_leaves_the_layout_alone() {
+    for mode in [
+        MaintenanceMode::OptimizeVectors,
+        MaintenanceMode::Auto,
+        MaintenanceMode::Compact,
+        MaintenanceMode::ReindexText,
+        MaintenanceMode::Full,
+    ] {
+        let (mut mem, mut store) = (Memory::new(oversized(0)).unwrap(), MemStorage::new());
+        fill(&mut mem, &mut store, 20);
+        let before = mem.stats().shards;
+
+        let report = mem
+            .maintain_with_options(
+                &mut store,
+                900 * DAY,
+                MaintenanceOptions {
+                    mode,
+                    max_hnsw_inserts: Some(0),
+                },
+            )
+            .unwrap();
+        let after = mem.stats().shards;
+        assert_eq!(after, report.shards_after, "{mode:?}");
+        if report.structural_compacted {
+            assert_ne!(after, before, "{mode:?} rebuilt but kept the old layout");
+        } else {
+            assert_eq!(after, before, "{mode:?} moved a layout it did not rebuild");
+        }
+        // Whatever it claimed, the file must still be readable — that is the
+        // property a wrong claim would break.
+        let bytes = mem.snapshot_bytes(0);
+        let (loaded, _) = Memory::from_bytes(Some(&bytes), &[], cfg(0)).unwrap();
+        assert_eq!(loaded.stats().shards, after, "{mode:?}");
+        assert_eq!(loaded.stats().facts, 20, "{mode:?}");
+    }
+}
+
+/// The trap the asymmetric band exists to avoid: a database out of layout must
+/// not ask for maintenance again the moment it finishes one.
+#[test]
+fn resharding_settles_instead_of_asking_forever() {
+    let (mut mem, mut store) = (Memory::new(oversized(0)).unwrap(), MemStorage::new());
+    fill(&mut mem, &mut store, 20);
+
+    let mut passes = 0;
+    let mut now = 900 * DAY;
+    while mem.maintenance_needed(MaintenanceOptions::auto()) {
+        mem.maintain(&mut store, now).unwrap();
+        now += DAY;
+        passes += 1;
+        assert!(passes <= 2, "maintenance never settled");
+    }
+    assert_eq!(passes, 1);
+
+    // The same holds while the database keeps growing: each doubling costs one
+    // pass, not one per write.
+    let mut resharded = 0;
+    for i in 0..facts_to_outgrow_the_floor() {
+        mem.remember(
+            &mut store,
+            RememberInput::text(now + i as u64, "a short fact"),
+        )
+        .unwrap();
+        if mem.maintenance_needed(MaintenanceOptions::auto()) {
+            let report = mem.maintain(&mut store, now + i as u64).unwrap();
+            if report.shards_after != report.shards_before {
+                resharded += 1;
+            }
+        }
+    }
+    assert!(
+        resharded <= 2,
+        "resharded {resharded} times while doubling once"
+    );
+}
+
+/// The four edge arenas are rebuilt by a different helper than everything
+/// else. Both must act on one decision, or a single snapshot ends up holding
+/// arenas laid out two ways.
+#[test]
+fn the_edge_arenas_reshard_with_the_rest() {
+    let (mut mem, mut store) = (Memory::new(oversized(0)).unwrap(), MemStorage::new());
+    for i in 0..40u64 {
+        mem.link(
+            &mut store,
+            LinkInput {
+                now: DAY + i,
+                src: "user",
+                rel: "knows",
+                dst: &format!("peer{i}"),
+                provenance: None,
+            },
+        )
+        .unwrap();
+    }
+    assert_eq!(mem.stats().shards.edges, 1024);
+
+    let report = mem
+        .maintain_with_options(&mut store, 900 * DAY, MaintenanceOptions::full())
+        .unwrap();
+    assert!(report.edges_compacted);
+    assert_eq!(mem.stats().shards, ShardLayout::default());
+
+    // The whole image agrees with the config it was written with.
+    let bytes = mem.snapshot_bytes(0);
+    let (loaded, _) = Memory::from_bytes(Some(&bytes), &[], cfg(0)).unwrap();
+    assert_eq!(loaded.stats().edges, 40);
+    loaded.verify().unwrap();
 }

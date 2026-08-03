@@ -1012,6 +1012,13 @@ fn render_stats(s: &Stats, json: bool, out: &mut impl Write) {
                 "next_entity": s.next_entity,
                 "next_edge": s.next_edge,
                 "pool_bytes": s.pool_bytes,
+                "shards": {
+                    "facts": s.shards.facts,
+                    "entities": s.shards.entities,
+                    "edges": s.shards.edges,
+                    "temporal": s.shards.temporal,
+                    "postings": s.shards.postings,
+                },
             })
         )
         .ok();
@@ -1026,6 +1033,14 @@ fn render_stats(s: &Stats, json: bool, out: &mut impl Write) {
         writeln!(out, "next_fact   {}", s.next_fact).ok();
         writeln!(out, "next_edge   {}", s.next_edge).ok();
         writeln!(out, "pool_bytes  {}", s.pool_bytes).ok();
+        // The engine picks these from what it holds and moves them during
+        // `maintain`; they are state to read, not a setting to choose.
+        writeln!(
+            out,
+            "shards      facts {} entities {} edges {} temporal {} postings {}",
+            s.shards.facts, s.shards.entities, s.shards.edges, s.shards.temporal, s.shards.postings,
+        )
+        .ok();
     }
 }
 

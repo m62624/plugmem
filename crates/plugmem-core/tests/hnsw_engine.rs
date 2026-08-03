@@ -14,11 +14,6 @@ fn cfg(flat_to_hnsw: usize) -> Config {
     let mut c = Config::default();
     c.dim = DIM;
     c.flat_to_hnsw = flat_to_hnsw;
-    c.shards_facts = 16;
-    c.shards_entities = 8;
-    c.shards_edges = 8;
-    c.shards_temporal = 8;
-    c.shards_postings = 32;
     c
 }
 

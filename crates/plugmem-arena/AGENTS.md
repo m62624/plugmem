@@ -49,6 +49,10 @@ The second load-bearing property of this crate, and as much a contract as the si
 
 `usize` is 32 bits on wasm32, and this crate reads untrusted images. Arithmetic on lengths and offsets taken from an image must be provably in range there too: compute in `u64` and compare against a real slice length before casting down, or use `checked_*`. The existing loaders (`blob.rs`, `chunk.rs`, `interner.rs`) show the pattern and say so in comments — follow it rather than reasoning about 64-bit sizes.
 
+## Shard counts come from the caller
+
+The arena validates that a shard count is a non-zero power of two and nothing more; how many shards an arena *should* have is `plugmem-core`'s decision (`memory/shards.rs`), because only it knows how much will be stored. Two things follow for this crate. The per-shard cost is real and paid up front — `heads`, `tails` and `dir_at` are one vector each — so keep it flat and keep it small. And a shard count read from an untrusted image becomes the length of those vectors, which is why the ceiling that bounds it lives in the caller's `Config::validate`: an arena handed an absurd count would simply try to allocate it.
+
 ## Borrowing and overlays
 
 Containers can own their bytes or borrow an immutable base with an owned grown tail. The borrowed base must never be resized or cloned merely to append. Handles and metadata must continue to refer to the same logical byte offsets in both modes.

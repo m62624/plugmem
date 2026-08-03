@@ -55,11 +55,6 @@ dim = 768              # 0 disables vectors
 max_bytes = 2147483648
 max_text = 4096
 max_blob = 65536
-shards_facts = 1024
-shards_entities = 256
-shards_edges = 512
-shards_temporal = 512
-shards_postings = 2048
 
 [embedder]
 # none | ollama | openai | lmstudio | vllm | llamacpp
@@ -100,11 +95,11 @@ HNSW tuning fields remain programmatic `plugmem-core::Config` settings for now.
 | `max_bytes` | `2147483648` | Total byte-pool ceiling. |
 | `max_text` | `4096` | Maximum fact text length in bytes. |
 | `max_blob` | `65536` | Maximum single blob length in bytes. |
-| `shards_facts` | `1024` | Facts arena shard count; must be a power of two. |
-| `shards_entities` | `256` | Entities arena shard count; must be a power of two. |
-| `shards_edges` | `512` | Edges arena shard count; must be a power of two. |
-| `shards_temporal` | `512` | Temporal arena shard count; must be a power of two. |
-| `shards_postings` | `2048` | BM25 postings arena shard count; must be a power of two. |
+
+There is no shard-count setting. How many shards each arena gets is derived
+from how much the database holds, and `maintain` moves it as that changes —
+a thousand facts on a layout meant for a million cost fourteen megabytes
+instead of one. `plugmem-cli stats` reports the current layout.
 
 ### `[embedder]`
 

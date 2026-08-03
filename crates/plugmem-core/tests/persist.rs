@@ -5,19 +5,13 @@
 use plugmem_arena::{Arena, ArenaCfg, ShardMode, Slot};
 use plugmem_core::model::EdgeHistorySlot;
 use plugmem_core::{
-    Config, EdgeSlot, Error, FactId, LinkInput, MAX_SHARDS, MemScratch, MemStorage, Memory,
-    RecallQuery, RememberInput, Scratch, Storage, UnlinkInput,
+    Config, EdgeSlot, Error, FactId, LinkInput, MAX_SHARDS, MaintenanceOptions, MemScratch,
+    MemStorage, Memory, RecallQuery, RememberInput, Scratch, Storage, UnlinkInput,
     snapshot::{Snapshot, SnapshotWriter},
 };
 
 fn cfg() -> Config {
-    let mut cfg = Config::default();
-    cfg.shards_facts = 8;
-    cfg.shards_entities = 4;
-    cfg.shards_edges = 4;
-    cfg.shards_temporal = 4;
-    cfg.shards_postings = 16;
-    cfg
+    Config::default()
 }
 
 const DAY: u64 = 86_400_000;
@@ -362,12 +356,6 @@ fn config_gates_reject_structural_drift() {
     let bytes = mem.snapshot_bytes(0);
 
     let mut other = cfg();
-    other.shards_facts = 16;
-    assert_eq!(
-        Memory::from_bytes(Some(&bytes), &[], other).unwrap_err(),
-        Error::ConfigMismatch("stored shard counts differ")
-    );
-    let mut other = cfg();
     other.max_text = 2048;
     assert_eq!(
         Memory::from_bytes(Some(&bytes), &[], other).unwrap_err(),
@@ -378,6 +366,38 @@ fn config_gates_reject_structural_drift() {
     other.w_bm25 = 2.0;
     other.rrf_k = 30;
     assert!(Memory::from_bytes(Some(&bytes), &[], other).is_ok());
+}
+
+/// The shard counts are not a gate. They describe how the file on disk is laid
+/// out, and the loader needs the stored ones to read it at all — what the
+/// caller happens to carry is irrelevant to that, and refusing over it would
+/// mean every caller had to learn the new numbers each time a database
+/// re-sharded itself.
+#[test]
+fn the_stored_shard_layout_is_adopted_rather_than_matched() {
+    let (mut mem, mut store) = (Memory::new(cfg()).unwrap(), MemStorage::new());
+    workload(&mut mem, &mut store);
+    // Put the database on a layout no caller would guess.
+    mem.maintain_with_options(&mut store, 100 * DAY, MaintenanceOptions::full())
+        .unwrap();
+    let stored = mem.stats().shards;
+    let bytes = mem.snapshot_bytes(0);
+
+    for other in [cfg(), {
+        let mut c = cfg();
+        c.shards_facts = 1024;
+        c.shards_entities = 1024;
+        c.shards_edges = 1024;
+        c.shards_temporal = 1024;
+        c.shards_postings = 1024;
+        c
+    }] {
+        let (loaded, _) = Memory::from_bytes(Some(&bytes), &[], other).unwrap();
+        assert_eq!(loaded.stats().shards, stored);
+        // The adopted layout is what the file says, so re-saving describes the
+        // same database rather than a differently-shaped one.
+        assert_eq!(loaded.snapshot_bytes(0), bytes);
+    }
 }
 
 #[test]

@@ -1,7 +1,7 @@
 //! Config validation tests: the defaults pass, and every documented range
 //! check fires with its own message (each `validate` branch is reachable).
 
-use plugmem_core::{Config, Error, MAX_SHARDS};
+use plugmem_core::{Config, Error, MAX_SHARDS, ShardLayout};
 
 /// Asserts that mutating one field trips `validate` with `msg`.
 fn rejects(mutate: impl FnOnce(&mut Config), msg: &str) {
@@ -20,10 +20,17 @@ fn defaults_are_valid() {
     // Spot-check the table.
     assert_eq!(cfg.dim, 0);
     assert_eq!(cfg.max_bytes, 2 * 1024 * 1024 * 1024);
-    assert_eq!(cfg.shards_facts, 1024);
-    assert_eq!(cfg.shards_postings, 2048);
     assert_eq!(cfg.rrf_k, 60);
     assert_eq!(cfg.flat_to_hnsw, 24_000);
+    // A fresh database is empty, and an empty database belongs on the shard
+    // floor. It grows from here through `maintain`, so these are a starting
+    // point rather than a tuning choice — see `Config::shards_facts`.
+    let floor = ShardLayout::default();
+    assert_eq!(cfg.shards_facts, floor.facts);
+    assert_eq!(cfg.shards_entities, floor.entities);
+    assert_eq!(cfg.shards_edges, floor.edges);
+    assert_eq!(cfg.shards_temporal, floor.temporal);
+    assert_eq!(cfg.shards_postings, floor.postings);
 }
 
 #[test]

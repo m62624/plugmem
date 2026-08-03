@@ -46,6 +46,12 @@ The flat length array is derived state, capped to a dense id space and trusted o
 
 `Config` is serialized into the engine image and validated on open. Changes to field order, widths, magic/version, or validation rules are persistence-format changes: update snapshot/journal tests and the host recovery path together.
 
+The five `shards_*` fields are **engine-managed state, not settings**. `memory/shards.rs` derives them from what the database holds; `open` adopts whatever the file records rather than comparing; `maintain` moves them. Three properties keep that safe, and each has a test that fails if you break it:
+
+- **the rule is a pure function of engine state.** The journal records only that a maintenance pass ran, not the layout it chose, so replay recomputes it. A rule that consulted the clock, the caller's config or anything outside the engine would make a replay diverge from the run it replays.
+- **the answer must not depend on pointer width.** The products overflow a 32-bit `usize` at populations a database can reach, so the arithmetic is `u64` and the clamp precedes the one cast. A wasm32 host that computed a different layout would replay the same journal into a different file.
+- **a pass may only claim the layout it actually built.** `cfg.shards_*` changes next to `install`, never on a path that rebuilds no arena, and every arena sharded by a given count must be rebuilt together — that is why a compaction now also rebuilds `by_name`, which used to ride through untouched. Claiming more leaves the config describing a shape the file does not have, and the loader then reads those arenas wrongly: corruption, not inefficiency.
+
 The core does not open paths or call fsync. `MemStorage` is useful for unit tests; file-backed behavior must be tested through `plugmem-host`.
 
 ## Tests and checks
