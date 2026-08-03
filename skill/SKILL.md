@@ -154,6 +154,13 @@ MANDATORY.
   heavier ones buy bytes and index freshness, never less history. The MCP tool
   takes the same values as an optional `mode` argument.
 
+  **What `verify` is for.** Opening a database checks that nothing in the file
+  can make a read unsafe — it does not check that the graph agrees with itself.
+  `verify` is the pass that does: stored text, metadata, the vector mapping,
+  and both directions of every edge. It costs a full sweep, so run it when you
+  have a reason (a file from elsewhere, a crash, a suspicion), not before every
+  session. An open that succeeded is not a clean bill of health; `verify` is.
+
 - **No shell, but your tools include `plugmem_recall` →** MCP. The server
   exposes, as tools: `plugmem_remember`, `plugmem_recall`, `plugmem_revise`,
   `plugmem_forget`, `plugmem_link`, `plugmem_unlink`, `plugmem_show`, `plugmem_stats`,

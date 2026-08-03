@@ -56,6 +56,8 @@ Low-level `no_std` storage primitives:
 
 Arena benchmarks describe the storage primitive itself. Do not present them as measurements of the complete memory engine.
 
+The crate has two contracts, not one: its single audited `unsafe`, and its allocation budget — zero allocations per operation, amortized growth only, and a published allocator-call count that a change may not raise without saying why. Both are spelled out in `crates/plugmem-arena/AGENTS.md`; treat them as equally binding.
+
 ### `crates/plugmem-core`
 
 The main `no_std` engine. It contains:

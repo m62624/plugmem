@@ -54,6 +54,13 @@ non-Latin text), an empty one, and a dirty journal. They exist because random
 bytes never get past the magic number; without seeds the fuzzer only ever
 exercises the header check and everything behind it stays unreached.
 
+Seeds are kept **across format changes**, not replaced by them. `full.snap` and
+`empty.snap` predate the per-document term-set summary, so opening them runs
+the migration that widens those records — a path the fuzzer would otherwise
+never reach, and one that turns untrusted bytes into an allocation size.
+`summarized.snap` is the same shape of database in the current format. When a
+layout changes, add an image in the new one and leave the old ones alone.
+
 `corpus/` is the fuzzer's own working set. It is **ignored by git**: a single
 run grows it by thousands of files, all derived from the seeds. Pass it first
 and `seeds/` second so libFuzzer writes new finds into the corpus and treats

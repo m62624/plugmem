@@ -422,10 +422,16 @@ break out:
 
 | Operation (single thread, native) | Latency |
 |---|---|
-| tags + time-range recall @ 100k | ~230 µs |
-| hybrid recall (text + hub entity anchor) @ 100k | ~470 µs |
-| `remember` (tokenize, index, quantize d384, similar-detect, journal) | ~72 µs mean |
+| tags + time-range recall @ 100k | ~17 µs |
+| hybrid recall (text + hub entity anchor) @ 100k | ~70 µs |
+| `remember` (tokenize, index, quantize d384, similar-detect, journal) | ~29 µs mean |
 | full HNSW rebuild during explicit maintenance | ~1.6 ms/vector |
+
+These moved by roughly an order of magnitude against earlier releases, and the
+chart above moved with them for the lexical bar. Do not read the other bars as
+regressions against previously published figures: this run is on different
+hardware, and only bars **within** one chart are comparable. The vector and
+graph code is unchanged.
 
 Reproduce: `cargo bench -p plugmem-core` (Criterion; a separate target,
 never run under `cargo test`) for the full statistical suite, or

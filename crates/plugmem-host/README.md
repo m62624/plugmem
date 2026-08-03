@@ -366,7 +366,7 @@ index freshness, never less history.
 fragments them — the incoming mirror is keyed by the far endpoint, so
 interleaved runs keep splitting pages in half — and rewriting them in key
 order packs the pages again. Measured over 200 relations relinked 1000 times
-(200k retained versions): 31.9 MB → 23.4 MB, 101 ms, every version kept.
+(200k retained versions): 31.9 MB → 23.4 MB, 59 ms, every version kept.
 
 The same selection is exposed by `plugmem maintain --mode <mode>`, the
 `mode` argument of the MCP `plugmem_maintain` tool, and `maintain(mode?)` in

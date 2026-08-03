@@ -28,6 +28,8 @@ Journal ids are authoritative. Replay must use the same internal apply path as l
 
 Metadata keys are sorted and duplicate keys are rejected/canonicalized before being stored as one opaque blob. The engine does not interpret metadata values.
 
+Similar-detection compares the new fact's term set against those of the entity's recent facts. It does not recover a candidate's term set by re-reading and re-tokenizing its text: the per-document BM25 record carries a summary of that set (distinct-term count plus one hashed bit per term), and the summary bounds the overlap from above. **Any prefilter here must be a strict upper bound.** The hints are part of the answer, so a bound that can undershoot silently drops a conflict the caller was supposed to see. The property test recomputes the expected hints from the raw Jaccard of the tokenized texts — keep it honest rather than relaxing it, and keep the bound gated on the tokenizer version, since a stale index may hold terms today's tokenizer would not produce.
+
 ## Vectors and recall
 
 `Config::dim == 0` disables vector storage. When dimension is non-zero, input `f32` vectors are quantized into the vector pool; replay reconstructs the quantized representation rather than relying on nondeterministic floating-point state.
@@ -35,6 +37,10 @@ Metadata keys are sorted and duplicate keys are rejected/canonicalized before be
 Flat vector search scans the vector pool. `Config::flat_to_hnsw` selects the regime; the default is 24,000 slots. `remember` does not incrementally rebuild HNSW. Maintenance advances/rebuilds the graph and keeps newer slots in the flat tail when appropriate; `Auto` uses a bounded insertion budget. Any performance statement must identify flat versus HNSW, dimension, `ef`, result count, and whether it measures the complete recall pipeline.
 
 Recall may combine BM25, vector, entity graph, tags, and temporal sources. The final result uses filtering, RRF-style fusion, recency, closed-fact policy, and token budget. A source benchmark is not a mixed recall benchmark. Reuse `RecallScratch` for repeated queries instead of allocating per query.
+
+The lexical scan is O(Σ df) in decodes and is meant to be. What it must not have is a *random* lookup per posting: document lengths come from a flat array, partial scores accumulate by merging sorted runs rather than probing a map, and the admission predicate — which costs a fact-record lookup — is asked only about documents in contention for the top `k` and only after the cheap tag test. The `decoded`, `scored` and `admitted` counters gate that split; treat a change that raises `admitted` above `k` on an unfiltered query as a regression, not a detail.
+
+The flat length array is derived state, capped to a dense id space and trusted only below the first id it declined — a snapshot is untrusted input and nothing range-checks the ids inside its stored records. Ids above that mark are answered from the arena. Keep memory bounds like this one on the *size of the cache*, never on the correctness of the answer.
 
 ## Configuration and persistence
 
