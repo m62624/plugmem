@@ -138,10 +138,16 @@ MANDATORY.
   | `show` / `stats` | `show <id>` · `stats` |
   | upkeep | `maintain [--mode M]` · `checkpoint` · `verify` · `scrub` · `recover <dst>` |
   | bulk | `export` (JSONL to stdout) · `import <file> [--batch N]` |
-  | session | `repl [--read-only]` — keep the engine open, one command per line |
 
   Add `--json` to any read verb for machine output; `plugmem-cli --version`
   reports the engine version (used in Step 0c).
+
+  **Never run `repl`.** It is an interactive session: it reads commands from
+  stdin until end-of-input, so an agent that starts it **hangs** — the command
+  never returns and the turn is stuck. It exists for a person at a terminal,
+  where keeping the engine open between commands is worth it. You are not that
+  person: run one verb per invocation. Every one of them is available as a
+  one-shot command, so nothing is lost by avoiding it.
 
   **Which `maintain`.** Plain `maintain` is `--mode auto`: it does only what is
   pending and is a no-op when nothing is. That is the one to run routinely —
@@ -237,5 +243,49 @@ plugmem version check: skill <marker> vs engine <reported> → OK | MISMATCH
 If they differ in ANY way: **stop**, warn the user that skill and engine
 describe different functionality, and proceed only on their explicit
 confirmation — tagging every result "unverified — version mismatch".
+
+## Several memories (only if you see a `db` argument)
+
+**Normally there is one memory and you never think about this.** No `db`
+argument on the tools, no choice to make, nothing in this section applies. That
+is the ordinary setup and the one you should assume.
+
+**The signal is the schema, not this text.** If `plugmem_remember` and the rest
+carry a `db` argument, this server holds several memories and you have to say
+which one each call is for. If they do not, skip the rest of this section.
+
+Two shapes, and the schema tells you which:
+
+- **`db` is optional and shows a default.** One memory is this session's own —
+  almost always the right one. Omit `db`. Name another only when the knowledge
+  plainly belongs elsewhere (shared team knowledge going to a common memory).
+- **`db` is required.** Nothing is implied; every call must name a memory.
+
+### Picking a name
+
+- **You were told the name** (the harness passed it, the user said it) → use it.
+- **You were not** → call `plugmem_workspace_find` with a description of what
+  you are looking for ("the chat about releases", "Ann's notes"). It returns
+  names. A person's name works too — owners are searchable even though they are
+  not in the description text. `plugmem_workspace_list` shows everything when
+  there are few enough to read.
+- **Never invent a name to guess with.** Writing to a name nobody has used
+  *creates* a memory, so a guess does not fail loudly — it silently starts an
+  empty one, and the knowledge you meant to file is now somewhere nobody looks.
+
+### Which memory something belongs in
+
+- Knowledge about this conversation → this conversation's memory.
+- Knowledge true for everyone → the shared memory (usually `common`), if the
+  workspace has one. Do not copy it into every conversation.
+- **Do not spread one fact across memories.** They are independent; there is no
+  search that spans them, so a fact filed in the wrong one is lost, not merely
+  misplaced.
+
+Names are lowercase letters, digits, `-` and `_`. A name is never a path.
+
+On the CLI the same thing is `--db <name>` instead of `--db <file>`, plus a
+`plugmem-cli workspace` command group (`list`, `find`, `describe`, `archive`,
+`verify`, `reindex`). Ask for `plugmem-cli workspace --help` if you need it.
 
 <!-- wasm-strip:end -->

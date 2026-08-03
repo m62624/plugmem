@@ -1842,3 +1842,77 @@ fn a_growing_database_reshards_itself_without_being_asked() {
     assert_eq!(reopened.stats().facts, n);
     reopened.verify().unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Workspace: many small databases at once. This is what the derived shard
+// layout bought — before it, a database holding a thousand facts cost 14 MB of
+// pages, so a bot with a memory per conversation was not affordable at all. The
+// gate belongs here rather than in a README because it is the property that
+// makes the whole feature viable, and it is exactly the kind of thing a future
+// change to shard sizing would silently undo.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fifty_small_memories_fit_in_a_budget_a_bot_can_afford() {
+    use plugmem_host::{DbName, IfMissing, Settings, WorkspaceLimits};
+
+    const MEMORIES: usize = 50;
+    const FACTS_EACH: u64 = 200;
+    /// Resident bytes the whole workspace may add.
+    ///
+    /// Measured at 3.6 MB in release and 5.4 MB in debug on the machine this
+    /// was written on; the budget is roughly triple that, to absorb allocator
+    /// and platform variance without becoming decorative. The regression it
+    /// guards against is not subtle: with the fixed shard counts this branch
+    /// was built on top of, a database this size cost 14 MB of pages whatever
+    /// it held, so sixteen pooled handles alone would be past 200 MB.
+    const BUDGET: usize = 16 * 1024 * 1024;
+
+    let tmp = TempDir::new("workspace-rss");
+    let settings = Settings::from_table(None).unwrap();
+    let ws = settings.open_workspace(&tmp.0).unwrap();
+    assert_eq!(
+        ws.limits(),
+        WorkspaceLimits::default(),
+        "the budget below is sized against the default pool"
+    );
+
+    let before = rss();
+    for i in 0..MEMORIES {
+        let name = DbName::parse(&format!("chat-{i}")).unwrap();
+        let db = ws.get(&name, 1_000, IfMissing::Create).unwrap();
+        for f in 0..FACTS_EACH {
+            db.remember(RememberInput::text(
+                1_000 + f,
+                &format!("memory {i} fact {f}: the sky was a shade of blue that day"),
+            ))
+            .unwrap();
+        }
+        db.checkpoint(2_000).unwrap();
+    }
+    let grew = rss().saturating_sub(before);
+
+    assert_eq!(ws.layout().list().unwrap().len(), MEMORIES);
+    // The pool is what bounds this: fifty memories were written, at most
+    // `max_open` are held, and the rest were closed on the way through.
+    assert!(
+        ws.open_count() <= WorkspaceLimits::default().max_open,
+        "pool held {} handles",
+        ws.open_count()
+    );
+    assert!(
+        grew < BUDGET,
+        "{MEMORIES} memories of {FACTS_EACH} facts added {grew} resident bytes (budget {BUDGET})"
+    );
+
+    // And every one of them is intact and independent afterwards.
+    for i in [0, MEMORIES / 2, MEMORIES - 1] {
+        let name = DbName::parse(&format!("chat-{i}")).unwrap();
+        let db = ws.get(&name, 3_000, IfMissing::Fail).unwrap();
+        assert_eq!(db.stats().facts, FACTS_EACH as usize);
+        let out = db
+            .recall(plugmem_host::RecallQuery::text(3_000, "shade of blue"))
+            .unwrap();
+        assert!(out.rendered.contains(&format!("memory {i} fact")), "{i}");
+    }
+}

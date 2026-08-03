@@ -209,9 +209,12 @@ pub(crate) enum Command {
         #[arg(long, value_name = "N")]
         batch: Option<usize>,
     },
-    /// Interactive session: open the database once and run commands from stdin
-    /// (one per line, same grammar as the subcommands), keeping the engine in
-    /// memory for native (host) speed instead of reloading per command. Type
+    /// Interactive session for a person at a terminal: open the database once
+    /// and run commands from stdin (one per line, same grammar as the
+    /// subcommands), keeping the engine in memory for native (host) speed
+    /// instead of reloading per command. NOT for a script or an agent — it
+    /// reads until end-of-input, so a caller that cannot type into it waits
+    /// forever; run one verb per invocation instead. Type
     /// `help` for the verb list, `exit`/`quit` (or EOF) to leave; the session
     /// checkpoints on exit. `scrub`/`recover` stay one-shot.
     Repl {

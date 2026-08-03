@@ -9,7 +9,8 @@ differences are the transport and how the bytes are fetched.
 Priority: flag/parameter > env > config file > default.
 
 - Database: `--db PATH` | `PLUGMEM_DB` | `./plugmem.plugmem` if it exists |
-  `$XDG_DATA_HOME/plugmem/default.plugmem` (created).
+  `$XDG_DATA_HOME/plugmem/default.plugmem` (created). With a workspace configured,
+  `--db`/`PLUGMEM_DB` may also be a bare memory *name* — see `10-workspace.md`.
 - Config file: `$XDG_CONFIG_HOME/plugmem/config.toml` — `[engine]` (the Config fields
   from `05-api.md`), `[embedder]` (`kind`, `url`, `model`, `api_key_env`),
   `[maintenance]` (`auto_after_ops`, `journal_snapshot_bytes`).
@@ -54,7 +55,9 @@ takes `format` ("json" default | "human"). `plugmem_remember`'s description says
 outright: "if similar contains a contradiction, decide: plugmem_revise or keep both".
 
 The server owns one database (path from argument/env as in the CLI), the embedder from
-the same config. `maintain` runs on the `[maintenance]` policy between requests (no
+the same config. With `--workspace DIR` it instead serves a directory of named memories,
+and every tool that touches one gains a `db` argument — absent otherwise, so the
+single-database default is unchanged. See `10-workspace.md`; that mode is opt-in. `maintain` runs on the `[maintenance]` policy between requests (no
 background thread — a check after each call). `SKILL.md` is embedded via `include_str!`
 and shipped as a release artifact; `plugmem_version`/`plugmem_about` tell the agent to
 load the version-matched skill.

@@ -31,6 +31,20 @@ The only unsafe operations here are the inherent `memmap2::Mmap::map` calls. `se
 
 Do not conflate `verify`, `scrub`, and `recover`. Tests should cover torn journal tails, corrupted content, bad structure, generation publication, and destination safety.
 
+## Workspaces
+
+`Workspace` is an optional layer over many `Database` handles in one directory. Three invariants hold it together, and a change that breaks any of them is a change to reject:
+
+**The core does not know workspaces exist.** One `Memory` is one database; `no_std`, `forbid(unsafe_code)` and the file format stay exactly as they are. A step that needs `plugmem-core` or a format field is not this feature.
+
+**A name cannot represent a path.** `DbName` admits only `[a-z0-9][a-z0-9_-]*`, so traversal is unconstructible rather than filtered, and resolution is a join. Windows device names (`con`, `nul`, `com1`, …) are refused on every platform: Windows resolves them as devices in any directory and with any extension, and a workspace directory is a thing people copy between machines. Lowercase-only is not style — case-insensitive filesystems would make `Work` and `work` one file.
+
+**The directory is the truth; the registry is a rebuildable index.** Each database describes itself in a fact on the reserved entity, so `reindex` derives the registry from the data. Losing the registry costs search, never data. `verify` reports disagreement and repairs nothing — a workspace is a directory a person can edit, and guessing at their intent is how a consistency check becomes a data-loss bug.
+
+Two behaviours that look like oversights and are not: the pool lock is held across an open (so two callers cannot race and have the loser told it is busy by its own process), and a handle handed out outlives its pool entry (the lock goes when the last `Arc` clone does). Both are documented on the types.
+
+The idle timeout exists for **liveness**, not memory: an open writer holds the exclusive lock, so without the sweep a long-running server makes its databases permanently unreachable from the CLI.
+
 ## Embedders and settings
 
 `Embedder` is a `Send` trait. `NullEmbedder` disables automatic vectors; `OpenAiCompatEmbedder` talks to an OpenAI-compatible HTTP endpoint and must be kept outside the engine lock where possible. Network/model latency is not storage latency.
