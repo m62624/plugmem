@@ -112,7 +112,8 @@ must agree. A `{ readOnly: true }` handle never auto-embeds — pass a vector.
 
 ## The verbs
 
-Method names mirror `plugmem-host`'s `Database` one-to-one.
+Every method here is the identically-named `plugmem-host` `Database` verb; the
+engine logic is entirely the host's.
 
 **Writer** (default): `remember`, `recall`, `revise(id, args)`, `forget(id)`,
 `link`, `unlink`, `get(id)`, `stats`, `export`, `verify`, and the two **async**
@@ -121,9 +122,21 @@ verbs below. **Read-only** (`{ readOnly: true }`, observing another process's wr
 snapshot generation) and `refresh()` (advance to the writer's latest checkpoint);
 the write verbs throw.
 
-**No `import` verb** — bulk-loading a `backup.jsonl` reads a file on disk, which
-is [`plugmem-cli import`](https://docs.rs/plugmem-cli/latest)'s job. An agent
-remembers facts one at a time as the conversation goes.
+### What the host has and this does not
+
+The list above is the whole surface — it is not yet all of `Database`, and the
+gaps are named rather than left to be discovered:
+
+| host verb | why it is not here |
+|---|---|
+| `recover` | salvaging a damaged file is a path-level operation on the disk the process is running on — [`plugmem-cli recover`](https://docs.rs/plugmem-cli/latest)'s job, like `import` and `scrub`. |
+| `remember_many` | **not exposed yet.** It writes a batch with one embedding round-trip; without it, loading N facts from Node is N requests to the embedder rather than N/batch. Loop over `remember` until it lands. |
+| `export_each` | **not exposed yet.** `export()` collects every fact into one array, so a very large memory exports with a RAM spike instead of a stream. |
+| `tags_of` | **not exposed yet.** One fact's tags; `export()` carries them for every fact meanwhile. |
+
+**No `import` verb** either — bulk-loading a `backup.jsonl` reads a file on disk,
+which is the CLI's job. An agent remembers facts one at a time as the
+conversation goes.
 
 ## Many memories in one directory (optional)
 
@@ -137,8 +150,8 @@ import { Workspace, type DbEntry } from "plugmem";
 
 const ws = new Workspace("/srv/memories", { maxOpen: 16, idleTimeoutMs: 60_000 });
 
-// `open` hands back the same `Plugmem` class, so a named memory has every verb
-// a path-opened one has. A first write to an unused name creates it.
+// `open` hands back the same `Plugmem` class, so a named memory has exactly the
+// verbs a path-opened one has. A first write to an unused name creates it.
 ws.open("chat-42").remember({ text: "prefers tokio" });
 
 // Do not know the name? Ask what each memory is for. Owners are searchable too,

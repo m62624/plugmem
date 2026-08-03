@@ -67,7 +67,10 @@ load the version-matched skill.
 A **native napi addon, not wasm**: the host is compiled as-is (real mmap/MVCC/locks, no
 RAM bloat and no 4 GiB ceiling). The crate is `crate-type = ["cdylib", "rlib"]`,
 `publish = false` (it ships to npm as the meta package `plugmem` plus six platform
-packages). The `Plugmem` class mirrors the host `Database` 1:1; inputs/outputs are
+packages). The `Plugmem` class wraps the host `Database` verb for verb — every method is
+the identically-named host verb — though it is not yet the *whole* of `Database`:
+`remember_many`, `export_each` and `tags_of` are not exposed, and `recover` is CLI-only
+like `import` and `scrub`. The crate README names the gaps. Inputs/outputs are
 `napi(object)` mapped to hand-written TypeScript interfaces; the heavy verbs
 (`maintain`/`checkpoint`) are async on libuv. Node opens a file directly (real file
 I/O), so there is no JS storage bridge. A `Workspace` class mirrors the host type the

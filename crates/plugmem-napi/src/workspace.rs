@@ -5,10 +5,15 @@
 //! many independent memories — one per conversation, per tenant, per project —
 //! and wants them to stay independent.
 //!
-//! The same 1:1 rule as [`crate::db`]: every method wraps the identically-named
-//! host verb, and the engine logic is 100 % `plugmem-host`. [`Workspace::open`]
-//! hands back a [`Plugmem`] over a pooled handle, so every verb a single memory
-//! has is available on a named one with no second implementation.
+//! The same rule as [`crate::db`]: every method wraps the identically-named host
+//! verb, and the engine logic is 100 % `plugmem-host`. [`Workspace::open`] hands
+//! back a [`Plugmem`] over a pooled handle, so a named memory has exactly the
+//! verbs a path-opened one has, with no second implementation to drift.
+//!
+//! Three host methods are deliberately not here: `registry()` (handing out the
+//! raw registry database invites writing into it by hand), `entry(name)`
+//! (`entries()` already answers it), and the path helpers (`path_of`, `exists`)
+//! — a caller that has a name never needs the path.
 
 use std::sync::Arc;
 

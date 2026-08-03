@@ -1,9 +1,12 @@
-//! The `Plugmem` class: a 1:1 napi mirror of plugmem-host's [`Database`] (and,
+//! The `Plugmem` class: the napi surface over plugmem-host's [`Database`] (and,
 //! in read-only mode, [`ReadOnlyDatabase`]).
 //!
 //! Every method wraps the identically-named host verb — the engine logic is
 //! 100% `plugmem-host`; this layer only marshals arguments and results across
-//! the Node boundary. Inputs are typed `#[napi(object)]` structs so napi emits
+//! the Node boundary. It is not yet the *whole* of `Database`: `remember_many`,
+//! `export_each` and `tags_of` are not exposed (the crate README says so and
+//! what it costs), and `recover` is deliberately CLI-only alongside `import`
+//! and `scrub` — salvage is a path-level operation on the host's own disk. Inputs are typed `#[napi(object)]` structs so napi emits
 //! precise TypeScript interfaces (autocomplete in a TS host like Pi); results
 //! come back as the typed mirrors in [`crate::types`]. A [`HostError`] becomes a
 //! thrown JS `Error`; the clock is the system clock, read per call (the engine
