@@ -65,9 +65,29 @@ fn tokenizer_generic_unicode_path_allocates_nothing_after_warmup() {
     let _serial = serial();
     let mut tokenizer = Tokenizer::new();
     let input = "Hello МИР-42 café Straße नमस्ते";
-    for _ in 0..8 {
-        tokenizer.tokenize(input, &mut |_| {});
+
+    // Warm-up is a property, not a magic number: ICU's generic path may defer
+    // a one-time scratch/cache allocation until a later iterator boundary.
+    // Require a stable zero-allocation run, but keep a finite bound so a
+    // complex-script path that allocates on every call fails instead of
+    // spinning forever.
+    const STABLE_ZERO_CALLS: usize = 8;
+    const MAX_WARMUP_CALLS: usize = 128;
+    let mut stable_zero_calls = 0;
+    let mut warmup_calls = 0;
+    while stable_zero_calls < STABLE_ZERO_CALLS && warmup_calls < MAX_WARMUP_CALLS {
+        let (n, ()) = allocs(|| tokenizer.tokenize(input, &mut |_| {}));
+        warmup_calls += 1;
+        if n == 0 {
+            stable_zero_calls += 1;
+        } else {
+            stable_zero_calls = 0;
+        }
     }
+    assert_eq!(
+        stable_zero_calls, STABLE_ZERO_CALLS,
+        "generic tokenizer path did not settle after {warmup_calls} warm-up calls"
+    );
 
     let (n, ()) = allocs(|| {
         for _ in 0..128 {
