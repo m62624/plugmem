@@ -101,8 +101,9 @@ pub const CHECKPOINT_TOOL: &str = "Flush the journal into a fresh snapshot and c
 the database checkpointed (read-ready for other processes). Returns ok.";
 
 /// `plugmem_verify` tool description.
-pub const VERIFY_TOOL: &str = "Check content integrity (fact text is valid UTF-8, the vector↔fact \
-mapping is consistent). A tool error on damage; ok otherwise.";
+pub const VERIFY_TOOL: &str = "Check the integrity an open defers: fact text is valid UTF-8, \
+metadata decodes, the vector↔fact mapping is consistent, and the edge graph agrees with itself. \
+A tool error on damage; ok otherwise.";
 
 // ── Argument descriptions ─────────────────────────────────────────────────
 

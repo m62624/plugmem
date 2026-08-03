@@ -38,6 +38,14 @@ impl<'a> Memory<'a> {
         -> Result<RememberOutcome, Error>;
     pub fn forget<S: Storage>(&mut self, s: &mut S, now: u64, id: FactId) -> Result<bool, Error>;
     pub fn link<S: Storage>(&mut self, s: &mut S, input: LinkInput<'_>) -> Result<(), Error>;
+    /// Close the current edge of (src, rel, dst). Its history version stays,
+    /// so `as_of` before the close still sees it. `Ok(false)` when no such
+    /// edge is open.
+    pub fn unlink<S: Storage>(&mut self, s: &mut S, input: UnlinkInput<'_>)
+        -> Result<bool, Error>;
+    /// The integrity an open defers: text, metadata, the vector bijection and
+    /// the graph's cross-references (`03-snapshot.md`, `08-performance.md`).
+    pub fn verify(&self) -> Result<(), Error>;
 
     /// All upkeep. Explicit, no background.
     pub fn maintain<S: Storage>(&mut self, s: &mut S, now: u64) -> Result<MaintainReport, Error>;
@@ -102,6 +110,17 @@ Similar detection (cheap, from the ready indexes): live facts of the same entity
 the engine finds, the agent decides (`revise` / keep both / `forget`). Full detection
 (vector included) fits the remember budget ≤ 500 µs — against an embedder call the
 engine is invisible anyway.
+
+Comparing term sets exactly needs both of them, and only the new fact's is at hand.
+The candidate's is **not** recovered by re-reading and re-tokenizing its text — that
+was nine tenths of a write. The per-document BM25 record carries a summary of its
+term set (`04-recall.md`), and the summary bounds the overlap from above: a term
+whose bit is clear is absent, and Jaccard rises with the intersection, so a bound at
+or below the threshold settles the question. Only a candidate that survives the bound
+is read. **Any prefilter here must be a strict upper bound** — the hints are part of
+the answer, so one that can undershoot silently drops a conflict the caller was meant
+to see. The bound is trusted only while the index was built by the current tokenizer;
+a stale index falls back to reading every candidate.
 
 ```rust
 pub struct RecallQuery<'a> {
@@ -197,9 +216,10 @@ review policy).
 | remember | yes | a new open fact + indexes + similar hints |
 | revise | yes | close target (valid_to = new.valid_from), a new fact with revises=target |
 | forget | yes | tombstone immediately (recall hides it), physical purge in maintain |
-| link | yes | an edge (upsert by (src,rel,dst)) |
+| link | yes | opens an edge version for (src,rel,dst); a repeat closes the open one and opens a new one |
+| unlink | yes | closes the current edge; the version stays and `as_of` still sees it |
 | recall | no | a pure query |
-| maintain | yes (marker) | physical deletion of tombstoned records (ids burned; see 02-data-model.md), satellite rebuild, stat recompute, folding the vector tail into HNSW |
+| maintain | yes (marker) | physical deletion of tombstoned records (ids burned; see 02-data-model.md), satellite rebuild, stat recompute, folding the vector tail into HNSW. Policy-driven (`auto` / `compact` / `reindex-text` / `optimize-vectors` / `full`); **no mode ever drops a fact revision or an edge version** |
 | snapshot | clears | full image + clear_journal |
 
 `maintain` is the only place with O(database) cost; every other verb is microseconds

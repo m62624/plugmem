@@ -92,14 +92,46 @@ Name → EntityId resolves through the interner (`name_term`) plus an
 `entity(name)` is deterministic. Semantic duplicates ("user" vs "the user") are the
 agent's concern (similar hints; an alias mechanism is v2).
 
-### Edge — two mirror arenas, Ordered, 16 B slot, KEY_LEN 12
+### Edge — two mirror arenas, Ordered, 28 B slot, KEY_LEN 12
 
-- an out-arena, key `[src BE 4 | rel BE 4 | dst BE 4]` + payload `fact` 4 (provenance,
-  may be NONE);
-- an in-arena, key `[dst BE 4 | rel BE 4 | src BE 4]` + payload `fact` 4.
+The **current** graph: the edges open right now.
+
+- an out-arena, key `[src BE 4 | rel BE 4 | dst BE 4]`;
+- an in-arena, key `[dst BE 4 | rel BE 4 | src BE 4]`;
+- payload in both: `fact` 4 (provenance, may be NONE), `edge` 4, `valid_from` 8.
 
 Walking neighbours is a range scan over the `src` (or `src+rel`) prefix — a linear
-read. An edge is unique by (src, rel, dst); a repeated link updates the provenance.
+read. An edge is unique by (src, rel, dst); a repeated link closes the open version
+and opens a new one.
+
+`edge` and `valid_from` are the key tail of this edge's open history version, so
+closing an edge addresses that record directly instead of searching a triple's
+versions for the open one — which is what makes `unlink` a point lookup.
+
+### Edge history — two mirror arenas, Ordered, 48 B slot, KEY_LEN 16
+
+Every version an edge has ever had, closed or open. Nothing here is ever deleted:
+history *is* the feature, and no `maintain` mode drops a version.
+
+- an out-arena, key `[a BE 4 | valid_from BE 8 | edge BE 4]`;
+- an in-arena, the same with the endpoints swapped;
+- payload: `rel`, `b`, `fact`, `flags`, `kind`, `recorded_at`, `valid_to`.
+
+The key is **time-ordered within an entity**, not grouped by triple. That is what
+makes `as_of` sublinear: walking backwards from `as_of` yields an entity's versions
+newest-first — those that most recently became true, and so the ones most likely to
+still be valid — and the walk stops as soon as the caller has enough. The range
+enforces `valid_from ≤ as_of`; `as_of < valid_to` is the other half of the test.
+
+The exception, measured and documented: an instant at which the entity had **no**
+valid edge has nothing to stop at, so proving the absence reads every version that
+had already begun. Answering that sublinearly needs an interval index, not an
+ordering.
+
+The current arenas and the history arenas are one fact stored twice. That they
+agree — both mirrors, a current edge against its open version, every open version
+reachable as a current edge — is checked by `verify()`, not by the loader
+(`08-performance.md`).
 
 ### Time index — Arena, Ordered, 12 B slot, KEY_LEN 12
 
