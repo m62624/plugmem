@@ -87,3 +87,45 @@ impl HostError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pool_ceiling_carries_its_follow_up_and_nothing_else_does() {
+        // The engine's own message for this is a bare byte count — true, and
+        // useless to somebody who does not know the number is a setting. Every
+        // surface prints this line after it, so it has to actually attach.
+        for engine in [
+            plugmem_core::Error::CapacityExceeded { what: "vectors" },
+            plugmem_core::Error::Arena(plugmem_core::ArenaError::CapacityExceeded {
+                max_bytes: 65_536,
+            }),
+        ] {
+            let hint = HostError::Engine(engine).capacity_hint();
+            assert_eq!(hint, Some(MAX_BYTES_HINT));
+            assert!(hint.unwrap().contains("max_bytes"));
+        }
+
+        // Anything else must not: a lock conflict followed by a lecture about
+        // pool sizing is worse than no follow-up at all.
+        assert_eq!(
+            HostError::Engine(plugmem_core::Error::TooLarge {
+                what: "text",
+                len: 9_000,
+                max: 4_096,
+            })
+            .capacity_hint(),
+            None
+        );
+        assert_eq!(HostError::Embed("no provider".into()).capacity_hint(), None);
+        assert_eq!(
+            HostError::Locked {
+                path: PathBuf::from("/tmp/m.plugmem"),
+            }
+            .capacity_hint(),
+            None
+        );
+    }
+}

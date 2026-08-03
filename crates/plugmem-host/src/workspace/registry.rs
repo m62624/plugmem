@@ -885,6 +885,68 @@ mod tests {
     }
 
     #[test]
+    fn a_stray_fact_in_the_registry_file_is_not_read_as_a_record() {
+        // The registry is an ordinary database, so anything can be written into
+        // it — by a person with the CLI, or by a restore that went sideways.
+        // Only facts carrying the marker tag count as records.
+        let tmp = TempDir::new("registry-stray");
+        let (ws, _) = workspace(&tmp, WorkspaceLimits::default());
+        ws.describe(&name("chat-42"), 1_000, about("planning"))
+            .unwrap();
+
+        let registry = ws.registry().unwrap();
+        registry
+            .remember(RememberInput::text(1_000, "somebody's shopping list"))
+            .unwrap();
+        drop(registry);
+
+        assert_eq!(names(&ws.entries().unwrap()), ["chat-42"]);
+    }
+
+    #[test]
+    fn a_failure_that_is_not_a_lock_stops_a_reindex_instead_of_being_counted() {
+        // `Busy` is expected and reported; anything else means the workspace is
+        // not in a state worth continuing through, so it is raised.
+        let tmp = TempDir::new("registry-reindex-err");
+        let (seed, _) = workspace(&tmp, WorkspaceLimits::default());
+        seed.get(&name("chat-42"), 1_000, IfMissing::Create)
+            .unwrap();
+        drop(seed);
+
+        let broken: crate::Opener = Box::new(|_| Err(HostError::Embed("no provider".into())));
+        let ws = Workspace::new(
+            crate::WorkspaceLayout::new(&tmp.0),
+            broken,
+            WorkspaceLimits::default(),
+        );
+        assert!(matches!(
+            ws.reindex(2_000),
+            Err(WorkspaceError::Host(HostError::Embed(_)))
+        ));
+    }
+
+    #[test]
+    fn a_host_failure_is_attributed_to_the_database_it_came_from() {
+        let tmp = TempDir::new("registry-blame");
+        let (ws, _) = workspace(&tmp, WorkspaceLimits::default());
+        let chat = name("chat-42");
+
+        // A lock conflict names the database rather than a path the caller
+        // never typed; everything else keeps its own message.
+        let locked = HostError::Locked {
+            path: ws.layout().path_of(&chat),
+        };
+        assert!(matches!(
+            ws.blame(&chat, locked),
+            WorkspaceError::Busy { name } if name == chat
+        ));
+        assert!(matches!(
+            ws.blame(&chat, HostError::Embed("no".into())),
+            WorkspaceError::Host(HostError::Embed(_))
+        ));
+    }
+
+    #[test]
     fn a_stale_record_is_one_a_reindex_would_change() {
         let tmp = TempDir::new("registry-stale");
         let (ws, _) = workspace(&tmp, WorkspaceLimits::default());

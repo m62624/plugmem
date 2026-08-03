@@ -656,6 +656,132 @@ mod tests {
     }
 
     #[test]
+    fn every_issue_class_renders_in_both_output_modes() {
+        // `verify` is only useful if a person can read what it found, and the
+        // rare classes are exactly the ones nobody sees until they matter.
+        let name = plugmem_host::DbName::parse("chat-42").unwrap();
+        let cases = [
+            (
+                WorkspaceIssue::Missing { name: name.clone() },
+                "missing",
+                "not on disk",
+            ),
+            (
+                WorkspaceIssue::Undescribed { name: name.clone() },
+                "undescribed",
+                "no description",
+            ),
+            (
+                WorkspaceIssue::Stale { name: name.clone() },
+                "stale",
+                "reindex",
+            ),
+            (
+                WorkspaceIssue::Unreadable {
+                    name: name.clone(),
+                    why: "held elsewhere".into(),
+                },
+                "unreadable",
+                "held elsewhere",
+            ),
+            (
+                WorkspaceIssue::AmbiguousSelf {
+                    name: name.clone(),
+                    facts: 2,
+                },
+                "ambiguous-self",
+                "reserved self-description",
+            ),
+        ];
+        for (issue, tag, phrase) in cases {
+            let rendered = issue_json(&issue);
+            assert_eq!(rendered["issue"], tag, "{issue:?}");
+            assert_eq!(rendered["db"], "chat-42", "{issue:?}");
+            let text = issue_text(&issue);
+            assert!(text.contains("chat-42"), "{text}");
+            assert!(text.contains(phrase), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_described_memory_renders_its_whole_record() {
+        let entries = [DbEntry {
+            name: plugmem_host::DbName::parse("chat-42").unwrap(),
+            description: "release planning".into(),
+            tags: vec!["kind:chat".into(), plugmem_host::ARCHIVED_TAG.into()],
+            owner: Some("ann".into()),
+        }];
+        let rendered = entries_json(&entries);
+        assert_eq!(rendered[0]["db"], "chat-42");
+        assert_eq!(rendered[0]["description"], "release planning");
+        assert_eq!(rendered[0]["owner"], "ann");
+        assert_eq!(rendered[0]["archived"], true);
+        assert_eq!(rendered[0]["tags"][0], "kind:chat");
+    }
+
+    #[test]
+    fn find_and_describe_answer_in_json_too() {
+        let tmp = TempDir::new("json");
+        let (code, out) = run(
+            &tmp.0,
+            &["--json", "workspace", "describe", "chat-42", "planning"],
+        );
+        assert_eq!(code, 0);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&out).unwrap()["described"],
+            true
+        );
+
+        let (code, out) = run(&tmp.0, &["--json", "workspace", "find", "planning"]);
+        assert_eq!(code, 0);
+        let hits: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(hits[0]["db"], "chat-42");
+
+        // An archived memory is marked as such in the listing.
+        run(&tmp.0, &["workspace", "archive", "chat-42"]);
+        let (_, out) = run(&tmp.0, &["workspace", "list"]);
+        assert!(out.contains("[archived]"), "{out}");
+    }
+
+    #[test]
+    fn reindex_reports_a_memory_another_process_is_holding() {
+        let tmp = TempDir::new("reindex-busy");
+        run(&tmp.0, &["workspace", "describe", "chat-42", "planning"]);
+        run(&tmp.0, &["workspace", "describe", "notes", "other things"]);
+
+        // A live writer elsewhere: this pass genuinely cannot read that memory,
+        // and the rebuilt registry is knowingly incomplete. It has to say so.
+        let held =
+            WorkspaceLayout::new(&tmp.0).path_of(&plugmem_host::DbName::parse("chat-42").unwrap());
+        let _outsider =
+            plugmem_host::Database::open(held, plugmem_host::Config::default()).unwrap();
+
+        let (code, out) = run(&tmp.0, &["workspace", "reindex"]);
+        assert_eq!(code, 0);
+        assert!(out.contains("in use by another process"), "{out}");
+        assert!(out.contains("chat-42"), "{out}");
+    }
+
+    #[test]
+    fn a_path_outside_the_workspace_creates_no_directory() {
+        // `ensure_dir` is scoped: the CLI invents `<root>/db` for a named
+        // memory, and nothing at all for a plain path.
+        let tmp = TempDir::new("ensure");
+        let elsewhere = tmp.0.join("elsewhere/m.plugmem");
+        ensure_dir(&elsewhere, Some(&tmp.0)).unwrap();
+        assert!(!tmp.0.join("elsewhere").exists());
+        assert!(!tmp.0.join("db").exists());
+
+        let inside =
+            WorkspaceLayout::new(&tmp.0).path_of(&plugmem_host::DbName::parse("x").unwrap());
+        ensure_dir(&inside, Some(&tmp.0)).unwrap();
+        assert!(tmp.0.join("db").is_dir());
+
+        // No workspace at all: nothing to create, and no error.
+        ensure_dir(&elsewhere, None).unwrap();
+    }
+
+    #[test]
     fn a_path_with_a_quote_survives_the_shell_it_is_written_for() {
         // The one platform-specific line in the crate: a path is not shell
         // syntax, and the two shells quote differently.
