@@ -29,3 +29,14 @@ bench-history/local-*
 **/cobertura.xml
 **/lcov.info
 **/tarpaulin-report.html
+
+# cargo-fuzz build output and run state. `fuzz/seeds/` is the committed input
+# set; `fuzz/corpus/` is the fuzzer's own working corpus, which it grows by
+# thousands of files per run and which is derived from the seeds.
+/fuzz/target/
+/fuzz/artifacts/
+/fuzz/coverage/
+/fuzz/corpus/
+# The seeds are committed inputs, not scratch — `*.journal` and `*.plugmem`
+# above would otherwise swallow them.
+!/fuzz/seeds/**

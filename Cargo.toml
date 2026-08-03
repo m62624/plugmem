@@ -12,6 +12,9 @@ members = [
     "tools/bench-charts",
     "tools/wasm-probe",
 ]
+# The fuzz targets are their own workspace: they build on nightly against a
+# sanitizer runtime and must not enter this lockfile or lint set.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.2.0"

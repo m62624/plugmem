@@ -136,12 +136,23 @@ MANDATORY.
   | `link` | `link <src> <rel> <dst>` |
   | `unlink` | `unlink <src> <rel> <dst>` |
   | `show` / `stats` | `show <id>` · `stats` |
-  | upkeep | `maintain` · `checkpoint` · `verify` · `scrub` · `recover <dst>` |
+  | upkeep | `maintain [--mode M]` · `checkpoint` · `verify` · `scrub` · `recover <dst>` |
   | bulk | `export` (JSONL to stdout) · `import <file> [--batch N]` |
   | session | `repl [--read-only]` — keep the engine open, one command per line |
 
   Add `--json` to any read verb for machine output; `plugmem-cli --version`
   reports the engine version (used in Step 0c).
+
+  **Which `maintain`.** Plain `maintain` is `--mode auto`: it does only what is
+  pending and is a no-op when nothing is. That is the one to run routinely —
+  after a batch of `forget`s, or before handing the file to another process.
+  Reach for `--mode full` only when you want the file *small*: it rebuilds
+  every index and repacks the edge arenas, which is work proportional to the
+  whole database. The narrow modes (`compact`, `reindex-text`,
+  `optimize-vectors`) exist for when you know exactly which structure you want
+  rebuilt. **No mode ever deletes a fact revision or an edge version** — the
+  heavier ones buy bytes and index freshness, never less history. The MCP tool
+  takes the same values as an optional `mode` argument.
 
 - **No shell, but your tools include `plugmem_recall` →** MCP. The server
   exposes, as tools: `plugmem_remember`, `plugmem_recall`, `plugmem_revise`,
@@ -214,7 +225,7 @@ comparison line:
 plugmem version check: skill <marker> vs engine <reported> → OK | MISMATCH
 ```
 
-<!-- skill-version: 0.2.0 -->
+<!-- skill-version: 0.3.0 -->
 
 If they differ in ANY way: **stop**, warn the user that skill and engine
 describe different functionality, and proceed only on their explicit
