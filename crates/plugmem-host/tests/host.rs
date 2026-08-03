@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use plugmem_host::{
     Config, Database, Embedder, FactId, FsyncPolicy, HostError, NullEmbedder, OpenAiCompatEmbedder,
-    ReadOnlyDatabase, RecallQuery, RememberInput, UnlinkInput,
+    ReadOnlyDatabase, RecallQuery, RememberInput, ShardLayout, UnlinkInput,
 };
 
 /// A unique temp directory per test; removed on drop.
@@ -1820,7 +1820,8 @@ fn a_growing_database_reshards_itself_without_being_asked() {
     // the per-shard target rather than being a guessed number.
     const FACT_SLOT: usize = 48;
     const SHARD_TARGET: usize = 64 * 4096;
-    let n = floor.facts * SHARD_TARGET / FACT_SLOT + 1;
+    // Past the floor is not enough — a rebuild waits for the growth margin.
+    let n = floor.facts * ShardLayout::GROWTH_MARGIN * SHARD_TARGET / FACT_SLOT + 1;
     for i in 0..n {
         db.remember(RememberInput::text(i as u64 + 1, "a short fact"))
             .unwrap();

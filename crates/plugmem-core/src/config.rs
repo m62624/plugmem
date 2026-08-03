@@ -131,7 +131,20 @@ pub const ENCODED_LEN: usize = RESERVED_AT + RESERVED_LEN;
 pub struct Config {
     /// Vector dimension; `0` disables the vector layer entirely. Max 4096.
     pub dim: usize,
-    /// Total ceiling for all byte pools (the wasm32 passport: ≤ 2 GiB).
+    /// Ceiling for **each** byte pool — not for their sum.
+    ///
+    /// Every pool the engine builds (the arenas' pages, the text and metadata
+    /// blob heaps, the tag and posting chunk pools, the vector pool) is given
+    /// this same figure as its own limit and refuses to grow past it with
+    /// [`Error::CapacityExceeded`]. A database's total therefore reaches
+    /// several times this number; the one that binds first is whichever pool
+    /// the workload fills, normally the fact texts.
+    ///
+    /// The default is the wasm32 passport rather than a capacity judgement: it
+    /// keeps every pool addressable where `usize` is 32 bits, so a database
+    /// written anywhere opens anywhere. Raising it is supported and costs
+    /// exactly that portability — a 32-bit host then refuses the file with a
+    /// typed `ConfigMismatch`, not with corruption.
     pub max_bytes: usize,
     /// Maximum fact text length in bytes.
     pub max_text: usize,

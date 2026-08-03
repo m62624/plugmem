@@ -164,7 +164,7 @@ markers, the id for a later revise/forget. An empty result → an empty string (
 | Field | Default | Note |
 |---|---|---|
 | `dim` | 0 | 0 = vector layer off |
-| `max_bytes` | 2 GiB | total pool ceiling |
+| `max_bytes` | 2 GiB | ceiling for **each** pool, not their sum; the default is the wasm32 passport |
 | `max_text` | 4096 | bytes |
 | `max_blob` | 64 KiB | |
 | `shards_facts / entities / edges / temporal / postings` | the floor | **engine-managed**, see below |

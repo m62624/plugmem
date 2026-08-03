@@ -114,6 +114,20 @@ impl Default for ShardLayout {
 }
 
 impl ShardLayout {
+    /// How far a database may drift below its ideal layout before a
+    /// maintenance pass moves it.
+    ///
+    /// Observable rather than internal: it is what tells a caller how much
+    /// under-sharding to expect between rebuilds, and it is the figure a test
+    /// needs to know how much data provokes one. Under-sharding is the cheap
+    /// direction — see [`ShardLayout::group_earns_rebuild`] — so this is wide
+    /// on purpose.
+    pub const GROWTH_MARGIN: usize = GROW_FACTOR;
+
+    /// How far it may drift above before one shrinks it. Narrower, because
+    /// over-sharding is the direction that costs memory.
+    pub const SHRINK_MARGIN: usize = SHRINK_FACTOR;
+
     /// The layout `population` calls for.
     ///
     /// Arenas that share a shard count are sized by the largest of them: that
@@ -174,12 +188,24 @@ impl ShardLayout {
 
     /// Whether one group's move from `have` to `want` earns a rebuild.
     ///
-    /// Asymmetric on purpose. Growing protects against a cost that compounds —
-    /// a page directory that keeps lengthening — so one doubling is enough to
-    /// act on. Shrinking only returns memory, so it waits for a fourfold
-    /// overshoot. The gap between the two is what stops a database sitting
-    /// near a boundary from rebuilding itself on every maintenance pass, and
-    /// what guarantees the count a rebuild lands on is itself stable.
+    /// Asymmetric, and in the direction the measurement points rather than the
+    /// intuitive one. Being *under*-sharded costs almost nothing: the sweep
+    /// behind [`PAGES_PER_SHARD`](crate::Config) found write throughput flat
+    /// out to 1465 pages per shard, and fewer shards also means fewer pages,
+    /// so it costs less memory too. Being *over*-sharded is the expensive
+    /// direction — that is the whole defect this rule exists to fix. So growth
+    /// waits for a wide margin and shrinking does not.
+    ///
+    /// The margin is not free to widen indefinitely: every crossing is a full
+    /// rebuild, and a bulk load that climbs through the size classes pays one
+    /// at each. A three-doubling band keeps a growing database under two
+    /// rebuilds on the way to a million facts while never letting it past
+    /// ~512 pages per shard, still well inside where the sweep measured
+    /// nothing.
+    ///
+    /// The gap between the two thresholds is also what stops a database
+    /// sitting near a boundary from rebuilding on every pass, and guarantees
+    /// the count a rebuild lands on is itself stable.
     fn group_earns_rebuild(have: usize, want: usize) -> bool {
         want >= have.saturating_mul(GROW_FACTOR) || have >= want.saturating_mul(SHRINK_FACTOR)
     }
@@ -228,12 +254,14 @@ impl ShardLayout {
     }
 }
 
-/// How far a group must outgrow its shard count before growing it: one
-/// doubling.
-const GROW_FACTOR: usize = 2;
-/// How far it must fall below before shrinking: two doublings. Wider than
-/// [`GROW_FACTOR`] so the two thresholds cannot both be true at once, which is
-/// what makes the decision stable.
+/// How far a group must outgrow its shard count before growing it: three
+/// doublings. Wide because under-sharding is the cheap direction and each
+/// crossing costs a full rebuild — see [`ShardLayout::group_earns_rebuild`].
+const GROW_FACTOR: usize = 8;
+/// How far it must fall below before shrinking: two doublings. Narrower than
+/// [`GROW_FACTOR`] because over-sharding is the direction that actually costs
+/// memory, and still wide enough that the two thresholds cannot both be true
+/// at once.
 const SHRINK_FACTOR: usize = 4;
 
 impl super::Memory<'_> {
@@ -397,8 +425,10 @@ mod tests {
     fn growth_is_eager_and_shrinking_is_lazy() {
         // Unchanged: nothing to do.
         assert!(!at(64).compacted_groups_earn_rebuild(&at(64)));
-        // One doubling up is acted on; anything short of it is not.
-        assert!(at(64).compacted_groups_earn_rebuild(&at(128)));
+        // Growth waits for a wide margin: a doubling is not enough.
+        assert!(!at(64).compacted_groups_earn_rebuild(&at(128)));
+        assert!(!at(64).compacted_groups_earn_rebuild(&at(256)));
+        assert!(at(64).compacted_groups_earn_rebuild(&at(512)));
         // Shrinking waits for four times over, so the two thresholds leave a
         // band in which neither fires and a database near a boundary rests.
         assert!(!at(64).compacted_groups_earn_rebuild(&at(32)));
@@ -409,7 +439,7 @@ mod tests {
         assert!(!at(128).compacted_groups_earn_rebuild(&at(128)));
         // One group out of step is enough.
         let mut skewed = at(64);
-        skewed.postings = 8;
+        skewed.postings = 4;
         assert!(at(64).compacted_groups_earn_rebuild(&skewed));
     }
 
@@ -420,7 +450,7 @@ mod tests {
     #[test]
     fn the_edge_arenas_are_judged_on_their_own() {
         let mut edges_only = at(64);
-        edges_only.edges = 512;
+        edges_only.edges = 1024;
         assert!(!at(64).compacted_groups_earn_rebuild(&edges_only));
         assert!(at(64).edges_earn_rebuild(&edges_only));
     }

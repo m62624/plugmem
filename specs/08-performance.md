@@ -34,6 +34,35 @@ this file: the vector and graph rows moved with the hardware, not with the code,
 which is why only rows measured in the same session may be compared. The lexical
 and tag rows moved with the code — see `04-recall.md`.
 
+### What the derived shard layout cost and bought
+
+Measured as an A/B on one machine (the only comparison worth making — a committed
+baseline drifts between machines and between days), 100k operations, base commit
+against the branch that made the layout follow the data:
+
+| | base | derived layout | |
+|---|---:|---:|---|
+| pool after `maintain` | 66.4 MB | 44.5 MB | **−33 %** |
+| snapshot on disk | 71.8 MB | 47.1 MB | **−34 %** |
+| reopen | 18.1 ms | 14.5 ms | −20 % |
+| read-only open | 18.3 ms | 13.4 ms | −27 % |
+| `maintain` | 214 ms | 197 ms | −8 % |
+| streaming load | 66,618 ops/s | 60,589 ops/s | **−9 %** |
+| `recall` text-only p50 | 24.1 µs | 25.3 µs | +5 % |
+| `recall` entity p50 | 68.0 µs | 76.9 µs | +13 % |
+
+The load figure is the honest cost and it is a **cold-import** cost: that run
+starts empty and climbs through the size classes, paying a rebuild at each
+crossing. A database already at its layout pays none of it. The gains are the
+other way round — they are permanent, and at the sizes a personal memory
+actually is they are far larger than 33 %: a thousand facts went from 14.1 MB
+to 0.43 MB.
+
+The recall rows are the real trade. Fewer shards mean deeper per-shard page
+directories, and a few extra cache-friendly compares per lookup show up as a
+few percent. That is the price of not paying a million-fact floor on a
+thousand-fact database.
+
 The **first `maintain` past the HNSW threshold is out of the < 1 s budget on purpose**:
 the graph build is ~1.6 ms/vector, done once when `flat_to_hnsw` is crossed (or > 10%
 dead nodes); steady-state maintain carries the graph through a remap (O(edges),

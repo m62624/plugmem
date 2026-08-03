@@ -184,12 +184,27 @@ fn run_parsed(cli: Cli, out: &mut impl Write) -> u8 {
 /// `[maintenance].batch_size` is set — safe for provider batch limits.
 const DEFAULT_IMPORT_BATCH: usize = 128;
 
+/// Writes one error, plus whatever follow-up it carries.
+///
+/// Every path that shows a failure goes through here — the one-shot commands
+/// and both repls — so a message cannot say one thing in one of them and
+/// something else in another. The follow-up matters for a pool ceiling in
+/// particular: on its own that error is a bare byte count.
+fn write_err(out: &mut impl Write, e: &CliError) {
+    let _ = match e {
+        CliError::Usage(msg) => writeln!(out, "plugmem: {msg}"),
+        CliError::Host(err) => {
+            writeln!(out, "plugmem: {err}").and_then(|()| match err.capacity_hint() {
+                Some(hint) => writeln!(out, "plugmem: {hint}"),
+                None => Ok(()),
+            })
+        }
+    };
+}
+
 /// Prints an error to stderr and returns its exit code (`2`).
 fn report_err(e: &CliError) -> u8 {
-    match e {
-        CliError::Usage(msg) => eprintln!("plugmem: {msg}"),
-        CliError::Host(err) => eprintln!("plugmem: {err}"),
-    }
+    write_err(&mut std::io::stderr(), e);
     2
 }
 
@@ -679,10 +694,7 @@ fn run_repl_line(db: &Database, line: &str, json: bool, out: &mut impl Write) {
         }
         _ => {
             if let Err(e) = execute(db, &cmd, json, now_ms(), out) {
-                let _ = match &e {
-                    CliError::Usage(m) => writeln!(out, "plugmem: {m}"),
-                    CliError::Host(h) => writeln!(out, "plugmem: {h}"),
-                };
+                write_err(out, &e);
             }
         }
     }
@@ -759,9 +771,7 @@ fn run_repl_ro(
                         writeln!(out, "already current → generation {g}").ok();
                     }
                 }
-                Err(e) => {
-                    writeln!(out, "plugmem: {e}").ok();
-                }
+                Err(e) => write_err(out, &CliError::Host(e)),
             },
             _ => run_repl_ro_line(&ro, &mut settings, line, json, out),
         }
@@ -809,10 +819,7 @@ fn run_repl_ro_line(
     let recall_vector = match embed_recall_query(settings, &cmd) {
         Ok(v) => v,
         Err(e) => {
-            let _ = match &e {
-                CliError::Usage(m) => writeln!(out, "plugmem: {m}"),
-                CliError::Host(h) => writeln!(out, "plugmem: {h}"),
-            };
+            write_err(out, &e);
             return;
         }
     };

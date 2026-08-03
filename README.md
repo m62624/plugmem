@@ -130,27 +130,29 @@ picture — only numbers inside the same table or the same chart are
 like-for-like.
 
 The size labels refer to ingested operations, not the final number of live
-facts. After maintenance, the two runs contain approximately 86k and 860k
-active facts respectively.
+facts. The 5k column is there because it is the size a personal memory
+actually is — and, until the shard layout followed the data, the size that
+behaved worst: it used to pay a fixed floor sized for a million facts.
 
-| Measurement | 100k operations | 1M operations |
-|---|---:|---:|
-| Active facts after `maintain` | 86,010 | 860,204 |
-| Pool bytes after `maintain` | 66.4 MB | 433.5 MB |
-| Streaming load | 1.53 s (65,377 ops/s) | 37.9 s (26,403 ops/s) |
-| Text-only recall p50 | 22 µs | 155 µs |
-| Full hybrid recall p50 | 51 µs | 323 µs |
-| Single frequent term recall p50 | 2.32 ms | 26.5 ms |
-| Checkpoint | 101 ms | 745 ms |
-| `maintain` | 0.22 s | 2.07 s |
-| Reopen (writer) | 17 ms | 155 ms |
-| `verify` | 30 ms | 316 ms |
+| Measurement | 5k operations | 100k operations | 1M operations |
+|---|---:|---:|---:|
+| Active facts after `maintain` | 4,305 | 86,010 | 860,204 |
+| Pool bytes after `maintain` | 3.4 MB | 44.5 MB | 413.7 MB |
+| Streaming load | 0.08 s (65,876 ops/s) | 1.65 s (60,589 ops/s) | 39.6 s (25,277 ops/s) |
+| Text-only recall p50 | 6 µs | 25 µs | 147 µs |
+| Full hybrid recall p50 | 34 µs | 60 µs | 302 µs |
+| Single frequent term recall p50 | 0.09 ms | 2.47 ms | 25.6 ms |
+| Checkpoint | 4 ms | 59 ms | 514 ms |
+| `maintain` | 0.01 s | 0.20 s | 1.96 s |
+| Reopen (writer) | 1 ms | 15 ms | 166 ms |
+| `verify` | 1 ms | 34 ms | 320 ms |
 
-![Recall latency at 100k versus 1M operations](crates/plugmem-host/assets/database-recall-scale-100k-1m.svg)
+![Recall latency at 5k, 100k and 1M operations](crates/plugmem-host/assets/database-recall-scale.svg)
 
-The 1M run holds roughly 10× as many active facts while the pool is 6.5×
-larger. Total load time is 24.8× higher, so the per-operation load cost grows
-by 2.5×; text-only recall grows by 7.1×.
+Across the two decades from 5k to 1M the pool grows 122× for 200× the facts —
+the per-fact cost *falls* (800 → 481 B) because the fixed floor amortizes away
+rather than dominating. Load time is 480× for 200× the operations, so the
+per-operation cost grows 2.4×; text-only recall grows 25×.
 
 The **single frequent term** row is the worst lexical input there is, and it is
 charted next to the others because it is the number to budget for. A query made

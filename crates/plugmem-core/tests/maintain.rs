@@ -731,7 +731,9 @@ fn facts_to_outgrow_the_floor() -> usize {
     const FACT_SLOT: usize = 48;
     const SHARD_TARGET: usize = 64 * 4096;
     let floor = ShardLayout::default().facts;
-    floor * SHARD_TARGET / FACT_SLOT + 1
+    // Past the floor is not enough — a rebuild waits for the growth margin,
+    // because running under-sharded is the cheap direction.
+    floor * ShardLayout::GROWTH_MARGIN * SHARD_TARGET / FACT_SLOT + 1
 }
 
 fn fill(mem: &mut Memory<'_>, store: &mut MemStorage, n: usize) {

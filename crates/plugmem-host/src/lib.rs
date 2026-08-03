@@ -54,7 +54,7 @@ pub use plugmem_core::snapshot::{DEFAULT_SCRUB_BUDGET, ScrubProgress};
 pub use plugmem_core::{
     Config, EdgeId, EntityId, Error, FactId, FactRecord, LinkInput, MaintainReport,
     MaintenanceMode, MaintenanceOptions, OpenReport, RecallQuery, RecallResult, RecallScratch,
-    RecalledEdge, RecalledFact, RememberInput, RememberOutcome, Similar, SimilarReason, Stats,
-    UnlinkInput, VALID_TO_OPEN, fact_flags,
+    RecalledEdge, RecalledFact, RememberInput, RememberOutcome, ShardLayout, Similar,
+    SimilarReason, Stats, UnlinkInput, VALID_TO_OPEN, fact_flags,
 };
 pub use plugmem_core::{MemScratch, Scratch};

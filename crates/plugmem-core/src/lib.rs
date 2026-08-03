@@ -47,3 +47,6 @@ pub use storage::{MemScratch, MemStorage, Scratch, Storage};
 // The arena-layer ids that appear in model records are part of this
 // crate's public surface too.
 pub use plugmem_arena::{BlobId, TermId};
+// The arena's own error appears inside `Error::Arena`, so anything matching on
+// it needs the type without depending on the arena crate directly.
+pub use plugmem_arena::Error as ArenaError;

@@ -92,9 +92,18 @@ HNSW tuning fields remain programmatic `plugmem-core::Config` settings for now.
 | Key | Default | Meaning |
 |---|---:|---|
 | `dim` | `0` | Embedding dimension; zero disables vector storage. |
-| `max_bytes` | `2147483648` | Total byte-pool ceiling. |
+| `max_bytes` | `2147483648` | Ceiling for **each** byte pool, not their sum — see below. |
 | `max_text` | `4096` | Maximum fact text length in bytes. |
 | `max_blob` | `65536` | Maximum single blob length in bytes. |
+
+`max_bytes` applies to every pool separately (arena pages, the text and
+metadata blob heaps, the tag and posting chunk pools, the vector pool), so a
+database's total goes several times past it; the pool that binds first is
+normally the fact texts. The default is not a capacity judgement — it is the
+figure that keeps every pool addressable where `usize` is 32 bits, so a file
+written anywhere opens anywhere. Raise it if you need to, and the only thing
+you give up is that: a 32-bit host then refuses the file with a typed error
+rather than reading it wrongly.
 
 There is no shard-count setting. How many shards each arena gets is derived
 from how much the database holds, and `maintain` moves it as that changes —
