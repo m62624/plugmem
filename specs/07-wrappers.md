@@ -70,8 +70,12 @@ RAM bloat and no 4 GiB ceiling). The crate is `crate-type = ["cdylib", "rlib"]`,
 packages). The `Plugmem` class mirrors the host `Database` 1:1; inputs/outputs are
 `napi(object)` mapped to hand-written TypeScript interfaces; the heavy verbs
 (`maintain`/`checkpoint`) are async on libuv. Node opens a file directly (real file
-I/O), so there is no JS storage bridge. The test suite is `node --test` smoke plus
-parity with native (the same scenario → the same rendered block).
+I/O), so there is no JS storage bridge. A `Workspace` class mirrors the host type the
+same way, and its `open(name)` returns the same `Plugmem` class — so a named memory has
+every verb (see `10-workspace.md`). The test suite is `node --test` smoke plus parity
+with native (the same scenario → the same rendered block), and a **type-check gate**:
+the generated `index.d.ts` is compiled with a consumer-shaped type test under `strict`
+plus `isolatedModules`, because a surface can be valid Rust and unusable TypeScript.
 
 ## SKILL.md
 
@@ -101,4 +105,5 @@ mechanics and required checks are in `08-performance.md`.
 - MCP: scenario JSON-RPC sessions: tools/list, each tool, bad inputs → correct JSON-RPC
   errors.
 - napi: `node --test` smoke (open→remember→recall→checkpoint→reopen); rendered parity
-  with native on a shared scenario.
+  with native on a shared scenario; `npm run typecheck` compiles the generated
+  declarations and asserts the inferred types.

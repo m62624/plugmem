@@ -177,7 +177,20 @@ the current directory. The line is shell-specific (`export` for `sh`,
 
 ### napi
 
-Out of scope for 0.3.0. The Node binding serves one database.
+`Workspace` is the class mirror of the host type, and `open(name)` returns the
+same `Plugmem` class a path-opened memory does — a named memory therefore has
+every verb, with no second implementation.
+
+`reindex()` and `verify()` are promises (they read every memory in the
+directory). A pool limit arriving from JS is range-checked like one arriving
+from a config file, and an idle timeout is checked for finiteness before it is
+cast, because a JS number is an `f64`.
+
+The generated `index.d.ts` is type-checked as a gate, under `strict` plus
+`isolatedModules` — the settings Vite, esbuild and swc imply. That is what
+caught `maintain`'s parameter being an ambient `const enum`, which is valid Rust
+and unusable TypeScript; it is declared as the string union the runtime already
+accepted.
 
 ## Deliberately absent
 
