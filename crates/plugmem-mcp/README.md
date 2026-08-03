@@ -210,6 +210,24 @@ did not come up.
 shape for one process per conversation, and it is what everything above
 describes. This section is for the other case.
 
+### Which shape to run
+
+| your situation | run |
+|---|---|
+| one agent, one memory | `--db FILE` — the default, nothing to configure |
+| one server process per conversation or per user, each with its own memory | `--db <that memory>`, workspace or not. The process boundary already answers "which memory", so the model is never asked |
+| one server process for many conversations | `--workspace DIR`, and pass `db` on every call |
+| mostly one memory, occasionally a shared one | `--workspace DIR --db <the usual one>` — `db` is then optional and defaults to it |
+
+Prefer a process per memory when you can. It is the shape with no way to address
+the wrong memory, and its extra cost is small: a chat-sized memory opens in
+milliseconds and holds well under a megabyte resident.
+
+Reach for one process for many when spawning per conversation is not practical —
+hundreds of live conversations, or a host that keeps one long-lived connection.
+
+### How it works
+
 Started with `--workspace DIR`, the server holds a directory of named memories
 and every tool that touches one gains a `db` argument:
 
