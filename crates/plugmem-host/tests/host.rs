@@ -1858,15 +1858,23 @@ fn fifty_small_memories_fit_in_a_budget_a_bot_can_afford() {
 
     const MEMORIES: usize = 50;
     const FACTS_EACH: u64 = 200;
-    /// Resident bytes the whole workspace may add.
+    /// Engine pool bytes one memory of this size may hold.
     ///
-    /// Measured at 3.6 MB in release and 5.4 MB in debug on the machine this
-    /// was written on; the budget is roughly triple that, to absorb allocator
-    /// and platform variance without becoming decorative. The regression it
-    /// guards against is not subtle: with the fixed shard counts this branch
-    /// was built on top of, a database this size cost 14 MB of pages whatever
-    /// it held, so sixteen pooled handles alone would be past 200 MB.
-    const BUDGET: usize = 16 * 1024 * 1024;
+    /// This, not the resident set, is the gate. `pool_bytes` counts what the
+    /// engine allocated and is identical on every platform and profile, while
+    /// RSS is the allocator's and the OS's answer to a different question — it
+    /// varies by page accounting and malloc zone, which makes a tight budget on
+    /// it a tripwire for the CI runner rather than for the engine.
+    ///
+    /// The regression it guards is not subtle: with the fixed shard counts this
+    /// branch was built on top of, a memory this size cost ~14 MB of pages
+    /// whatever it held. A hundredth of that is still generous for 200 facts.
+    const POOL_BUDGET: usize = 256 * 1024;
+    /// A resident-set sanity bound, deliberately loose. It exists to catch a
+    /// pool that never evicts (fifty memories held open at once), not to count
+    /// bytes — sixteen pooled handles at the old floor would be past 200 MB, so
+    /// anything under this is unambiguously "the floor is gone".
+    const RSS_BUDGET: usize = 96 * 1024 * 1024;
 
     let tmp = TempDir::new("workspace-rss");
     let settings = Settings::from_table(None).unwrap();
@@ -1901,15 +1909,27 @@ fn fifty_small_memories_fit_in_a_budget_a_bot_can_afford() {
         ws.open_count()
     );
     assert!(
-        grew < BUDGET,
-        "{MEMORIES} memories of {FACTS_EACH} facts added {grew} resident bytes (budget {BUDGET})"
+        grew < RSS_BUDGET,
+        "{MEMORIES} memories of {FACTS_EACH} facts added {grew} resident bytes \
+         (loose bound {RSS_BUDGET})"
     );
 
-    // And every one of them is intact and independent afterwards.
+    // The deterministic half: every memory is intact, independent, and small.
+    for i in 0..MEMORIES {
+        let name = DbName::parse(&format!("chat-{i}")).unwrap();
+        let db = ws.get(&name, 3_000, IfMissing::Fail).unwrap();
+        let stats = db.stats();
+        assert_eq!(stats.facts, FACTS_EACH as usize);
+        assert!(
+            stats.pool_bytes < POOL_BUDGET,
+            "chat-{i} holds {} pool bytes for {FACTS_EACH} facts (budget {POOL_BUDGET})",
+            stats.pool_bytes
+        );
+    }
+
     for i in [0, MEMORIES / 2, MEMORIES - 1] {
         let name = DbName::parse(&format!("chat-{i}")).unwrap();
         let db = ws.get(&name, 3_000, IfMissing::Fail).unwrap();
-        assert_eq!(db.stats().facts, FACTS_EACH as usize);
         let out = db
             .recall(plugmem_host::RecallQuery::text(3_000, "shade of blue"))
             .unwrap();

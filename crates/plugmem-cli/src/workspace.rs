@@ -477,13 +477,10 @@ mod tests {
     #[test]
     fn list_shows_every_memory_including_the_ones_nobody_described() {
         let tmp = TempDir::new("list");
-        assert_eq!(
+        assert!(
             run(&tmp.0, &["workspace", "list"])
                 .1
-                .trim_end()
-                .split('/')
-                .next_back(),
-            Some("db")
+                .contains("no memories in")
         );
 
         // Two memories, one described. Both must be listed: this is a list of
@@ -622,7 +619,11 @@ mod tests {
             "export PLUGMEM_DB='"
         };
         assert!(out.starts_with(expected_prefix), "{out}");
-        assert!(out.contains("db/work.plugmem"), "{out}");
+        // The path is compared as a path, not as a string with a separator
+        // baked into it — that separator is the OS's to choose.
+        let expected =
+            WorkspaceLayout::new(&tmp.0).path_of(&plugmem_host::DbName::parse("work").unwrap());
+        assert!(out.contains(&*expected.to_string_lossy()), "{out}");
 
         // No state file anywhere — the shell holds the state, so one window
         // cannot redirect another.
