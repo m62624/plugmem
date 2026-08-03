@@ -160,6 +160,33 @@ fn bm25_matches_the_independent_reference() {
     assert_scores(&search(&idx, &[], 10), &[]);
 }
 
+/// A sparse fact-id space must still score correctly.
+///
+/// Document lengths are answered from a flat array indexed by fact id, which
+/// is only allocated while the ids stay dense — a snapshot is untrusted input
+/// and nothing range-checks the ids inside its stored records, so an id far
+/// past the document count must not be able to demand a gigabyte of memory
+/// (and `usize` is 32 bits on wasm32, where that edge is nearer). The array
+/// stops growing; the arena answers the rest. This checks that the fallback is
+/// wired, not merely that the allocation is capped.
+#[test]
+fn bm25_scores_documents_beyond_the_flat_length_index() {
+    let mut idx = Bm25Index::new(16, usize::MAX).unwrap();
+    idx.index_doc(FactId(0), &[(1, 1)]).unwrap();
+    // Far outside any dense window a two-document corpus would justify.
+    idx.index_doc(FactId(u32::MAX - 1), &[(1, 1)]).unwrap();
+    assert_eq!(idx.docs(), 2);
+
+    let found = search(&idx, &[1], 10);
+    assert_eq!(
+        found.iter().map(|&(id, _)| id).collect::<Vec<_>>(),
+        vec![0, u32::MAX - 1],
+        "both documents must score, whichever side of the flat index they are on"
+    );
+    // Same term, same length, so the sparse one must score identically.
+    assert!((found[0].1 - found[1].1).abs() < 1e-6);
+}
+
 #[test]
 fn bm25_idf_is_monotone_in_df() {
     let idx = golden_index();

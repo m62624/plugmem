@@ -852,12 +852,15 @@ impl AllowFilter {
     /// Rebuilds the filter over `allow`. Reuses the buffer, so a warm scratch
     /// does not allocate.
     fn fill(&mut self, allow: &[FactId]) {
+        // Clamped before rounding up: `next_power_of_two` overflows rather
+        // than saturates, and on wasm32 `usize` is 32 bits, so a large
+        // allow-set could reach that edge.
         let words = allow
             .len()
             .saturating_mul(ALLOW_BITS_PER_MEMBER)
             .div_ceil(64)
-            .next_power_of_two()
-            .clamp(ALLOW_MIN_WORDS, ALLOW_MAX_WORDS);
+            .clamp(ALLOW_MIN_WORDS, ALLOW_MAX_WORDS)
+            .next_power_of_two();
         self.bits.clear();
         self.bits.resize(words, 0);
         self.shift = 64 - (words * 64).trailing_zeros();

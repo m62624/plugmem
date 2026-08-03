@@ -218,6 +218,10 @@ pub struct Bm25Index<'a> {
     /// `doc_len` on load, never written to the snapshot. `doc_len` remains the
     /// stored form and the only place the term-set summary lives.
     doc_len_dense: Vec<u32>,
+    /// Exclusive upper bound of the fact ids [`Bm25Index::doc_len_dense`] may
+    /// be trusted for. `usize::MAX` while it has covered every document it was
+    /// offered; lowered to the first id it declined.
+    dense_limit: usize,
 }
 
 /// [`Bm25Index::doc_len_dense`] entry for a fact id with no indexed document.
@@ -243,6 +247,7 @@ impl<'a> Bm25Index<'a> {
             admitted: Cell::new(0),
             unsummarized: false,
             doc_len_dense: Vec::new(),
+            dense_limit: usize::MAX,
         })
     }
 
@@ -281,12 +286,25 @@ impl<'a> Bm25Index<'a> {
     /// Records a document's length in the flat index, growing it to reach the
     /// id. Fact ids are dense and monotone, so the growth is amortized.
     ///
-    /// `usize` is 32 bits on wasm32, so an id that cannot be indexed there is
-    /// simply left out: [`Bm25Index::doc_len_of`] then reports the document as
-    /// absent, which scores it as the stored arena would for a missing record.
+    /// Growth stops where the id space stops being dense — see
+    /// [`Bm25Index::dense_capacity`]. Nothing is lost when it does:
+    /// [`Bm25Index::doc_len_of`] reads the stored arena for an id the flat
+    /// index does not cover.
     fn note_dense(&mut self, doc: &DocLenSlot) {
-        let Some(at) = usize::try_from(doc.fact.0).ok() else {
-            return;
+        let at = match usize::try_from(doc.fact.0) {
+            Ok(at) if at < self.dense_capacity() => at,
+            // Declined. The array can never speak for this id, and documents
+            // do not arrive in id order (compaction walks a hashed arena), so
+            // a later id may extend the array right over this one — hence the
+            // watermark rather than a bare skip.
+            Ok(at) => {
+                self.dense_limit = self.dense_limit.min(at);
+                return;
+            }
+            Err(_) => {
+                self.dense_limit = 0;
+                return;
+            }
         };
         if at >= self.doc_len_dense.len() {
             let Some(len) = at.checked_add(1) else { return };
@@ -295,9 +313,30 @@ impl<'a> Bm25Index<'a> {
         self.doc_len_dense[at] = u32::from(doc.len);
     }
 
+    /// Highest fact id the flat length index will grow to cover.
+    ///
+    /// The index is worth its four bytes per id only while ids are dense,
+    /// which they are by construction — they are handed out in order, and only
+    /// purged facts leave holes. An id far past the document count means the
+    /// space is sparse or the image is lying, and a flat array would then cost
+    /// more memory than the documents themselves; a snapshot is untrusted
+    /// input, and nothing range-checks the ids inside the stored records.
+    /// `usize` being 32 bits on wasm32 makes the same claim sharper there.
+    ///
+    /// This bounds memory, never correctness: an id past the cap is answered
+    /// from the arena.
+    fn dense_capacity(&self) -> usize {
+        const SLACK: usize = 8;
+        usize::try_from(self.total_docs)
+            .unwrap_or(usize::MAX)
+            .saturating_add(1)
+            .saturating_mul(SLACK)
+    }
+
     /// Rebuilds the flat length index from the stored records (the load path).
     fn rebuild_dense(&mut self) {
         self.doc_len_dense.clear();
+        self.dense_limit = usize::MAX;
         let docs: Vec<DocLenSlot> = self.doc_len.iter().collect();
         for doc in docs {
             self.note_dense(&doc);
@@ -361,16 +400,18 @@ impl<'a> Bm25Index<'a> {
         // facts in posting order rather than document order. Allocated only
         // when there is something to fill, and dropped with this call.
         //
-        // The length is computed through `checked_add` because `usize` is 32
-        // bits on wasm32: a fact id near `u32::MAX` would wrap there. Failing
-        // that check skips the rebuild, which costs speed and nothing else —
-        // an unsummarized document simply keeps reading its text.
+        // Sized like the flat length index and for the same reasons: `usize`
+        // is 32 bits on wasm32, and the ids come from an untrusted image, so
+        // the array is allocated only for an id space that is actually dense.
+        // Declining costs speed and nothing else — an unsummarized document
+        // keeps reading its text.
         let mut rebuilt = match usize::try_from(max_fact)
             .ok()
             .and_then(|m| m.checked_add(1))
+            .filter(|&len| legacy > 0 && len <= out.dense_capacity())
         {
-            Some(len) if legacy > 0 => alloc::vec![(0u64, 0u16); len],
-            _ => Vec::new(),
+            Some(len) => alloc::vec![(0u64, 0u16); len],
+            None => Vec::new(),
         };
         for slot in self.postings.slots() {
             for (fact, tf) in self.postings.entries(slot.key) {
@@ -582,11 +623,19 @@ impl<'a> Bm25Index<'a> {
     }
 
     /// Length of the document `fact` names, or `None` when it names none.
+    ///
+    /// The flat index is authoritative below [`Bm25Index::dense_limit`],
+    /// because every stored document with an id there was written into it. At
+    /// or above that mark it may have holes it never filled, so the answer
+    /// comes from the stored arena — slower, and correct.
     fn doc_len_of(&self, fact: FactId) -> Option<u16> {
-        match self.doc_len_dense.get(fact.0 as usize).copied() {
-            Some(DOC_LEN_ABSENT) | None => None,
-            Some(len) => Some(len as u16),
+        let at = fact.0 as usize;
+        if at < self.dense_limit
+            && let Some(&len) = self.doc_len_dense.get(at)
+        {
+            return (len != DOC_LEN_ABSENT).then_some(len as u16);
         }
+        self.doc_len.get(&fact.0.to_be_bytes()).map(|doc| doc.len)
     }
 
     /// Bytes held by the underlying pools.
@@ -630,6 +679,7 @@ impl<'a> Bm25Index<'a> {
             admitted: Cell::new(0),
             unsummarized: false,
             doc_len_dense: Vec::new(),
+            dense_limit: usize::MAX,
         };
         // One sequential pass over the stored records; the flat index is
         // derived state and is never part of the image.
