@@ -29,6 +29,10 @@ use clap::Parser;
 
 /// Environment variable naming the database file (below the `--db` flag).
 const ENV_DB: &str = "PLUGMEM_DB";
+/// Environment variable naming the workspace directory (below `--workspace`).
+const ENV_WORKSPACE: &str = "PLUGMEM_WORKSPACE";
+/// How often the janitor closes databases nobody is using.
+const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 /// MCP-owned config keys. The test below compares this inventory with the
 /// shared host help catalogue whenever the parser gains a new key.
 const MCP_SETTING_KEYS: &[(&str, &str)] = &[("server", "workers")];
@@ -38,8 +42,30 @@ const MCP_SETTING_KEYS: &[(&str, &str)] = &[("server", "workers")];
 #[command(name = "plugmem-mcp", version, about = messages::ABOUT_CLI)]
 struct Args {
     /// Memory file to serve (else $PLUGMEM_DB, else the per-user data path).
+    /// With --workspace this is a memory *name* instead, and becomes the
+    /// default for calls that do not say which memory they mean.
     #[arg(long)]
-    db: Option<PathBuf>,
+    db: Option<String>,
+
+    /// Serve a directory of named memories instead of one file (else
+    /// $PLUGMEM_WORKSPACE, else [workspace].dir). Without it there is one
+    /// memory and the tools have no `db` argument at all — the default, and
+    /// the right choice for one process per conversation.
+    #[arg(long)]
+    workspace: Option<PathBuf>,
+
+    /// Restrict a workspace server to these memory names (repeatable). Absent,
+    /// any name in the workspace is servable. This is a convenience for a
+    /// single-tenant process, not an access-control boundary: `db` comes from
+    /// the caller, whose own harness sees the call before this server does.
+    #[arg(long = "allow", value_name = "NAME")]
+    allow: Vec<String>,
+
+    /// Refuse to create a memory that does not exist yet. By default a write
+    /// to an unused name creates it, which is what lets a new conversation get
+    /// a memory without a registration step; reads never create.
+    #[arg(long)]
+    no_create: bool,
     /// config.toml path (else $PLUGMEM_CONFIG, else the platform default).
     #[arg(long)]
     config: Option<PathBuf>,
@@ -55,35 +81,60 @@ struct Args {
 }
 
 fn main() -> ExitCode {
-    let args = Args::parse();
-    let cli_db = args.db;
-    let env_db = std::env::var_os(ENV_DB).map(PathBuf::from);
+    match run(Args::parse()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("plugmem-mcp: {message}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Resolve settings, pick the mode, serve. Every failure before serving is
+/// fatal and reported to stderr, so the host that spawned the server sees it
+/// did not start.
+fn run(args: Args) -> Result<(), String> {
+    let Args {
+        db: cli_db,
+        workspace,
+        allow,
+        no_create,
+        config,
+        read_only,
+        workers,
+    } = args;
+    let env_db = std::env::var_os(ENV_DB).map(|s| s.to_string_lossy().into_owned());
     let use_config_or_default_db = cli_db.is_none() && env_db.is_none();
 
     // Read config.toml once: the shared loader builds the engine settings; the
-    // server reads its own `[server].workers` from the same table. A failure
-    // here (a bad config, or the file already locked by another writer) is
-    // fatal: report to stderr and exit, so the spawning host sees the server
-    // did not start.
-    let table = match plugmem_host::read_config(args.config.as_deref()) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("plugmem-mcp: {e}");
-            return ExitCode::from(2);
-        }
-    };
-    let workers = args
-        .workers
-        .unwrap_or_else(|| resolve_workers(table.as_ref()));
-    let settings = match plugmem_host::Settings::from_table(table.as_ref()) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("plugmem-mcp: {e}");
-            return ExitCode::from(2);
-        }
-    };
+    // server reads its own `[server].workers` from the same table.
+    let table = plugmem_host::read_config(config.as_deref()).map_err(|e| e.to_string())?;
+    let workers = workers.unwrap_or_else(|| resolve_workers(table.as_ref()));
+    let settings = plugmem_host::Settings::from_table(table.as_ref()).map_err(|e| e.to_string())?;
+
+    // Workspace mode is opt-in and stays opt-in: with no flag, no environment
+    // variable and no `[workspace].dir`, everything below behaves exactly as it
+    // did before workspaces existed — one file, and no `db` argument anywhere.
+    let root = workspace
+        .or_else(|| std::env::var_os(ENV_WORKSPACE).map(PathBuf::from))
+        .or_else(|| settings.workspace.dir.clone());
+    if let Some(root) = root {
+        return serve_workspace(
+            settings,
+            &root,
+            cli_db.or(env_db),
+            &allow,
+            WorkspaceMode {
+                read_only,
+                create: !no_create,
+            },
+            workers,
+        );
+    }
+
     let path = cli_db
-        .or(env_db)
+        .map(PathBuf::from)
+        .or(env_db.map(PathBuf::from))
         .or_else(|| settings.database_path.clone())
         .or_else(plugmem_host::default_database_path)
         .unwrap_or_else(|| PathBuf::from("plugmem.db"));
@@ -92,37 +143,105 @@ fn main() -> ExitCode {
         && let Some(parent) = path.parent()
         && let Err(e) = std::fs::create_dir_all(parent)
     {
-        eprintln!(
-            "plugmem-mcp: cannot create database directory {}: {e}",
+        return Err(format!(
+            "cannot create database directory {}: {e}",
             parent.display()
-        );
-        return ExitCode::from(2);
+        ));
     }
 
     // Read-only: open a shared snapshot of another process's writer and keep the
     // embedder to embed recall queries (the read-only handle has none). Default:
     // open the single writer handle, consuming the settings (embedder included).
-    let shared = if args.read_only {
+    let shared = if read_only {
         let embedder = settings.embedder;
-        match plugmem_host::Database::open_readonly(&path, settings.config) {
-            Ok(db) => rpc::Shared::Reader(Arc::new(tools::ReaderShared::new(db, embedder))),
-            Err(e) => {
-                eprintln!("plugmem-mcp: {}: {e}", path.display());
-                return ExitCode::from(2);
-            }
-        }
+        let db = plugmem_host::Database::open_readonly(&path, settings.config)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        rpc::Shared::Reader(Arc::new(tools::ReaderShared::new(db, embedder)))
     } else {
-        match settings.open(&path) {
-            Ok(db) => rpc::Shared::Writer(db),
-            Err(e) => {
-                eprintln!("plugmem-mcp: {}: {e}", path.display());
-                return ExitCode::from(2);
-            }
-        }
+        let db = settings
+            .open(&path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        rpc::Shared::Writer(db)
     };
 
     rpc::serve(shared, workers);
-    ExitCode::SUCCESS
+    Ok(())
+}
+
+/// The two workspace-relevant flags, so the serving path takes what it uses.
+struct WorkspaceMode {
+    read_only: bool,
+    create: bool,
+}
+
+/// Serve a directory of named memories.
+///
+/// `--read-only` has no workspace form: a read-only handle pins one immutable
+/// snapshot generation, and "a pool of pinned snapshots that silently age" is a
+/// worse thing to offer than nothing. Refusing is the honest answer.
+fn serve_workspace(
+    settings: plugmem_host::Settings,
+    root: &std::path::Path,
+    default: Option<String>,
+    allow: &[String],
+    mode: WorkspaceMode,
+    workers: usize,
+) -> Result<(), String> {
+    if mode.read_only {
+        return Err(messages::WORKSPACE_READ_ONLY.to_string());
+    }
+    let default = default.map(|s| parse_name(&s, "--db")).transpose()?;
+    let allowed = allow
+        .iter()
+        .map(|s| parse_name(s, "--allow"))
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(name) = &default
+        && !allowed.is_empty()
+        && !allowed.contains(name)
+    {
+        return Err(format!(
+            "--db {name} is not in the --allow set, so the default memory could never be served"
+        ));
+    }
+
+    let workspace = settings
+        .open_workspace(root)
+        .map_err(|e| format!("{}: {e}", root.display()))?;
+    let shared = Arc::new(tools::WorkspaceShared::new(
+        workspace,
+        default,
+        allowed,
+        mode.create,
+    ));
+
+    // The janitor is what makes the idle timeout real. An open memory holds an
+    // exclusive file lock, so a server that never let go would keep every
+    // memory it has ever touched unreachable from anything else on the machine.
+    // A detached thread is right here: it owns nothing the shutdown path needs,
+    // and the process exiting is a perfectly good way to stop sweeping.
+    let janitor = Arc::clone(&shared);
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(SWEEP_INTERVAL);
+            janitor.workspace().close_idle(now_ms());
+        }
+    });
+
+    rpc::serve(rpc::Shared::Workspace(shared), workers);
+    Ok(())
+}
+
+/// Parses a memory name from the command line, naming the flag it came from.
+fn parse_name(s: &str, flag: &str) -> Result<plugmem_host::DbName, String> {
+    plugmem_host::DbName::parse(s).map_err(|e| format!("{flag}: {e}"))
+}
+
+/// Wall-clock now in unix milliseconds.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// The worker count: `[server].workers` if a positive integer, else half the
