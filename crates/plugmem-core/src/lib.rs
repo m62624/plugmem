@@ -31,13 +31,13 @@ pub mod snapshot;
 pub mod storage;
 pub mod tokenizer;
 
-pub use config::Config;
+pub use config::{Config, MAX_HNSW_DEGREE, MAX_SHARDS};
 pub use error::Error;
 pub use id::{EdgeId, EntityId, FactId, NONE_U32};
 pub use memory::{
     FactFault, FactView, LinkInput, MaintainReport, MaintenanceMode, MaintenanceOptions, Memory,
     OpenReport, RecallQuery, RecallResult, RecallScratch, RecalledEdge, RecalledFact,
-    RememberInput, RememberOutcome, Similar, SimilarReason, Stats, UnlinkInput,
+    RememberInput, RememberOutcome, ShardLayout, Similar, SimilarReason, Stats, UnlinkInput,
 };
 pub use model::{
     EdgeSlot, EntityByName, EntityRecord, FactAux, FactRecord, TemporalSlot, VALID_TO_OPEN,
@@ -47,3 +47,6 @@ pub use storage::{MemScratch, MemStorage, Scratch, Storage};
 // The arena-layer ids that appear in model records are part of this
 // crate's public surface too.
 pub use plugmem_arena::{BlobId, TermId};
+// The arena's own error appears inside `Error::Arena`, so anything matching on
+// it needs the type without depending on the arena crate directly.
+pub use plugmem_arena::Error as ArenaError;

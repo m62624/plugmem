@@ -50,7 +50,10 @@ use crate::index::hnsw::{HnswGraph, HnswScratch};
 use crate::index::vecpool::VecPool;
 use crate::journal::Op;
 use crate::memory::persist::Sections;
-use crate::model::{EdgeHistorySlot, EdgeSlot, EntityRecord, FactAux, FactRecord, TemporalSlot};
+use crate::memory::shards::ShardLayout;
+use crate::model::{
+    EdgeHistorySlot, EdgeSlot, EntityByName, EntityRecord, FactAux, FactRecord, TemporalSlot,
+};
 use crate::snapshot::SnapshotSink;
 use crate::storage::{Scratch, Storage};
 use crate::tokenizer::Tokenizer;
@@ -155,6 +158,43 @@ impl MaintenanceOptions {
     }
 }
 
+/// Slack over the record count for a dense id-indexed array, so a database
+/// whose ids are sparse pays for its records rather than for its id space.
+const LIVE_DENSE_SLACK: usize = 8;
+
+impl<'a> Memory<'a> {
+    /// Every stored fact id, ascending.
+    ///
+    /// The obvious walk is `0..next_fact`, and that is what the rebuild loops
+    /// used to do. But `next_fact` counts ids ever *issued*, not records held:
+    /// a database that has purged most of its facts pays for the holes on
+    /// every pass, and a snapshot is free to claim a counter of four billion
+    /// over ten records — a counter the loader can only check from below,
+    /// since a legitimately long-lived database really does outrun its record
+    /// count. Trusting it turns a maintenance pass into a four-billion-step
+    /// spin. Walking the records costs one `u32` each and is bounded by data.
+    ///
+    /// Ascending order is not incidental: a rebuild must be byte-identical
+    /// between a live pass and the journal replay of that pass.
+    pub(super) fn fact_ids_ascending(&self) -> Vec<u32> {
+        let mut ids: Vec<u32> = self.facts.iter().map(|rec| rec.id.0).collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// How far a dense array indexed by fact id may reach before the caller
+    /// has to fall back to an arena lookup. Derived from the record count, not
+    /// from `next_fact`, for the reason above.
+    fn dense_id_span(&self) -> usize {
+        let cap = self
+            .facts
+            .len()
+            .saturating_add(1)
+            .saturating_mul(LIVE_DENSE_SLACK);
+        (self.next_fact as usize).min(cap)
+    }
+}
+
 /// Maps a [`Scratch`] error into the engine's storage-error variant.
 fn scratch_err<E: core::fmt::Debug>(e: E) -> Error {
     Error::Storage(format!("{e:?}"))
@@ -221,6 +261,14 @@ struct RebuildMeta {
     facts: Arena<'static, FactRecord>,
     fact_aux: Arena<'static, FactAux>,
     entities: Arena<'static, EntityRecord>,
+    /// Rebuilt alongside the entities because it is sharded with them.
+    ///
+    /// It holds only stable ids, so a compaction has nothing to *fix* here and
+    /// this arena used to ride through untouched. It cannot ride through a
+    /// change of shard count, though: the config records one number for the
+    /// whole entities group, and an arena left behind at the old one no longer
+    /// matches what the file says it is.
+    by_name: Arena<'static, EntityByName>,
     temporal: Arena<'static, TemporalSlot>,
     tag_lists: ChunkPool<'static>,
     /// Compacted metadata blobs of the live facts (built owned in RAM on both
@@ -259,6 +307,11 @@ pub struct MaintainReport {
     pub hnsw_indexed_before: u32,
     /// HNSW coverage after the pass.
     pub hnsw_indexed_after: u32,
+    /// Shard layout before the pass.
+    pub shards_before: ShardLayout,
+    /// Shard layout after it. Equal to `shards_before` unless the pass
+    /// rebuilt the arenas into a different one.
+    pub shards_after: ShardLayout,
     /// Physical fact/text/vector compaction ran.
     pub structural_compacted: bool,
     /// BM25 was compacted from existing postings without re-tokenizing text.
@@ -303,6 +356,7 @@ impl RepackedEdges {
 struct Rebuilt {
     facts: Arena<'static, FactRecord>,
     entities: Arena<'static, EntityRecord>,
+    by_name: Arena<'static, EntityByName>,
     fact_aux: Arena<'static, FactAux>,
     texts: BlobHeap<'static>,
     metas: BlobHeap<'static>,
@@ -315,6 +369,9 @@ struct Rebuilt {
     hnsw: HnswGraph<'static>,
     edges: Option<RepackedEdges>,
     bm25_tokenizer_version: u32,
+    /// The layout this rebuild actually produced — the plan's target for every
+    /// group it rebuilt, and the stored count for any it left alone.
+    layout: ShardLayout,
     report: MaintainReport,
 }
 
@@ -332,6 +389,19 @@ struct WorkPlan {
     hnsw_full_rebuild: bool,
     repack_edges: bool,
     max_hnsw_inserts: Option<usize>,
+    /// The shard layout this pass builds into, decided **once** and handed to
+    /// every rebuild helper.
+    ///
+    /// Both mirrors of the edge arenas, the fact arenas and the postings
+    /// arenas must come out of one decision: if `rebuild_parts` used a fresh
+    /// target and `repack_edges` re-read the config, one snapshot would hold
+    /// arenas laid out two different ways.
+    ///
+    /// It only takes effect where arenas are actually rebuilt. On a pass that
+    /// does not compact, the config keeps the layout the file already has —
+    /// writing a new one there would leave the config describing a shape the
+    /// data does not have, which is corruption rather than inefficiency.
+    layout: ShardLayout,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -533,6 +603,8 @@ impl Memory<'_> {
             vectors_after: self.vecs.len(),
             hnsw_indexed_before: self.hnsw.indexed(),
             hnsw_indexed_after: self.hnsw.indexed(),
+            shards_before: ShardLayout::of_config(&self.cfg),
+            shards_after: ShardLayout::of_config(&self.cfg),
             structural_compacted: false,
             bm25_compacted: false,
             bm25_reindexed: false,
@@ -560,31 +632,49 @@ impl Memory<'_> {
         let graph_tail = self.cfg.dim != 0
             && self.vecs.len() >= self.cfg.flat_to_hnsw
             && self.hnsw.indexed() < self.vecs.len() as u32;
+        // The layout the data now calls for, and whether the distance from the
+        // stored one is worth a rebuild. This has to reach `needs_work` for
+        // every mode that can act on it: a caller told "maintenance is needed"
+        // that then runs a pass reporting `no_op` would be asked again on the
+        // next write, and again after that.
+        let layout = self.target_layout();
+        let stored_layout = ShardLayout::of_config(&self.cfg);
+        let relayout_due = stored_layout.compacted_groups_earn_rebuild(&layout);
+        // Repacking is normally a `Full`-only luxury, but it is also the only
+        // thing that rebuilds the edge arenas — so it is how their shard count
+        // changes. A growing database would otherwise keep the edge layout it
+        // was created with until somebody ran `Full` by hand.
+        let edges_need_relayout = stored_layout.edges_earn_rebuild(&layout);
         match options.mode {
             MaintenanceMode::Auto => WorkPlan {
-                compact: compaction_due,
+                compact: compaction_due || relayout_due,
                 bm25_reindex: tokenizer_stale,
                 optimize_vectors: graph_tail,
                 hnsw_full_rebuild: false,
-                repack_edges: false,
+                repack_edges: edges_need_relayout,
                 max_hnsw_inserts: options.max_hnsw_inserts,
+                layout,
             },
             MaintenanceMode::Compact => WorkPlan {
-                compact: compaction_due,
+                compact: compaction_due || relayout_due,
                 bm25_reindex: tokenizer_stale,
                 optimize_vectors: has_tombstones && self.hnsw.indexed() != 0,
                 hnsw_full_rebuild: false,
-                repack_edges: false,
+                repack_edges: edges_need_relayout,
                 max_hnsw_inserts: options.max_hnsw_inserts,
+                layout,
             },
             MaintenanceMode::ReindexText => WorkPlan {
-                compact: compaction_due,
+                compact: compaction_due || relayout_due,
                 bm25_reindex: true,
                 optimize_vectors: has_tombstones && self.hnsw.indexed() != 0,
                 hnsw_full_rebuild: false,
-                repack_edges: false,
+                repack_edges: edges_need_relayout,
                 max_hnsw_inserts: options.max_hnsw_inserts,
+                layout,
             },
+            // Vectors only. Nothing here rebuilds an arena, so the layout is
+            // carried but never applied — see `WorkPlan::layout`.
             MaintenanceMode::OptimizeVectors => WorkPlan {
                 compact: false,
                 bm25_reindex: false,
@@ -594,14 +684,16 @@ impl Memory<'_> {
                 hnsw_full_rebuild: self.hnsw.indexed() == 0,
                 repack_edges: false,
                 max_hnsw_inserts: options.max_hnsw_inserts,
+                layout,
             },
             MaintenanceMode::Full => WorkPlan {
                 compact: true,
                 bm25_reindex: true,
                 optimize_vectors: self.cfg.dim != 0 && self.vecs.len() >= self.cfg.flat_to_hnsw,
                 hnsw_full_rebuild: true,
-                repack_edges: !self.edges_hist_out.is_empty(),
+                repack_edges: !self.edges_hist_out.is_empty() || edges_need_relayout,
                 max_hnsw_inserts: None,
+                layout,
             },
         }
     }
@@ -620,9 +712,9 @@ impl Memory<'_> {
     ///
     /// Only [`MaintenanceMode::Full`] asks for this: it is O(versions) work
     /// for a size win, not something a background pass should do.
-    fn repack_edges(&self) -> Result<RepackedEdges, Error> {
-        let ord = ArenaCfg::new(self.cfg.shards_edges, ShardMode::Ordered)
-            .with_max_bytes(self.cfg.max_bytes);
+    fn repack_edges(&self, layout: &ShardLayout) -> Result<RepackedEdges, Error> {
+        let ord =
+            ArenaCfg::new(layout.edges, ShardMode::Ordered).with_max_bytes(self.cfg.max_bytes);
         let mut out = Arena::new(ord)?;
         let mut inn = Arena::new(ord)?;
         let mut hist_out = Arena::new(ord)?;
@@ -649,12 +741,18 @@ impl Memory<'_> {
         })
     }
 
+    /// Rebuilds BM25 from stored text, keeping the **stored** shard count.
+    ///
+    /// This runs on the pass that does not compact, so no other arena is
+    /// rebuilt alongside it. Re-sharding the postings here would leave the
+    /// config's five counts describing two different files at once; the
+    /// postings change shape only inside a full rebuild.
     fn reindex_bm25_from_text(&self) -> Result<Bm25Index<'static>, Error> {
         let cfg = &self.cfg;
         let mut bm25 = Bm25Index::new(cfg.shards_postings, cfg.max_bytes)?;
         let mut tokenizer = Tokenizer::new();
         let mut tf: Vec<(u32, u8)> = Vec::new();
-        for fid in 0..self.next_fact {
+        for fid in self.fact_ids_ascending() {
             let id = FactId(fid);
             let Some(rec) = self.facts.get(&fid.to_be_bytes()) else {
                 continue;
@@ -727,14 +825,17 @@ impl Memory<'_> {
         } else {
             Bm25Policy::Compact
         };
-        let (m, vec_map, purged) = self.rebuild_parts(&mut pools, bm25_policy)?;
+        let (m, vec_map, purged) = self.rebuild_parts(&mut pools, bm25_policy, &plan.layout)?;
         let (hnsw, graph_work) = self.rebuild_graph(
             &vec_map,
             &pools.vecs,
             plan.hnsw_full_rebuild,
             plan.max_hnsw_inserts,
         )?;
-        let edges = plan.repack_edges.then(|| self.repack_edges()).transpose()?;
+        let edges = plan
+            .repack_edges
+            .then(|| self.repack_edges(&plan.layout))
+            .transpose()?;
         let mut report = self.report_skeleton(self.satellite_bytes(plan.repack_edges));
         report.purged = purged;
         report.bytes_after = edges.as_ref().map_or(0, RepackedEdges::pool_bytes)
@@ -760,10 +861,14 @@ impl Memory<'_> {
         report.hnsw_remapped = graph_work.remapped;
         report.hnsw_inserted = graph_work.inserted;
         report.edges_compacted = edges.is_some();
+        let layout = ShardLayout::of_config(&self.cfg).realized(&plan.layout, edges.is_some());
+        report.shards_before = ShardLayout::of_config(&self.cfg);
+        report.shards_after = layout;
         Ok((
             Rebuilt {
                 facts: m.facts,
                 entities: m.entities,
+                by_name: m.by_name,
                 fact_aux: m.fact_aux,
                 texts: pools.texts,
                 metas: m.metas,
@@ -780,6 +885,7 @@ impl Memory<'_> {
                 } else {
                     self.bm25_tokenizer_version
                 },
+                layout,
                 report,
             },
             purged,
@@ -796,6 +902,7 @@ impl Memory<'_> {
         &self,
         pools: &mut P,
         bm25_policy: Bm25Policy,
+        layout: &ShardLayout,
     ) -> Result<(RebuildMeta, alloc::vec::Vec<u32>, usize), Error> {
         let cfg = &self.cfg;
         let uni =
@@ -803,28 +910,45 @@ impl Memory<'_> {
         let ord =
             |shards: usize| ArenaCfg::new(shards, ShardMode::Ordered).with_max_bytes(cfg.max_bytes);
 
-        let mut entities = Arena::new(uni(cfg.shards_entities))?;
-        let mut facts = Arena::new(uni(cfg.shards_facts))?;
-        let mut fact_aux = Arena::new(uni(cfg.shards_facts))?;
+        let mut entities = Arena::new(uni(layout.entities))?;
+        // Ordered, and its source is ordered too, so re-inserting in key order
+        // appends every time and packs the pages — the same win `repack_edges`
+        // takes, for free.
+        let mut by_name = Arena::new(ord(layout.entities))?;
+        for entry in self.by_name.iter() {
+            by_name.insert(&entry)?;
+        }
+        let mut facts = Arena::new(uni(layout.facts))?;
+        let mut fact_aux = Arena::new(uni(layout.facts))?;
         let mut tag_lists = ChunkPool::new(ChunkPoolCfg::new().with_max_bytes(cfg.max_bytes));
-        let mut live = alloc::vec![false; self.next_fact as usize];
+        // A flat "is this fact live" bitmap, consulted once per posting entry,
+        // so it has to be O(1). Its length follows the records rather than
+        // `next_fact`; past the end the closure below asks the arena instead.
+        let dense = self.dense_id_span();
+        let mut live = alloc::vec![false; dense];
         for rec in self.facts.iter() {
-            if !rec.is_tombstone() {
-                live[rec.id.0 as usize] = true;
+            let at = rec.id.0 as usize;
+            if at < dense && !rec.is_tombstone() {
+                live[at] = true;
             }
         }
+        let is_live = |id: FactId| match live.get(id.0 as usize) {
+            Some(&flag) => flag,
+            None => self
+                .facts
+                .get(&id.0.to_be_bytes())
+                .is_some_and(|rec| !rec.is_tombstone()),
+        };
         let mut bm25 = match bm25_policy {
             Bm25Policy::Compact => {
                 self.bm25
-                    .compact_live(cfg.shards_postings, cfg.max_bytes, |id| {
-                        live.get(id.0 as usize).copied().unwrap_or(false)
-                    })?
+                    .compact_live(layout.postings, cfg.max_bytes, is_live)?
             }
-            Bm25Policy::Reindex => Bm25Index::new(cfg.shards_postings, cfg.max_bytes)?,
+            Bm25Policy::Reindex => Bm25Index::new(layout.postings, cfg.max_bytes)?,
         };
-        let mut tags_idx = IdListIndex::new(cfg.shards_postings, cfg.max_bytes)?;
-        let mut entity_facts = IdListIndex::new(cfg.shards_entities, cfg.max_bytes)?;
-        let mut temporal = Arena::new(ord(cfg.shards_temporal))?;
+        let mut tags_idx = IdListIndex::new(layout.postings, cfg.max_bytes)?;
+        let mut entity_facts = IdListIndex::new(layout.entities, cfg.max_bytes)?;
+        let mut temporal = Arena::new(ord(layout.temporal))?;
         let mut metas = BlobHeap::new(
             BlobHeapCfg::new()
                 .with_max_bytes(cfg.max_bytes)
@@ -860,7 +984,7 @@ impl Memory<'_> {
         let mut vec_map = alloc::vec![NONE_U32; self.vecs.len()];
 
         let mut purged = 0usize;
-        for fid in 0..self.next_fact {
+        for fid in self.fact_ids_ascending() {
             let id = FactId(fid);
             // A missing record is an id burned by an earlier pass — legal
             // (: numbering holes after a purge are the norm).
@@ -948,6 +1072,7 @@ impl Memory<'_> {
         Ok((
             RebuildMeta {
                 facts,
+                by_name,
                 fact_aux,
                 entities,
                 temporal,
@@ -1024,7 +1149,7 @@ impl Memory<'_> {
         } else {
             Bm25Policy::Compact
         };
-        let (m, vec_map, purged) = self.rebuild_parts(&mut pools, bm25_policy)?;
+        let (m, vec_map, purged) = self.rebuild_parts(&mut pools, bm25_policy, &plan.layout)?;
 
         // Freeze the staged pools and borrow them as the two big sections; the
         // metadata and graph are the only things in RAM.
@@ -1050,11 +1175,15 @@ impl Memory<'_> {
         // Repacked edges are built owned like the other metadata: they are
         // records, not content, so they scale with the edge count and not with
         // the image size the disk-first path exists to keep out of RAM.
-        let edges = plan.repack_edges.then(|| self.repack_edges()).transpose()?;
+        let edges = plan
+            .repack_edges
+            .then(|| self.repack_edges(&plan.layout))
+            .transpose()?;
         let sections = Sections {
             facts: &m.facts,
             fact_aux: &m.fact_aux,
             entities: &m.entities,
+            by_name: &m.by_name,
             temporal: &m.temporal,
             texts: &texts,
             metas: &m.metas,
@@ -1068,6 +1197,7 @@ impl Memory<'_> {
             edges_in: edges.as_ref().map_or(&self.edges_in, |e| &e.inn),
             edges_hist_out: edges.as_ref().map_or(&self.edges_hist_out, |e| &e.hist_out),
             edges_hist_in: edges.as_ref().map_or(&self.edges_hist_in, |e| &e.hist_in),
+            layout: ShardLayout::of_config(&self.cfg).realized(&plan.layout, edges.is_some()),
         };
         self.write_snapshot_with(&sections, created_at, sink)?;
         report.purged = purged;
@@ -1148,6 +1278,7 @@ impl Memory<'_> {
     fn install(&mut self, r: Rebuilt) {
         self.facts = r.facts;
         self.entities = r.entities;
+        self.by_name = r.by_name;
         self.fact_aux = r.fact_aux;
         self.texts = r.texts;
         self.metas = r.metas;
@@ -1166,5 +1297,8 @@ impl Memory<'_> {
         }
         self.tombstones = 0;
         self.bm25_tokenizer_version = r.bm25_tokenizer_version;
+        // Last, and only here: the config may claim the new layout because
+        // the arenas it describes have just been swapped in above.
+        r.layout.apply(&mut self.cfg);
     }
 }

@@ -83,11 +83,6 @@ fn recall_and_get_allocate_nothing_after_warmup() {
     let dim = 32usize;
     let mut cfg = Config::default();
     cfg.dim = dim;
-    cfg.shards_facts = 64;
-    cfg.shards_entities = 16;
-    cfg.shards_edges = 16;
-    cfg.shards_temporal = 16;
-    cfg.shards_postings = 128;
     let mut mem = Memory::new(cfg).unwrap();
     let mut store = MemStorage::new();
 
@@ -167,11 +162,6 @@ fn graph_regime_recall_allocates_nothing_after_warmup() {
     let mut cfg = Config::default();
     cfg.dim = dim;
     cfg.flat_to_hnsw = 64;
-    cfg.shards_facts = 16;
-    cfg.shards_entities = 8;
-    cfg.shards_edges = 8;
-    cfg.shards_temporal = 8;
-    cfg.shards_postings = 32;
     let mut mem = Memory::new(cfg).unwrap();
     let mut store = MemStorage::new();
     let embed = |seed: u64| -> Vec<f32> {
@@ -232,9 +222,7 @@ fn overlay_open_does_not_clone_the_base_pools() {
     // `from_bytes_overlay` borrows its byte pools, so it allocates only the
     // small owned metadata — nowhere near the whole image the owned open copies.
     let _serial = serial();
-    let mut cfg = Config::default();
-    cfg.shards_facts = 64;
-    cfg.shards_postings = 128;
+    let cfg = Config::default();
 
     // A snapshot whose byte pools dominate: many facts, each with real text.
     let mut mem = Memory::new(cfg.clone()).unwrap();

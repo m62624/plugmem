@@ -32,9 +32,10 @@ use crate::index::varint::decode_u32;
 use crate::index::vecpool::VecPool;
 use crate::memory::FactFault;
 use crate::memory::migrations::{self, STATE_LEN};
+use crate::memory::shards::ShardLayout;
 use crate::model::{
-    EdgeHistorySlot, EdgeSlot, EntityRecord, FactAux, FactRecord, TemporalSlot, VALID_TO_OPEN,
-    edge_history_key, edge_key,
+    EdgeHistorySlot, EdgeSlot, EntityByName, EntityRecord, FactAux, FactRecord, TemporalSlot,
+    VALID_TO_OPEN, edge_history_key, edge_key,
 };
 use crate::snapshot::{Prefix, SectionMeta, Snapshot, SnapshotSink, build_prefix, pad_len};
 use xxhash_rust::xxh3::Xxh3;
@@ -124,6 +125,7 @@ pub(crate) struct Sections<'r, 'a> {
     pub(crate) facts: &'r Arena<'a, FactRecord>,
     pub(crate) fact_aux: &'r Arena<'a, FactAux>,
     pub(crate) entities: &'r Arena<'a, EntityRecord>,
+    pub(crate) by_name: &'r Arena<'a, EntityByName>,
     pub(crate) temporal: &'r Arena<'a, TemporalSlot>,
     pub(crate) texts: &'r BlobHeap<'a>,
     pub(crate) metas: &'r BlobHeap<'a>,
@@ -137,6 +139,13 @@ pub(crate) struct Sections<'r, 'a> {
     pub(crate) edges_in: &'r Arena<'a, EdgeSlot>,
     pub(crate) edges_hist_out: &'r Arena<'a, EdgeHistorySlot>,
     pub(crate) edges_hist_in: &'r Arena<'a, EdgeHistorySlot>,
+    /// How the arenas above are sharded.
+    ///
+    /// Carried with the sections rather than read from `self.cfg`, because the
+    /// disk-first path writes arenas it has just rebuilt while the engine it
+    /// borrows still records the old layout. The config in the file has to
+    /// describe the arenas in the same file.
+    pub(crate) layout: ShardLayout,
 }
 
 /// Dumps an arena as its `(meta, pool)` section pair.
@@ -414,6 +423,7 @@ impl<'a> Memory<'a> {
             facts: &self.facts,
             fact_aux: &self.fact_aux,
             entities: &self.entities,
+            by_name: &self.by_name,
             temporal: &self.temporal,
             texts: &self.texts,
             metas: &self.metas,
@@ -427,6 +437,7 @@ impl<'a> Memory<'a> {
             edges_in: &self.edges_in,
             edges_hist_out: &self.edges_hist_out,
             edges_hist_in: &self.edges_hist_in,
+            layout: ShardLayout::of_config(&self.cfg),
         }
     }
 
@@ -451,7 +462,7 @@ impl<'a> Memory<'a> {
             (
                 kind::BY_NAME_META,
                 kind::BY_NAME_POOL,
-                arena_sections(&self.by_name),
+                arena_sections(s.by_name),
             ),
             (
                 kind::EDGES_OUT_META,
@@ -571,7 +582,9 @@ impl<'a> Memory<'a> {
         mut sink: impl SnapshotSink,
     ) -> Result<(), Error> {
         let mut cfg_bytes = Vec::new();
-        self.cfg.encode(&mut cfg_bytes);
+        let mut cfg = self.cfg.clone();
+        s.layout.apply(&mut cfg);
+        cfg.encode(&mut cfg_bytes);
         let flags = if self.cfg.dim > 0 {
             crate::snapshot::FLAG_VECTORS
         } else {
@@ -889,24 +902,22 @@ impl<'a> Memory<'a> {
 
     /// Checks the stored config against the caller's (structural fields
     /// must match; tuning fields follow the caller) and adopts the
-    /// snapshot's lineage identity. Shared by both load paths.
+    /// snapshot's lineage identity and shard layout. Shared by both load
+    /// paths.
     fn reconcile_config(snap: &Snapshot<'_>, mut cfg: Config) -> Result<Config, Error> {
         let stored = Config::decode(snap.config())?;
         if stored.dim != cfg.dim {
             return Err(Error::ConfigMismatch("stored dim differs"));
         }
-        if [
-            (stored.shards_facts, cfg.shards_facts),
-            (stored.shards_entities, cfg.shards_entities),
-            (stored.shards_edges, cfg.shards_edges),
-            (stored.shards_temporal, cfg.shards_temporal),
-            (stored.shards_postings, cfg.shards_postings),
-        ]
-        .iter()
-        .any(|&(a, b)| a != b)
-        {
-            return Err(Error::ConfigMismatch("stored shard counts differ"));
-        }
+        // The shard counts are how this file is laid out, not something the
+        // caller gets a say in: the loader needs the stored ones to read the
+        // arena metadata at all, and the caller's are irrelevant to that. So
+        // they are adopted rather than compared — the same treatment `db_uuid`
+        // gets below, and what lets a database re-shard itself without every
+        // caller having to learn the new numbers. `Config::decode` has already
+        // bounded them by `MAX_SHARDS`, which is the only check that matters
+        // here: these become allocation sizes.
+        ShardLayout::of_config(&stored).apply(&mut cfg);
         if stored.max_bytes != cfg.max_bytes
             || stored.max_text != cfg.max_text
             || stored.max_blob != cfg.max_blob
@@ -1218,7 +1229,7 @@ impl<'a> Memory<'a> {
         let metas = self.metas.len() as u32;
         let mut pairs = Vec::new();
         let mut out = Vec::new();
-        for i in 0..self.next_fact {
+        for i in self.fact_ids_ascending() {
             let id = FactId(i);
             let Some(record) = self.fact(id) else {
                 continue; // unknown or tombstoned

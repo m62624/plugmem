@@ -780,8 +780,16 @@ fn render<T: Serialize>(value: &T, format: &str) -> String {
 }
 
 /// A host error as a tool-level error result (the model reads and reacts).
+///
+/// Carries the host's follow-up line when there is one. A model that reads
+/// "pool would grow past 2147483648 bytes" and nothing else has no idea the
+/// number is a setting; with the hint it can say so to the person running it.
 fn tool_error(id: Value, e: &HostError) -> Value {
-    rpc::tool_result(id, e.to_string(), true)
+    let text = match e.capacity_hint() {
+        Some(hint) => format!("{e}\n{hint}"),
+        None => e.to_string(),
+    };
+    rpc::tool_result(id, text, true)
 }
 
 /// Wall-clock now in unix milliseconds (the engine keeps no clock).

@@ -47,7 +47,16 @@ The second load-bearing property of this crate, and as much a contract as the si
 
 ## 32-bit targets
 
-`usize` is 32 bits on wasm32, and this crate reads untrusted images. Arithmetic on lengths and offsets taken from an image must be provably in range there too: compute in `u64` and compare against a real slice length before casting down, or use `checked_*`. The existing loaders (`blob.rs`, `chunk.rs`, `interner.rs`) show the pattern and say so in comments — follow it rather than reasoning about 64-bit sizes.
+The third load-bearing property, alongside the single `unsafe` and the allocation budget. `usize` is 32 bits on wasm32, and this crate reads untrusted images. Arithmetic on lengths and offsets taken from an image must be provably in range there too: compute in `u64` and compare against a real slice length before casting down, or use `checked_*`. The existing loaders (`blob.rs`, `chunk.rs`, `interner.rs`) show the pattern and say so in comments — follow it rather than reasoning about 64-bit sizes.
+
+Two rules make that concrete, and both are gates rather than advice:
+
+- **a size taken from an image may not become an allocation size.** Check it against the real length of the slice it describes *first*; only then is the allocation bounded by data that exists. `load_index` in `blob.rs` and the chunk validator show the order.
+- **the tests run at 32 bits.** `cargo test -p plugmem-arena --target wasm32-wasip1` is in CI, and it only started working once the native-only proptest harness was gated off the target — before that, the layer with the most 32-bit arithmetic was the one never executed at 32 bits. Keep new test files buildable there: guard proptest imports, strategies and blocks with `#[cfg(not(target_family = "wasm"))]`.
+
+## Shard counts come from the caller
+
+The arena validates that a shard count is a non-zero power of two and nothing more; how many shards an arena *should* have is `plugmem-core`'s decision (`memory/shards.rs`), because only it knows how much will be stored. Two things follow for this crate. The per-shard cost is real and paid up front — `heads`, `tails` and `dir_at` are one vector each — so keep it flat and keep it small. And a shard count read from an untrusted image becomes the length of those vectors, which is why the ceiling that bounds it lives in the caller's `Config::validate`: an arena handed an absurd count would simply try to allocate it.
 
 ## Borrowing and overlays
 

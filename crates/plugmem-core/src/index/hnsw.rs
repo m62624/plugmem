@@ -127,6 +127,11 @@ pub struct HnswGraph<'a> {
     m: usize,
     /// Level-0 degree cap.
     m0: usize,
+    /// Pool ceiling, kept so the level-0 block can be bounded where it grows.
+    /// The other two pools carry their own; `level0` is a plain `Vec` and had
+    /// none, which left `nodes × m0` — a product of two snapshot-supplied
+    /// numbers — as an unchecked allocation size.
+    max_bytes: usize,
     /// `indexed × m0` neighbor slots, `NONE_U32`-padded.
     level0: Vec<u32>,
     /// Upper-level handles.
@@ -159,6 +164,7 @@ impl<'a> HnswGraph<'a> {
         Ok(Self {
             m,
             m0,
+            max_bytes,
             level0: Vec::new(),
             upper: Arena::new(
                 ArenaCfg::new(UPPER_SHARDS, ShardMode::Uniform).with_max_bytes(max_bytes),
@@ -170,6 +176,26 @@ impl<'a> HnswGraph<'a> {
             #[cfg(feature = "counters")]
             dist_evals: Cell::new(0),
         })
+    }
+
+    /// Length of the level-0 neighbour array for `nodes` slots.
+    ///
+    /// Computed in `u64` and checked against the pool ceiling before it
+    /// becomes a length: both factors come from a snapshot, and their product
+    /// wraps a 32-bit `usize` at vector counts a real database can reach —
+    /// which on wasm32 would silently allocate a short array and then index
+    /// past it.
+    fn level0_len(&self, nodes: u32) -> Result<usize, Error> {
+        let slots = u64::from(nodes) * self.m0 as u64;
+        let bytes = slots * NEIGHBOR_BYTES as u64;
+        if bytes > self.max_bytes as u64 {
+            return Err(Error::CapacityExceeded {
+                what: "hnsw level-0 neighbours",
+            });
+        }
+        // In range on both architectures: `bytes` fits `max_bytes`, itself a
+        // `usize`, and `slots` is `bytes / NEIGHBOR_BYTES`.
+        Ok(slots as usize)
     }
 
     /// Number of slots covered by the graph (the flat tail starts here).
@@ -418,7 +444,7 @@ impl<'a> HnswGraph<'a> {
         scratch: &mut HnswScratch,
     ) -> Result<(), Error> {
         debug_assert!(upto as usize <= pool.len());
-        self.level0.resize(upto as usize * self.m0, NONE_U32);
+        self.level0.resize(self.level0_len(upto)?, NONE_U32);
         for slot in self.indexed..upto {
             self.insert_one(pool, slot, ef_construction, scratch)?;
             // Advance per slot: a capacity failure leaves a graph that is
@@ -570,7 +596,7 @@ impl<'a> HnswGraph<'a> {
             .iter()
             .filter(|&&m| m != NONE_U32)
             .count() as u32;
-        g.level0 = alloc::vec![NONE_U32; new_indexed as usize * self.m0];
+        g.level0 = alloc::vec![NONE_U32; g.level0_len(new_indexed)?];
         g.indexed = new_indexed;
         let mut nbrs = Vec::new();
         let mut sel = Vec::new();

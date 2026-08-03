@@ -155,12 +155,12 @@ edge lifecycle — operation cost by corpus size
 </text>
 <polyline fill="none" opacity="1" stroke="#000000" stroke-width="1" points="84,40 89,40 "/>
 <polyline fill="none" opacity="1" stroke="#000000" stroke-width="1" points="90,442 889,442 "/>
-<rect x="148" y="359" width="66" height="82" opacity="1" fill="#1E3A8A" stroke="none"/>
-<rect x="415" y="351" width="66" height="90" opacity="1" fill="#1E3A8A" stroke="none"/>
-<rect x="681" y="234" width="66" height="207" opacity="1" fill="#1E3A8A" stroke="none"/>
-<rect x="231" y="348" width="66" height="93" opacity="1" fill="#BE185D" stroke="none"/>
-<rect x="497" y="354" width="66" height="87" opacity="1" fill="#BE185D" stroke="none"/>
-<rect x="764" y="237" width="66" height="204" opacity="1" fill="#BE185D" stroke="none"/>
+<rect x="148" y="362" width="66" height="79" opacity="1" fill="#1E3A8A" stroke="none"/>
+<rect x="415" y="340" width="66" height="101" opacity="1" fill="#1E3A8A" stroke="none"/>
+<rect x="681" y="278" width="66" height="163" opacity="1" fill="#1E3A8A" stroke="none"/>
+<rect x="231" y="327" width="66" height="114" opacity="1" fill="#BE185D" stroke="none"/>
+<rect x="497" y="327" width="66" height="114" opacity="1" fill="#BE185D" stroke="none"/>
+<rect x="764" y="252" width="66" height="189" opacity="1" fill="#BE185D" stroke="none"/>
 <rect x="784" y="45" width="101" height="44" opacity="0.85" fill="#FFFFFF" stroke="none"/>
 <rect x="784" y="45" width="101" height="44" opacity="0.35" fill="none" stroke="#000000"/>
 <text x="824" y="55" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#000000">

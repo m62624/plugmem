@@ -1,9 +1,11 @@
 //! Boundary tests for `Interner` (test plan) plus a property model
 //! against `HashMap<String, u32>`.
 
+#[cfg(not(target_family = "wasm"))]
 use std::collections::HashMap;
 
 use plugmem_arena::{BlobHeapCfg, Error, Interner, TermId};
+#[cfg(not(target_family = "wasm"))]
 use proptest::prelude::*;
 
 #[test]
@@ -127,6 +129,7 @@ fn probe_counter_moves_and_resets() {
     assert!(terms.probes() >= 1);
 }
 
+#[cfg(not(target_family = "wasm"))]
 proptest! {
     /// The interner must be a bijection `string <-> id` equivalent to a
     /// `HashMap<String, u32>` with dense first-seen numbering. A small

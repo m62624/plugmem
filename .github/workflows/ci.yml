@@ -186,7 +186,7 @@ jobs:
   # (specs/14 §5) that native 64-bit CI can never see. proptest sections are
   # native-only (gated in the test files); everything else runs.
   wasm-suite:
-    name: core suite on wasm32 (${{ matrix.runtime }}, ${{ matrix.feature_name }})
+    name: core+arena suites on wasm32 (${{ matrix.runtime }}, ${{ matrix.feature_name }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -223,6 +223,12 @@ jobs:
         # a debug interpreter-free JIT but still add minutes; release keeps the
         # whole suite in seconds.
         run: cargo test --release -p plugmem-core --target wasm32-wasip1 ${{ matrix.feature_args }}
+      - name: Run the arena suite on wasm32
+        # The crate that owns the untrusted-image loaders and every page
+        # offset. Its tests only started building for this target once the
+        # native-only proptest harness was gated off it; before that the layer
+        # with the most 32-bit arithmetic was the one never run at 32 bits.
+        run: cargo test --release -p plugmem-arena --target wasm32-wasip1 ${{ matrix.feature_args }}
 
   # Build the pure-no_std probe for wasm32 AND wasm64 (WebAssembly 3.0
   # memory64), execute the artifacts in whichever runtime supports them, and

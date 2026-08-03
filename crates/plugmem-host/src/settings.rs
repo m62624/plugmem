@@ -26,17 +26,7 @@ const ENV_EMBEDDER: &str = "PLUGMEM_EMBEDDER";
 // Keep these inventories next to the parser. The settings-help tests compare
 // them with the public documentation catalogue, so adding a parser key without
 // adding its help entry fails loudly.
-pub(crate) const ENGINE_SETTING_KEYS: &[&str] = &[
-    "dim",
-    "max_bytes",
-    "max_text",
-    "max_blob",
-    "shards_facts",
-    "shards_entities",
-    "shards_edges",
-    "shards_temporal",
-    "shards_postings",
-];
+pub(crate) const ENGINE_SETTING_KEYS: &[&str] = &["dim", "max_bytes", "max_text", "max_blob"];
 pub(crate) const DATABASE_SETTING_KEYS: &[&str] = &["path"];
 pub(crate) const EMBEDDER_SETTING_KEYS: &[&str] = &["kind", "url", "model", "api_key_env"];
 pub(crate) const MAINTENANCE_SETTING_KEYS: &[&str] = &[
@@ -220,11 +210,6 @@ fn apply_engine(cfg: &mut Config, t: &toml::Table) -> Result<(), SettingsError> 
         (ENGINE_SETTING_KEYS[1], &mut cfg.max_bytes),
         (ENGINE_SETTING_KEYS[2], &mut cfg.max_text),
         (ENGINE_SETTING_KEYS[3], &mut cfg.max_blob),
-        (ENGINE_SETTING_KEYS[4], &mut cfg.shards_facts),
-        (ENGINE_SETTING_KEYS[5], &mut cfg.shards_entities),
-        (ENGINE_SETTING_KEYS[6], &mut cfg.shards_edges),
-        (ENGINE_SETTING_KEYS[7], &mut cfg.shards_temporal),
-        (ENGINE_SETTING_KEYS[8], &mut cfg.shards_postings),
     ];
     for (key, slot) in fields {
         if let Some(v) = t.get(key) {
@@ -329,7 +314,7 @@ mod tests {
         let text = "\
 [engine]
 dim = 384
-shards_facts = 16
+max_text = 2048
 [maintenance]
 snapshot_every_ops = 50
 snapshot_journal_bytes = 8192
@@ -338,7 +323,7 @@ maintain_every_forgets = 3
         let table: toml::Table = text.parse().unwrap();
         let s = Settings::from_table(Some(&table)).unwrap();
         assert_eq!(s.config.dim, 384);
-        assert_eq!(s.config.shards_facts, 16);
+        assert_eq!(s.config.max_text, 2048);
         assert_eq!(s.snapshot_every_ops, Some(50));
         assert_eq!(s.snapshot_journal_bytes, Some(8192));
         assert_eq!(s.maintain_every_forgets, Some(3));

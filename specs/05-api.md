@@ -164,10 +164,10 @@ markers, the id for a later revise/forget. An empty result → an empty string (
 | Field | Default | Note |
 |---|---|---|
 | `dim` | 0 | 0 = vector layer off |
-| `max_bytes` | 2 GiB | total pool ceiling |
+| `max_bytes` | 2 GiB | ceiling for **each** pool, not their sum; the default is the wasm32 passport |
 | `max_text` | 4096 | bytes |
 | `max_blob` | 64 KiB | |
-| `shards_facts / entities / edges / temporal / postings` | 1024 / 256 / 512 / 512 / 2048 | powers of 2 |
+| `shards_facts / entities / edges / temporal / postings` | the floor | **engine-managed**, see below |
 | `bm25_k1 / b` | 1.2 / 0.75 | |
 | `rrf_k` | 60 | |
 | `w_bm25 / w_vec / w_graph / w_time` | 1.0 | RRF weights |
@@ -178,12 +178,22 @@ markers, the id for a later revise/forget. An empty result → an empty string (
 | `flat_to_hnsw` | 24_000 | threshold, tuned by a bench |
 | `db_uuid` | 0 | u128 database lineage id: host-minted at creation, 0 = unnamed; on open 0 adopts the stored one, nonzero must match (`ConfigMismatch`); printed in `stats()` |
 
+**The shard counts are not a setting.** They describe how a file is laid out, and
+the engine derives them from how much it holds (`01-arena.md` for the rule and the
+measurement behind it). A new database starts on the floor, `open` **adopts**
+whatever the snapshot records — the caller's values are ignored, because the loader
+needs the stored ones to read the arenas at all — and `maintain` moves the layout as
+the data grows or shrinks, eagerly upward and lazily downward so a database near a
+boundary does not rebuild itself repeatedly. There is no `config.toml` key; the
+current layout is reported by `stats()`. Setting the fields in Rust affects only a
+database being created, and the next maintenance pass overrules it.
+
 **Integrity is not config.** Open trusts the file by default (trust/sparse, the SQLite
 model) and does not checksum the image. Byte integrity is on demand via `scrub()`
 (resumable); content integrity via `verify()`. Config is stored in the snapshot; on
-`open` the given config is checked — incompatible fields (dim, shards) against a
-non-empty database are `Error::ConfigMismatch` (changing dim = reindexing, a separate
-CLI utility).
+`open` the given config is checked — an incompatible `dim` against a non-empty
+database is `Error::ConfigMismatch` (changing dim = reindexing, a separate CLI
+utility).
 
 ## Errors
 

@@ -55,11 +55,6 @@ dim = 768              # 0 disables vectors
 max_bytes = 2147483648
 max_text = 4096
 max_blob = 65536
-shards_facts = 1024
-shards_entities = 256
-shards_edges = 512
-shards_temporal = 512
-shards_postings = 2048
 
 [embedder]
 # none | ollama | openai | lmstudio | vllm | llamacpp
@@ -97,14 +92,23 @@ HNSW tuning fields remain programmatic `plugmem-core::Config` settings for now.
 | Key | Default | Meaning |
 |---|---:|---|
 | `dim` | `0` | Embedding dimension; zero disables vector storage. |
-| `max_bytes` | `2147483648` | Total byte-pool ceiling. |
+| `max_bytes` | `2147483648` | Ceiling for **each** byte pool, not their sum — see below. |
 | `max_text` | `4096` | Maximum fact text length in bytes. |
 | `max_blob` | `65536` | Maximum single blob length in bytes. |
-| `shards_facts` | `1024` | Facts arena shard count; must be a power of two. |
-| `shards_entities` | `256` | Entities arena shard count; must be a power of two. |
-| `shards_edges` | `512` | Edges arena shard count; must be a power of two. |
-| `shards_temporal` | `512` | Temporal arena shard count; must be a power of two. |
-| `shards_postings` | `2048` | BM25 postings arena shard count; must be a power of two. |
+
+`max_bytes` applies to every pool separately (arena pages, the text and
+metadata blob heaps, the tag and posting chunk pools, the vector pool), so a
+database's total goes several times past it; the pool that binds first is
+normally the fact texts. The default is not a capacity judgement — it is the
+figure that keeps every pool addressable where `usize` is 32 bits, so a file
+written anywhere opens anywhere. Raise it if you need to, and the only thing
+you give up is that: a 32-bit host then refuses the file with a typed error
+rather than reading it wrongly.
+
+There is no shard-count setting. How many shards each arena gets is derived
+from how much the database holds, and `maintain` moves it as that changes —
+a thousand facts on a layout meant for a million cost fourteen megabytes
+instead of one. `plugmem-cli stats` reports the current layout.
 
 ### `[embedder]`
 
@@ -130,6 +134,18 @@ use the same OpenAI-compatible HTTP shape.
 | `snapshot_journal_bytes` | `4194304` | Snapshot when the journal reaches this size. |
 | `maintain_every_forgets` | off | Run policy maintenance after this many forgets. |
 | `batch_size` | `128` | CLI-only `import` batch size; `--batch` overrides it. |
+
+One maintenance trigger has no key and is always on: a database that outgrows
+(or falls far below) its shard layout re-shards itself on the next write. It
+has to be automatic — the triggers above are opt-in, so otherwise a growing
+database would keep the layout it was created with until somebody ran
+`maintain` by hand. It is also self-limiting: the thresholds are a doubling up
+and a fourfold drop, so it fires a handful of times over a database's life.
+
+One consequence worth expecting: a database written by a version that used the
+old fixed layout is stale the moment it opens, so its **first write re-shards
+it**, at a cost proportional to its size. That happens once and leaves a
+permanently smaller file.
 
 ### `[server]`
 

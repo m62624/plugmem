@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use plugmem_host::{
     Config, Database, Embedder, FactId, FsyncPolicy, HostError, NullEmbedder, OpenAiCompatEmbedder,
-    ReadOnlyDatabase, RecallQuery, RememberInput, UnlinkInput,
+    ReadOnlyDatabase, RecallQuery, RememberInput, ShardLayout, UnlinkInput,
 };
 
 /// A unique temp directory per test; removed on drop.
@@ -41,13 +41,7 @@ impl Drop for TempDir {
 }
 
 fn cfg() -> Config {
-    let mut cfg = Config::default();
-    cfg.shards_facts = 8;
-    cfg.shards_entities = 4;
-    cfg.shards_edges = 4;
-    cfg.shards_temporal = 4;
-    cfg.shards_postings = 16;
-    cfg
+    Config::default()
 }
 
 #[test]
@@ -1809,4 +1803,42 @@ fn metadata_round_trips_through_get_and_export_sorted() {
         want,
         "import preserves metadata"
     );
+}
+
+/// A growing database re-shards itself. Nothing else would: automatic
+/// maintenance is opt-in, so without this trigger a database would keep the
+/// layout it was created with until somebody ran `maintain` by hand, paying
+/// for it in memory the whole time.
+#[test]
+fn a_growing_database_reshards_itself_without_being_asked() {
+    let tmp = TempDir::new("reshard");
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    let floor = db.stats().shards;
+
+    // Enough facts to push the fact arena one step past the floor. The rule
+    // sizes each group by its payload, so this follows from the slot width and
+    // the per-shard target rather than being a guessed number.
+    const FACT_SLOT: usize = 48;
+    const SHARD_TARGET: usize = 64 * 4096;
+    // Past the floor is not enough — a rebuild waits for the growth margin.
+    let n = floor.facts * ShardLayout::GROWTH_MARGIN * SHARD_TARGET / FACT_SLOT + 1;
+    for i in 0..n {
+        db.remember(RememberInput::text(i as u64 + 1, "a short fact"))
+            .unwrap();
+    }
+
+    let grown = db.stats().shards;
+    assert!(
+        grown.facts > floor.facts,
+        "layout stayed at {floor:?} after {n} facts"
+    );
+    assert_eq!(db.stats().facts, n, "re-sharding is a rearrangement");
+
+    // It survives a reopen: the file records the layout, and the caller's
+    // config — still on the floor — does not override it.
+    drop(db);
+    let (reopened, _) = Database::open(tmp.db(), cfg()).unwrap();
+    assert_eq!(reopened.stats().shards, grown);
+    assert_eq!(reopened.stats().facts, n);
+    reopened.verify().unwrap();
 }

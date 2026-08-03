@@ -9,14 +9,9 @@ use plugmem_core::{
 };
 
 fn cfg(dim: usize) -> Config {
-    let mut c = Config::default();
-    c.dim = dim;
-    c.shards_facts = 16;
-    c.shards_entities = 8;
-    c.shards_edges = 8;
-    c.shards_temporal = 8;
-    c.shards_postings = 32;
-    c
+    let mut cfg = Config::default();
+    cfg.dim = dim;
+    cfg
 }
 
 /// A tiny deterministic LCG — the repo forbids unseeded randomness.

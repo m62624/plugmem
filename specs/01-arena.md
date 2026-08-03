@@ -34,6 +34,31 @@ bytes per 4 KiB page (≈0.5%), so it stays in cache while the pool does not.
 The directory is **derived state** — rebuilt by the load walk, absent from the
 on-disk image — alongside `prev` and `tails`.
 
+### How many shards
+
+The arena takes the count; the engine decides it, and **not from configuration**
+(`04-recall.md` for where the rule lives). There is no correct constant, because
+the two costs pull opposite ways:
+
+- a shard's directory is sorted, so an insert lands mid-directory and memmoves
+  the entries above it — more pages per shard, more memmove;
+- every *touched* shard owns at least one whole page, so too few records per
+  shard means buying 4 KiB for a handful of bytes.
+
+Measured, since the balance is not obvious: sweeping 8…4096 shards over fixed
+100k- and 1M-fact corpora moved write throughput by less than run-to-run noise —
+flat even at 1465 pages per shard — while resident bytes grew monotonically with
+the shard count, by 52 % at 100k facts across the range. A directory entry is 20
+bytes, so even a thousand of them is one short `memmove`; the page floor is the
+cost that actually bites. The engine therefore aims at **64 pages per shard**,
+two orders of magnitude below where the sweep still measured nothing on the
+write side, and holds the floor near 5 % of payload.
+
+The count is bounded above by `MAX_SHARDS`, which is not a preference but a
+safety limit: a shard count arrives from an untrusted snapshot and becomes the
+length of the arena's per-shard vectors, so it is an allocation size taken from
+a file (`03-snapshot.md`).
+
 ### Trait
 
 ```rust

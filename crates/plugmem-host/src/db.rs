@@ -538,6 +538,23 @@ impl Database {
             engine.with(store, |mem, store| mem.maintain(store, now))?;
             st.forgets = 0;
         }
+        // A database that outgrows its shard layout re-shards itself. This is
+        // on by default, unlike `maintain_every_forgets`, because without it
+        // nothing would ever move a layout: a growing database would keep the
+        // one it was created with until somebody ran `maintain` by hand, and
+        // the cost of that is silent — memory, and a page directory that keeps
+        // lengthening.
+        //
+        // Affordable because both halves are bounded. The question is O(1)
+        // (stored record counts), so asking on every write is free; and the
+        // answer is self-limiting — the thresholds are a doubling up and a
+        // fourfold drop, so it says yes a handful of times over a database's
+        // whole life. `resharding_settles_instead_of_asking_forever` in the
+        // core suite is the test that keeps that true.
+        let State { engine, store, .. } = &mut *st;
+        if engine.with(store, |mem, _| mem.shard_layout_is_stale()) {
+            engine.with(store, |mem, store| mem.maintain(store, now))?;
+        }
         let by_ops = self.inner.snapshot_every_ops > 0 && st.ops >= self.inner.snapshot_every_ops;
         let by_bytes = self.inner.snapshot_journal_bytes > 0
             && st.store.journal_bytes() >= self.inner.snapshot_journal_bytes;

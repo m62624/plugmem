@@ -163,12 +163,19 @@ const DATABASE_CHARTS: &[Chart] = &[
 ];
 
 /// The like-for-like recall comparison chart. Its input contains one
-/// `database-100k` and one `database-1m` series, both emitted by the same
-/// file-backed runner and rendered in the same units.
-const DATABASE_SCALE_SERIES: [(&str, RGBColor); 2] = [
+/// `database-5k`, `database-100k` and `database-1m` series, all emitted by the
+/// same file-backed runner and rendered in the same units.
+///
+/// The 5k point is the size an ordinary personal memory actually is, and until
+/// the layout followed the data it was the size that behaved worst — so it
+/// belongs on the chart rather than being extrapolated from the other two.
+const DATABASE_SCALE_SERIES: [(&str, RGBColor); 3] = [
+    ("5k operations", RGBColor(21, 128, 61)),
     ("100k operations", RGBColor(30, 58, 138)),
     ("1M operations", RGBColor(190, 24, 93)),
 ];
+/// The corpus sizes those series read, in the same order.
+const DATABASE_SCALE_SIZES: [&str; 3] = ["database-5k", "database-100k", "database-1m"];
 const DATABASE_SCALE_ROWS: &[(&str, &str, &str)] = &[
     ("text_only", "writer_diagnostic/text_only", "p50_us"),
     ("tag + range", "writer_diagnostic/text_tag_range", "p50_us"),
@@ -493,14 +500,14 @@ fn main() {
                 updated += 1;
                 println!(
                     "{:32} rewritten (Δmax {:.0}%)",
-                    "database-recall-scale-100k-1m.svg",
+                    "database-recall-scale.svg",
                     max_delta * 100.0
                 );
             }
             Verdict::Skip { max_delta } => {
                 println!(
                     "{:32} unchanged (Δmax {:.0}% ≤ {:.0}%)",
-                    "database-recall-scale-100k-1m.svg",
+                    "database-recall-scale.svg",
                     max_delta * 100.0,
                     cfg.threshold * 100.0
                 );
@@ -632,7 +639,7 @@ fn chart_cells(chart: &Chart, new: &Table) -> Vec<(Key, f64)> {
 
 /// Returns the rows consumed by the corpus-size comparison chart.
 fn database_scale_cells(new: &Table) -> Vec<(Key, f64)> {
-    scale_cells(new, &["database-100k", "database-1m"], DATABASE_SCALE_ROWS)
+    scale_cells(new, &DATABASE_SCALE_SIZES, DATABASE_SCALE_ROWS)
 }
 
 /// Returns the rows consumed by an edge-lifecycle size comparison chart.
@@ -780,8 +787,8 @@ fn render(chart: &Chart, new: &Table, out_dir: &Path) {
 fn render_database_scale(new: &Table, out_dir: &Path) {
     render_scale(
         ScaleRender {
-            file: "database-recall-scale-100k-1m.svg",
-            title: "file-backed database — recall p50 by corpus size (log)",
+            file: "database-recall-scale.svg",
+            title: "file-backed database — recall p50 by corpus size — 5k, 100k, 1M (log)",
             rows: DATABASE_SCALE_ROWS,
             y_title: "microseconds (log)",
             // The rows span two orders of magnitude once the degenerate query
@@ -792,7 +799,7 @@ fn render_database_scale(new: &Table, out_dir: &Path) {
         },
         new,
         out_dir,
-        &["database-100k", "database-1m"],
+        &DATABASE_SCALE_SIZES,
         &DATABASE_SCALE_SERIES,
     );
 }

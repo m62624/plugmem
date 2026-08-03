@@ -7,7 +7,90 @@
 
 use alloc::vec::Vec;
 
+use plugmem_arena::PAGE_BYTES;
+
 use crate::error::Error;
+
+/// Runtime metadata an arena keeps per shard: the `heads`, `tails` and
+/// `dir_at` vectors, one `u32` each.
+const SHARD_META_BYTES: usize = 3 * core::mem::size_of::<u32>();
+/// Pages per shard the engine aims for.
+///
+/// Two costs pull in opposite directions. A shard's page directory is sorted,
+/// so an insert lands mid-directory and memmoves the entries above it — more
+/// pages per shard, more memmove. But every *touched* shard also owns at least
+/// one whole page, so fewer records per shard means paying 4 KiB for a handful
+/// of bytes; that is what made a thousand facts occupy fourteen megabytes.
+///
+/// Measured, because the balance is not obvious: sweeping the shard counts
+/// across a fixed corpus (100k and 1M facts, 8 through 4096 shards) moved write
+/// throughput by less than the run-to-run noise — flat even at 1465 pages per
+/// shard — while resident bytes grew monotonically with the shard count, by
+/// 52 % at 100k facts between the loosest and the tightest setting. The
+/// directory memmove is simply cheap: an entry is 20 bytes, so even a thousand
+/// of them is one short `memmove`.
+///
+/// So the tradeoff is lopsided and this sits on the roomy side of it: 64 pages
+/// keeps the per-shard directory two orders of magnitude below where the sweep
+/// still measured nothing, and holds the page floor near 5 % of payload.
+pub const PAGES_PER_SHARD: usize = 64;
+/// Payload bytes one shard is meant to hold: [`PAGES_PER_SHARD`] pages.
+pub const SHARD_TARGET_BYTES: usize = PAGES_PER_SHARD * PAGE_BYTES;
+
+/// Largest neighbour degree the vector graph accepts.
+///
+/// Derived, like [`MAX_SHARDS`]: a node's level-0 neighbour block is `degree`
+/// `u32`s, and this is the degree at which that block fills exactly one
+/// [`PAGE_BYTES`] page — the allocation unit the rest of the engine works in.
+/// It is also far past useful: HNSW degrees live in the tens, and a list this
+/// long turns each hop into a linear scan. The bound exists because the value
+/// arrives in a snapshot and then multiplies the node count into an allocation
+/// size, which on wasm32 wraps a 32-bit `usize` well before any pool ceiling
+/// would notice.
+pub const MAX_HNSW_DEGREE: usize = PAGE_BYTES / core::mem::size_of::<u32>();
+
+/// Fewest shards any arena gets.
+///
+/// A shard is not free — it costs its own metadata and, once touched, a whole
+/// page — so a nearly empty database wants as few as possible. It wants more
+/// than one because the count is also the concurrency and locality unit, and
+/// because a database that starts at one shard would re-shard on its first
+/// handful of records.
+pub const MIN_SHARDS: usize = 4;
+
+/// Largest shard count any arena may be configured with.
+///
+/// A shard count arrives from an untrusted snapshot, and `Arena::new` turns it
+/// straight into three vectors plus a page pool — so it is an allocation size
+/// taken from a file, and those need a ceiling. This one is derived, not
+/// picked:
+///
+/// - `MAX_SHARDS * PAGE_BYTES` is 256 MiB, which fits a 32-bit `usize`, so page
+///   arithmetic cannot overflow on wasm32;
+/// - per-shard runtime metadata stays bounded at
+///   `MAX_SHARDS * SHARD_META_BYTES` (768 KiB) per arena;
+/// - it cannot bind on a database that can actually exist: the default 2 GiB
+///   pool ceiling at [`SHARD_TARGET_BYTES`] per shard justifies at most
+///   `2 GiB / SHARD_TARGET_BYTES` ≈ 43690 shards, which rounds up to exactly
+///   this value. Anything larger describes a database no pool could hold.
+pub const MAX_SHARDS: usize = 1 << 16;
+
+/// Ceiling for one arena's per-shard runtime metadata, which is what stops
+/// [`MAX_SHARDS`] from being a number someone can raise without noticing the
+/// cost: every arena pays this, and the engine builds roughly a dozen.
+const MAX_SHARD_META_BYTES: usize = 1024 * 1024;
+
+const _: () = {
+    assert!(MAX_SHARDS.is_power_of_two());
+    // The wasm32 bound: pages of every shard must be addressable there.
+    assert!(MAX_SHARDS <= u32::MAX as usize / PAGE_BYTES);
+    // The metadata bound.
+    assert!(MAX_SHARDS * SHARD_META_BYTES <= MAX_SHARD_META_BYTES);
+    // The "cannot bind in practice" bound, spelled out so a change to
+    // PAGES_PER_SHARD that invalidates it fails the build instead of silently
+    // turning MAX_SHARDS into a real limit.
+    assert!(MAX_SHARDS >= (2 * 1024 * 1024 * 1024usize) / SHARD_TARGET_BYTES);
+};
 
 /// Serialized width of one `u64`-encoded size field.
 const U64_BYTES: usize = core::mem::size_of::<u64>();
@@ -48,21 +131,40 @@ pub const ENCODED_LEN: usize = RESERVED_AT + RESERVED_LEN;
 pub struct Config {
     /// Vector dimension; `0` disables the vector layer entirely. Max 4096.
     pub dim: usize,
-    /// Total ceiling for all byte pools (the wasm32 passport: ≤ 2 GiB).
+    /// Ceiling for **each** byte pool — not for their sum.
+    ///
+    /// Every pool the engine builds (the arenas' pages, the text and metadata
+    /// blob heaps, the tag and posting chunk pools, the vector pool) is given
+    /// this same figure as its own limit and refuses to grow past it with
+    /// [`Error::CapacityExceeded`]. A database's total therefore reaches
+    /// several times this number; the one that binds first is whichever pool
+    /// the workload fills, normally the fact texts.
+    ///
+    /// The default is the wasm32 passport rather than a capacity judgement: it
+    /// keeps every pool addressable where `usize` is 32 bits, so a database
+    /// written anywhere opens anywhere. Raising it is supported and costs
+    /// exactly that portability — a 32-bit host then refuses the file with a
+    /// typed `ConfigMismatch`, not with corruption.
     pub max_bytes: usize,
     /// Maximum fact text length in bytes.
     pub max_text: usize,
     /// Maximum single blob length in bytes.
     pub max_blob: usize,
-    /// Shard count of the facts arena (power of two).
+    /// Shard count of the facts arena (power of two, ≤ [`MAX_SHARDS`]).
+    ///
+    /// **Engine-managed.** The five shard counts describe how an existing file
+    /// is laid out, not a preference: a new database starts at [`MIN_SHARDS`],
+    /// opening one adopts whatever the snapshot records, and `maintain` moves
+    /// the layout as the data grows or shrinks. Setting one here only affects a
+    /// database being created, and the next maintenance pass will overrule it.
     pub shards_facts: usize,
-    /// Shard count of the entities arena (power of two).
+    /// Shard count of the entities arena. See [`Config::shards_facts`].
     pub shards_entities: usize,
-    /// Shard count of each edge arena (power of two).
+    /// Shard count of each edge arena. See [`Config::shards_facts`].
     pub shards_edges: usize,
-    /// Shard count of the temporal arena (power of two).
+    /// Shard count of the temporal arena. See [`Config::shards_facts`].
     pub shards_temporal: usize,
-    /// Shard count of the postings arena (power of two).
+    /// Shard count of the postings arenas. See [`Config::shards_facts`].
     pub shards_postings: usize,
     /// BM25 `k1` (term-frequency saturation).
     pub bm25_k1: f32,
@@ -118,11 +220,13 @@ impl Default for Config {
             max_bytes: 2 * 1024 * 1024 * 1024,
             max_text: 4096,
             max_blob: 64 * 1024,
-            shards_facts: 1024,
-            shards_entities: 256,
-            shards_edges: 512,
-            shards_temporal: 512,
-            shards_postings: 2048,
+            // A new database is empty, and the layout rule puts an empty
+            // database on the floor. It grows from here through `maintain`.
+            shards_facts: MIN_SHARDS,
+            shards_entities: MIN_SHARDS,
+            shards_edges: MIN_SHARDS,
+            shards_temporal: MIN_SHARDS,
+            shards_postings: MIN_SHARDS,
             bm25_k1: 1.2,
             bm25_b: 0.75,
             rrf_k: 60,
@@ -174,24 +278,40 @@ impl Config {
         if self.dim > 4096 {
             return Err(Error::ConfigMismatch("dim must be <= 4096"));
         }
-        for (shards, what) in [
-            (self.shards_facts, "shards_facts must be a power of two"),
+        // Both checks matter for untrusted input: a snapshot supplies these,
+        // and `Arena::new` turns each straight into an allocation size.
+        for (shards, not_pow2, too_many) in [
+            (
+                self.shards_facts,
+                "shards_facts must be a power of two",
+                "shards_facts exceeds MAX_SHARDS",
+            ),
             (
                 self.shards_entities,
                 "shards_entities must be a power of two",
+                "shards_entities exceeds MAX_SHARDS",
             ),
-            (self.shards_edges, "shards_edges must be a power of two"),
+            (
+                self.shards_edges,
+                "shards_edges must be a power of two",
+                "shards_edges exceeds MAX_SHARDS",
+            ),
             (
                 self.shards_temporal,
                 "shards_temporal must be a power of two",
+                "shards_temporal exceeds MAX_SHARDS",
             ),
             (
                 self.shards_postings,
                 "shards_postings must be a power of two",
+                "shards_postings exceeds MAX_SHARDS",
             ),
         ] {
             if !shards.is_power_of_two() {
-                return Err(Error::ConfigMismatch(what));
+                return Err(Error::ConfigMismatch(not_pow2));
+            }
+            if shards > MAX_SHARDS {
+                return Err(Error::ConfigMismatch(too_many));
             }
         }
         if self.max_text == 0 || self.max_text > self.max_blob {
@@ -228,6 +348,14 @@ impl Config {
         }
         if self.hnsw_m0 < self.hnsw_m {
             return Err(Error::ConfigMismatch("hnsw_m0 must be >= hnsw_m"));
+        }
+        // Checked here rather than where the graph is built: both degrees
+        // become factors of an allocation size, and a snapshot supplies them.
+        if self.hnsw_m > MAX_HNSW_DEGREE {
+            return Err(Error::ConfigMismatch("hnsw_m exceeds MAX_HNSW_DEGREE"));
+        }
+        if self.hnsw_m0 > MAX_HNSW_DEGREE {
+            return Err(Error::ConfigMismatch("hnsw_m0 exceeds MAX_HNSW_DEGREE"));
         }
         if self.hnsw_ef_construction < self.hnsw_m {
             return Err(Error::ConfigMismatch(
