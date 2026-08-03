@@ -196,6 +196,9 @@ edges are unlinked while history is retained.
 
 Per-edge cost is flat across the range rather than growing with it, and graph
 recall is bounded by the expansion caps rather than by the size of the hub.
+Unlinking closes an edge; it does not erase it. The history row above is the
+whole point — after every edge is unlinked, and again after a full `maintain`,
+the version count is unchanged and `as_of` still answers.
 A second benchmark covers the other axis — a few relations relinked over and
 over, which is what stresses historical traversal:
 
@@ -209,16 +212,23 @@ At 200k retained versions over 200 relations: current graph recall 31 µs,
 
 ![Edge lifecycle operation cost at 100k versus 1M edges](crates/plugmem-host/assets/edge-lifecycle-latency-100k-1m.svg)
 ![Edge lifecycle graph recall at 100k versus 1M edges](crates/plugmem-host/assets/edge-lifecycle-recall-100k-1m.svg)
-![Edge lifecycle current edges versus history](crates/plugmem-host/assets/edge-lifecycle-growth-100k-1m.svg)
 
-The lexical tokenizer is ICU4X-backed: it applies Unicode NFKC normalization,
-locale-neutral lowercase mapping, UAX #29 word boundaries, language-aware
-segmentation for complex scripts, Latin search folding and CJK bigrams. Its
-generic Unicode path reuses scratch buffers and performs no tokenizer-internal
-allocations after warm-up. ICU4X's dictionary/LSTM path may allocate a
-temporary boundary cache for scripts such as Thai and Khmer in exchange for
-better word segmentation. The tokenizer emits canonical lexical terms; it
-does not perform stemming or lemmatization.
+The lexical tokenizer is [ICU4X](https://github.com/unicode-org/icu4x)-backed:
+it applies Unicode [NFKC](https://unicode.org/reports/tr15/) normalization,
+locale-neutral lowercase mapping,
+[UAX #29](https://unicode.org/reports/tr29/) word boundaries, language-aware
+[segmentation](https://docs.rs/icu_segmenter/latest/icu_segmenter/) for complex
+scripts, Latin
+[search folding](https://www.unicode.org/reports/tr30/tr30-4.html) and CJK
+[bigrams](https://en.wikipedia.org/wiki/Bigram). Its generic Unicode path
+reuses scratch buffers and performs no tokenizer-internal allocations after
+warm-up. ICU4X's dictionary/[LSTM](https://en.wikipedia.org/wiki/Long_short-term_memory)
+path may allocate a temporary boundary cache for scripts such as Thai and Khmer
+in exchange for better word segmentation. The tokenizer emits canonical lexical
+terms; it does not perform
+[stemming](https://en.wikipedia.org/wiki/Stemming) or
+[lemmatization](https://en.wikipedia.org/wiki/Lemmatization).
+
 ## Install
 
 Two binaries — the `plugmem-cli` CLI (crate `plugmem-cli`) and the `plugmem-mcp`
