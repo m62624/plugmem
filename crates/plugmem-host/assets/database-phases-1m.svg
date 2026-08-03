@@ -59,14 +59,14 @@ milliseconds
 </text>
 <polyline fill="none" opacity="1" stroke="#000000" stroke-width="1" points="84,40 89,40 "/>
 <polyline fill="none" opacity="1" stroke="#000000" stroke-width="1" points="90,442 889,442 "/>
-<rect x="115" y="170" width="49" height="271" opacity="1" fill="#1E3A8A" stroke="none"/>
-<rect x="215" y="120" width="49" height="321" opacity="1" fill="#1E3A8A" stroke="none"/>
-<rect x="314" y="372" width="50" height="69" opacity="1" fill="#1E3A8A" stroke="none"/>
-<rect x="414" y="208" width="50" height="233" opacity="1" fill="#1E3A8A" stroke="none"/>
-<rect x="514" y="370" width="50" height="71" opacity="1" fill="#1E3A8A" stroke="none"/>
-<rect x="614" y="210" width="50" height="231" opacity="1" fill="#1E3A8A" stroke="none"/>
-<rect x="714" y="372" width="49" height="69" opacity="1" fill="#1E3A8A" stroke="none"/>
-<rect x="814" y="341" width="49" height="100" opacity="1" fill="#1E3A8A" stroke="none"/>
+<rect x="115" y="191" width="49" height="250" opacity="1" fill="#1E3A8A" stroke="none"/>
+<rect x="215" y="132" width="49" height="309" opacity="1" fill="#1E3A8A" stroke="none"/>
+<rect x="314" y="241" width="50" height="200" opacity="1" fill="#1E3A8A" stroke="none"/>
+<rect x="414" y="282" width="50" height="159" opacity="1" fill="#1E3A8A" stroke="none"/>
+<rect x="514" y="242" width="50" height="199" opacity="1" fill="#1E3A8A" stroke="none"/>
+<rect x="614" y="280" width="50" height="161" opacity="1" fill="#1E3A8A" stroke="none"/>
+<rect x="714" y="239" width="49" height="202" opacity="1" fill="#1E3A8A" stroke="none"/>
+<rect x="814" y="339" width="49" height="102" opacity="1" fill="#1E3A8A" stroke="none"/>
 <rect x="808" y="45" width="77" height="29" opacity="0.85" fill="#FFFFFF" stroke="none"/>
 <rect x="808" y="45" width="77" height="29" opacity="0.35" fill="none" stroke="#000000"/>
 <text x="848" y="55" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#000000">

@@ -424,4 +424,54 @@ proptest! {
             }
         }
     }
+
+    /// The tag filter must lose nothing, not merely admit nothing wrong.
+    ///
+    /// `results_are_subsets_of_the_allow_set` above proves one direction, and
+    /// a filter that dropped members would still satisfy it. The membership
+    /// test in front of the allow-set is a Bloom filter, whose whole
+    /// correctness claim is that it has no false negatives, so the other
+    /// direction needs its own property: on a corpus small enough that no
+    /// source cap binds, a tagged query must return exactly the untagged
+    /// result restricted to the facts that carry the tags.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn the_tag_filter_drops_nothing_it_should_keep(
+        tagged in proptest::collection::vec(proptest::collection::vec(0usize..4, 0..3), 1..25),
+        query_tags in proptest::collection::vec(0usize..4, 1..3),
+    ) {
+        let pool = ["a", "b", "c", "d"];
+        let mut mem = Memory::new(cfg()).unwrap();
+        let mut store = MemStorage::new();
+        for (i, tags) in tagged.iter().enumerate() {
+            let tags: Vec<&str> = tags.iter().map(|&t| pool[t]).collect();
+            mem.remember(&mut store, RememberInput {
+                tags: &tags,
+                ..RememberInput::text((i as u64 + 1) * DAY, "common searchable text")
+            }).unwrap();
+        }
+        let query: Vec<&str> = query_tags.iter().map(|&t| pool[t]).collect();
+        let plain = mem.recall(RecallQuery {
+            k: 64,
+            ..RecallQuery::text(100 * DAY, "common searchable text")
+        }).unwrap();
+        let filtered = mem.recall(RecallQuery {
+            tags: &query,
+            k: 64,
+            ..RecallQuery::text(100 * DAY, "common searchable text")
+        }).unwrap();
+
+        let mut tag_buf = Vec::new();
+        let mut expected = Vec::new();
+        for fact in &plain.facts {
+            tag_buf.clear();
+            mem.tags_of(fact.id, &mut tag_buf);
+            let names: Vec<&str> = tag_buf.iter().map(|&t| mem.term(t)).collect();
+            if query.iter().all(|q| names.contains(q)) {
+                expected.push(fact.id);
+            }
+        }
+        let got: Vec<_> = filtered.facts.iter().map(|f| f.id).collect();
+        prop_assert_eq!(got, expected, "tags {:?}", query);
+    }
 }

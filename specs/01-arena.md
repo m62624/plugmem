@@ -18,9 +18,21 @@ four structures here.
 ## 1. `Arena<T: Slot>` — a sharded sorted arena
 
 A shard is a chain of range-partitioned pages: each page holds a sorted run of
-keys, and pages in a chain ascend by range. This is "the leaf level of a B+-tree
-with no internal nodes" — at our chain lengths (a shard tops out at tens of pages)
-internal nodes do not pay.
+keys, and pages in a chain ascend by range — "the leaf level of a B+-tree".
+
+The interior level is a flat **page directory**: `dir`, one entry per chain page
+holding the page id and a copy of that page's first key, laid out shard after
+shard. Locating a page is a binary search over it, never a walk. The assumption
+that chains stay short does not hold — an `Ordered` arena whose keys share their
+leading bytes (every edge of a hub entity, every timestamp of a real clock)
+concentrates in one shard, whose chain then grows with the record count, and a
+walk there is O(records) per operation.
+
+Caching the key inside the entry rather than reading it from the pool is what
+makes the search cheap: the pool is the size of the data, the directory is 20
+bytes per 4 KiB page (≈0.5%), so it stays in cache while the pool does not.
+The directory is **derived state** — rebuilt by the load walk, absent from the
+on-disk image — alongside `prev` and `tails`.
 
 ### Trait
 
@@ -72,15 +84,24 @@ well above the capacity contract.
 
 ### Operations and their cost
 
-- `insert(slot) -> Result<bool>`: shard → walk the chain to the page whose range
-  covers the key (comparing against the page's first slot — one cache line per
-  step) → binary search in the page → memmove the page tail (≤ 4 KB) → write. A
-  full page **splits**: a new page (from the free list or the pool end) takes the
-  upper half, the chain is relinked, and the insert retries into the right half. A
+- `insert(slot) -> Result<bool>`: shard → binary search the shard's run of the
+  page directory for the page whose range covers the key → binary search in the
+  page → memmove the page tail (≤ 4 KB) → write. A full page **splits**: a new
+  page (from the free list or the pool end) takes the upper half, the chain and
+  the directory are relinked, and the insert retries into the right half. A
   duplicate key returns `Ok(false)`.
+  Appending *past* the last key does not split in half — that would leave both
+  pages permanently half full, since nothing sorts into the lower one again.
+  The record takes a fresh page and the full one stays full, so a monotonic
+  load (which is every id and timestamp this crate stores) packs pages
+  completely.
 - `get(key)` / `contains`, `find_by` / `find_slice_by` / `find_slice_mut_by`: the
-  same descent and binary search, O(chain + log slots). `find_slice_mut_by` may
-  mutate only payload bytes — the key prefix is immutable (debug_assert).
+  same descent and binary search, O(log pages + log slots). `find_slice_mut_by`
+  may mutate only payload bytes — the key prefix is immutable (debug_assert).
+- Every mutation that can change which record sits first on a page refreshes
+  that directory entry's cached key. A stale entry misdirects a lookup rather
+  than failing, so the entry a search lands on is re-checked against its page
+  under `debug_assertions`.
 - `remove(key) -> bool`: shift within the page; a page that empties is unlinked to
   the free list. Half-empty neighbours are not merged (memory is reclaimed by the
   `maintain` compaction, which rebuilds the arena).

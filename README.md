@@ -18,6 +18,12 @@
 > Claude models, in roughly equal measure. Expect non-professional design
 > choices, rough edges, broken behavior, or mistakes. Use it at your own risk.
 
+**[What it is](#what-plugmem-is) · [Which crate](#which-crate-do-i-need) ·
+[How recall works](#what-recall-does) · [Measured scale](#measured-scale) ·
+[Install](#install) · [License](#license)**
+
+## What plugmem is
+
 An embeddable **memory database for local LLM agents** — you link it into your
 program like SQLite, in-process and single-file. plugmem stores short
 **facts** — with a subject entity, tags, optional metadata, an optional
@@ -118,8 +124,10 @@ been checkpointed and maintained; the 1M SVGs live in
 
 Both columns of this table, and both of the edge table below, were measured in
 one session on one machine, so the sizes compare to each other. They do **not**
-compare to the arena and core-recall charts, which were measured earlier on
-faster hardware — only numbers inside the same table are like-for-like.
+compare to the arena charts, whose wasm rows come from a matrix run on other
+hardware and cannot be reproduced piecemeal without mixing machines into one
+picture — only numbers inside the same table or the same chart are
+like-for-like.
 
 The size labels refer to ingested operations, not the final number of live
 facts. After maintenance, the two runs contain approximately 86k and 860k
@@ -128,21 +136,36 @@ active facts respectively.
 | Measurement | 100k operations | 1M operations |
 |---|---:|---:|
 | Active facts after `maintain` | 86,010 | 860,204 |
-| Pool bytes after `maintain` | 66.4 MB | 425.1 MB |
-| Streaming load | 9.39 s (10,649 ops/s) | 143.2 s (6,985 ops/s) |
-| Text-only recall p50 | 65 µs | 1.66 ms |
-| Full hybrid recall p50 | 235 µs | 2.40 ms |
-| Checkpoint | 122 ms | 1.08 s |
-| `maintain` | 0.25 s | 2.55 s |
+| Pool bytes after `maintain` | 66.4 MB | 433.5 MB |
+| Streaming load | 1.53 s (65,377 ops/s) | 37.9 s (26,403 ops/s) |
+| Text-only recall p50 | 22 µs | 155 µs |
+| Full hybrid recall p50 | 51 µs | 323 µs |
+| Single frequent term recall p50 | 2.32 ms | 26.5 ms |
+| Checkpoint | 101 ms | 745 ms |
+| `maintain` | 0.22 s | 2.07 s |
+| Reopen (writer) | 17 ms | 155 ms |
+| `verify` | 30 ms | 316 ms |
 
 ![Recall latency at 100k versus 1M operations](crates/plugmem-host/assets/database-recall-scale-100k-1m.svg)
 
-The 1M run holds roughly 10× as many active facts while the pool is 6.4×
-larger. Total load time is 15.3× higher, but the per-operation load cost grows
-by 1.5×; full hybrid recall grows by 10.2×. The 1M column averages two runs —
-at that size single-run recall p50s move by tens of percent. These are
-machine-specific trend measurements, not release guarantees. Reproduce both
-columns with:
+The 1M run holds roughly 10× as many active facts while the pool is 6.5×
+larger. Total load time is 24.8× higher, so the per-operation load cost grows
+by 2.5×; text-only recall grows by 7.1×.
+
+The **single frequent term** row is the worst lexical input there is, and it is
+charted next to the others because it is the number to budget for. A query made
+of one term the corpus uses everywhere has to decode a posting list that covers
+the corpus; the stop-frequency guard drops such a term only when the query
+offers a rarer one to fall back on. Ordinary queries cost microseconds, that one
+costs milliseconds, and no amount of index tuning changes the shape — only the
+constant.
+
+Opening is deliberately cheap and `verify` deliberately is not: an open checks
+that nothing in the image can make a read unsafe, while the cross-checks that
+prove the graph *consistent* are what `plugmem verify` runs on demand.
+
+These are machine-specific trend measurements, not release guarantees.
+Reproduce both columns with:
 
 ```text
 cargo run --release -p plugmem-host --example bench_database -- 100000 --diagnose-recall | tee database-benchmark-100k.tsv
@@ -170,15 +193,18 @@ edges are unlinked while history is retained.
 
 | Edge lifecycle measurement | 100k edges | 1M edges |
 |---|---:|---:|
-| `link` latency | 1.5 µs/edge | 1.7 µs/edge |
-| `unlink` latency | 1.6 µs/edge | 1.8 µs/edge |
-| Current graph recall p50 while edges are open | 51 µs | 69 µs |
-| Historical `as_of` graph recall p50 after unlink | 49 µs | 69 µs |
-| Full `maintain` after unlink | 0.33 s | 3.64 s |
+| `link` latency | 1.6 µs/edge | 1.7 µs/edge |
+| `unlink` latency | 1.7 µs/edge | 1.7 µs/edge |
+| Current graph recall p50 while edges are open | 53 µs | 59 µs |
+| Historical `as_of` graph recall p50 after unlink | 50 µs | 55 µs |
+| Full `maintain` after unlink | 0.33 s | 3.24 s |
 | Retained edge-history records after unlink | 100,000 | 1,000,000 |
 
 Per-edge cost is flat across the range rather than growing with it, and graph
 recall is bounded by the expansion caps rather than by the size of the hub.
+Unlinking closes an edge; it does not erase it. The history row above is the
+whole point — after every edge is unlinked, and again after a full `maintain`,
+the version count is unchanged and `as_of` still answers.
 A second benchmark covers the other axis — a few relations relinked over and
 over, which is what stresses historical traversal:
 
@@ -186,22 +212,29 @@ over, which is what stresses historical traversal:
 cargo run --release -p plugmem-host --example bench_edge_churn -- 200 1000
 ```
 
-At 200k retained versions over 200 relations: current graph recall 34 µs,
-`as_of` recall 35 µs, and a full `maintain` repacks the edge arenas from
-31.9 MB to 23.4 MB in 101 ms without dropping a single version.
+At 200k retained versions over 200 relations: current graph recall 31 µs,
+`as_of` recall 32 µs, and a full `maintain` repacks the edge arenas from
+31.9 MB to 23.4 MB in 59 ms without dropping a single version.
 
 ![Edge lifecycle operation cost at 100k versus 1M edges](crates/plugmem-host/assets/edge-lifecycle-latency-100k-1m.svg)
 ![Edge lifecycle graph recall at 100k versus 1M edges](crates/plugmem-host/assets/edge-lifecycle-recall-100k-1m.svg)
-![Edge lifecycle current edges versus history](crates/plugmem-host/assets/edge-lifecycle-growth-100k-1m.svg)
 
-The lexical tokenizer is ICU4X-backed: it applies Unicode NFKC normalization,
-locale-neutral lowercase mapping, UAX #29 word boundaries, language-aware
-segmentation for complex scripts, Latin search folding and CJK bigrams. Its
-generic Unicode path reuses scratch buffers and performs no tokenizer-internal
-allocations after warm-up. ICU4X's dictionary/LSTM path may allocate a
-temporary boundary cache for scripts such as Thai and Khmer in exchange for
-better word segmentation. The tokenizer emits canonical lexical terms; it
-does not perform stemming or lemmatization.
+The lexical tokenizer is [ICU4X](https://github.com/unicode-org/icu4x)-backed:
+it applies Unicode [NFKC](https://unicode.org/reports/tr15/) normalization,
+locale-neutral lowercase mapping,
+[UAX #29](https://unicode.org/reports/tr29/) word boundaries, language-aware
+[segmentation](https://docs.rs/icu_segmenter/latest/icu_segmenter/) for complex
+scripts, Latin
+[search folding](https://www.unicode.org/reports/tr30/tr30-4.html) and CJK
+[bigrams](https://en.wikipedia.org/wiki/Bigram). Its generic Unicode path
+reuses scratch buffers and performs no tokenizer-internal allocations after
+warm-up. ICU4X's dictionary/[LSTM](https://en.wikipedia.org/wiki/Long_short-term_memory)
+path may allocate a temporary boundary cache for scripts such as Thai and Khmer
+in exchange for better word segmentation. The tokenizer emits canonical lexical
+terms; it does not perform
+[stemming](https://en.wikipedia.org/wiki/Stemming) or
+[lemmatization](https://en.wikipedia.org/wiki/Lemmatization).
+
 ## Install
 
 Two binaries — the `plugmem-cli` CLI (crate `plugmem-cli`) and the `plugmem-mcp`

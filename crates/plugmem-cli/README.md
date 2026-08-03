@@ -133,7 +133,7 @@ engine keeps no clock, so `now` comes from the system clock at each call.
 | `stats` | engine size counters |
 | `maintain [--mode M]` | policy-driven maintenance: cheap no-op, tombstone compaction, text reindex or bounded HNSW work. `M` is `auto` (default), `compact`, `reindex-text`, `optimize-vectors` or `full`; only `full` repacks the edge arenas, and no mode drops history |
 | `checkpoint` | flush the journal into a fresh snapshot and clear it (leaves the database checkpointed) |
-| `verify` | check content integrity (text UTF-8, vector↔fact consistency); exit 2 on damage |
+| `verify` | check integrity an open defers: text UTF-8, metadata, vector↔fact consistency, and that the edge graph agrees with itself; exit 2 on damage |
 | `scrub` | check the snapshot's byte-level container checksums; exit 2 on the first damaged section |
 | `recover <DST>` | salvage a content-corrupt database into a clean `DST`; the source (`--db`) is left untouched |
 | `export` | dump the currently-open facts as JSONL (one per line) to stdout |

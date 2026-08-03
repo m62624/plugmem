@@ -23,11 +23,16 @@ p50 / p99 after warm-up.
 
 Memory budget: the "RAM image / useful data" inflation ≤ 1.6, checked by a test on
 corpus M. Representative measured numbers (native, testgen corpus): structural recall
-@100k ~471 µs (a Zipf hub anchor makes the graph source spend its full
+@100k ~70 µs (a Zipf hub anchor still makes the graph source spend its full
 `GRAPH_EXAMINE_CAP` of 2048 postings — the price of the declared caps, not a complexity
-regression); tags+range @100k ~226 µs; flat 24k×384 k=8 ~332 µs; HNSW 30k×384 ef64
-~185 µs; BM25 3-terms-of-10k ~64 µs. Ceilings only tighten; loosening one is a
+regression); tags+range @100k ~17 µs; flat 24k×384 k=8 ~267 µs; HNSW 30k×384 ef64
+~3.3 ms; BM25 3-terms-of-10k ~8.5 µs. Ceilings only tighten; loosening one is a
 deliberate edit to this file.
+
+Those figures come from one machine and are not comparable to earlier editions of
+this file: the vector and graph rows moved with the hardware, not with the code,
+which is why only rows measured in the same session may be compared. The lexical
+and tag rows moved with the code — see `04-recall.md`.
 
 The **first `maintain` past the HNSW threshold is out of the < 1 s budget on purpose**:
 the graph build is ~1.6 ms/vector, done once when `flat_to_hnsw` is crossed (or > 10%
@@ -82,9 +87,17 @@ exercises both recall semantics and quantization). API: `Corpus::generate(seed, 
   section table, ref ranges) → `Err` at load; content damage (text/vec bytes) passes
   load, then a full access sweep (`get` all facts, `recall`, vector search,
   `snapshot_bytes`, `verify`, `scrub`) must finish without panic. Two on-demand checks
-  catch latent damage: `verify()` (content — text UTF-8, fact↔slot bijection, metadata)
-  and `scrub()` (byte — per-section + file_hash xxh3), each → `Corrupt` naming the bad
-  section. Any panic/UB from fuzz is a P0 bug.
+  catch latent damage: `verify()` (content — text UTF-8, fact↔slot bijection, metadata
+  — **and the graph's cross-references**: both edge mirrors, a current edge against its
+  open version, and every open version reachable as a current edge) and `scrub()` (byte
+  — per-section + file_hash xxh3), each → `Corrupt` naming the bad section. Any
+  panic/UB from fuzz is a P0 bug.
+
+  The graph checks live in `verify` rather than in the loader deliberately: each is a
+  random lookup per edge, which on a million-record graph is most of an open, and none
+  of them is a bounds check. **A successful open means nothing in the image can make a
+  read unsafe — it does not mean the graph agrees with itself.** Rendering therefore
+  skips an edge whose endpoints do not resolve instead of unwrapping them.
 - **Cross-target**: the whole core test suite runs natively and under wasmtime;
   `cargo build --target wasm32v1-none` for the libraries is a gate.
 

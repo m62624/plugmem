@@ -170,8 +170,9 @@ pub(crate) enum Command {
     /// database checkpointed, so the read-only path (`scrub`, and any
     /// shared-lock open) can proceed without a dirty-journal `NeedsCheckpoint`.
     Checkpoint,
-    /// Check content integrity (text UTF-8, vector↔fact consistency) — the
-    /// on-demand equivalent of SQLite's `integrity_check`. Exit 2 on damage.
+    /// Check the integrity an open defers: text UTF-8, metadata, vector↔fact
+    /// consistency, and that the edge graph agrees with itself — the on-demand
+    /// equivalent of SQLite's `integrity_check`. Exit 2 on damage.
     Verify,
     /// Scrub the snapshot's byte-level container integrity (per-section and
     /// whole-file checksums), a slice at a time. Requires a checkpointed

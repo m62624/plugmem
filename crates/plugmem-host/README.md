@@ -76,12 +76,14 @@ The retrieval above lives in the engine; this crate adds the OS side:
   copy-on-write), so opening a multi-gigabyte database to append one fact
   no longer copies the whole image into RAM. A snapshot materializes the
   base + overlay into a fresh file and re-maps it. Validation is lazy (the
-  SQLite model): an open checks only the record metadata, so the large text,
-  vector and per-fact-metadata pools stay non-resident until a query touches
-  them — a measured open residents well under half of a text-heavy image. The default open
-  trusts the file and never checksums the whole image (the SQLite model),
-  so it stays sparse; corruption is caught when the bad record is read
-  (never a panic), or on demand with `verify()` (content) and `scrub()`
+  SQLite model): an open range-checks the record metadata and nothing else, so
+  the large text, vector and per-fact-metadata pools stay non-resident until a
+  query touches them — a measured open residents well under half of a
+  text-heavy image. What that guarantees is precise and worth stating: **no
+  stored id can make a read unsafe. It does not mean the data agrees with
+  itself.** The default open never checksums the image either, so it stays
+  sparse; corruption is caught when the bad record is read (never a panic), or
+  on demand with `verify()` (content *and* graph consistency) and `scrub()`
   (byte-level container integrity) — see **Integrity & recovery** below;
 - **Maintenance policy** — auto-snapshot and optional auto-`maintain`,
   run inline (no background threads);
@@ -272,7 +274,7 @@ error or a repaired file.
 
 | call | checks | cost |
 |---|---|---|
-| `verify()` | *content* consistency — stored text is valid UTF-8, the fact↔vector-slot bijection holds | one linear pass over the text + vector pools |
+| `verify()` | everything an open defers — stored text is valid UTF-8, metadata blobs decode, the fact↔vector-slot bijection holds, and the graph agrees with itself (both edge mirrors, a current edge against its open version, every open version reachable as a current edge) | one linear pass over the text + vector pools, plus a lookup per edge |
 | `scrub()` | *byte-level* container integrity — each section's stored xxh3 and the whole-file hash (the ZFS-scrub model) | resumable; a read-handle op |
 | `recover()` | *salvage* — drop the content-corrupt facts, rebuild, write a clean copy | rebuilds in RAM ≈ image size |
 
@@ -366,7 +368,7 @@ index freshness, never less history.
 fragments them — the incoming mirror is keyed by the far endpoint, so
 interleaved runs keep splitting pages in half — and rewriting them in key
 order packs the pages again. Measured over 200 relations relinked 1000 times
-(200k retained versions): 31.9 MB → 23.4 MB, 101 ms, every version kept.
+(200k retained versions): 31.9 MB → 23.4 MB, 59 ms, every version kept.
 
 The same selection is exposed by `plugmem maintain --mode <mode>`, the
 `mode` argument of the MCP `plugmem_maintain` tool, and `maintain(mode?)` in

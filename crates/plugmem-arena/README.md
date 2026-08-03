@@ -107,14 +107,22 @@ are excluded from written output.
 directory in place of the interior nodes. Where `std::collections::BTreeMap`
 allocates linked nodes of up to 11 elements and descends them by pointer (each
 hop is a potential cache miss and its own heap allocation), the arena picks a
-shard in O(1), binary-searches a contiguous `u32` array to find the page, and
-keeps records in 4 KiB pages inside one pool. The directory is derived state —
-rebuilt when an image is loaded, absent from the format — and costs one `u32`
-per page, about 0.1%. The measured
-consequences at 1M records: **40 allocator calls versus 133,419** for
-`BTreeMap`, no pointer chasing on lookups, and a serialization format for
-free. The price is paid in page fill (see the memory numbers) and in the
-in-page `memmove` on insert.
+shard in O(1), binary-searches a contiguous array to find the page, and
+keeps records in 4 KiB pages inside one pool.
+
+Each directory entry carries the page id **and a copy of that page's first
+key** — 20 bytes per 4 KiB page, about 0.5%. The copy is the point: comparing
+first keys by reading them from the pool would make every probe a random access
+into a structure the size of the data, whereas the directory of a 64 MB arena
+is 320 KB and stays in cache. The key rides inside the existing entry rather
+than in a second parallel vector, so the number of allocator calls is
+unchanged. The directory is derived state — rebuilt when an image is loaded,
+absent from the format.
+
+The measured consequences at 1M records: a few dozen allocator calls versus
+**133,419** for `BTreeMap`, no pointer chasing on lookups, and a serialization
+format for free. The price is paid in page fill (see the memory numbers) and in
+the in-page `memmove` on insert.
 
 ## The four structures
 

@@ -179,6 +179,8 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         ..Profile::default()
     };
     let query_text = format!("{} {} {}", word_for(0), word_for(400), word_for(2500));
+    // Rank 0 of the Zipf vocabulary: the term almost every document carries.
+    let common_text = word_for(0);
     let mut query_entity = None;
     let mut query_tag = None;
     let mut query_vector = None;
@@ -291,6 +293,7 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     let queries = QuerySpec {
         now: last_now + 3,
         text: &query_text,
+        common_text: &common_text,
         entities: &query_entities,
         tags: &query_tags,
         range: query_range,
@@ -417,15 +420,31 @@ fn apply_op(db: &Database, op: &GenOp) -> Result<(), plugmem_host::HostError> {
 struct QuerySpec<'a> {
     now: u64,
     text: &'a str,
+    /// A single term the corpus uses everywhere — see [`QueryText::Common`].
+    common_text: &'a str,
     entities: &'a [&'a str],
     tags: &'a [&'a str],
     range: (u64, u64),
     vector: Option<&'a [f32]>,
 }
 
+/// Which query text a variant asks with.
+#[derive(Clone, Copy)]
+enum QueryText {
+    /// The three-word query the rest of the matrix shares: one frequent term,
+    /// one mid-frequency, one rare.
+    Mixed,
+    /// One term the corpus uses in most documents — the degenerate lexical
+    /// case. The stop-frequency guard drops such a term only when the query
+    /// has a rarer one to fall back on, so a query made *only* of it is the
+    /// engine's worst lexical input: its posting list covers the corpus.
+    Common,
+}
+
 #[derive(Clone, Copy)]
 struct QueryVariant {
     name: &'static str,
+    text: QueryText,
     tags: bool,
     entities: bool,
     range: bool,
@@ -434,48 +453,63 @@ struct QueryVariant {
 const RECALL_VARIANTS: &[QueryVariant] = &[
     QueryVariant {
         name: "text_only",
+        text: QueryText::Mixed,
+        tags: false,
+        entities: false,
+        range: false,
+    },
+    QueryVariant {
+        name: "text_common",
+        text: QueryText::Common,
         tags: false,
         entities: false,
         range: false,
     },
     QueryVariant {
         name: "text_tag",
+        text: QueryText::Mixed,
         tags: true,
         entities: false,
         range: false,
     },
     QueryVariant {
         name: "text_entity",
+        text: QueryText::Mixed,
         tags: false,
         entities: true,
         range: false,
     },
     QueryVariant {
         name: "text_range",
+        text: QueryText::Mixed,
         tags: false,
         entities: false,
         range: true,
     },
     QueryVariant {
         name: "text_tag_entity",
+        text: QueryText::Mixed,
         tags: true,
         entities: true,
         range: false,
     },
     QueryVariant {
         name: "text_tag_range",
+        text: QueryText::Mixed,
         tags: true,
         entities: false,
         range: true,
     },
     QueryVariant {
         name: "text_entity_range",
+        text: QueryText::Mixed,
         tags: false,
         entities: true,
         range: true,
     },
     QueryVariant {
         name: "full_hybrid",
+        text: QueryText::Mixed,
         tags: true,
         entities: true,
         range: true,
@@ -484,7 +518,11 @@ const RECALL_VARIANTS: &[QueryVariant] = &[
 
 impl QueryVariant {
     fn request<'a>(self, query: &'a QuerySpec<'a>) -> RecallQuery<'a> {
-        let mut request = RecallQuery::text(query.now, query.text).with_k(8);
+        let text = match self.text {
+            QueryText::Mixed => query.text,
+            QueryText::Common => query.common_text,
+        };
+        let mut request = RecallQuery::text(query.now, text).with_k(8);
         if self.tags {
             request.tags = query.tags;
         }

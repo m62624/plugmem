@@ -16,6 +16,7 @@
 //! | engine state, 32 bytes | edge-version counter | re-derived from history |
 //! | edges without history | the whole edge-history arena | one open version synthesized per current edge |
 //! | edges keyed by triple | the time-ordered history key | every version re-keyed by `valid_from`; current edges re-derived from the open ones |
+//! | 8-byte per-document BM25 records | the term-set summary | widened, marked unknown; `maintain` fills them from the postings |
 //!
 //! The legacy record layouts live here as their own [`Slot`] types. They are
 //! deliberately duplicated rather than shared with [`crate::model`]: the
@@ -27,6 +28,7 @@ use plugmem_arena::{Arena, ArenaCfg, ShardMode, Slot, TermId, key};
 use crate::config::Config;
 use crate::error::Error;
 use crate::id::{EdgeId, EntityId, FactId};
+use crate::index::bm25::DocLenSlot;
 use crate::model::{EdgeHistorySlot, VALID_TO_OPEN};
 use crate::snapshot::Snapshot;
 
@@ -39,6 +41,9 @@ pub(super) mod legacy_kind {
     pub const EDGES_OUT_POOL: u16 = 10;
     pub const EDGES_IN_META: u16 = 11;
     pub const EDGES_IN_POOL: u16 = 12;
+    /// Per-document BM25 records without the term-set summary, 8-byte slots.
+    pub const BM25_DOCLEN_META: u16 = 26;
+    pub const BM25_DOCLEN_POOL: u16 = 27;
     /// Edge history, `[a | rel | b | edge]` keyed.
     pub const EDGE_HIST_OUT_META: u16 = 46;
     pub const EDGE_HIST_OUT_POOL: u16 = 47;
@@ -314,6 +319,76 @@ fn legacy_history(
             "snapshot has incomplete edge history sections",
         )),
     }
+}
+
+/// A per-document BM25 record as written before it carried the term-set
+/// summary: key `[fact]`, payload `len` and two reserved bytes.
+#[derive(Clone, Copy)]
+struct LegacyDocLenSlot {
+    fact: FactId,
+    len: u16,
+}
+
+impl Slot for LegacyDocLenSlot {
+    const SIZE: usize = 8;
+    const KEY_LEN: usize = 4;
+
+    fn write(&self, out: &mut [u8]) {
+        key::write_u32(out, self.fact.0);
+        out[4..6].copy_from_slice(&self.len.to_be_bytes());
+        out[6..8].copy_from_slice(&[0, 0]);
+    }
+
+    fn read(bytes: &[u8]) -> Self {
+        Self {
+            fact: FactId(key::read_u32(bytes)),
+            len: u16::from_be_bytes(bytes[4..6].try_into().unwrap()),
+        }
+    }
+}
+
+/// Reads the per-document BM25 records of a pre-signature image, widened into
+/// the current slot, or `None` when this image is already current-format.
+///
+/// The upgraded records are marked "unknown" rather than guessed: recovering a
+/// term set here would mean tokenizing every stored text at open time. The
+/// write path falls back to reading the text for such a document — exactly what
+/// it did before signatures existed — and the first `maintain` fills the
+/// summaries in from the postings, which is the same information without the
+/// tokenizer.
+///
+/// The result is always owned, even for a borrowed open: the slot widened, so
+/// the old bytes cannot be aliased as new records.
+pub(super) fn legacy_doc_len(
+    snap: &Snapshot<'_>,
+    cfg: &Config,
+) -> Result<Option<Arena<'static, DocLenSlot>>, Error> {
+    let Some((meta, pool)) = section_pair(
+        snap,
+        legacy_kind::BM25_DOCLEN_META,
+        legacy_kind::BM25_DOCLEN_POOL,
+    )?
+    else {
+        return Ok(None);
+    };
+    let old = Arena::<LegacyDocLenSlot>::load(doc_len_cfg(cfg), meta, pool)?;
+    let mut out = Arena::new(doc_len_cfg(cfg))?;
+    for doc in old.iter() {
+        out.insert(&DocLenSlot {
+            fact: doc.fact,
+            len: doc.len,
+            distinct: 0,
+            sig: 0,
+        })?;
+    }
+    Ok(Some(out))
+}
+
+/// Arena configuration of the per-document BM25 records, shared by the legacy
+/// reader and the current loader so a migration cannot land in a differently
+/// shaped arena.
+pub(super) fn doc_len_cfg(cfg: &Config) -> ArenaCfg {
+    ArenaCfg::new(cfg.shards_postings, ShardMode::Uniform).with_max_bytes(cfg.max_bytes)
 }
 
 /// The `(meta, pool)` byte pair one arena is stored as.

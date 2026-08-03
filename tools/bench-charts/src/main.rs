@@ -173,6 +173,10 @@ const DATABASE_SCALE_ROWS: &[(&str, &str, &str)] = &[
     ("text_only", "writer_diagnostic/text_only", "p50_us"),
     ("tag + range", "writer_diagnostic/text_tag_range", "p50_us"),
     ("full hybrid", "writer_diagnostic/full_hybrid", "p50_us"),
+    // The degenerate lexical query: one term the corpus uses everywhere, so
+    // its posting list is the corpus. Charted next to the others because the
+    // worst case is the number a caller has to budget for.
+    ("common term", "writer_diagnostic/text_common", "p50_us"),
 ];
 
 /// Like-for-like edge-lifecycle comparison series. Rows come from
@@ -200,26 +204,11 @@ const EDGE_RECALL_ROWS: &[(&str, &str, &str)] = &[
         "p50_us",
     ),
 ];
-const EDGE_GROWTH_ROWS: &[(&str, &str, &str)] = &[
-    ("current after link", "current_edges/after_link", "count"),
-    ("history after link", "edge_history/after_link", "count"),
-    (
-        "current after unlink",
-        "current_edges/after_unlink",
-        "count",
-    ),
-    ("history after unlink", "edge_history/after_unlink", "count"),
-    (
-        "current after maintain",
-        "current_edges/after_full_maintain",
-        "count",
-    ),
-    (
-        "history after maintain",
-        "edge_history/after_full_maintain",
-        "count",
-    ),
-];
+// There is no growth chart. Plotting "N edges linked, N history records
+// retained, 0 current after unlink" draws the workload's own definition back
+// at the reader: every bar is a number the benchmark was told to produce, not
+// one it measured. The retention claim it was meant to make is a sentence, and
+// the edge table states it.
 const EDGE_SCALE_CHARTS: &[ScaleChart] = &[
     ScaleChart {
         file: "edge-lifecycle-latency-100k-1m.svg",
@@ -234,13 +223,6 @@ const EDGE_SCALE_CHARTS: &[ScaleChart] = &[
         rows: EDGE_RECALL_ROWS,
         y_title: "microseconds",
         log: true,
-    },
-    ScaleChart {
-        file: "edge-lifecycle-growth-100k-1m.svg",
-        title: "edge lifecycle — current edges vs retained history",
-        rows: EDGE_GROWTH_ROWS,
-        y_title: "records",
-        log: false,
     },
 ];
 
@@ -799,10 +781,14 @@ fn render_database_scale(new: &Table, out_dir: &Path) {
     render_scale(
         ScaleRender {
             file: "database-recall-scale-100k-1m.svg",
-            title: "file-backed database — recall p50 by corpus size",
+            title: "file-backed database — recall p50 by corpus size (log)",
             rows: DATABASE_SCALE_ROWS,
-            y_title: "microseconds",
-            log: false,
+            y_title: "microseconds (log)",
+            // The rows span two orders of magnitude once the degenerate query
+            // is among them: on a linear axis its bar is the chart and the
+            // other three are a flat line, which is the opposite of what a
+            // comparison is for.
+            log: true,
         },
         new,
         out_dir,
@@ -1112,8 +1098,11 @@ mod tests {
              #DB\tedge-100k\tnative\tedge_history/after_unlink\tcount\t100000\n",
         );
 
+        // Two charts: operation cost and graph recall. The counts in the input
+        // are still emitted by the benchmark and still read by the tables —
+        // they are simply not charted, because they restate the workload.
+        assert_eq!(EDGE_SCALE_CHARTS.len(), 2);
         assert_eq!(edge_scale_cells(&EDGE_SCALE_CHARTS[0], &table).len(), 3);
         assert_eq!(edge_scale_cells(&EDGE_SCALE_CHARTS[1], &table).len(), 2);
-        assert_eq!(edge_scale_cells(&EDGE_SCALE_CHARTS[2], &table).len(), 2);
     }
 }

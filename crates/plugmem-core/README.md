@@ -422,10 +422,16 @@ break out:
 
 | Operation (single thread, native) | Latency |
 |---|---|
-| tags + time-range recall @ 100k | ~230 µs |
-| hybrid recall (text + hub entity anchor) @ 100k | ~470 µs |
-| `remember` (tokenize, index, quantize d384, similar-detect, journal) | ~72 µs mean |
+| tags + time-range recall @ 100k | ~17 µs |
+| hybrid recall (text + hub entity anchor) @ 100k | ~70 µs |
+| `remember` (tokenize, index, quantize d384, similar-detect, journal) | ~29 µs mean |
 | full HNSW rebuild during explicit maintenance | ~1.6 ms/vector |
+
+These moved by roughly an order of magnitude against earlier releases, and the
+chart above moved with them for the lexical bar. Do not read the other bars as
+regressions against previously published figures: this run is on different
+hardware, and only bars **within** one chart are comparable. The vector and
+graph code is unchanged.
 
 Reproduce: `cargo bench -p plugmem-core` (Criterion; a separate target,
 never run under `cargo test`) for the full statistical suite, or
@@ -451,16 +457,23 @@ pool strides — not estimates:
 
 | Structure | Holds | Per unit | Indexed by | Ceiling |
 |---|---|---|---|---|
-| `facts` + `fact_aux` | one fact's record | 48 + 16 = **64 B** | u32 page × 4 KiB | 4.29 B facts (`u32` id) |
+| `facts` + `fact_aux` | one fact's record | 48 + 20 = **68 B** | u32 page × 4 KiB | 4.29 B facts (`u32` id) |
 | `temporal` | `recorded_at` index entry | **12 B** / fact | u32 page × 4 KiB | 16 TiB pool |
 | `entities` + `by_name` | one entity | 24 + 8 = **32 B** | u32 page × 4 KiB | 4.29 B entities |
-| `edges_out` + `edges_in` | one current typed edge (both directions) | 16 + 16 = **32 B** | u32 page × 4 KiB | 16 TiB pool |
+| `edges_out` + `edges_in` | one current typed edge (both directions) | 28 + 28 = **56 B** | u32 page × 4 KiB | 16 TiB pool |
 | `edges_hist_out` + `edges_hist_in` | one historical edge version (both directions) | 48 + 48 = **96 B** | u32 page × 4 KiB | 16 TiB pool |
+| `doc_len` (BM25) | one document's length + term-set summary | **16 B** / fact | u32 page × 4 KiB | 16 TiB pool |
 | `texts` (blob heap) | **all** fact texts + entity names, concatenated | its text length | **usize byte offset** | **4 GiB on 32-bit; RAM-bound on 64-bit** |
 | `terms` (interner) | vocabulary: unique tokens, tags, relation names | deduped term length | **usize byte offset** | **4 GiB on 32-bit; RAM-bound on 64-bit** |
 | `tag_lists` + postings | tag/term/entity → fact lists | ~varint / entry | u32 chunk × 64 B | 256 GiB each |
 | `vecs` (vector pool) | one int8-quantized embedding | `8 + 8·⌈dim/64⌉ + dim` B | u32 slot | 4.29 B vectors |
 | HNSW graph | neighbor blocks | ≈ `m0 × 4 B` / vector | u32 node id | 4.29 B nodes |
+
+Two derived structures are resident on **every** open, mapped or not, because
+they are rebuilt at load rather than read from the image: each arena's page
+directory (20 B per 4 KiB page, ≈0.5% of its pool) and the flat document-length
+index (4 B per fact id, capped to a dense id space). They buy the lookup costs
+in `04-recall.md`; they are never written to the file.
 
 Per-vector stride, concretely: **d384 → 440 B**, **d768 → 872 B**,
 **d1536 → 1736 B** (f32 is never stored — only the int8 components, a

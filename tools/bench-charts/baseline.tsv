@@ -100,53 +100,55 @@
 1000000	wasmtime	std HashMap	ins_p99	183.8
 1000000	wasmtime	std HashMap	insert_ns	53.0
 1000000	wasmtime	std HashMap	mem_b	35.7
-core	native	BM25 (3 terms, 10k)	latency_us	67.1
-core	native	HNSW (30k, d384)	latency_us	177.0
-core	native	flat vector (24k, d384)	latency_us	226.9
-core	native	tags (3 lists, 100k)	latency_us	55.9
-database-100k	native	writer_diagnostic/full_hybrid	p50_us	234.5
-database-100k	native	writer_diagnostic/text_only	p50_us	64.9
-database-100k	native	writer_diagnostic/text_tag_range	p50_us	66.8
-database-1m	native	after_load	pool_bytes	441710194.0
-database-1m	native	after_maintain	pool_bytes	425106760.0
-database-1m	native	checkpoint	elapsed_ms	1079.6
-database-1m	native	maintain	elapsed_ms	2552.5
-database-1m	native	mixed_stream	load_ops_per_sec	6985.2
-database-1m	native	readonly	elapsed_ms	538.9
-database-1m	native	readonly	pool_bytes	425106760.0
-database-1m	native	readonly/hybrid_recall	p50_us	2004.9
-database-1m	native	readonly/text_recall	p50_us	1710.1
-database-1m	native	readonly_scrub	elapsed_ms	56.4
-database-1m	native	readonly_verify	elapsed_ms	33.1
-database-1m	native	reopen	elapsed_ms	560.8
-database-1m	native	reopen_verify	elapsed_ms	34.0
-database-1m	native	writer/hybrid_recall	p50_us	1973.2
-database-1m	native	writer/text_recall	p50_us	1679.0
-database-1m	native	writer_diagnostic/full_hybrid	p50_us	2403.4
-database-1m	native	writer_diagnostic/text_only	p50_us	1664.5
-database-1m	native	writer_diagnostic/text_tag_range	p50_us	1972.0
-database-1m	native	writer_verify	elapsed_ms	33.1
+core	native	BM25 (3 terms, 10k)	latency_us	8.5
+core	native	HNSW (30k, d384)	latency_us	3262.3
+core	native	flat vector (24k, d384)	latency_us	266.9
+core	native	tags (3 lists, 100k)	latency_us	56.9
+database-100k	native	writer_diagnostic/full_hybrid	p50_us	51.2
+database-100k	native	writer_diagnostic/text_common	p50_us	2322.1
+database-100k	native	writer_diagnostic/text_only	p50_us	21.9
+database-100k	native	writer_diagnostic/text_tag_range	p50_us	22.4
+database-1m	native	after_load	pool_bytes	450098802.0
+database-1m	native	after_maintain	pool_bytes	433495368.0
+database-1m	native	checkpoint	elapsed_ms	745.1
+database-1m	native	maintain	elapsed_ms	2069.5
+database-1m	native	mixed_stream	load_ops_per_sec	26402.9
+database-1m	native	readonly	elapsed_ms	160.3
+database-1m	native	readonly	pool_bytes	433495368.0
+database-1m	native	readonly/hybrid_recall	p50_us	320.6
+database-1m	native	readonly/text_recall	p50_us	157.7
+database-1m	native	readonly_scrub	elapsed_ms	58.6
+database-1m	native	readonly_verify	elapsed_ms	325.5
+database-1m	native	reopen	elapsed_ms	154.8
+database-1m	native	reopen_verify	elapsed_ms	313.2
+database-1m	native	writer/hybrid_recall	p50_us	316.4
+database-1m	native	writer/text_recall	p50_us	157.4
+database-1m	native	writer_diagnostic/full_hybrid	p50_us	322.6
+database-1m	native	writer_diagnostic/text_common	p50_us	26495.8
+database-1m	native	writer_diagnostic/text_only	p50_us	155.4
+database-1m	native	writer_diagnostic/text_tag_range	p50_us	288.2
+database-1m	native	writer_verify	elapsed_ms	315.8
 edge-100k	native	current_edges/after_full_maintain	count	0.0
 edge-100k	native	current_edges/after_link	count	100000.0
 edge-100k	native	current_edges/after_unlink	count	0.0
-edge-100k	native	current_graph_recall/after_unlink	p50_us	1.4
-edge-100k	native	current_graph_recall/open_edges	p50_us	51.5
+edge-100k	native	current_graph_recall/after_unlink	p50_us	1.5
+edge-100k	native	current_graph_recall/open_edges	p50_us	52.9
 edge-100k	native	edge_history/after_full_maintain	count	100000.0
 edge-100k	native	edge_history/after_link	count	100000.0
 edge-100k	native	edge_history/after_unlink	count	100000.0
 edge-100k	native	full_maintain	latency_us_per_op	3.3
-edge-100k	native	historical_graph_recall/as_of_open	p50_us	49.4
-edge-100k	native	link	latency_us_per_op	1.5
-edge-100k	native	unlink	latency_us_per_op	1.6
+edge-100k	native	historical_graph_recall/as_of_open	p50_us	50.2
+edge-100k	native	link	latency_us_per_op	1.6
+edge-100k	native	unlink	latency_us_per_op	1.7
 edge-1m	native	current_edges/after_full_maintain	count	0.0
 edge-1m	native	current_edges/after_link	count	1000000.0
 edge-1m	native	current_edges/after_unlink	count	0.0
-edge-1m	native	current_graph_recall/after_unlink	p50_us	1.5
-edge-1m	native	current_graph_recall/open_edges	p50_us	69.3
+edge-1m	native	current_graph_recall/after_unlink	p50_us	1.3
+edge-1m	native	current_graph_recall/open_edges	p50_us	58.8
 edge-1m	native	edge_history/after_full_maintain	count	1000000.0
 edge-1m	native	edge_history/after_link	count	1000000.0
 edge-1m	native	edge_history/after_unlink	count	1000000.0
-edge-1m	native	full_maintain	latency_us_per_op	3.6
-edge-1m	native	historical_graph_recall/as_of_open	p50_us	69.3
+edge-1m	native	full_maintain	latency_us_per_op	3.2
+edge-1m	native	historical_graph_recall/as_of_open	p50_us	54.8
 edge-1m	native	link	latency_us_per_op	1.7
-edge-1m	native	unlink	latency_us_per_op	1.8
+edge-1m	native	unlink	latency_us_per_op	1.7

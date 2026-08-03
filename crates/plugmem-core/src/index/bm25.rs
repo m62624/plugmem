@@ -8,10 +8,22 @@
 //! score(d, q) = Σ_t idf(t) · tf_norm(d, t)
 //! ```
 //!
-//! Query cost is O(Σ df) — a full decode of every query term's postings
-//! with accumulation in a reusable scratch map. No WAND-style pruning in
-//! v1: at the capacity passport's scale decoding is microseconds, and the
-//! deterministic `postings_decoded` counter gates it in CI.
+//! A query decodes every query term's postings — O(Σ df), and there is no
+//! WAND-style pruning to avoid it. That is affordable because a decode is a
+//! few nanoseconds of varint over a contiguous chunk chain; what is not
+//! affordable is a *random* lookup per posting, and the scan is built to have
+//! none:
+//!
+//! - document lengths come from a flat array indexed by fact id, not from the
+//!   stored arena (see [`Bm25Index::doc_len_dense`]);
+//! - partial scores accumulate by merging sorted runs, because the postings
+//!   are already sorted by fact id, so no map is probed;
+//! - the caller's `live` predicate — a fact-record lookup on the engine side —
+//!   is asked only about documents in contention for the top `k`, since a
+//!   filter can remove entries from a ranking but never reorder it.
+//!
+//! The `decoded`, `scored` and `admitted` counters gate exactly this split in
+//! CI, and `bm25_probe_work_is_bounded` pins the last one at `k`.
 //!
 //! Deletions never touch the postings: tombstoned facts are filtered per
 //! candidate by the caller's `live` predicate and fall out physically
@@ -28,8 +40,45 @@ use crate::error::Error;
 use crate::id::FactId;
 use crate::index::postings::PostingStore;
 
-/// Per-document length record: `[fact 4 | len u16 | pad 2]`, Uniform
-/// arena.
+/// Byte layout of [`DocLenSlot`]. Every offset is the previous field's offset
+/// plus its width, so a field cannot be moved by editing one number.
+mod doclen_at {
+    use core::mem::size_of;
+
+    pub(super) const FACT: usize = 0;
+    pub(super) const KEY_LEN: usize = FACT + size_of::<u32>();
+    pub(super) const LEN: usize = KEY_LEN;
+    pub(super) const DISTINCT: usize = LEN + size_of::<u16>();
+    pub(super) const SIG: usize = DISTINCT + size_of::<u16>();
+    pub(super) const SIZE: usize = SIG + size_of::<u64>();
+}
+
+/// Width of a [`DocLenSlot::sig`] signature in bits.
+const SIG_BITS: u32 = 64;
+/// Fibonacci hashing multiplier — the same constant the arena shards with, so
+/// term ids scatter over the signature's bits without a second hash family.
+const SIG_MULT: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// The signature bit a term claims. Distinct terms may collide; that is what
+/// makes [`DocLenSlot::sig`] an over-approximation and never an
+/// under-approximation of a document's term set.
+pub(crate) fn sig_bit(term: u32) -> u64 {
+    // The top `log2(SIG_BITS)` bits of the multiplied word, so the index is in
+    // range by construction.
+    let index = u64::from(term).wrapping_mul(SIG_MULT) >> (64 - SIG_BITS.trailing_zeros());
+    1u64 << index
+}
+
+/// Per-document record: `[fact 4 | len u16 | distinct u16 | sig u64]`,
+/// Uniform arena.
+///
+/// Beyond the length BM25 scores with, the slot carries a summary of the
+/// document's *term set*: how many distinct terms it has, and one bit per
+/// term hashed into a 64-bit word. That summary is what lets the write path
+/// bound the term-set overlap of two facts without re-reading and
+/// re-tokenizing their texts (see `Memory::find_similar`). It is written when
+/// the document is indexed, where the term set is already in hand, so it
+/// costs nothing to produce.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DocLenSlot {
@@ -37,35 +86,82 @@ pub struct DocLenSlot {
     pub fact: FactId,
     /// Token count of the document, saturated at `u16::MAX`.
     pub len: u16,
+    /// Number of distinct terms, saturated at `u16::MAX`. Zero means
+    /// "unknown": a document indexed before the signature existed, read
+    /// through the legacy migration.
+    pub distinct: u16,
+    /// Union of [`sig_bit`] over the document's distinct terms. A term absent
+    /// from this word is definitely absent from the document; a term present
+    /// may still be absent (bits collide). Zero alongside `distinct == 0`
+    /// means "unknown".
+    pub sig: u64,
+}
+
+impl DocLenSlot {
+    /// Whether the term-set summary is present. A legacy document carries
+    /// none, and callers must fall back to reading its text.
+    pub fn has_signature(&self) -> bool {
+        self.distinct != 0
+    }
+
+    /// An upper bound on how many of `terms` this document also holds.
+    ///
+    /// Exact in the direction that matters: a term whose bit is clear cannot
+    /// be in the document, so the true intersection is never larger than the
+    /// count returned here. Callers use it to rule overlap *out*.
+    pub fn overlap_bound(&self, terms: &[u32]) -> usize {
+        terms
+            .iter()
+            .filter(|&&term| self.sig & sig_bit(term) != 0)
+            .count()
+    }
 }
 
 impl Slot for DocLenSlot {
-    const SIZE: usize = 8;
-    const KEY_LEN: usize = 4;
+    const SIZE: usize = doclen_at::SIZE;
+    const KEY_LEN: usize = doclen_at::KEY_LEN;
 
     fn write(&self, out: &mut [u8]) {
-        key::write_u32(out, self.fact.0);
-        out[4..6].copy_from_slice(&self.len.to_be_bytes());
-        out[6..8].copy_from_slice(&[0, 0]);
+        key::write_u32(&mut out[doclen_at::FACT..], self.fact.0);
+        out[doclen_at::LEN..doclen_at::DISTINCT].copy_from_slice(&self.len.to_be_bytes());
+        out[doclen_at::DISTINCT..doclen_at::SIG].copy_from_slice(&self.distinct.to_be_bytes());
+        out[doclen_at::SIG..doclen_at::SIZE].copy_from_slice(&self.sig.to_be_bytes());
     }
 
     fn read(bytes: &[u8]) -> Self {
         Self {
-            fact: FactId(key::read_u32(bytes)),
-            len: u16::from_be_bytes(bytes[4..6].try_into().unwrap()),
+            fact: FactId(key::read_u32(&bytes[doclen_at::FACT..])),
+            len: u16::from_be_bytes(
+                bytes[doclen_at::LEN..doclen_at::DISTINCT]
+                    .try_into()
+                    .unwrap(),
+            ),
+            distinct: u16::from_be_bytes(
+                bytes[doclen_at::DISTINCT..doclen_at::SIG]
+                    .try_into()
+                    .unwrap(),
+            ),
+            sig: u64::from_be_bytes(bytes[doclen_at::SIG..doclen_at::SIZE].try_into().unwrap()),
         }
     }
 }
 
-/// Reusable query scratch: accumulator and top-k selection buffer. One
-/// per engine; after warm-up a query allocates nothing (the zero-alloc
-/// recall invariant).
+/// Reusable query scratch: score accumulator and top-k selection buffer. One
+/// per concurrent reader; after warm-up a query allocates nothing (the
+/// zero-alloc recall invariant).
 #[derive(Debug, Default)]
 pub struct Bm25Scratch {
-    /// fact id → accumulated score. The xxh3 hasher is explicit:
-    /// hashbrown's default hasher is behind a feature we do not enable,
-    /// and a fixed hasher keeps scratch behavior deterministic.
-    acc: hashbrown::HashMap<u32, f32, xxhash_rust::xxh3::Xxh3Builder>,
+    /// Partial scores as `(fact, score)` **sorted by fact id**.
+    ///
+    /// A map would be the obvious shape, and was the original one, but the
+    /// postings are already sorted by fact id: accumulating a term is then a
+    /// linear merge of two sorted runs instead of one hash probe per posting.
+    /// The difference is not the hashing — it is that a map big enough to hold
+    /// a frequent term's postings misses cache on essentially every probe,
+    /// while a merge walks three arrays forwards.
+    acc: Vec<(u32, f32)>,
+    /// Merge target, swapped with `acc` after each term past the first.
+    merge: Vec<(u32, f32)>,
     /// Selection buffer for the top-k extraction.
     top: Vec<(f32, u32)>,
 }
@@ -89,7 +185,48 @@ pub struct Bm25Index<'a> {
     /// deterministic cost metric of the lexical source.
     #[cfg(feature = "counters")]
     decoded: Cell<u64>,
+    /// Documents whose BM25 contribution was actually evaluated — a document
+    /// length fetched and `tf_norm` computed (feature `counters`).
+    ///
+    /// Decoding a posting entry is a few nanoseconds of varint; *scoring* it
+    /// costs a document-length lookup, which is a random probe into an arena
+    /// that grows with the corpus. The two counters therefore measure
+    /// different things, and this is the one that dominates a large query.
+    #[cfg(feature = "counters")]
+    scored: Cell<u64>,
+    /// Calls to the caller's `live` predicate (feature `counters`).
+    ///
+    /// Every call is a fact-record lookup on the engine side — the second
+    /// random probe per candidate. A candidate that cannot reach the top `k`
+    /// should never cost one.
+    #[cfg(feature = "counters")]
+    admitted: Cell<u64>,
+    /// Some documents arrived without a term-set summary — this index came out
+    /// of a pre-signature image. Derived at load, never persisted: the next
+    /// compaction fills the summaries in and clears it.
+    unsummarized: bool,
+    /// Document length by fact id, [`DOC_LEN_ABSENT`] where the id names no
+    /// indexed document.
+    ///
+    /// Scoring needs the length of every document a query term's postings
+    /// name, which is one lookup per posting entry — the single hottest read
+    /// in the engine, and a random probe into an arena that deepens as the
+    /// corpus grows. Fact ids are dense and monotone, so a flat array answers
+    /// it by indexing, at four bytes per id.
+    ///
+    /// Runtime-only, like the arena's own page directory: rebuilt from
+    /// `doc_len` on load, never written to the snapshot. `doc_len` remains the
+    /// stored form and the only place the term-set summary lives.
+    doc_len_dense: Vec<u32>,
+    /// Exclusive upper bound of the fact ids [`Bm25Index::doc_len_dense`] may
+    /// be trusted for. `usize::MAX` while it has covered every document it was
+    /// offered; lowered to the first id it declined.
+    dense_limit: usize,
 }
+
+/// [`Bm25Index::doc_len_dense`] entry for a fact id with no indexed document.
+/// Lengths saturate at `u16::MAX`, so this cannot collide with a real one.
+const DOC_LEN_ABSENT: u32 = u32::MAX;
 
 impl<'a> Bm25Index<'a> {
     /// Creates an empty index; `shards` per the engine config
@@ -104,6 +241,13 @@ impl<'a> Bm25Index<'a> {
             total_len: 0,
             #[cfg(feature = "counters")]
             decoded: Cell::new(0),
+            #[cfg(feature = "counters")]
+            scored: Cell::new(0),
+            #[cfg(feature = "counters")]
+            admitted: Cell::new(0),
+            unsummarized: false,
+            doc_len_dense: Vec::new(),
+            dense_limit: usize::MAX,
         })
     }
 
@@ -118,17 +262,101 @@ impl<'a> Bm25Index<'a> {
     /// for the whole operation (journal replay rebuilds consistently).
     pub fn index_doc(&mut self, fact: FactId, term_tfs: &[(u32, u8)]) -> Result<(), Error> {
         let mut len = 0u32;
+        let mut sig = 0u64;
         for &(term, tf) in term_tfs {
             self.postings.push(term, fact, tf)?;
             len += u32::from(tf);
+            sig |= sig_bit(term);
         }
-        self.doc_len.insert(&DocLenSlot {
+        let doc = DocLenSlot {
             fact,
             len: u16::try_from(len).unwrap_or(u16::MAX),
-        })?;
+            // The caller's pairs are already unique per term, so their count
+            // is the distinct-term count.
+            distinct: u16::try_from(term_tfs.len()).unwrap_or(u16::MAX),
+            sig,
+        };
+        self.doc_len.insert(&doc)?;
+        self.note_dense(&doc);
         self.total_docs += 1;
         self.total_len += u64::from(len);
         Ok(())
+    }
+
+    /// Records a document's length in the flat index, growing it to reach the
+    /// id. Fact ids are dense and monotone, so the growth is amortized.
+    ///
+    /// Growth stops where the id space stops being dense — see
+    /// [`Bm25Index::dense_capacity`]. Nothing is lost when it does:
+    /// [`Bm25Index::doc_len_of`] reads the stored arena for an id the flat
+    /// index does not cover.
+    fn note_dense(&mut self, doc: &DocLenSlot) {
+        // A `u32` id always fits a `usize`, on wasm32 as on a 64-bit host; the
+        // bound that matters is the capacity below.
+        let at = doc.fact.0 as usize;
+        if at >= self.dense_capacity() {
+            // Declined. The array can never speak for this id, and documents
+            // do not arrive in id order (compaction walks a hashed arena), so
+            // a later id may extend the array right over this one — hence the
+            // watermark rather than a bare skip.
+            self.dense_limit = self.dense_limit.min(at);
+            return;
+        }
+        if at >= self.doc_len_dense.len() {
+            self.doc_len_dense.resize(at + 1, DOC_LEN_ABSENT);
+        }
+        self.doc_len_dense[at] = u32::from(doc.len);
+    }
+
+    /// Highest fact id the flat length index will grow to cover.
+    ///
+    /// The index is worth its four bytes per id only while ids are dense,
+    /// which they are by construction — they are handed out in order, and only
+    /// purged facts leave holes. An id far past the document count means the
+    /// space is sparse or the image is lying, and a flat array would then cost
+    /// more memory than the documents themselves; a snapshot is untrusted
+    /// input, and nothing range-checks the ids inside the stored records.
+    /// `usize` being 32 bits on wasm32 makes the same claim sharper there.
+    ///
+    /// This bounds memory, never correctness: an id past the cap is answered
+    /// from the arena.
+    /// Saturating throughout, which is also what makes `at + 1` safe wherever
+    /// `at < dense_capacity()` holds: the capacity never exceeds `usize::MAX`,
+    /// so an id below it is below `usize::MAX` too.
+    fn dense_capacity(&self) -> usize {
+        const SLACK: usize = 8;
+        let docs = self.total_docs.min(usize::MAX as u64) as usize;
+        docs.saturating_add(1).saturating_mul(SLACK)
+    }
+
+    /// Rebuilds the flat length index from the stored records (the load path).
+    fn rebuild_dense(&mut self) {
+        self.doc_len_dense.clear();
+        self.dense_limit = usize::MAX;
+        let docs: Vec<DocLenSlot> = self.doc_len.iter().collect();
+        for doc in docs {
+            self.note_dense(&doc);
+        }
+    }
+
+    /// The per-document record of `fact`, or `None` when the document is not
+    /// indexed. Carries the term-set summary the write path bounds overlap
+    /// with — see [`DocLenSlot`].
+    pub fn doc(&self, fact: FactId) -> Option<DocLenSlot> {
+        self.doc_len.get(&fact.0.to_be_bytes())
+    }
+
+    /// Whether this index holds documents with no term-set summary, which
+    /// compaction can fill in from the postings. True only after opening a
+    /// pre-signature image.
+    pub(crate) fn needs_resummarize(&self) -> bool {
+        self.unsummarized
+    }
+
+    /// Marks the index as holding unsummarized documents (the load path, after
+    /// a legacy migration).
+    pub(crate) fn mark_unsummarized(&mut self) {
+        self.unsummarized = true;
     }
 
     /// Builds a compacted BM25 index by filtering this index's existing
@@ -145,21 +373,89 @@ impl<'a> Bm25Index<'a> {
         mut live: impl FnMut(FactId) -> bool,
     ) -> Result<Bm25Index<'static>, Error> {
         let mut out = Bm25Index::new(shards, max_bytes)?;
+        // Documents carried over from a pre-signature image, and the id range
+        // they span. Compaction is the cheapest place to fill their term-set
+        // summaries in: it already walks every posting, which is the transpose
+        // of what a signature needs, so no text is read and nothing is
+        // tokenized.
+        let mut legacy = 0usize;
+        let mut max_fact = 0u32;
         for doc in self.doc_len.iter() {
             if live(doc.fact) {
                 out.doc_len.insert(&doc)?;
+                out.note_dense(&doc);
                 out.total_docs += 1;
                 out.total_len += u64::from(doc.len);
-            }
-        }
-        for slot in self.postings.slots() {
-            for (fact, tf) in self.postings.entries(slot.key) {
-                if live(fact) {
-                    out.postings.push(slot.key, fact, tf)?;
+                if !doc.has_signature() {
+                    legacy += 1;
+                    max_fact = max_fact.max(doc.fact.0);
                 }
             }
         }
+        // `(sig, distinct)` per fact id, dense because the transpose visits
+        // facts in posting order rather than document order. Allocated only
+        // when there is something to fill, and dropped with this call.
+        //
+        // Sized like the flat length index and for the same reasons: `usize`
+        // is 32 bits on wasm32, and the ids come from an untrusted image, so
+        // the array is allocated only for an id space that is actually dense.
+        // Declining costs speed and nothing else — an unsummarized document
+        // keeps reading its text.
+        let highest = max_fact as usize;
+        let mut rebuilt = if legacy > 0 && highest < out.dense_capacity() {
+            alloc::vec![(0u64, 0u16); highest + 1]
+        } else {
+            Vec::new()
+        };
+        for slot in self.postings.slots() {
+            for (fact, tf) in self.postings.entries(slot.key) {
+                if !live(fact) {
+                    continue;
+                }
+                out.postings.push(slot.key, fact, tf)?;
+                if let Some(entry) = rebuilt.get_mut(fact.0 as usize) {
+                    entry.0 |= sig_bit(slot.key);
+                    entry.1 = entry.1.saturating_add(1);
+                }
+            }
+        }
+        if !rebuilt.is_empty() {
+            out.fill_missing_signatures(&rebuilt);
+        }
         Ok(out)
+    }
+
+    /// Writes the recomputed term-set summaries of [`Self::compact_live`]
+    /// into the documents that arrived without one. Documents that already
+    /// carry a signature keep it: it was written from the exact term set the
+    /// indexer saw, and the transpose can only reproduce it.
+    ///
+    /// The compacted index never inherits [`Self::unsummarized`]. A document
+    /// still unsummarized after this pass has no indexed terms at all, so no
+    /// later pass could summarize it either — carrying the flag forward would
+    /// make every future `maintain` recompact for work that cannot be done.
+    fn fill_missing_signatures(&mut self, rebuilt: &[(u64, u16)]) {
+        let stale: Vec<DocLenSlot> = self
+            .doc_len
+            .iter()
+            .filter(|doc| !doc.has_signature())
+            .collect();
+        for mut doc in stale {
+            let Some(&(sig, distinct)) = rebuilt.get(doc.fact.0 as usize) else {
+                continue;
+            };
+            if distinct == 0 {
+                continue; // a document with no indexed terms has nothing to summarize
+            }
+            doc.sig = sig;
+            doc.distinct = distinct;
+            let Some(payload) = self.doc_len.payload_mut(&doc.fact.0.to_be_bytes()) else {
+                continue;
+            };
+            let mut full = [0u8; DocLenSlot::SIZE];
+            doc.write(&mut full);
+            payload.copy_from_slice(&full[DocLenSlot::KEY_LEN..]);
+        }
     }
 
     /// Document frequency of a term.
@@ -187,6 +483,13 @@ impl<'a> Bm25Index<'a> {
     ///
     /// Duplicate query terms are the caller's choice: each occurrence
     /// accumulates again (a term repeated in the query weighs more).
+    ///
+    /// Cost is O(Σ df) in *decodes*, which is the honest price of a lexical
+    /// scan, but the expensive part of a candidate is not its decode — it is
+    /// the two random lookups that used to follow it, one for the document
+    /// length and one for the `live` predicate. Neither is paid per candidate
+    /// any more: lengths come from a flat array, and `live` is asked only
+    /// about documents that are actually in contention for the top `k`.
     pub fn search(
         &self,
         (k1, b): (f32, f32),
@@ -200,47 +503,133 @@ impl<'a> Bm25Index<'a> {
         if self.total_docs == 0 || k == 0 {
             return;
         }
-        scratch.acc.clear();
+        let Bm25Scratch { acc, merge, top } = scratch;
+        acc.clear();
         let avg_len = self.total_len as f32 / self.total_docs as f32;
         #[cfg(feature = "counters")]
-        let mut decoded = 0u64;
+        let (mut decoded, mut scored) = (0u64, 0u64);
+
         for &term in terms {
             let df = self.postings.count(term);
             if df == 0 {
                 continue;
             }
             let idf = self.idf(df);
+            // A term's postings are already ascending by fact id and `acc`
+            // holds the same order, so accumulating is a merge of two sorted
+            // runs. The first term has nothing to merge against and fills
+            // `acc` directly.
+            let mut ahead = 0usize;
+            merge.clear();
             for (fact, tf) in self.postings.entries(term) {
                 #[cfg(feature = "counters")]
                 {
                     decoded += 1;
                 }
-                let Some(doc) = self.doc_len.get(&fact.0.to_be_bytes()) else {
+                // Everything in `acc` below this posting keeps its score.
+                while let Some(&entry) = acc.get(ahead)
+                    && entry.0 < fact.0
+                {
+                    merge.push(entry);
+                    ahead += 1;
+                }
+                let carried = match acc.get(ahead) {
+                    Some(&entry) if entry.0 == fact.0 => {
+                        ahead += 1;
+                        Some(entry.1)
+                    }
+                    _ => None,
+                };
+                // A posting naming a document with no length record scores
+                // nothing — and must not create a candidate either.
+                let Some(len) = self.doc_len_of(fact) else {
+                    if let Some(score) = carried {
+                        merge.push((fact.0, score));
+                    }
                     continue;
                 };
+                #[cfg(feature = "counters")]
+                {
+                    scored += 1;
+                }
                 let tf = f32::from(tf);
-                let norm =
-                    tf * (k1 + 1.0) / (tf + k1 * (1.0 - b + b * f32::from(doc.len) / avg_len));
-                *scratch.acc.entry(fact.0).or_insert(0.0) += idf * norm;
+                let norm = tf * (k1 + 1.0) / (tf + k1 * (1.0 - b + b * f32::from(len) / avg_len));
+                // Terms are summed in query order, the order the accumulating
+                // map used, so the float result is bit-for-bit the same.
+                merge.push((fact.0, carried.unwrap_or(0.0) + idf * norm));
             }
+            merge.extend_from_slice(&acc[ahead.min(acc.len())..]);
+            core::mem::swap(acc, merge);
         }
         #[cfg(feature = "counters")]
-        self.decoded.set(self.decoded.get() + decoded);
+        {
+            self.decoded.set(self.decoded.get() + decoded);
+            self.scored.set(self.scored.get() + scored);
+        }
 
-        // Top-k: collect survivors, sort the (small) buffer. k is ≤ 64 in
-        // the engine; a heap would not buy anything at these sizes.
-        scratch.top.clear();
-        for (&id, &score) in &scratch.acc {
-            if live(FactId(id)) {
-                scratch.top.push((score, id));
+        // Top-k. Ranking is by score alone, so `live` cannot change the order
+        // — only remove entries from it. Asking it about every candidate is
+        // therefore wasted work: rank first, then walk the ranking and ask
+        // only until `k` survivors are found. The result is the same set in
+        // the same order an exhaustive filter produces.
+        top.clear();
+        top.extend(acc.iter().map(|&(id, score)| (score, id)));
+        let order = |a: &(f32, u32), b: &(f32, u32)| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1));
+        #[cfg(feature = "counters")]
+        let mut admitted = 0u64;
+        let mut consume = |band: &[(f32, u32)], out: &mut Vec<(FactId, f32)>| {
+            for &(score, id) in band {
+                if out.len() == k {
+                    return;
+                }
+                #[cfg(feature = "counters")]
+                {
+                    admitted += 1;
+                }
+                if live(FactId(id)) {
+                    out.push((FactId(id), score));
+                }
             }
+        };
+
+        // The usual case: partition the `k` highest scores to the front,
+        // order them, and take the survivors. Linear, and it asks `live`
+        // about `k` documents rather than every candidate.
+        let band = k.min(top.len());
+        if band > 0 {
+            if band < top.len() {
+                top.select_nth_unstable_by(band - 1, order);
+            }
+            top[..band].sort_unstable_by(order);
+            consume(&top[..band], out);
         }
-        scratch
-            .top
-            .sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-        for &(score, id) in scratch.top.iter().take(k) {
-            out.push((FactId(id), score));
+        // The band was thinned by tombstones or a filter. Order what is left
+        // in one pass and continue down it — the same total cost the
+        // exhaustive filter used to pay on every query, now only on a query
+        // that needs it.
+        if out.len() < k && band < top.len() {
+            top[band..].sort_unstable_by(order);
+            let (_, rest) = top.split_at(band);
+            consume(rest, out);
         }
+        #[cfg(feature = "counters")]
+        self.admitted.set(self.admitted.get() + admitted);
+    }
+
+    /// Length of the document `fact` names, or `None` when it names none.
+    ///
+    /// The flat index is authoritative below [`Bm25Index::dense_limit`],
+    /// because every stored document with an id there was written into it. At
+    /// or above that mark it may have holes it never filled, so the answer
+    /// comes from the stored arena — slower, and correct.
+    fn doc_len_of(&self, fact: FactId) -> Option<u16> {
+        let at = fact.0 as usize;
+        if at < self.dense_limit
+            && let Some(&len) = self.doc_len_dense.get(at)
+        {
+            return (len != DOC_LEN_ABSENT).then_some(len as u16);
+        }
+        self.doc_len.get(&fact.0.to_be_bytes()).map(|doc| doc.len)
     }
 
     /// Bytes held by the underlying pools.
@@ -271,14 +660,25 @@ impl<'a> Bm25Index<'a> {
         total_docs: u64,
         total_len: u64,
     ) -> Self {
-        Self {
+        let mut index = Self {
             postings,
             doc_len,
             total_docs,
             total_len,
             #[cfg(feature = "counters")]
             decoded: Cell::new(0),
-        }
+            #[cfg(feature = "counters")]
+            scored: Cell::new(0),
+            #[cfg(feature = "counters")]
+            admitted: Cell::new(0),
+            unsummarized: false,
+            doc_len_dense: Vec::new(),
+            dense_limit: usize::MAX,
+        };
+        // One sequential pass over the stored records; the flat index is
+        // derived state and is never part of the image.
+        index.rebuild_dense();
+        index
     }
 
     /// Posting entries decoded so far (feature `counters`).
@@ -287,9 +687,25 @@ impl<'a> Bm25Index<'a> {
         self.decoded.get()
     }
 
-    /// Resets the decode counter (feature `counters`).
+    /// Documents scored so far — document-length fetches (feature
+    /// `counters`). See the [`Bm25Index::scored`] field docs for why this is
+    /// tracked apart from [`Bm25Index::decoded`].
     #[cfg(feature = "counters")]
-    pub fn reset_decoded(&self) {
+    pub fn scored(&self) -> u64 {
+        self.scored.get()
+    }
+
+    /// `live` predicate calls so far (feature `counters`).
+    #[cfg(feature = "counters")]
+    pub fn admitted(&self) -> u64 {
+        self.admitted.get()
+    }
+
+    /// Resets the query work counters (feature `counters`).
+    #[cfg(feature = "counters")]
+    pub fn reset_query_counters(&self) {
         self.decoded.set(0);
+        self.scored.set(0);
+        self.admitted.set(0);
     }
 }
