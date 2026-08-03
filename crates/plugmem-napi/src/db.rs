@@ -200,6 +200,18 @@ impl Plugmem {
         })
     }
 
+    /// Wraps a database handle a workspace already opened.
+    ///
+    /// Not a JS constructor: a memory in a workspace is reached by name through
+    /// `Workspace.open`, which is what keeps a name from ever being a path.
+    /// The class it hands back is this one, so a named memory has every verb a
+    /// path-opened one does and there is no second implementation to drift.
+    pub(crate) fn from_database(db: Database) -> Self {
+        Self {
+            handle: Some(Handle::Writer(db)),
+        }
+    }
+
     /// Stores a fact; returns its id plus similar/conflicting live facts.
     /// @throws in read-only mode.
     #[napi]
@@ -334,7 +346,16 @@ impl Plugmem {
     /// rebuilds everything and repacks the edge arenas — O(database) work, and
     /// the only mode that reclaims edge-history page slack.
     #[napi(ts_return_type = "Promise<MaintainReport>")]
-    pub fn maintain(&self, mode: Option<MaintainMode>) -> Result<AsyncTask<MaintainTask>> {
+    pub fn maintain(
+        &self,
+        // The generated type for a napi string enum is `const enum`, which
+        // TypeScript refuses to import from a declaration file under
+        // `isolatedModules` — the setting Vite, esbuild and swc all imply. The
+        // runtime has always accepted the plain string (the enum's values *are*
+        // these strings), so the declared type says so and both worlds work.
+        #[napi(ts_arg_type = "'auto' | 'compact' | 'reindex-text' | 'optimize-vectors' | 'full'")]
+        mode: Option<MaintainMode>,
+    ) -> Result<AsyncTask<MaintainTask>> {
         Ok(AsyncTask::new(MaintainTask {
             db: self.writer()?.clone(),
             now: now_ms(),
@@ -500,13 +521,13 @@ fn str_refs(v: &Option<Vec<String>>) -> Vec<&str> {
 }
 
 /// A host error as a thrown JS `Error` (the message is the host's own text).
-fn to_napi_err(e: HostError) -> Error {
+pub(crate) fn to_napi_err(e: HostError) -> Error {
     Error::from_reason(e.to_string())
 }
 
 /// A config-resolution error (bad `config.toml`, or an `[embedder]` missing a
 /// required field) as a thrown JS `Error`.
-fn settings_to_napi(e: SettingsError) -> Error {
+pub(crate) fn settings_to_napi(e: SettingsError) -> Error {
     Error::from_reason(e.to_string())
 }
 
@@ -526,7 +547,7 @@ fn closed_error() -> Error {
 }
 
 /// Wall-clock now in unix milliseconds (the engine keeps no clock).
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)

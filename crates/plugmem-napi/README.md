@@ -125,6 +125,48 @@ the write verbs throw.
 is [`plugmem-cli import`](https://docs.rs/plugmem-cli/latest)'s job. An agent
 remembers facts one at a time as the conversation goes.
 
+## Many memories in one directory (optional)
+
+**Default: one memory, one file.** `new Plugmem(path)` and nothing here applies.
+
+A process that serves many independent memories — one per conversation, per
+tenant, per project — can point at a directory and address them by name:
+
+```ts
+import { Workspace, type DbEntry } from "plugmem";
+
+const ws = new Workspace("/srv/memories", { maxOpen: 16, idleTimeoutMs: 60_000 });
+
+// `open` hands back the same `Plugmem` class, so a named memory has every verb
+// a path-opened one has. A first write to an unused name creates it.
+ws.open("chat-42").remember({ text: "prefers tokio" });
+
+// Do not know the name? Ask what each memory is for. Owners are searchable too,
+// even though an owner is a graph edge rather than text.
+ws.describe("chat-42", { description: "release planning", owner: "ann" });
+const hits: DbEntry[] = ws.find("release planning");   // → [{ db: "chat-42", … }]
+```
+
+A name is `[a-z0-9][a-z0-9_-]*` and **cannot represent a path**, so it resolves
+to exactly one file inside the directory — traversal is not filtered out, it is
+unconstructible. `open(name, false)` refuses a name that does not exist yet,
+which is what a read should do so a typo is diagnosed rather than answered with
+an empty result.
+
+The pool bounds how many stay open; `closeIdle()` releases the rest. Call it on
+a timer: an open memory holds the file's **exclusive lock**, so a long-running
+process that never let go would make its memories unreachable from anything else
+on the machine. That is what the idle timeout is for — liveness, not memory.
+
+Two things to know before building on it. Memories are **independent**: nothing
+searches across them and no entity links between them, so a fact filed in the
+wrong one is unreachable from the other rather than merely misplaced. And **who
+may reach which memory is not this package's responsibility** — the name comes
+from your code, so put the policy there.
+
+`reindex()` and `verify()` return promises: they open and read every memory in
+the directory, which is not work for the main thread.
+
 ## Async and concurrency (no tokio)
 
 `maintain()` and `checkpoint()` can do real disk I/O (compaction, HNSW work,

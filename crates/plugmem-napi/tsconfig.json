@@ -1,0 +1,16 @@
+{
+  "//": "Type-checking only: compile the generated index.d.ts and the type test, emit nothing. The package ships the .d.ts napi generates, not anything built from here. `isolatedModules` + `verbatimModuleSyntax` are what Vite, esbuild and swc imply, and they are what makes an ambient `const enum` in a .d.ts unusable — so the gate has to run with them on, or it would not catch the class of problem it exists for.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "skipLibCheck": false,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true
+  },
+  "include": ["index.d.ts", "__test__/types.test-d.mts"]
+}

@@ -14,6 +14,8 @@ use napi_derive::napi;
 mod db;
 /// Typed result mirrors, so verbs return precise TypeScript interfaces.
 mod types;
+/// The `Workspace` class — many memories in one directory, addressed by name.
+mod workspace;
 
 /// The companion skill, embedded so a consumer can persist it next to the
 /// engine without a second download. Single source of truth: the repo-root

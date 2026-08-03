@@ -259,6 +259,51 @@ impl From<MaintainMode> for plugmem_host::MaintenanceOptions {
     }
 }
 
+/// One memory as the workspace registry knows it.
+///
+/// Hand-mapped rather than serde-round-tripped like the rest of this file:
+/// `DbEntry` carries a `DbName`, which is a validated newtype with no serde
+/// derive, and giving one to a public host type only so a wrapper could
+/// round-trip it would be the wrong direction of dependency.
+#[napi(object)]
+pub struct DbEntry {
+    /// The memory's name — its identity, and what `Workspace.open` takes.
+    pub db: String,
+    /// What it is for.
+    pub description: String,
+    /// Its tags.
+    pub tags: Vec<String>,
+    /// Its owner, if recorded.
+    pub owner: Option<String>,
+    /// Whether it is labelled archived.
+    pub archived: bool,
+}
+
+/// What a `Workspace.reindex()` pass did.
+#[napi(object)]
+pub struct ReindexReport {
+    /// Memories whose own description was copied into the registry.
+    pub indexed: Vec<String>,
+    /// Memories nobody has described. Not a fault — a memory works without a
+    /// description; it just cannot be found by one.
+    pub undescribed: Vec<String>,
+    /// Memories another process holds open, so this pass could not read them.
+    /// Named rather than skipped silently: the registry is knowingly incomplete.
+    pub busy: Vec<String>,
+}
+
+/// Something `Workspace.verify()` found. Reported, never repaired.
+#[napi(object)]
+pub struct WorkspaceProblem {
+    /// The memory it concerns (empty for a kind this binding does not know).
+    pub db: String,
+    /// What kind: `"missing"`, `"undescribed"`, `"stale"`, `"unreadable"`,
+    /// `"ambiguous-self"`. The same vocabulary the CLI prints in `--json`.
+    pub issue: String,
+    /// More detail, where the kind carries any.
+    pub detail: Option<String>,
+}
+
 /// Convert a host result into its typed JS mirror via a serde round-trip: the
 /// mirror's fields match the host type's serialized names, so serde maps them
 /// with no hand-written per-field code. Unmapped host fields (e.g. `Stats`'s
