@@ -36,6 +36,7 @@ mod settings;
 #[cfg(feature = "config")]
 mod settings_help;
 mod storage;
+mod workspace;
 
 pub use db::{Database, DatabaseBuilder, ExportedFact, FactSnapshot, RecoverReport};
 pub use embedder::{Embedder, NullEmbedder, OpenAiCompatEmbedder};
@@ -47,6 +48,7 @@ pub use settings::{Settings, SettingsError, read_config};
 #[cfg(feature = "config")]
 pub use settings_help::{SettingDoc, SettingScope, SettingsHelp, settings_help};
 pub use storage::{FileScratch, FileStorage, FsyncPolicy};
+pub use workspace::{DbName, MAX_DB_NAME, NameProblem, WorkspaceError, WorkspaceLayout};
 
 // The engine types a host caller works with, re-exported so simple
 // embedders need only this crate.
