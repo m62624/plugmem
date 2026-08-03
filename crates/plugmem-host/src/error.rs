@@ -48,12 +48,84 @@ pub enum HostError {
     Embed(String),
 }
 
+/// What to tell someone whose pool hit its ceiling.
+///
+/// Kept as one string in one place so the CLI, the MCP server and the Node
+/// binding say the same thing. The engine cannot say it: `plugmem-core` knows
+/// nothing about config files, and its message is therefore a bare byte count
+/// — true, and useless on its own.
+pub const MAX_BYTES_HINT: &str = "that ceiling is `max_bytes` (`[engine] max_bytes` in config.toml), \
+and it applies to each pool separately rather than to their sum. Its default is not a capacity \
+judgement — it is the figure that keeps every pool addressable where `usize` is 32 bits, so a \
+database written anywhere opens anywhere. Raising it costs exactly that portability: a 32-bit \
+host then refuses the file with a typed error instead of misreading it.";
+
 impl HostError {
+    /// The follow-up line for a pool that ran out of room, or `None` when this
+    /// error is something else.
+    ///
+    /// The number in the message is a setting; the setting has a name and one
+    /// specific trade-off. Callers that talk to a person should print this
+    /// after the error itself.
+    pub fn capacity_hint(&self) -> Option<&'static str> {
+        let Self::Engine(engine) = self else {
+            return None;
+        };
+        matches!(
+            engine,
+            plugmem_core::Error::CapacityExceeded { .. }
+                | plugmem_core::Error::Arena(plugmem_core::ArenaError::CapacityExceeded { .. })
+        )
+        .then_some(MAX_BYTES_HINT)
+    }
+
     /// Shorthand for wrapping an I/O error with its path.
     pub(crate) fn io(path: &std::path::Path, source: std::io::Error) -> Self {
         Self::Io {
             path: path.to_path_buf(),
             source,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pool_ceiling_carries_its_follow_up_and_nothing_else_does() {
+        // The engine's own message for this is a bare byte count — true, and
+        // useless to somebody who does not know the number is a setting. Every
+        // surface prints this line after it, so it has to actually attach.
+        for engine in [
+            plugmem_core::Error::CapacityExceeded { what: "vectors" },
+            plugmem_core::Error::Arena(plugmem_core::ArenaError::CapacityExceeded {
+                max_bytes: 65_536,
+            }),
+        ] {
+            let hint = HostError::Engine(engine).capacity_hint();
+            assert_eq!(hint, Some(MAX_BYTES_HINT));
+            assert!(hint.unwrap().contains("max_bytes"));
+        }
+
+        // Anything else must not: a lock conflict followed by a lecture about
+        // pool sizing is worse than no follow-up at all.
+        assert_eq!(
+            HostError::Engine(plugmem_core::Error::TooLarge {
+                what: "text",
+                len: 9_000,
+                max: 4_096,
+            })
+            .capacity_hint(),
+            None
+        );
+        assert_eq!(HostError::Embed("no provider".into()).capacity_hint(), None);
+        assert_eq!(
+            HostError::Locked {
+                path: PathBuf::from("/tmp/m.plugmem"),
+            }
+            .capacity_hint(),
+            None
+        );
     }
 }

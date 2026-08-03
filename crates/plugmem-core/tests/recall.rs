@@ -8,13 +8,7 @@ use plugmem_core::{Config, FactId, MemStorage, Memory, RecallQuery, RememberInpu
 use proptest::prelude::*;
 
 fn cfg() -> Config {
-    let mut cfg = Config::default();
-    cfg.shards_facts = 8;
-    cfg.shards_entities = 4;
-    cfg.shards_edges = 4;
-    cfg.shards_temporal = 4;
-    cfg.shards_postings = 16;
-    cfg
+    Config::default()
 }
 
 /// A fixed fixture: a user with preferences, a project with links, and
@@ -295,6 +289,73 @@ fn recall_is_deterministic_and_pure() {
     assert_eq!(mem.facts_len(), before);
 }
 
+/// Graph expansion stops once its caps are full instead of decoding a hub's
+/// whole edge list, and the prefix it keeps is the deterministic one each
+/// traversal order defines:
+///
+/// - the current graph is keyed by `(src, rel, dst)`, so it yields the
+///   lowest-id neighbours first;
+/// - `as_of` walks history backwards from the queried instant, so it yields
+///   the edges that most recently became true — the ones a caller asking
+///   "what was linked then" actually wants at the top.
+#[test]
+fn hub_expansion_is_capped_at_the_exhaustive_prefix() {
+    const LEAVES: u32 = 400; // far past the 128-edge / 64-entity caps
+    let mut mem = Memory::new(cfg()).unwrap();
+    let mut store = MemStorage::new();
+    mem.remember(
+        &mut store,
+        RememberInput {
+            entity: Some("hub"),
+            ..RememberInput::text(DAY, "hub anchor")
+        },
+    )
+    .unwrap();
+    // Leaves are created in id order, and `link` keys edges by
+    // `(src, rel, dst)`, so the expected walk order is leaf id order.
+    for i in 0..LEAVES {
+        let leaf = format!("leaf-{i:04}");
+        mem.remember(
+            &mut store,
+            RememberInput {
+                entity: Some("hub"),
+                links: &[("touches", leaf.as_str())],
+                ..RememberInput::text((2 + u64::from(i)) * DAY, "hub edge fact")
+            },
+        )
+        .unwrap();
+    }
+
+    let now = (LEAVES as u64 + 10) * DAY;
+    for as_of in [None, Some(now)] {
+        let result = mem
+            .recall(RecallQuery {
+                entities: &["hub"],
+                as_of,
+                k: 64,
+                token_budget: Some(4096),
+                ..RecallQuery::text(now, "")
+            })
+            .unwrap();
+        let label = if as_of.is_some() { "as_of" } else { "current" };
+        assert_eq!(result.edges.len(), 128, "{label}: edge cap");
+        let dsts: Vec<u32> = result.edges.iter().map(|e| e.dst.0).collect();
+        let hub = result.edges[0].src;
+        assert!(
+            result.edges.iter().all(|e| e.src == hub),
+            "{label}: every edge leaves the hub"
+        );
+        // Leaf entities were created in ascending id order, one per round, so
+        // id order and time order are the same sequence read from either end.
+        let start = dsts[0];
+        let expected: Vec<u32> = match as_of {
+            None => (start..start + 128).collect(),
+            Some(_) => (start - 127..=start).rev().collect(),
+        };
+        assert_eq!(dsts, expected, "{label}: prefix of the exhaustive walk");
+    }
+}
+
 #[test]
 fn reused_result_buffers_are_equivalent_to_fresh_ones() {
     let (mem, _) = fixture();
@@ -356,5 +417,55 @@ proptest! {
                 prop_assert!(names.contains(q), "fact {:?} misses tag {q}", fact.id);
             }
         }
+    }
+
+    /// The tag filter must lose nothing, not merely admit nothing wrong.
+    ///
+    /// `results_are_subsets_of_the_allow_set` above proves one direction, and
+    /// a filter that dropped members would still satisfy it. The membership
+    /// test in front of the allow-set is a Bloom filter, whose whole
+    /// correctness claim is that it has no false negatives, so the other
+    /// direction needs its own property: on a corpus small enough that no
+    /// source cap binds, a tagged query must return exactly the untagged
+    /// result restricted to the facts that carry the tags.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn the_tag_filter_drops_nothing_it_should_keep(
+        tagged in proptest::collection::vec(proptest::collection::vec(0usize..4, 0..3), 1..25),
+        query_tags in proptest::collection::vec(0usize..4, 1..3),
+    ) {
+        let pool = ["a", "b", "c", "d"];
+        let mut mem = Memory::new(cfg()).unwrap();
+        let mut store = MemStorage::new();
+        for (i, tags) in tagged.iter().enumerate() {
+            let tags: Vec<&str> = tags.iter().map(|&t| pool[t]).collect();
+            mem.remember(&mut store, RememberInput {
+                tags: &tags,
+                ..RememberInput::text((i as u64 + 1) * DAY, "common searchable text")
+            }).unwrap();
+        }
+        let query: Vec<&str> = query_tags.iter().map(|&t| pool[t]).collect();
+        let plain = mem.recall(RecallQuery {
+            k: 64,
+            ..RecallQuery::text(100 * DAY, "common searchable text")
+        }).unwrap();
+        let filtered = mem.recall(RecallQuery {
+            tags: &query,
+            k: 64,
+            ..RecallQuery::text(100 * DAY, "common searchable text")
+        }).unwrap();
+
+        let mut tag_buf = Vec::new();
+        let mut expected = Vec::new();
+        for fact in &plain.facts {
+            tag_buf.clear();
+            mem.tags_of(fact.id, &mut tag_buf);
+            let names: Vec<&str> = tag_buf.iter().map(|&t| mem.term(t)).collect();
+            if query.iter().all(|q| names.contains(q)) {
+                expected.push(fact.id);
+            }
+        }
+        let got: Vec<_> = filtered.facts.iter().map(|f| f.id).collect();
+        prop_assert_eq!(got, expected, "tags {:?}", query);
     }
 }

@@ -8,9 +8,9 @@
 `plugmem-host` is the `std` host layer for the plugmem
 [temporal-memory engine](https://docs.rs/plugmem-core/latest). It supplies
 what the `no_std` engine does not own — files, locking, and network — so from
-this one crate a Rust program gets `remember / recall / revise / forget` backed
-by durable storage. It re-exports the engine, so **this one crate is all a Rust
-program needs.**
+this one crate a Rust program gets `remember / recall / revise / forget` plus
+graph `link`/`unlink`, backed by durable storage. It re-exports the engine, so
+**this one crate is all a Rust program needs.**
 
 ## Which crate do I need?
 
@@ -76,12 +76,14 @@ The retrieval above lives in the engine; this crate adds the OS side:
   copy-on-write), so opening a multi-gigabyte database to append one fact
   no longer copies the whole image into RAM. A snapshot materializes the
   base + overlay into a fresh file and re-maps it. Validation is lazy (the
-  SQLite model): an open checks only the record metadata, so the large text,
-  vector and per-fact-metadata pools stay non-resident until a query touches
-  them — a measured open residents well under half of a text-heavy image. The default open
-  trusts the file and never checksums the whole image (the SQLite model),
-  so it stays sparse; corruption is caught when the bad record is read
-  (never a panic), or on demand with `verify()` (content) and `scrub()`
+  SQLite model): an open range-checks the record metadata and nothing else, so
+  the large text, vector and per-fact-metadata pools stay non-resident until a
+  query touches them — a measured open residents well under half of a
+  text-heavy image. What that guarantees is precise and worth stating: **no
+  stored id can make a read unsafe. It does not mean the data agrees with
+  itself.** The default open never checksums the image either, so it stays
+  sparse; corruption is caught when the bad record is read (never a panic), or
+  on demand with `verify()` (content *and* graph consistency) and `scrub()`
   (byte-level container integrity) — see **Integrity & recovery** below;
 - **Maintenance policy** — auto-snapshot and optional auto-`maintain`,
   run inline (no background threads);
@@ -129,15 +131,23 @@ println!("{}", out.rendered);
 ## Benchmarks
 
 ```text
+cargo run -p plugmem-host --example edge_lifecycle
+cargo run -p plugmem-host --example maintain_modes
 cargo run --release -p plugmem-host --example bench_database -- 100000 --diagnose-recall | tee database-benchmark-100k.tsv
 cargo run --release -p plugmem-host --example bench_database -- 1000000 --diagnose-recall | tee database-benchmark-1m.tsv
 cat database-benchmark-100k.tsv database-benchmark-1m.tsv > database-benchmark-scale.tsv
 cargo run -p plugmem-bench-charts -- database-benchmark-scale.tsv --force
+cargo run --release -p plugmem-host --example bench_edges -- 100000 | tee edge-benchmark-100k.tsv
+cargo run --release -p plugmem-host --example bench_edges -- 1000000 | tee edge-benchmark-1m.tsv
+cat edge-benchmark-100k.tsv edge-benchmark-1m.tsv > edge-benchmark-scale.tsv
+cargo run -p plugmem-bench-charts -- edge-benchmark-scale.tsv --force
 cargo bench -p plugmem-host
 ```
 
-The committed `assets/database-*.svg` charts are generated from the 1M run.
-![Recall latency at 100k versus 1M operations](assets/database-recall-scale-100k-1m.svg)
+The committed `assets/database-*.svg` charts are generated from the database
+runs; `assets/edge-lifecycle-*.svg` charts are generated from `bench_edges`.
+![Recall latency at 5k, 100k and 1M operations](assets/database-recall-scale.svg)
+![Edge lifecycle graph recall at 100k versus 1M edges](assets/edge-lifecycle-recall-100k-1m.svg)
 
 For the same-workload comparison between 100k and 1M, see the
 [measured scale table on GitHub](https://github.com/m62624/plugmem#measured-scale).
@@ -179,6 +189,29 @@ Journal appends are fsynced per operation by default
 journal tail for speed. On open, the journal is replayed over the
 snapshot deterministically; a torn tail from a crash mid-append is
 detected, dropped and reported.
+
+## Workspaces (optional)
+
+**Default: one `Database`, one file.** `Workspace` is for a process serving many
+independent memories — a directory of named databases, opened on demand and
+pooled, plus an optional registry of what each is for.
+
+```rust,no_run
+use plugmem_host::{DbName, IfMissing, Settings};
+
+let ws = Settings::load(None)?.open_workspace("/srv/bot".as_ref())?;
+let db = ws.get(&DbName::parse("chat-42")?, now_ms, IfMissing::Create)?;
+# fn now_ms() -> u64 { 0 }
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+A name is `[a-z0-9][a-z0-9_-]*` and cannot represent a path, so it resolves to
+exactly one file inside the directory. The pool bounds how many stay open;
+`close_idle` releases the rest, which matters because an open writer holds the
+file's exclusive lock — the timeout is a liveness setting, not a memory one.
+
+The core is untouched by any of this: one `Memory` is still one database.
+See [`specs/10-workspace.md`](https://github.com/m62624/plugmem/blob/main/specs/10-workspace.md).
 
 ## Concurrency model
 
@@ -264,7 +297,7 @@ error or a repaired file.
 
 | call | checks | cost |
 |---|---|---|
-| `verify()` | *content* consistency — stored text is valid UTF-8, the fact↔vector-slot bijection holds | one linear pass over the text + vector pools |
+| `verify()` | everything an open defers — stored text is valid UTF-8, metadata blobs decode, the fact↔vector-slot bijection holds, and the graph agrees with itself (both edge mirrors, a current edge against its open version, every open version reachable as a current edge) | one linear pass over the text + vector pools, plus a lookup per edge |
 | `scrub()` | *byte-level* container integrity — each section's stored xxh3 and the whole-file hash (the ZFS-scrub model) | resumable; a read-handle op |
 | `recover()` | *salvage* — drop the content-corrupt facts, rebuild, write a clean copy | rebuilds in RAM ≈ image size |
 
@@ -334,10 +367,36 @@ threads, matching the engine's own philosophy:
 | `snapshot_every_ops` | 1024 | full snapshot + journal reset after N mutations |
 | `snapshot_journal_bytes` | 4 MiB | …or when the journal outgrows this |
 | `maintain_every_forgets` | off | optional auto-`maintain` (physical purge) |
+| — | always on | re-shard when the layout no longer fits the data |
 
-`maintain` is O(database) and the first pass beyond the HNSW threshold
-pays the vector-graph build (~1.6 ms per vector) — which is why it is
-explicit by default: call `db.maintain(now)` on your schedule.
+`maintain` is policy-driven. The default `Auto` path first checks whether
+anything is pending; with no tombstones, stale text index or vector tail to
+optimize, it returns a no-op report without rewriting the snapshot. When work
+is pending, host maintenance stays disk-first: text and vector pools stream
+through scratch files, ordinary BM25 compaction filters existing postings, and
+HNSW work is bounded unless a full rebuild is explicitly requested.
+
+`maintain_with_options` selects the policy explicitly. No mode ever drops a
+fact revision or an edge version — what the heavier modes buy is bytes and
+index freshness, never less history.
+
+| mode | what it does | cost |
+|---|---|---|
+| `Auto` | only pending work; no-op when there is none | bounded |
+| `Compact` | purge tombstones, compact storage and indexes | O(live records) |
+| `ReindexText` | rebuild BM25 by re-tokenizing stored text | O(text) |
+| `OptimizeVectors` | build or advance the vector graph | O(vectors) |
+| `Full` | rebuild everything, fully optimize vectors, repack the edge arenas | O(database) |
+
+`Full` is the only mode that repacks the edge arenas. Relinking many relations
+fragments them — the incoming mirror is keyed by the far endpoint, so
+interleaved runs keep splitting pages in half — and rewriting them in key
+order packs the pages again. Measured over 200 relations relinked 1000 times
+(200k retained versions): 31.9 MB → 23.4 MB, 59 ms, every version kept.
+
+The same selection is exposed by `plugmem maintain --mode <mode>`, the
+`mode` argument of the MCP `plugmem_maintain` tool, and `maintain(mode?)` in
+the Node bindings.
 
 ## Embedders
 

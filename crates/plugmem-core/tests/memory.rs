@@ -3,20 +3,15 @@
 //! property: replaying the journal reproduces the direct execution.
 
 use plugmem_core::{
-    Config, Error, FactId, LinkInput, MemStorage, Memory, RememberInput, Storage, VALID_TO_OPEN,
+    Config, Error, FactId, LinkInput, MemStorage, Memory, RecallQuery, RememberInput, Storage,
+    UnlinkInput, VALID_TO_OPEN,
 };
 #[cfg(not(target_family = "wasm"))]
 use proptest::prelude::*;
 
 /// A small-sharded config (tests don't need 1024-shard arenas).
 fn cfg() -> Config {
-    let mut cfg = Config::default();
-    cfg.shards_facts = 8;
-    cfg.shards_entities = 4;
-    cfg.shards_edges = 4;
-    cfg.shards_temporal = 4;
-    cfg.shards_postings = 16;
-    cfg
+    Config::default()
 }
 
 fn engine() -> (Memory<'static>, MemStorage) {
@@ -230,10 +225,27 @@ fn links_create_edges_and_input_limits_hold() {
         },
     )
     .unwrap();
+    assert_eq!(mem.stats().edge_versions, 1);
     mem.link(
         &mut store,
         LinkInput {
             now: 4,
+            src: "user",
+            rel: "works_on",
+            dst: "plugmem",
+            provenance: Some(f.id),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        mem.stats().edge_versions,
+        1,
+        "same edge and provenance is a no-op"
+    );
+    mem.link(
+        &mut store,
+        LinkInput {
+            now: 5,
             src: "plugmem",
             rel: "depends_on",
             dst: "tokio",
@@ -250,7 +262,7 @@ fn links_create_edges_and_input_limits_hold() {
             &mut store,
             RememberInput {
                 tags: &tags,
-                ..RememberInput::text(5, "x")
+                ..RememberInput::text(6, "x")
             },
         )
         .unwrap_err();
@@ -369,9 +381,19 @@ fn journal_replay_reproduces_direct_execution() {
         },
     )
     .unwrap();
+    mem.unlink(
+        &mut store,
+        UnlinkInput {
+            now: 600,
+            src: "plugmem",
+            rel: "depends_on",
+            dst: "tokio",
+        },
+    )
+    .unwrap();
 
     let (reopened, report) = Memory::open(&mut store, cfg()).unwrap();
-    assert_eq!(report.replayed, 5);
+    assert_eq!(report.replayed, 6);
     assert_eq!(report.skipped, 0);
     assert!(!report.truncated_tail);
     assert_observably_equal(&mem, &reopened);
@@ -379,6 +401,7 @@ fn journal_replay_reproduces_direct_execution() {
 
 /// Compares every fact view, tag set and entity count of two engines.
 fn assert_observably_equal(a: &Memory<'_>, b: &Memory<'_>) {
+    assert_eq!(a.stats(), b.stats());
     assert_eq!(a.facts_len(), b.facts_len());
     assert_eq!(a.entities_len(), b.entities_len());
     for id in 0..a.facts_len() as u32 {
@@ -396,6 +419,23 @@ fn assert_observably_equal(a: &Memory<'_>, b: &Memory<'_>) {
             (x, y) => panic!("fact {id:?} presence differs: {x:?} vs {y:?}"),
         }
     }
+    let current = RecallQuery {
+        entities: &["plugmem"],
+        ..RecallQuery::text(700, "")
+    };
+    assert_eq!(
+        a.recall(current).unwrap().edges,
+        b.recall(current).unwrap().edges
+    );
+    let historical = RecallQuery {
+        entities: &["plugmem"],
+        as_of: Some(550),
+        ..RecallQuery::text(700, "")
+    };
+    assert_eq!(
+        a.recall(historical).unwrap().edges,
+        b.recall(historical).unwrap().edges
+    );
 }
 
 #[test]
@@ -572,6 +612,107 @@ fn similar_detection_surfaces_conflicts_but_never_acts() {
     );
 }
 
+/// The similar-detection prefilter must not change the answer.
+///
+/// `find_similar` skips reading a candidate's text when the term-set summary
+/// proves the overlap cannot reach `similar_jaccard`. This checks that claim
+/// against the definition rather than against the previous implementation:
+/// the expected hints are recomputed here from the raw Jaccard of the
+/// tokenized texts, so a prefilter that dropped one — or invented one — shows
+/// up as a mismatch.
+///
+/// The corpus is built to land *on* the interesting region: every text shares
+/// a prefix with the query text and differs by a growing tail, so the overlaps
+/// sweep from well above the threshold down through it to well below.
+#[test]
+fn similar_prefilter_matches_exhaustive_jaccard() {
+    use plugmem_core::tokenizer::Tokenizer;
+    use std::collections::BTreeSet;
+
+    let mut tokenizer = Tokenizer::new();
+    let terms = |tokenizer: &mut Tokenizer, text: &str| -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        tokenizer.tokenize(text, &mut |token| {
+            out.insert(token.to_owned());
+        });
+        out
+    };
+
+    const SHARED: &str = "alpha beta gamma delta epsilon zeta eta theta";
+    let extras = [
+        "",
+        "iota",
+        "iota kappa",
+        "iota kappa lambda",
+        "iota kappa lambda mu",
+    ];
+    // Truncated prefixes of the shared part, so overlaps also shrink from the
+    // other direction.
+    let heads: Vec<&str> = vec![
+        SHARED,
+        "alpha beta gamma delta epsilon zeta",
+        "alpha beta gamma delta",
+        "alpha beta",
+        "alpha",
+    ];
+    let mut texts = Vec::new();
+    for head in &heads {
+        for extra in &extras {
+            texts.push(if extra.is_empty() {
+                (*head).to_owned()
+            } else {
+                format!("{head} {extra}")
+            });
+        }
+    }
+
+    let (mut mem, mut store) = engine();
+    let threshold = cfg().similar_jaccard;
+    // Fact id -> its term set, for the reference computation.
+    let mut inserted: Vec<(FactId, BTreeSet<String>)> = Vec::new();
+    let mut hinted_at_all = 0usize;
+
+    for (i, text) in texts.iter().enumerate() {
+        let new_terms = terms(&mut tokenizer, text);
+        // What an exhaustive comparison against every live earlier fact of the
+        // entity would report, in the engine's own order.
+        let mut expected: Vec<(FactId, f32)> = inserted
+            .iter()
+            .filter_map(|(id, cand)| {
+                let both = cand.intersection(&new_terms).count();
+                let union = cand.len() + new_terms.len() - both;
+                let jaccard = both as f32 / union as f32;
+                (jaccard > threshold).then_some((*id, jaccard))
+            })
+            .collect();
+        expected.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        expected.truncate(8);
+
+        let out = mem
+            .remember(
+                &mut store,
+                RememberInput {
+                    entity: Some("subject"),
+                    ..RememberInput::text(1000 + i as u64, text)
+                },
+            )
+            .unwrap();
+        let got: Vec<(FactId, f32)> = out.similar.iter().map(|s| (s.id, s.score)).collect();
+        assert_eq!(got, expected, "hints for {text:?} diverged from Jaccard");
+        if !got.is_empty() {
+            hinted_at_all += 1;
+        }
+        inserted.push((out.id, new_terms));
+    }
+
+    // A corpus that never triggers a hint would pass the comparison while
+    // proving nothing about the prefilter's ability to let one through.
+    assert!(
+        hinted_at_all >= 5,
+        "the corpus must exercise the accepting side too, got {hinted_at_all}"
+    );
+}
+
 #[test]
 fn remember_batch_imports_and_skips_similar() {
     let (mut mem, mut store) = engine();
@@ -609,14 +750,310 @@ fn remember_batch_imports_and_skips_similar() {
 }
 
 #[test]
+fn unlink_closes_current_edge_but_preserves_as_of_history() {
+    let (mut mem, mut store) = engine();
+    let provenance = mem
+        .remember(
+            &mut store,
+            RememberInput {
+                entity: Some("user"),
+                ..RememberInput::text(10, "user works on plugmem")
+            },
+        )
+        .unwrap()
+        .id;
+    mem.link(
+        &mut store,
+        LinkInput {
+            now: 20,
+            src: "user",
+            rel: "works_on",
+            dst: "plugmem",
+            provenance: Some(provenance),
+        },
+    )
+    .unwrap();
+
+    let current = mem
+        .recall(RecallQuery {
+            entities: &["user"],
+            ..RecallQuery::text(30, "")
+        })
+        .unwrap();
+    assert_eq!(current.edges.len(), 1);
+    assert_eq!(mem.stats().edges, 1);
+    assert_eq!(mem.stats().edge_versions, 1);
+
+    assert!(
+        mem.unlink(
+            &mut store,
+            UnlinkInput {
+                now: 40,
+                src: "user",
+                rel: "works_on",
+                dst: "plugmem",
+            },
+        )
+        .unwrap()
+    );
+    assert_eq!(mem.stats().edges, 0);
+    assert_eq!(mem.stats().edge_versions, 1);
+    let after = mem
+        .recall(RecallQuery {
+            entities: &["user"],
+            ..RecallQuery::text(50, "")
+        })
+        .unwrap();
+    assert!(after.edges.is_empty());
+
+    let historical = mem
+        .recall(RecallQuery {
+            entities: &["user"],
+            as_of: Some(30),
+            ..RecallQuery::text(50, "")
+        })
+        .unwrap();
+    assert_eq!(historical.edges.len(), 1);
+    assert_eq!(historical.edges[0].provenance, provenance);
+    assert!(
+        !mem.unlink(
+            &mut store,
+            UnlinkInput {
+                now: 60,
+                src: "user",
+                rel: "works_on",
+                dst: "plugmem",
+            },
+        )
+        .unwrap(),
+        "unlink is idempotent after the current edge is closed"
+    );
+}
+
+#[test]
+fn unlink_missing_edge_is_idempotent_and_does_not_create_names() {
+    let (mut mem, mut store) = engine();
+    let before = mem.stats();
+    assert!(
+        !mem.unlink(
+            &mut store,
+            UnlinkInput {
+                now: 1,
+                src: "missing src",
+                rel: "missing_rel",
+                dst: "missing dst",
+            },
+        )
+        .unwrap()
+    );
+    let after = mem.stats();
+    assert_eq!(after.entities, before.entities);
+    assert_eq!(after.terms, before.terms);
+    assert_eq!(after.edges, 0);
+    assert_eq!(after.edge_versions, 0);
+}
+
+#[test]
+fn unlink_before_edge_valid_from_closes_at_valid_from() {
+    let (mut mem, mut store) = engine();
+    mem.link(
+        &mut store,
+        LinkInput {
+            now: 20,
+            src: "user",
+            rel: "uses",
+            dst: "plugmem",
+            provenance: None,
+        },
+    )
+    .unwrap();
+    assert!(
+        mem.unlink(
+            &mut store,
+            UnlinkInput {
+                now: 10,
+                src: "user",
+                rel: "uses",
+                dst: "plugmem",
+            },
+        )
+        .unwrap()
+    );
+
+    let before = mem
+        .recall(RecallQuery {
+            entities: &["user"],
+            as_of: Some(19),
+            ..RecallQuery::text(30, "")
+        })
+        .unwrap();
+    let at_start = mem
+        .recall(RecallQuery {
+            entities: &["user"],
+            as_of: Some(20),
+            ..RecallQuery::text(30, "")
+        })
+        .unwrap();
+    assert!(before.edges.is_empty());
+    assert!(
+        at_start.edges.is_empty(),
+        "a backdated unlink produces an empty validity interval, not an underflow"
+    );
+}
+
+#[test]
+fn relink_after_unlink_creates_a_new_edge_version() {
+    let (mut mem, mut store) = engine();
+    mem.link(
+        &mut store,
+        LinkInput {
+            now: 10,
+            src: "user",
+            rel: "uses",
+            dst: "plugmem",
+            provenance: None,
+        },
+    )
+    .unwrap();
+    mem.unlink(
+        &mut store,
+        UnlinkInput {
+            now: 20,
+            src: "user",
+            rel: "uses",
+            dst: "plugmem",
+        },
+    )
+    .unwrap();
+    mem.link(
+        &mut store,
+        LinkInput {
+            now: 30,
+            src: "user",
+            rel: "uses",
+            dst: "plugmem",
+            provenance: None,
+        },
+    )
+    .unwrap();
+    let stats = mem.stats();
+    assert_eq!(stats.edges, 1);
+    assert_eq!(stats.edge_versions, 2);
+    assert_eq!(stats.next_edge, 2);
+
+    let before = mem
+        .recall(RecallQuery {
+            entities: &["user"],
+            as_of: Some(15),
+            ..RecallQuery::text(40, "")
+        })
+        .unwrap();
+    let gap = mem
+        .recall(RecallQuery {
+            entities: &["user"],
+            as_of: Some(25),
+            ..RecallQuery::text(40, "")
+        })
+        .unwrap();
+    let after = mem
+        .recall(RecallQuery {
+            entities: &["user"],
+            as_of: Some(35),
+            ..RecallQuery::text(40, "")
+        })
+        .unwrap();
+    assert_eq!(before.edges.len(), 1);
+    assert!(gap.edges.is_empty());
+    assert_eq!(after.edges.len(), 1);
+}
+
+#[test]
+fn relink_with_new_provenance_closes_previous_edge_version() {
+    let (mut mem, mut store) = engine();
+    let first = mem
+        .remember(
+            &mut store,
+            RememberInput {
+                entity: Some("user"),
+                ..RememberInput::text(10, "user uses plugmem")
+            },
+        )
+        .unwrap()
+        .id;
+    let second = mem
+        .remember(
+            &mut store,
+            RememberInput {
+                entity: Some("user"),
+                ..RememberInput::text(20, "the relationship source changed")
+            },
+        )
+        .unwrap()
+        .id;
+    mem.link(
+        &mut store,
+        LinkInput {
+            now: 30,
+            src: "user",
+            rel: "uses",
+            dst: "plugmem",
+            provenance: Some(first),
+        },
+    )
+    .unwrap();
+    mem.link(
+        &mut store,
+        LinkInput {
+            now: 40,
+            src: "user",
+            rel: "uses",
+            dst: "plugmem",
+            provenance: Some(second),
+        },
+    )
+    .unwrap();
+
+    let stats = mem.stats();
+    assert_eq!(stats.edges, 1);
+    assert_eq!(stats.edge_versions, 2);
+    assert_eq!(stats.next_edge, 2);
+    let old = mem
+        .recall(RecallQuery {
+            entities: &["user"],
+            as_of: Some(35),
+            ..RecallQuery::text(50, "")
+        })
+        .unwrap();
+    let current = mem
+        .recall(RecallQuery {
+            entities: &["user"],
+            ..RecallQuery::text(50, "")
+        })
+        .unwrap();
+    assert_eq!(old.edges.len(), 1);
+    assert_eq!(old.edges[0].provenance, first);
+    assert_eq!(current.edges.len(), 1);
+    assert_eq!(current.edges[0].provenance, second);
+}
+
+#[test]
 fn stats_report_engine_counters() {
     let (mut mem, mut store) = engine();
     let empty = mem.stats();
     assert_eq!(
-        (empty.facts, empty.entities, empty.terms, empty.edges),
-        (0, 0, 0, 0)
+        (
+            empty.facts,
+            empty.entities,
+            empty.terms,
+            empty.edges,
+            empty.edge_versions
+        ),
+        (0, 0, 0, 0, 0)
     );
-    assert_eq!((empty.next_fact, empty.next_entity), (0, 0));
+    assert_eq!(
+        (empty.next_fact, empty.next_entity, empty.next_edge),
+        (0, 0, 0)
+    );
     assert_eq!(empty.vectors, 0);
     assert_eq!(empty.pool_bytes, 0);
 
@@ -634,8 +1071,11 @@ fn stats_report_engine_counters() {
         .unwrap();
 
     let s = mem.stats();
-    assert_eq!((s.facts, s.entities, s.edges), (2, 2, 1));
-    assert_eq!((s.next_fact, s.next_entity), (2, 2));
+    assert_eq!(
+        (s.facts, s.entities, s.edges, s.edge_versions),
+        (2, 2, 1, 1)
+    );
+    assert_eq!((s.next_fact, s.next_entity, s.next_edge), (2, 2, 1));
     assert!(s.terms > 0, "tokens, tags and names were interned");
     assert!(s.pool_bytes > 0, "pools hold the records and texts");
 }

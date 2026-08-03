@@ -46,9 +46,9 @@ use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use memmap2::Mmap;
 use plugmem_core::{
-    Config, Error, FactFault, FactRecord, LinkInput, MaintainReport, MemStorage, Memory,
-    OpenReport, RecallQuery, RecallResult, RecallScratch, RememberInput, RememberOutcome, Stats,
-    Storage,
+    Config, Error, FactFault, FactRecord, LinkInput, MaintainReport, MaintenanceMode,
+    MaintenanceOptions, MemStorage, Memory, OpenReport, RecallQuery, RecallResult, RecallScratch,
+    RememberInput, RememberOutcome, Stats, Storage, UnlinkInput,
 };
 
 thread_local! {
@@ -193,6 +193,20 @@ pub struct ExportedFact {
     pub valid_from: u64,
 }
 
+/// One bounded page of currently-open facts.
+///
+/// `next_cursor` is the next fact id to inspect, not an offset into `facts`:
+/// closed, tombstoned, and purged ids are skipped without making the caller
+/// rescan them. `None` means the scan reached the database's current end.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ExportPage {
+    /// The open facts found in this page, in fact-id order.
+    pub facts: Vec<ExportedFact>,
+    /// Pass this to the next [`Database::export_page`] call.
+    pub next_cursor: Option<u32>,
+}
+
 /// The outcome of a [`Database::recover`] salvage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -226,33 +240,63 @@ pub(crate) fn metadata_map(mem: &Memory, id: plugmem_core::FactId) -> BTreeMap<S
         .collect()
 }
 
+fn exported_fact(
+    mem: &Memory,
+    id: plugmem_core::FactId,
+    terms: &mut Vec<plugmem_core::TermId>,
+) -> Option<ExportedFact> {
+    use plugmem_core::{EntityId, VALID_TO_OPEN};
+    let view = mem.get(id)?;
+    if view.record.valid_to != VALID_TO_OPEN {
+        return None; // a closed revision — export the current state only
+    }
+    let entity = (view.record.entity != EntityId::NONE)
+        .then(|| mem.entity_name(view.record.entity))
+        .flatten()
+        .map(str::to_string);
+    terms.clear();
+    mem.tags_of(id, terms);
+    let tags = terms.iter().map(|t| mem.term(*t).to_string()).collect();
+    Some(ExportedFact {
+        text: view.text.to_string(),
+        entity,
+        tags,
+        metadata: metadata_map(mem, id),
+        recorded_at: view.record.recorded_at,
+        valid_from: view.record.valid_from,
+    })
+}
+
 pub(crate) fn export_facts_each(mem: &Memory, mut f: impl FnMut(ExportedFact)) {
-    use plugmem_core::{EntityId, FactId, VALID_TO_OPEN};
+    use plugmem_core::FactId;
     let next = mem.stats().next_fact;
     let mut terms = Vec::new();
     for i in 0..next {
-        let id = FactId(i);
-        let Some(view) = mem.get(id) else {
-            continue; // unknown or tombstoned
-        };
-        if view.record.valid_to != VALID_TO_OPEN {
-            continue; // a closed revision — export the current state only
+        if let Some(fact) = exported_fact(mem, FactId(i), &mut terms) {
+            f(fact);
         }
-        let entity = (view.record.entity != EntityId::NONE)
-            .then(|| mem.entity_name(view.record.entity))
-            .flatten()
-            .map(str::to_string);
-        terms.clear();
-        mem.tags_of(id, &mut terms);
-        let tags = terms.iter().map(|t| mem.term(*t).to_string()).collect();
-        f(ExportedFact {
-            text: view.text.to_string(),
-            entity,
-            tags,
-            metadata: metadata_map(mem, id),
-            recorded_at: view.record.recorded_at,
-            valid_from: view.record.valid_from,
-        });
+    }
+}
+
+pub(crate) fn export_facts_page(mem: &Memory, cursor: u32, limit: usize) -> ExportPage {
+    use plugmem_core::FactId;
+    let end = mem.stats().next_fact;
+    let mut cursor = cursor.min(end);
+    let stop = cursor
+        .saturating_add(limit.min(u32::MAX as usize) as u32)
+        .min(end);
+    let mut terms = Vec::new();
+    let mut facts = Vec::with_capacity((stop - cursor) as usize);
+    while cursor < stop {
+        let id = FactId(cursor);
+        cursor += 1;
+        if let Some(fact) = exported_fact(mem, id, &mut terms) {
+            facts.push(fact);
+        }
+    }
+    ExportPage {
+        facts,
+        next_cursor: (cursor < end).then_some(cursor),
     }
 }
 
@@ -538,6 +582,23 @@ impl Database {
             engine.with(store, |mem, store| mem.maintain(store, now))?;
             st.forgets = 0;
         }
+        // A database that outgrows its shard layout re-shards itself. This is
+        // on by default, unlike `maintain_every_forgets`, because without it
+        // nothing would ever move a layout: a growing database would keep the
+        // one it was created with until somebody ran `maintain` by hand, and
+        // the cost of that is silent — memory, and a page directory that keeps
+        // lengthening.
+        //
+        // Affordable because both halves are bounded. The question is O(1)
+        // (stored record counts), so asking on every write is free; and the
+        // answer is self-limiting — the thresholds are a doubling up and a
+        // fourfold drop, so it says yes a handful of times over a database's
+        // whole life. `resharding_settles_instead_of_asking_forever` in the
+        // core suite is the test that keeps that true.
+        let State { engine, store, .. } = &mut *st;
+        if engine.with(store, |mem, _| mem.shard_layout_is_stale()) {
+            engine.with(store, |mem, store| mem.maintain(store, now))?;
+        }
         let by_ops = self.inner.snapshot_every_ops > 0 && st.ops >= self.inner.snapshot_every_ops;
         let by_bytes = self.inner.snapshot_journal_bytes > 0
             && st.store.journal_bytes() >= self.inner.snapshot_journal_bytes;
@@ -711,6 +772,15 @@ impl Database {
         Ok(())
     }
 
+    /// Closes a typed edge. Returns `false` when the edge is already absent.
+    pub fn unlink(&self, input: UnlinkInput<'_>) -> Result<bool, HostError> {
+        let mut st = self.write();
+        let State { engine, store, .. } = &mut *st;
+        let fresh = engine.with(store, |mem, store| mem.unlink(store, input))?;
+        self.after_mutation(&mut st, input.now)?;
+        Ok(fresh)
+    }
+
     /// An owned copy of one fact, or `None` for unknown/tombstoned ids.
     pub fn get(&self, id: plugmem_core::FactId) -> Option<FactSnapshot> {
         self.read().engine.read(|mem| {
@@ -719,6 +789,19 @@ impl Database {
                 text: v.text.to_string(),
                 metadata: metadata_map(mem, id),
             })
+        })
+    }
+
+    /// One fact's tags, or an empty vector for an unknown or tombstoned id.
+    ///
+    /// [`FactSnapshot`] carries text and metadata but not tags, so without this
+    /// the only way to read one fact's tags is [`Database::export`] — a full
+    /// scan to answer a question about a single id.
+    pub fn tags_of(&self, id: plugmem_core::FactId) -> Vec<String> {
+        self.read().engine.read(|mem| {
+            let mut terms = Vec::new();
+            mem.tags_of(id, &mut terms);
+            terms.iter().map(|t| mem.term(*t).to_string()).collect()
         })
     }
 
@@ -742,8 +825,24 @@ impl Database {
         self.read().engine.read(|mem| export_facts_each(mem, f));
     }
 
-    /// Runs a maintenance pass now (purge, compaction, HNSW build past the
-    /// threshold — for the cost model).
+    /// Inspects at most `limit` fact ids starting at `cursor` and returns the
+    /// ones that are currently open. A sparse page may therefore contain fewer
+    /// facts, including zero, while still carrying a `next_cursor`.
+    ///
+    /// This is the pull-based counterpart to [`export_each`](Self::export_each):
+    /// it releases the database read guard before returning, so a boundary
+    /// caller can process the page, apply backpressure, or write to the database
+    /// without a callback running under this lock. Mutations between page calls
+    /// are visible to later pages; use a stable read-only checkpoint when
+    /// snapshot-consistent paging is required.
+    pub fn export_page(&self, cursor: u32, limit: std::num::NonZeroUsize) -> ExportPage {
+        self.read()
+            .engine
+            .read(|mem| export_facts_page(mem, cursor, limit.get()))
+    }
+
+    /// Runs a maintenance pass now (cheap no-op, purge/compaction, text
+    /// reindex, and/or bounded HNSW work — for the cost model).
     ///
     /// **Disk-first** (milestone H): the compacted image is written by streaming
     /// the two big pools (vectors, text) through temp files and then re-mapped,
@@ -755,6 +854,15 @@ impl Database {
     ///
     /// The report's byte counts are the on-disk image size before and after.
     pub fn maintain(&self, now: u64) -> Result<MaintainReport, HostError> {
+        self.maintain_with_options(now, MaintenanceOptions::auto())
+    }
+
+    /// Runs a maintenance pass with explicit policy.
+    pub fn maintain_with_options(
+        &self,
+        now: u64,
+        options: MaintenanceOptions,
+    ) -> Result<MaintainReport, HostError> {
         let mut st = self.write();
         // The image size is the current snapshot generation's, not the tiny
         // manifest at the base path.
@@ -768,6 +876,30 @@ impl Database {
                 .unwrap_or(0)
         };
         let bytes_before = snap_len(&st.store);
+        if !st.engine.read(|mem| mem.maintenance_needed(options)) {
+            let mut report = st
+                .engine
+                .read(|mem| mem.maintenance_preview(options, bytes_before));
+            report.bytes_after = bytes_before;
+            return Ok(report);
+        }
+        let stats = st.engine.read(|mem| mem.stats());
+        let needs_disk_first =
+            stats.tombstones != 0 || matches!(options.mode, MaintenanceMode::Full);
+        if !needs_disk_first {
+            let mut report = {
+                let State { engine, store, .. } = &mut *st;
+                engine.with(store, |mem, store| {
+                    mem.maintain_with_options(store, now, options)
+                })?
+            };
+            self.resnapshot(&mut st, now)?;
+            st.forgets = 0;
+            st.ops = 0;
+            report.bytes_before = bytes_before;
+            report.bytes_after = snap_len(&st.store);
+            return Ok(report);
+        }
         let text_tmp = tmp_sibling(st.store.path(), "mtext");
         let vec_tmp = tmp_sibling(st.store.path(), "mvec");
 
@@ -775,15 +907,23 @@ impl Database {
         // this reads through the live map, so it happens before the map is
         // dropped (as in `resnapshot`).
         let mut purged = 0usize;
+        let mut report = MaintainReport::default();
         {
             let State { engine, store, .. } = &mut *st;
             store.stage_snapshot(|sink| {
                 engine.read(|mem| {
                     let mut text_scratch = FileScratch::create(&text_tmp)?;
                     let mut vec_scratch = FileScratch::create(&vec_tmp)?;
-                    purged = mem
-                        .snapshot_disk_first(now, &mut text_scratch, &mut vec_scratch, &mut *sink)
+                    report = mem
+                        .snapshot_disk_first_with_options(
+                            now,
+                            &mut text_scratch,
+                            &mut vec_scratch,
+                            &mut *sink,
+                            options,
+                        )
                         .map_err(HostError::from)?;
+                    purged = report.purged;
                     Ok(())
                 })
             })?;
@@ -800,11 +940,10 @@ impl Database {
         st.forgets = 0;
         st.ops = 0;
         let bytes_after = snap_len(&st.store);
-        Ok(MaintainReport {
-            purged,
-            bytes_before,
-            bytes_after,
-        })
+        report.purged = purged;
+        report.bytes_before = bytes_before;
+        report.bytes_after = bytes_after;
+        Ok(report)
     }
 
     /// Writes a full snapshot and clears the journal now (re-mapping the

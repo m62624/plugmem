@@ -1,12 +1,10 @@
 //! Native Node.js addon for plugmem, published to npm via napi-rs.
 //!
-//! **N0: skill + version surface.** The companion-skill accessors and the
-//! version function are ported 1:1 from the retired `plugmem-wasm` crate
-//! (`#[wasm_bindgen]` → `#[napi]`); they carry `SKILL.md` and expose its
-//! version marker. The engine
-//! surface — a `Plugmem` class mirroring `plugmem-host`'s `Database` verb
-//! for verb — arrives in the next milestones and extends this file without
-//! touching the release/skill pipeline.
+//! The companion-skill accessors and the version function are ported 1:1 from
+//! the retired `plugmem-wasm` crate (`#[wasm_bindgen]` → `#[napi]`); they carry
+//! `SKILL.md` and expose its version marker. The engine surface is a
+//! `Plugmem` class mirroring `plugmem-host`'s `Database` verb for verb, plus a
+//! name-addressed `Workspace` for independent memories.
 
 use napi_derive::napi;
 
@@ -14,6 +12,8 @@ use napi_derive::napi;
 mod db;
 /// Typed result mirrors, so verbs return precise TypeScript interfaces.
 mod types;
+/// The `Workspace` class — many memories in one directory, addressed by name.
+mod workspace;
 
 /// The companion skill, embedded so a consumer can persist it next to the
 /// engine without a second download. Single source of truth: the repo-root

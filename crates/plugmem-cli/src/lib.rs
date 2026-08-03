@@ -14,6 +14,7 @@
 
 mod cli;
 mod config;
+mod workspace;
 
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
@@ -23,12 +24,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 use plugmem_host::{
-    Database, ExportedFact, FactId, HostError, LinkInput, ReadOnlyDatabase, RecallQuery,
-    RecallResult, RememberInput, RememberOutcome, Settings, Stats, VALID_TO_OPEN,
+    Database, ExportedFact, FactId, HostError, LinkInput, MaintenanceMode, MaintenanceOptions,
+    ReadOnlyDatabase, RecallQuery, RecallResult, RememberInput, RememberOutcome, Settings, Stats,
+    UnlinkInput, VALID_TO_OPEN,
 };
 use serde_json::json;
 
-use crate::cli::{Cli, Command, HelpTopic};
+use crate::cli::{Cli, Command, HelpTopic, MaintainMode};
 use crate::config::read_batch_size;
 
 /// Environment variable naming the database file (below the `--db` flag).
@@ -86,7 +88,28 @@ fn run_parsed(cli: Cli, out: &mut impl Write) -> u8 {
         Ok(s) => s,
         Err(e) => return report_err(&e.into()),
     };
-    let path = resolve_db_path(cli.db.as_deref(), settings.database_path.as_deref());
+    // A workspace is opt-in: with no flag, no environment variable and no
+    // `[workspace].dir`, `root` is `None` and everything below behaves exactly
+    // as it did before workspaces existed — `--db` is a path, and the
+    // `workspace` group says there is nothing to manage.
+    let root = workspace::resolve_root(cli.workspace.as_deref(), &settings);
+    if let Command::Workspace { command } = &cli.command {
+        return match workspace::execute(command, root, settings, cli.json, out) {
+            Ok(code) => code,
+            Err(e) => {
+                let _ = out.flush();
+                report_err(&e)
+            }
+        };
+    }
+    let path = resolve_db_path(
+        cli.db.as_deref(),
+        settings.database_path.as_deref(),
+        root.as_ref(),
+    );
+    if let Err(e) = workspace::ensure_dir(&path, root.as_ref()) {
+        return report_err(&e);
+    }
 
     // `recover` is a standalone salvage on file paths — it opens the source
     // itself (under an exclusive lock) and writes a fresh destination, so it
@@ -183,12 +206,27 @@ fn run_parsed(cli: Cli, out: &mut impl Write) -> u8 {
 /// `[maintenance].batch_size` is set — safe for provider batch limits.
 const DEFAULT_IMPORT_BATCH: usize = 128;
 
+/// Writes one error, plus whatever follow-up it carries.
+///
+/// Every path that shows a failure goes through here — the one-shot commands
+/// and both repls — so a message cannot say one thing in one of them and
+/// something else in another. The follow-up matters for a pool ceiling in
+/// particular: on its own that error is a bare byte count.
+fn write_err(out: &mut impl Write, e: &CliError) {
+    let _ = match e {
+        CliError::Usage(msg) => writeln!(out, "plugmem: {msg}"),
+        CliError::Host(err) => {
+            writeln!(out, "plugmem: {err}").and_then(|()| match err.capacity_hint() {
+                Some(hint) => writeln!(out, "plugmem: {hint}"),
+                None => Ok(()),
+            })
+        }
+    };
+}
+
 /// Prints an error to stderr and returns its exit code (`2`).
 fn report_err(e: &CliError) -> u8 {
-    match e {
-        CliError::Usage(msg) => eprintln!("plugmem: {msg}"),
-        CliError::Host(err) => eprintln!("plugmem: {err}"),
-    }
+    write_err(&mut std::io::stderr(), e);
     2
 }
 
@@ -203,12 +241,19 @@ fn report_locked(path: &std::path::Path) -> u8 {
 
 /// Database path precedence: `--db` flag > `$PLUGMEM_DB` >
 /// `[database].path` > the platform default.
+///
+/// With a workspace configured, the first two may name a memory instead of a
+/// path — see [`workspace::resolve_target`]. `[database].path` and the platform
+/// default are always paths: they are file settings, not names.
 fn resolve_db_path(
-    flag: Option<&std::path::Path>,
+    flag: Option<&str>,
     config_path: Option<&std::path::Path>,
+    root: Option<&PathBuf>,
 ) -> PathBuf {
-    flag.map(PathBuf::from)
-        .or_else(|| std::env::var_os(ENV_DB).map(PathBuf::from))
+    flag.map(|value| workspace::resolve_target(value, root))
+        .or_else(|| {
+            std::env::var_os(ENV_DB).map(|v| workspace::resolve_target(&v.to_string_lossy(), root))
+        })
         .or_else(|| config_path.map(PathBuf::from))
         .or_else(plugmem_host::default_database_path)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_DB))
@@ -372,6 +417,22 @@ fn execute(
             }
             Ok(0)
         }
+        Command::Unlink { src, rel, dst } => {
+            let fresh = db.unlink(UnlinkInput { now, src, rel, dst })?;
+            if json {
+                writeln!(
+                    out,
+                    "{}",
+                    json!({ "src": src, "rel": rel, "dst": dst, "unlinked": fresh })
+                )
+                .ok();
+            } else if fresh {
+                writeln!(out, "unlinked {src} -{rel}-> {dst}").ok();
+            } else {
+                writeln!(out, "edge {src} -{rel}-> {dst} was already absent").ok();
+            }
+            Ok(0)
+        }
         Command::Show { id } => Ok(render_show(db.get(FactId(*id)), *id, json, out)),
         Command::Stats => {
             render_stats(&db.stats(), json, out);
@@ -381,8 +442,8 @@ fn execute(
             db.export_each(|f| write_export_line(out, &f));
             Ok(0)
         }
-        Command::Maintain => {
-            let report = db.maintain(now)?;
+        Command::Maintain { mode } => {
+            let report = db.maintain_with_options(now, maintenance_options(*mode))?;
             if json {
                 writeln!(
                     out,
@@ -391,14 +452,47 @@ fn execute(
                         "purged": report.purged,
                         "bytes_before": report.bytes_before,
                         "bytes_after": report.bytes_after,
+                        "no_op": report.no_op,
+                        "tombstones_before": report.tombstones_before,
+                        "facts_before": report.facts_before,
+                        "facts_after": report.facts_after,
+                        "vectors_before": report.vectors_before,
+                        "vectors_after": report.vectors_after,
+                        "hnsw_indexed_before": report.hnsw_indexed_before,
+                        "hnsw_indexed_after": report.hnsw_indexed_after,
+                        "structural_compacted": report.structural_compacted,
+                        "bm25_compacted": report.bm25_compacted,
+                        "bm25_reindexed": report.bm25_reindexed,
+                        "hnsw_rebuilt": report.hnsw_rebuilt,
+                        "hnsw_remapped": report.hnsw_remapped,
+                        "hnsw_inserted": report.hnsw_inserted,
+                        "edges_compacted": report.edges_compacted,
+                        "edges_before": report.edges_before,
+                        "edge_versions_before": report.edge_versions_before,
                     })
                 )
                 .ok();
             } else {
                 writeln!(
                     out,
-                    "maintained: purged {}, {} -> {} bytes",
-                    report.purged, report.bytes_before, report.bytes_after
+                    "maintained: purged {}, {} -> {} bytes, hnsw +{}, bm25 {}{}{}",
+                    report.purged,
+                    report.bytes_before,
+                    report.bytes_after,
+                    report.hnsw_inserted,
+                    if report.bm25_reindexed {
+                        "reindexed"
+                    } else if report.bm25_compacted {
+                        "compacted"
+                    } else {
+                        "unchanged"
+                    },
+                    if report.edges_compacted {
+                        ", edges repacked"
+                    } else {
+                        ""
+                    },
+                    if report.no_op { " (no-op)" } else { "" }
                 )
                 .ok();
             }
@@ -429,6 +523,7 @@ fn execute(
         | Command::Recover { .. }
         | Command::Repl { .. }
         | Command::Import { .. }
+        | Command::Workspace { .. }
         | Command::Help { .. } => {
             unreachable!("this command is dispatched before execute")
         }
@@ -589,7 +684,7 @@ fn run_repl(
         } else if line == "help" {
             writeln!(
                 out,
-                "verbs: remember recall revise forget link show stats maintain checkpoint \
+                "verbs: remember recall revise forget link unlink show stats maintain checkpoint \
                  verify export import  (scrub/recover stay one-shot)  exit"
             )
             .ok();
@@ -629,10 +724,7 @@ fn run_repl_line(db: &Database, line: &str, json: bool, out: &mut impl Write) {
         }
         _ => {
             if let Err(e) = execute(db, &cmd, json, now_ms(), out) {
-                let _ = match &e {
-                    CliError::Usage(m) => writeln!(out, "plugmem: {m}"),
-                    CliError::Host(h) => writeln!(out, "plugmem: {h}"),
-                };
+                write_err(out, &e);
             }
         }
     }
@@ -709,9 +801,7 @@ fn run_repl_ro(
                         writeln!(out, "already current → generation {g}").ok();
                     }
                 }
-                Err(e) => {
-                    writeln!(out, "plugmem: {e}").ok();
-                }
+                Err(e) => write_err(out, &CliError::Host(e)),
             },
             _ => run_repl_ro_line(&ro, &mut settings, line, json, out),
         }
@@ -759,10 +849,7 @@ fn run_repl_ro_line(
     let recall_vector = match embed_recall_query(settings, &cmd) {
         Ok(v) => v,
         Err(e) => {
-            let _ = match &e {
-                CliError::Usage(m) => writeln!(out, "plugmem: {m}"),
-                CliError::Host(h) => writeln!(out, "plugmem: {h}"),
-            };
+            write_err(out, &e);
             return;
         }
     };
@@ -929,6 +1016,21 @@ fn render_show(
     0
 }
 
+/// Translates the command-line mode into engine options.
+///
+/// `auto` keeps the bounded HNSW budget that makes it safe to run often;
+/// every explicit mode takes the budget the engine defines for it.
+fn maintenance_options(mode: MaintainMode) -> MaintenanceOptions {
+    match MaintenanceMode::from(mode) {
+        MaintenanceMode::Auto => MaintenanceOptions::auto(),
+        MaintenanceMode::Full => MaintenanceOptions::full(),
+        mode => MaintenanceOptions {
+            mode,
+            ..MaintenanceOptions::auto()
+        },
+    }
+}
+
 /// Renders engine size counters.
 fn render_stats(s: &Stats, json: bool, out: &mut impl Write) {
     if json {
@@ -940,10 +1042,20 @@ fn render_stats(s: &Stats, json: bool, out: &mut impl Write) {
                 "entities": s.entities,
                 "terms": s.terms,
                 "edges": s.edges,
+                "edge_versions": s.edge_versions,
                 "vectors": s.vectors,
+                "hnsw_indexed": s.hnsw_indexed,
                 "next_fact": s.next_fact,
                 "next_entity": s.next_entity,
+                "next_edge": s.next_edge,
                 "pool_bytes": s.pool_bytes,
+                "shards": {
+                    "facts": s.shards.facts,
+                    "entities": s.shards.entities,
+                    "edges": s.shards.edges,
+                    "temporal": s.shards.temporal,
+                    "postings": s.shards.postings,
+                },
             })
         )
         .ok();
@@ -952,9 +1064,20 @@ fn render_stats(s: &Stats, json: bool, out: &mut impl Write) {
         writeln!(out, "entities    {}", s.entities).ok();
         writeln!(out, "terms       {}", s.terms).ok();
         writeln!(out, "edges       {}", s.edges).ok();
+        writeln!(out, "edge_vers   {}", s.edge_versions).ok();
         writeln!(out, "vectors     {}", s.vectors).ok();
+        writeln!(out, "hnsw_idx    {}", s.hnsw_indexed).ok();
         writeln!(out, "next_fact   {}", s.next_fact).ok();
+        writeln!(out, "next_edge   {}", s.next_edge).ok();
         writeln!(out, "pool_bytes  {}", s.pool_bytes).ok();
+        // The engine picks these from what it holds and moves them during
+        // `maintain`; they are state to read, not a setting to choose.
+        writeln!(
+            out,
+            "shards      facts {} entities {} edges {} temporal {} postings {}",
+            s.shards.facts, s.shards.entities, s.shards.edges, s.shards.temporal, s.shards.postings,
+        )
+        .ok();
     }
 }
 
@@ -1247,6 +1370,10 @@ mod tests {
             snapshot_every_ops: None,
             snapshot_journal_bytes: None,
             maintain_every_forgets: None,
+            workspace: plugmem_host::WorkspaceSettings {
+                dir: None,
+                limits: plugmem_host::WorkspaceLimits::default(),
+            },
         }
     }
 
@@ -1642,7 +1769,14 @@ mod tests {
         let (_, out) = run_cmd(&db, &Command::Forget { id: 0 }, false, 2_100);
         assert!(out.contains("already gone"), "{out}");
 
-        let (code, out) = run_cmd(&db, &Command::Maintain, false, 3_000);
+        let (code, out) = run_cmd(
+            &db,
+            &Command::Maintain {
+                mode: MaintainMode::Auto,
+            },
+            false,
+            3_000,
+        );
         assert_eq!(code, 0);
         assert!(out.contains("purged 1"), "{out}");
     }
@@ -1664,12 +1798,24 @@ mod tests {
         let (code, out) = run_cmd(&db, &link, false, 2_000);
         assert_eq!(code, 0);
         assert!(out.contains("plugmem -depends_on-> tokio"), "{out}");
+        let unlink = Command::Unlink {
+            src: "plugmem".into(),
+            rel: "depends_on".into(),
+            dst: "tokio".into(),
+        };
+        let (code, out) = run_cmd(&db, &unlink, false, 2_500);
+        assert_eq!(code, 0);
+        assert!(
+            out.contains("unlinked plugmem -depends_on-> tokio"),
+            "{out}"
+        );
 
         let (code, out) = run_cmd(&db, &Command::Stats, true, 3_000);
         assert_eq!(code, 0);
         let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
         assert_eq!(v["facts"], 1);
-        assert!(v["edges"].as_u64().unwrap() >= 1);
+        assert_eq!(v["edges"], 0);
+        assert_eq!(v["edge_versions"], 1);
     }
 
     #[test]
@@ -1757,12 +1903,27 @@ mod tests {
         let (_, out) = run_cmd(&db, &link, true, 2_000);
         let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
         assert_eq!(v["rel"], "depends_on");
+        let unlink = Command::Unlink {
+            src: "plugmem".into(),
+            rel: "depends_on".into(),
+            dst: "tokio".into(),
+        };
+        let (_, out) = run_cmd(&db, &unlink, true, 2_100);
+        let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(v["unlinked"], true);
 
         // forget --json then maintain --json
         let (_, out) = run_cmd(&db, &Command::Forget { id: 1 }, true, 2_500);
         let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
         assert_eq!(v["forgotten"], true);
-        let (_, out) = run_cmd(&db, &Command::Maintain, true, 3_000);
+        let (_, out) = run_cmd(
+            &db,
+            &Command::Maintain {
+                mode: MaintainMode::Auto,
+            },
+            true,
+            3_000,
+        );
         let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
         assert!(v["purged"].as_u64().unwrap() >= 1);
 
@@ -1796,6 +1957,21 @@ mod tests {
     }
 
     #[test]
+    fn verify_command_renders_human_and_json() {
+        let (db, _t) = TempDb::open();
+        run_cmd(&db, &remember("clean", None, &[]), false, 1_000);
+
+        let (code, out) = run_cmd(&db, &Command::Verify, false, 2_000);
+        assert_eq!(code, 0);
+        assert_eq!(out.trim(), "integrity ok");
+
+        let (code, out) = run_cmd(&db, &Command::Verify, true, 2_100);
+        assert_eq!(code, 0);
+        let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(v["ok"], true);
+    }
+
+    #[test]
     fn show_json_of_a_revised_predecessor_is_closed() {
         let (db, _t) = TempDb::open();
         run_cmd(&db, &remember("v1", Some("e"), &[]), false, 1_000);
@@ -1816,16 +1992,50 @@ mod tests {
 
     #[test]
     fn resolve_db_path_prefers_the_flag() {
-        let p = std::path::Path::new("/tmp/explicit.plugmem");
-        assert_eq!(resolve_db_path(Some(p), None), PathBuf::from(p));
+        let p = "/tmp/explicit.plugmem";
+        assert_eq!(resolve_db_path(Some(p), None, None), PathBuf::from(p));
         let configured = std::path::Path::new("/tmp/configured.plugmem");
         assert_eq!(
-            resolve_db_path(None, Some(configured)),
+            resolve_db_path(None, Some(configured), None),
             PathBuf::from(configured)
         );
         // With no flag/config it falls back to $PLUGMEM_DB or the platform default — we
         // only assert the code path runs and yields some path.
-        let _ = resolve_db_path(None, None);
+        let _ = resolve_db_path(None, None, None);
+    }
+
+    #[test]
+    fn a_bare_name_is_a_memory_only_when_a_workspace_is_configured() {
+        let root = PathBuf::from("/srv/bot");
+
+        // Without a workspace, everything is a path — this is the guard on the
+        // default: the old behaviour of `--db` is not allowed to shift.
+        assert_eq!(
+            resolve_db_path(Some("work"), None, None),
+            PathBuf::from("work")
+        );
+
+        // With one, a bare name resolves inside it...
+        assert_eq!(
+            resolve_db_path(Some("work"), None, Some(&root)),
+            PathBuf::from("/srv/bot/db/work.plugmem")
+        );
+        // ...and anything that is not a name stays a path, so an explicit file
+        // is still reachable from inside a workspace.
+        for path in ["./work", "work.plugmem", "/srv/other.plugmem", "../up"] {
+            assert_eq!(
+                resolve_db_path(Some(path), None, Some(&root)),
+                PathBuf::from(path),
+                "{path}"
+            );
+        }
+
+        // `[database].path` is a file setting, never a name.
+        let configured = std::path::Path::new("work");
+        assert_eq!(
+            resolve_db_path(None, Some(configured), Some(&root)),
+            PathBuf::from("work")
+        );
     }
 
     #[test]
@@ -1837,6 +2047,14 @@ mod tests {
         assert!(output.contains("plugmem settings"));
         assert!(output.contains("[database]"));
         assert!(output.contains("path (path string"));
+
+        let cli = Cli::try_parse_from(["plugmem-cli", "--json", "help", "settings"]).unwrap();
+        let mut output = Vec::new();
+        assert_eq!(run_parsed(cli, &mut output), 0);
+        let output: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(output["topic"], "settings");
+        assert!(output["config_path_precedence"].is_array());
+        assert!(output["settings"].as_array().unwrap().len() > 10);
     }
 
     #[test]
@@ -1849,7 +2067,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("m.plugmem");
         let cli = Cli {
-            db: Some(path.clone()),
+            db: Some(path.display().to_string()),
+            workspace: None,
             config: None,
             json: false,
             command: Command::Stats,
@@ -1859,6 +2078,93 @@ mod tests {
         assert_eq!(code, 0);
         assert!(String::from_utf8(buf).unwrap().contains("facts"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recover_and_scrub_render_json_and_human_shapes() {
+        let (db, tmp) = TempDb::open();
+        let path = tmp.0.join("m.plugmem");
+        run_cmd(&db, &remember("recoverable fact", None, &[]), false, 1_000);
+        run_cmd(&db, &Command::Checkpoint, false, 2_000);
+        drop(db);
+
+        let settings = settings_with(None);
+        let mut out = Vec::new();
+        assert_eq!(do_scrub(&path, &settings, true, &mut out), 0);
+        let scrub: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(scrub["ok"], true);
+        assert!(scrub["bytes"].as_u64().unwrap() > 0);
+        let mut out = Vec::new();
+        assert_eq!(do_scrub(&path, &settings, false, &mut out), 0);
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("scrub ok:"), "{out}");
+
+        let json_dst = tmp.0.join("copy-json.plugmem");
+        let mut out = Vec::new();
+        assert_eq!(do_recover(&path, &json_dst, &settings, true, &mut out), 0);
+        let recover: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(recover["kept"], 1);
+        assert_eq!(recover["dropped_text"], 0);
+        assert_eq!(recover["dst"], json_dst.display().to_string());
+
+        let human_dst = tmp.0.join("copy-human.plugmem");
+        let mut out = Vec::new();
+        assert_eq!(do_recover(&path, &human_dst, &settings, false, &mut out), 0);
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("recovered to"), "{out}");
+        assert!(out.contains("kept 1"), "{out}");
+    }
+
+    #[test]
+    fn readonly_dispatcher_renders_every_read_shape() {
+        let (db, tmp) = TempDb::open();
+        let path = tmp.0.join("m.plugmem");
+        run_cmd(
+            &db,
+            &remember("readonly tokio fact", Some("plugmem"), &["pref"]),
+            false,
+            1_000,
+        );
+        run_cmd(&db, &Command::Checkpoint, false, 2_000);
+        let ro = Database::open_readonly(&path, Config::default()).unwrap();
+
+        let mut out = Vec::new();
+        assert_eq!(execute_ro(&ro, &Command::Stats, None, true, &mut out), 0);
+        let stats: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(stats["facts"], 1);
+
+        let mut out = Vec::new();
+        assert_eq!(
+            execute_ro(&ro, &Command::Show { id: 0 }, None, false, &mut out),
+            0
+        );
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("readonly tokio fact"), "{text}");
+
+        let mut out = Vec::new();
+        assert_eq!(execute_ro(&ro, &Command::Export, None, false, &mut out), 0);
+        let exported: serde_json::Value =
+            serde_json::from_str(String::from_utf8(out).unwrap().lines().next().unwrap()).unwrap();
+        assert_eq!(exported["text"], "readonly tokio fact");
+
+        let mut out = Vec::new();
+        let recall = Command::Recall {
+            query: Some("tokio".into()),
+            tags: vec!["pref".into()],
+            entities: vec!["plugmem".into()],
+            as_of: None,
+            range: None,
+            k: 1,
+            closed: false,
+        };
+        assert_eq!(execute_ro(&ro, &recall, None, false, &mut out), 0);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("tokio"), "{text}");
+
+        let mut out = Vec::new();
+        assert_eq!(execute_ro(&ro, &Command::Verify, None, true, &mut out), 0);
+        let verify: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(verify["ok"], true);
     }
 
     #[test]
@@ -1874,7 +2180,8 @@ mod tests {
             (Database::open(&path, Config::default()).unwrap(), dir)
         };
         let cli = Cli {
-            db: Some(dir.join("m.plugmem")),
+            db: Some(dir.join("m.plugmem").display().to_string()),
+            workspace: None,
             config: None,
             json: false,
             command: Command::Stats,
@@ -1893,7 +2200,8 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let cli = Cli {
-            db: Some(dir.join("m.plugmem")),
+            db: Some(dir.join("m.plugmem").display().to_string()),
+            workspace: None,
             config: None,
             json: false,
             command: Command::Remember {
@@ -2112,7 +2420,8 @@ mod tests {
 
         // A remember through the read-write path leaves a dirty journal.
         let remember = Cli {
-            db: Some(path.clone()),
+            db: Some(path.display().to_string()),
+            workspace: None,
             config: None,
             json: false,
             command: Command::Remember {
@@ -2128,7 +2437,8 @@ mod tests {
 
         // The new command: human shape.
         let checkpoint = |json| Cli {
-            db: Some(path.clone()),
+            db: Some(path.display().to_string()),
+            workspace: None,
             config: None,
             json,
             command: Command::Checkpoint,
@@ -2147,7 +2457,8 @@ mod tests {
         // The journal is now clean, so scrub (a shared-lock, read-only open)
         // succeeds — it would fail `NeedsCheckpoint` on a dirty journal.
         let scrub = Cli {
-            db: Some(path),
+            db: Some(path.display().to_string()),
+            workspace: None,
             config: None,
             json: false,
             command: Command::Scrub,
@@ -2169,7 +2480,8 @@ mod tests {
         }
         // stats routes through open_readonly (mmap, shared)
         let cli = Cli {
-            db: Some(path.clone()),
+            db: Some(path.display().to_string()),
+            workspace: None,
             config: None,
             json: false,
             command: Command::Stats,
@@ -2180,7 +2492,8 @@ mod tests {
 
         // recall with no embedder also uses the read-only path
         let cli = Cli {
-            db: Some(path),
+            db: Some(path.display().to_string()),
+            workspace: None,
             config: None,
             json: false,
             command: Command::Recall {

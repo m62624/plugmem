@@ -220,7 +220,10 @@ stays answerable through `as_of` queries. `forget` tombstones a fact
 immediately; the next `maintain` removes it physically, and its id is
 burned, never reissued. Entities form a graph through typed **edges**
 (`works_at`, `depends_on`, …) with a provenance link back to the fact
-that justified them.
+that justified them. `link` opens or replaces the current edge; `unlink`
+closes the current edge without deleting its history. Normal graph recall
+walks the compact current-edge indexes; `as_of` graph recall walks the
+historical edge indexes.
 
 | Verb | Effect |
 |---|---|
@@ -229,7 +232,8 @@ that justified them.
 | `revise` | close the predecessor, record the successor, keep the chain |
 | `forget` | immediate tombstone; physical purge at `maintain` |
 | `link` | upsert a typed edge between entities |
-| `maintain` | the one O(base) verb: purge, compaction, index rebuilds, HNSW build |
+| `unlink` | close the current typed edge while preserving `as_of` history |
+| `maintain` | policy-driven maintenance: no-op, compaction, text reindex, vector optimization or full rebuild |
 | `snapshot` | full image + journal reset |
 
 ## Retrieval
@@ -265,7 +269,7 @@ targets.
   the L2-normalized vector (f32 is never persisted). Below a configured
   threshold, search is a two-phase flat scan: a Hamming prefilter over
   1-bit sign signatures, then an exact quantized-cosine rescore of the
-  best candidates. Above the threshold, `maintain` builds an
+  best candidates. Above the threshold, maintenance builds or advances an
   [HNSW](https://arxiv.org/abs/1603.09320) graph (Malkov & Yashunin)
   with the neighbor-selection heuristic and early-stopped beam search;
   vectors added since the last build sit in a flat tail that is scanned
@@ -322,9 +326,14 @@ around this one; this is the map.
 - **HNSW graph** above a size threshold (Malkov & Yashunin) — sub-linear
   approximate search with the neighbor-selection heuristic and early-stopped
   beam. Why: linear scan stops paying off past ~tens of thousands of vectors.
-  Cost: a one-time build in `maintain` (~ms/vector) and approximate recall.
+  Cost: graph construction is maintenance work (~ms/vector when rebuilt) and
+  approximate recall.
 - **Delta + LEB128 posting lists** with a stop-frequency guard. Why: compact
   lists decode fast and a hub term cannot dominate query cost.
+- **Posting-based BM25 compaction** — ordinary compaction filters existing
+  posting lists instead of re-tokenizing every live document. Why: deleting
+  tombstones should not make Unicode tokenization the dominant maintenance
+  cost. Cost: tokenizer semantic changes require explicit text reindex.
 - **Bounded everything in fusion** — per-source candidate cap (`SOURCE_CAP`),
   graph expansion budgets, greedy top-k. Why: one hub entity or one common term
   can never blow a query up; cost is a fixed ceiling regardless of data shape.
@@ -413,10 +422,16 @@ break out:
 
 | Operation (single thread, native) | Latency |
 |---|---|
-| tags + time-range recall @ 100k | ~230 µs |
-| hybrid recall (text + hub entity anchor) @ 100k | ~470 µs |
-| `remember` (tokenize, index, quantize d384, similar-detect, journal) | ~72 µs mean |
-| one-time HNSW build inside `maintain` | ~1.6 ms/vector |
+| tags + time-range recall @ 100k | ~17 µs |
+| hybrid recall (text + hub entity anchor) @ 100k | ~70 µs |
+| `remember` (tokenize, index, quantize d384, similar-detect, journal) | ~29 µs mean |
+| full HNSW rebuild during explicit maintenance | ~1.6 ms/vector |
+
+These moved by roughly an order of magnitude against earlier releases, and the
+chart above moved with them for the lexical bar. Do not read the other bars as
+regressions against previously published figures: this run is on different
+hardware, and only bars **within** one chart are comparable. The vector and
+graph code is unchanged.
 
 Reproduce: `cargo bench -p plugmem-core` (Criterion; a separate target,
 never run under `cargo test`) for the full statistical suite, or
@@ -442,15 +457,23 @@ pool strides — not estimates:
 
 | Structure | Holds | Per unit | Indexed by | Ceiling |
 |---|---|---|---|---|
-| `facts` + `fact_aux` | one fact's record | 48 + 16 = **64 B** | u32 page × 4 KiB | 4.29 B facts (`u32` id) |
+| `facts` + `fact_aux` | one fact's record | 48 + 20 = **68 B** | u32 page × 4 KiB | 4.29 B facts (`u32` id) |
 | `temporal` | `recorded_at` index entry | **12 B** / fact | u32 page × 4 KiB | 16 TiB pool |
 | `entities` + `by_name` | one entity | 24 + 8 = **32 B** | u32 page × 4 KiB | 4.29 B entities |
-| `edges_out` + `edges_in` | one typed edge (both directions) | 16 + 16 = **32 B** | u32 page × 4 KiB | 16 TiB pool |
+| `edges_out` + `edges_in` | one current typed edge (both directions) | 28 + 28 = **56 B** | u32 page × 4 KiB | 16 TiB pool |
+| `edges_hist_out` + `edges_hist_in` | one historical edge version (both directions) | 48 + 48 = **96 B** | u32 page × 4 KiB | 16 TiB pool |
+| `doc_len` (BM25) | one document's length + term-set summary | **16 B** / fact | u32 page × 4 KiB | 16 TiB pool |
 | `texts` (blob heap) | **all** fact texts + entity names, concatenated | its text length | **usize byte offset** | **4 GiB on 32-bit; RAM-bound on 64-bit** |
 | `terms` (interner) | vocabulary: unique tokens, tags, relation names | deduped term length | **usize byte offset** | **4 GiB on 32-bit; RAM-bound on 64-bit** |
 | `tag_lists` + postings | tag/term/entity → fact lists | ~varint / entry | u32 chunk × 64 B | 256 GiB each |
 | `vecs` (vector pool) | one int8-quantized embedding | `8 + 8·⌈dim/64⌉ + dim` B | u32 slot | 4.29 B vectors |
 | HNSW graph | neighbor blocks | ≈ `m0 × 4 B` / vector | u32 node id | 4.29 B nodes |
+
+Two derived structures are resident on **every** open, mapped or not, because
+they are rebuilt at load rather than read from the image: each arena's page
+directory (20 B per 4 KiB page, ≈0.5% of its pool) and the flat document-length
+index (4 B per fact id, capped to a dense id space). They buy the lookup costs
+in `04-recall.md`; they are never written to the file.
 
 Per-vector stride, concretely: **d384 → 440 B**, **d768 → 872 B**,
 **d1536 → 1736 B** (f32 is never stored — only the int8 components, a
@@ -512,8 +535,10 @@ truncated). See [WebAssembly 2.0 and 3.0](#webassembly-20-and-30).
   computed — and approximate above the HNSW threshold (recall@10 ≥ 0.9
   against brute force is a test gate, not a proof).
 - The tokenizer does no stemming or lemmatization.
-- `maintain` is O(database) and the first one past the HNSW threshold
-  pays the graph build; call it on your schedule, not on a hot path.
+- `maintain` defaults to `Auto`: it returns a cheap no-op when no work is
+  pending, compacts tombstones when present, reindexes text only when tokenizer
+  semantics require it, and advances HNSW with a bounded insertion budget.
+  `MaintenanceMode::Full` remains the explicit offline rebuild path.
 - The snapshot format is not yet frozen (pre-1.0): a new version may
   require re-importing, not migrating.
 

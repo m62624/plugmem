@@ -29,6 +29,17 @@
 # happens in review, not by silently lowering the number.
 [default]
 workspace = true
+# Per-test-binary timeout. The default of 60 s is not enough under ptrace
+# instrumentation: the host suite's resharding test alone runs ~100 s there
+# against well under a second normally, and tarpaulin gives up on the whole run
+# rather than on the one test. CI already passed `--timeout 300`, so a local run
+# was the only place this bit — exactly the drift this file exists to prevent.
+#
+# It must be a duration *string*: a bare integer is a parse error, and a parse
+# error anywhere in this file makes tarpaulin discard **all** of it and fall
+# back to the command line — silently, with one WARN line. The first symptom is
+# a link failure in plugmem-napi, because the `exclude` below stopped applying.
+timeout = "300s"
 # plugmem-napi is excluded from the *build*, not just the metric: its
 # `#[napi]` surface references N-API runtime symbols (`napi_*`) that are only
 # provided by a Node process at load time. A normal `cargo test` links fine

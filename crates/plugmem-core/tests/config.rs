@@ -1,7 +1,7 @@
 //! Config validation tests: the defaults pass, and every documented range
 //! check fires with its own message (each `validate` branch is reachable).
 
-use plugmem_core::{Config, Error};
+use plugmem_core::{Config, Error, MAX_HNSW_DEGREE, MAX_SHARDS, ShardLayout};
 
 /// Asserts that mutating one field trips `validate` with `msg`.
 fn rejects(mutate: impl FnOnce(&mut Config), msg: &str) {
@@ -20,10 +20,17 @@ fn defaults_are_valid() {
     // Spot-check the table.
     assert_eq!(cfg.dim, 0);
     assert_eq!(cfg.max_bytes, 2 * 1024 * 1024 * 1024);
-    assert_eq!(cfg.shards_facts, 1024);
-    assert_eq!(cfg.shards_postings, 2048);
     assert_eq!(cfg.rrf_k, 60);
     assert_eq!(cfg.flat_to_hnsw, 24_000);
+    // A fresh database is empty, and an empty database belongs on the shard
+    // floor. It grows from here through `maintain`, so these are a starting
+    // point rather than a tuning choice — see `Config::shards_facts`.
+    let floor = ShardLayout::default();
+    assert_eq!(cfg.shards_facts, floor.facts);
+    assert_eq!(cfg.shards_entities, floor.entities);
+    assert_eq!(cfg.shards_edges, floor.edges);
+    assert_eq!(cfg.shards_temporal, floor.temporal);
+    assert_eq!(cfg.shards_postings, floor.postings);
 }
 
 #[test]
@@ -58,6 +65,26 @@ fn every_range_check_fires() {
         |c| c.shards_postings = 6,
         "shards_postings must be a power of two",
     );
+    rejects(
+        |c| c.shards_facts = MAX_SHARDS * 2,
+        "shards_facts exceeds MAX_SHARDS",
+    );
+    rejects(
+        |c| c.shards_entities = MAX_SHARDS * 2,
+        "shards_entities exceeds MAX_SHARDS",
+    );
+    rejects(
+        |c| c.shards_edges = MAX_SHARDS * 2,
+        "shards_edges exceeds MAX_SHARDS",
+    );
+    rejects(
+        |c| c.shards_temporal = MAX_SHARDS * 2,
+        "shards_temporal exceeds MAX_SHARDS",
+    );
+    rejects(
+        |c| c.shards_postings = MAX_SHARDS * 2,
+        "shards_postings exceeds MAX_SHARDS",
+    );
     rejects(|c| c.max_text = 0, "max_text must be in 1..=max_blob");
     rejects(
         |c| {
@@ -91,6 +118,18 @@ fn every_range_check_fires() {
     );
     rejects(|c| c.hnsw_m = 1, "hnsw_m must be >= 2");
     rejects(|c| c.hnsw_m0 = 8, "hnsw_m0 must be >= hnsw_m");
+    rejects(
+        |c| {
+            c.hnsw_m = MAX_HNSW_DEGREE + 1;
+            c.hnsw_m0 = MAX_HNSW_DEGREE + 1;
+            c.hnsw_ef_construction = MAX_HNSW_DEGREE + 1;
+        },
+        "hnsw_m exceeds MAX_HNSW_DEGREE",
+    );
+    rejects(
+        |c| c.hnsw_m0 = MAX_HNSW_DEGREE + 1,
+        "hnsw_m0 exceeds MAX_HNSW_DEGREE",
+    );
     rejects(
         |c| c.hnsw_ef_construction = 4,
         "hnsw_ef_construction must be >= hnsw_m",

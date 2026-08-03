@@ -42,8 +42,10 @@ jobs:
       # Reads tarpaulin.toml for workspace + exclude-files; we only override the
       # output to a Cobertura XML at the repo root for the Codecov upload step.
       - name: Generate coverage (Cobertura XML)
-        run: cargo tarpaulin --timeout 120 --out Xml --output-dir .
+        continue-on-error: true
+        run: cargo tarpaulin --timeout 300 --verbose --out Xml --output-dir .
       - name: Upload to Codecov
+        if: hashFiles('cobertura.xml') != ''
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

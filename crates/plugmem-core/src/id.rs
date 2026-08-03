@@ -49,3 +49,8 @@ id_type! {
     /// mention.
     EntityId
 }
+
+id_type! {
+    /// Identifier of an edge version in the temporal entity graph.
+    EdgeId
+}

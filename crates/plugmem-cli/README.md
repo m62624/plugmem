@@ -108,7 +108,7 @@ filter; they are not a source):
 |---|---|---|
 | **Lexical** | [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) (Robertson idf) over a Unicode ([UAX #29](https://unicode.org/reports/tr29/)) tokenizer | exact terms / keyword overlap |
 | **Semantic** | int8-quantized cosine — flat two-phase below a threshold, an [HNSW](https://arxiv.org/abs/1603.09320) graph above | meaning / nearest neighbours |
-| **Graph** | entity graph with typed edges, breadth-first from query anchors | relational knowledge |
+| **Graph** | entity graph with current typed edges on the hot path; `--as-of` walks edge history | relational knowledge |
 | **Temporal** | range scans over a `recorded_at`-ordered index; bitemporal validity | "what was true *then*", time windows |
 
 ## Usage
@@ -128,11 +128,12 @@ engine keeps no clock, so `now` comes from the system clock at each call.
 | `revise <ID> <TEXT> [same flags as remember]` | close the old fact, record the successor |
 | `forget <ID>` | tombstone a fact (purged physically at the next `maintain`) |
 | `link <SRC> <REL> <DST>` | upsert a typed edge between entities |
+| `unlink <SRC> <REL> <DST>` | close the current typed edge while preserving `--as-of` history |
 | `show <ID>` | one fact's full card — text, both time axes, state |
 | `stats` | engine size counters |
-| `maintain` | purge tombstones, compact, build HNSW past the threshold (disk-first) |
+| `maintain [--mode M]` | policy-driven maintenance: cheap no-op, tombstone compaction, text reindex or bounded HNSW work. `M` is `auto` (default), `compact`, `reindex-text`, `optimize-vectors` or `full`; only `full` repacks the edge arenas, and no mode drops history |
 | `checkpoint` | flush the journal into a fresh snapshot and clear it (leaves the database checkpointed) |
-| `verify` | check content integrity (text UTF-8, vector↔fact consistency); exit 2 on damage |
+| `verify` | check integrity an open defers: text UTF-8, metadata, vector↔fact consistency, and that the edge graph agrees with itself; exit 2 on damage |
 | `scrub` | check the snapshot's byte-level container checksums; exit 2 on the first damaged section |
 | `recover <DST>` | salvage a content-corrupt database into a clean `DST`; the source (`--db`) is left untouched |
 | `export` | dump the currently-open facts as JSONL (one per line) to stdout |
@@ -190,6 +191,64 @@ plugmem-cli verify                       # content consistency
 plugmem-cli checkpoint && plugmem-cli scrub  # flush journal, then byte-level checksums
 plugmem-cli recover agent.recovered.plugmem   # salvage into a clean copy
 ```
+
+## Many memories in one directory (optional)
+
+**Default: one memory, one file.** `--db path/to/memory.plugmem` and nothing
+here applies. Reach for this only when you keep several independent
+memories — one per project, per client, per agent — and want to address them by
+name instead of remembering where each file is.
+
+Point the CLI at a directory and `--db` starts taking a name:
+
+```console
+$ export PLUGMEM_WORKSPACE=~/memories        # or --workspace, or [workspace].dir
+$ plugmem-cli --db work remember "the release branch is integration/0.3.0"
+$ plugmem-cli --db personal recall "release branch"   # sees nothing: separate memory
+```
+
+The rule is one line: a name has no separator and no dot, so `work` is a name
+while `work.plugmem`, `./work` and `/srv/work` stay paths. A name resolves to
+`<dir>/db/<name>.plugmem` and nowhere else — it is not a path and cannot become
+one. A first write to an unused name creates that memory; there is no
+registration step.
+
+Memories are **independent**: no search spans them, and there is no way to link
+an entity across them. That is the point (one memory answering for another is
+what makes a shared store useless), and it is also the thing to decide up front
+— a fact filed in the wrong memory is not merely misplaced, it is unreachable
+from the other.
+
+### The `workspace` command group
+
+Administrative, and none of it is needed for everyday use:
+
+| command | what it does |
+|---|---|
+| `workspace list` | every memory on disk, with its description when it has one |
+| `workspace find <QUERY> [-k N]` | which memory is the one about… — searches descriptions, and a person's name finds what they own |
+| `workspace describe <NAME> <TEXT> [--tag T]… [--owner WHO]` | say what a memory is for; creates it if absent |
+| `workspace archive <NAME>` | label it archived (it stays where it is and stays openable) |
+| `workspace reindex` | rebuild the registry from the memories' own descriptions |
+| `workspace verify` | report where the registry and the directory disagree; exit `1` if they do |
+| `workspace use <NAME>` | print the shell line that points **this terminal** at a memory |
+
+The description lives in two places: inside the memory itself, and in a registry
+(`<dir>/registry.plugmem`, an ordinary plugmem database). The directory is the
+truth and the registry is only a searchable index over it — delete it and
+`workspace reindex` rebuilds it from the memories; what you lose is search, not
+data.
+
+`workspace use` writes **nothing to disk**. It prints a line for the shell:
+
+```console
+$ eval "$(plugmem-cli workspace use work)"     # sh / bash / zsh
+$ plugmem-cli workspace use work | Invoke-Expression   # PowerShell
+```
+
+The selection then lives in that terminal, so a second window is unaffected — a
+state file shared by every window would let one of them silently redirect a
+script running in another.
 
 ## Interactive mode (`repl`)
 

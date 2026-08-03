@@ -31,7 +31,12 @@ use crate::index::postings::PostingStore;
 use crate::index::varint::decode_u32;
 use crate::index::vecpool::VecPool;
 use crate::memory::FactFault;
-use crate::model::{EntityRecord, FactAux, FactRecord, TemporalSlot};
+use crate::memory::migrations::{self, STATE_LEN};
+use crate::memory::shards::ShardLayout;
+use crate::model::{
+    EdgeHistorySlot, EdgeSlot, EntityByName, EntityRecord, FactAux, FactRecord, TemporalSlot,
+    VALID_TO_OPEN, edge_history_key, edge_key,
+};
 use crate::snapshot::{Prefix, SectionMeta, Snapshot, SnapshotSink, build_prefix, pad_len};
 use xxhash_rust::xxh3::Xxh3;
 
@@ -48,10 +53,8 @@ mod kind {
     pub const ENTITIES_POOL: u16 = 6;
     pub const BY_NAME_META: u16 = 7;
     pub const BY_NAME_POOL: u16 = 8;
-    pub const EDGES_OUT_META: u16 = 9;
-    pub const EDGES_OUT_POOL: u16 = 10;
-    pub const EDGES_IN_META: u16 = 11;
-    pub const EDGES_IN_POOL: u16 = 12;
+    // 9..=12 and 46..=49 were the edge sections before the time-ordered
+    // history layout; see `migrations::legacy_kind`.
     pub const TEMPORAL_META: u16 = 13;
     pub const TEMPORAL_POOL: u16 = 14;
     pub const TEXTS_INDEX: u16 = 15;
@@ -65,8 +68,8 @@ mod kind {
     pub const BM25_HANDLES_POOL: u16 = 23;
     pub const BM25_CHUNKS_META: u16 = 24;
     pub const BM25_CHUNKS_POOL: u16 = 25;
-    pub const BM25_DOCLEN_META: u16 = 26;
-    pub const BM25_DOCLEN_POOL: u16 = 27;
+    // 26..=27 were the per-document BM25 records before they carried the
+    // term-set summary; see `migrations::legacy_kind`.
     pub const TAGS_HANDLES_META: u16 = 28;
     pub const TAGS_HANDLES_POOL: u16 = 29;
     pub const TAGS_CHUNKS_META: u16 = 30;
@@ -85,10 +88,20 @@ mod kind {
     pub const HNSW_LISTS_POOL: u16 = 43;
     pub const METAS_INDEX: u16 = 44;
     pub const METAS_POOL: u16 = 45;
+    /// Current edges carrying their open version's identity.
+    pub const EDGES_OUT_META: u16 = 50;
+    pub const EDGES_OUT_POOL: u16 = 51;
+    pub const EDGES_IN_META: u16 = 52;
+    pub const EDGES_IN_POOL: u16 = 53;
+    /// Edge history keyed `[a | valid_from | edge]`.
+    pub const EDGE_HIST_OUT_META: u16 = 54;
+    pub const EDGE_HIST_OUT_POOL: u16 = 55;
+    pub const EDGE_HIST_IN_META: u16 = 56;
+    pub const EDGE_HIST_IN_POOL: u16 = 57;
+    /// Per-document BM25 records carrying the term-set summary.
+    pub const BM25_DOCLEN_META: u16 = 58;
+    pub const BM25_DOCLEN_POOL: u16 = 59;
 }
-
-/// Byte length of the engine-state section.
-const STATE_LEN: usize = 24;
 
 /// The callback [`Memory::emit_sections_from`] drives once per snapshot
 /// section: the section `kind` and the byte pieces whose concatenation is its
@@ -99,14 +112,20 @@ type SectionFn<'f> = dyn FnMut(u16, &[&[u8]]) -> Result<(), Error> + 'f;
 /// everything `maintain` recompacts. Bundled behind references so one emit path
 /// serves both the live engine (`self`'s own structures, [`Memory::sections`])
 /// and the disk-first rebuild (freshly rebuilt metadata + graph, with the two
-/// big pools borrowing a `Scratch`). The ride-through structures —
-/// the interner, the by-name index, the edges, and the id counters — are read
-/// straight from `self` in [`Memory::emit_sections_from`]; `maintain` never
-/// touches them, so they are the same on both paths.
+/// big pools borrowing a `Scratch`). The genuinely ride-through structures —
+/// the interner, the by-name index and the id counters — are read straight
+/// from `self` in [`Memory::emit_sections_from`]; `maintain` never touches
+/// them, so they are the same on both paths.
+///
+/// The edge arenas are here rather than read from `self` because
+/// [`MaintenanceMode::Full`](super::MaintenanceMode::Full) repacks them: the
+/// disk-first path has to emit the rebuilt ones, and an ordinary snapshot the
+/// engine's own.
 pub(crate) struct Sections<'r, 'a> {
     pub(crate) facts: &'r Arena<'a, FactRecord>,
     pub(crate) fact_aux: &'r Arena<'a, FactAux>,
     pub(crate) entities: &'r Arena<'a, EntityRecord>,
+    pub(crate) by_name: &'r Arena<'a, EntityByName>,
     pub(crate) temporal: &'r Arena<'a, TemporalSlot>,
     pub(crate) texts: &'r BlobHeap<'a>,
     pub(crate) metas: &'r BlobHeap<'a>,
@@ -116,6 +135,17 @@ pub(crate) struct Sections<'r, 'a> {
     pub(crate) entity_facts: &'r IdListIndex<'a>,
     pub(crate) vecs: &'r VecPool<'a>,
     pub(crate) hnsw: &'r HnswGraph<'a>,
+    pub(crate) edges_out: &'r Arena<'a, EdgeSlot>,
+    pub(crate) edges_in: &'r Arena<'a, EdgeSlot>,
+    pub(crate) edges_hist_out: &'r Arena<'a, EdgeHistorySlot>,
+    pub(crate) edges_hist_in: &'r Arena<'a, EdgeHistorySlot>,
+    /// How the arenas above are sharded.
+    ///
+    /// Carried with the sections rather than read from `self.cfg`, because the
+    /// disk-first path writes arenas it has just rebuilt while the engine it
+    /// borrows still records the old layout. The config in the file has to
+    /// describe the arenas in the same file.
+    pub(crate) layout: ShardLayout,
 }
 
 /// Dumps an arena as its `(meta, pool)` section pair.
@@ -130,6 +160,59 @@ fn arena_sections<T: Slot>(a: &Arena<'_, T>) -> (Vec<u8>, Vec<u8>) {
 fn section<'a>(snap: &Snapshot<'a>, kind: u16) -> Result<&'a [u8], Error> {
     snap.section(kind)
         .ok_or(Error::Corrupt("snapshot is missing a required section"))
+}
+
+/// The eight current-format edge sections.
+struct EdgeSections<'a> {
+    out_meta: &'a [u8],
+    out_pool: &'a [u8],
+    in_meta: &'a [u8],
+    in_pool: &'a [u8],
+    hist_out_meta: &'a [u8],
+    hist_out_pool: &'a [u8],
+    hist_in_meta: &'a [u8],
+    hist_in_pool: &'a [u8],
+}
+
+/// Collects the current-format edge sections, or `None` when the image has
+/// none of them — an empty database, or one written before the time-ordered
+/// history layout, which [`Memory::migrate_edges`] then rebuilds. Present but
+/// incomplete is corruption: the eight sections are written together.
+fn edge_sections<'a>(snap: &Snapshot<'a>) -> Result<Option<EdgeSections<'a>>, Error> {
+    const KINDS: [u16; 8] = [
+        kind::EDGES_OUT_META,
+        kind::EDGES_OUT_POOL,
+        kind::EDGES_IN_META,
+        kind::EDGES_IN_POOL,
+        kind::EDGE_HIST_OUT_META,
+        kind::EDGE_HIST_OUT_POOL,
+        kind::EDGE_HIST_IN_META,
+        kind::EDGE_HIST_IN_POOL,
+    ];
+    let found = KINDS.map(|k| snap.section(k));
+    if found.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    let [
+        out_meta,
+        out_pool,
+        in_meta,
+        in_pool,
+        hist_out_meta,
+        hist_out_pool,
+        hist_in_meta,
+        hist_in_pool,
+    ] = found.map(|s| s.ok_or(Error::Corrupt("snapshot has incomplete edge sections")));
+    Ok(Some(EdgeSections {
+        out_meta: out_meta?,
+        out_pool: out_pool?,
+        in_meta: in_meta?,
+        in_pool: in_pool?,
+        hist_out_meta: hist_out_meta?,
+        hist_out_pool: hist_out_pool?,
+        hist_in_meta: hist_in_meta?,
+        hist_in_pool: hist_in_pool?,
+    }))
 }
 
 impl<'a, const TF: bool> PostingStore<'a, TF> {
@@ -265,12 +348,18 @@ impl<'a> Bm25Index<'a> {
             section(snap, kind::BM25_CHUNKS_META)?,
             section(snap, kind::BM25_CHUNKS_POOL)?,
         )?;
-        let doc_len = Arena::load(
-            ArenaCfg::new(cfg.shards_postings, ShardMode::Uniform).with_max_bytes(cfg.max_bytes),
-            section(snap, kind::BM25_DOCLEN_META)?,
-            section(snap, kind::BM25_DOCLEN_POOL)?,
-        )?;
-        Self::assemble(postings, doc_len, snap)
+        let (doc_len, migrated) = match migrations::legacy_doc_len(snap, cfg)? {
+            Some(upgraded) => (upgraded, true),
+            None => (
+                Arena::load(
+                    migrations::doc_len_cfg(cfg),
+                    section(snap, kind::BM25_DOCLEN_META)?,
+                    section(snap, kind::BM25_DOCLEN_POOL)?,
+                )?,
+                false,
+            ),
+        };
+        Self::assemble(postings, doc_len, snap, migrated)
     }
 
     /// Zero-copy sibling of [`Bm25Index::load_from`]: the postings and
@@ -284,12 +373,20 @@ impl<'a> Bm25Index<'a> {
             section(snap, kind::BM25_CHUNKS_META)?,
             section(snap, kind::BM25_CHUNKS_POOL)?,
         )?;
-        let doc_len = Arena::load_borrowed(
-            ArenaCfg::new(cfg.shards_postings, ShardMode::Uniform).with_max_bytes(cfg.max_bytes),
-            section(snap, kind::BM25_DOCLEN_META)?,
-            section(snap, kind::BM25_DOCLEN_POOL)?,
-        )?;
-        Self::assemble(postings, doc_len, snap)
+        // A pre-signature image cannot be aliased: the slot widened, so the
+        // migration hands back an owned arena even here.
+        let (doc_len, migrated) = match migrations::legacy_doc_len(snap, cfg)? {
+            Some(upgraded) => (upgraded, true),
+            None => (
+                Arena::load_borrowed(
+                    migrations::doc_len_cfg(cfg),
+                    section(snap, kind::BM25_DOCLEN_META)?,
+                    section(snap, kind::BM25_DOCLEN_POOL)?,
+                )?,
+                false,
+            ),
+        };
+        Self::assemble(postings, doc_len, snap, migrated)
     }
 
     /// Reconciles the corpus totals from the engine-state section and
@@ -299,28 +396,34 @@ impl<'a> Bm25Index<'a> {
         postings: PostingStore<'a, true>,
         doc_len: Arena<'a, crate::index::bm25::DocLenSlot>,
         snap: &Snapshot<'_>,
+        migrated: bool,
     ) -> Result<Self, Error> {
         let state = section(snap, kind::ENGINE_STATE)?;
-        if state.len() != STATE_LEN {
-            return Err(Error::Corrupt("engine state section has a wrong length"));
-        }
+        // Validates the width for every layout this crate has written; the
+        // corpus totals sit in the prefix all of them share.
+        migrations::decode_engine_state(state)?;
         let total_docs = u64::from_le_bytes(state[8..16].try_into().unwrap());
         let total_len = u64::from_le_bytes(state[16..24].try_into().unwrap());
         if total_docs != doc_len.len() as u64 {
             return Err(Error::Corrupt("bm25 document total disagrees with doc_len"));
         }
-        Ok(Self::from_parts(postings, doc_len, total_docs, total_len))
+        let mut index = Self::from_parts(postings, doc_len, total_docs, total_len);
+        if migrated {
+            index.mark_unsummarized();
+        }
+        Ok(index)
     }
 }
 
 impl<'a> Memory<'a> {
     /// A [`Sections`] view over this engine's own structures — the source for
     /// an ordinary snapshot.
-    fn sections(&self) -> Sections<'_, 'a> {
+    pub(super) fn sections(&self) -> Sections<'_, 'a> {
         Sections {
             facts: &self.facts,
             fact_aux: &self.fact_aux,
             entities: &self.entities,
+            by_name: &self.by_name,
             temporal: &self.temporal,
             texts: &self.texts,
             metas: &self.metas,
@@ -330,6 +433,11 @@ impl<'a> Memory<'a> {
             entity_facts: &self.entity_facts,
             vecs: &self.vecs,
             hnsw: &self.hnsw,
+            edges_out: &self.edges_out,
+            edges_in: &self.edges_in,
+            edges_hist_out: &self.edges_hist_out,
+            edges_hist_in: &self.edges_hist_in,
+            layout: ShardLayout::of_config(&self.cfg),
         }
     }
 
@@ -354,17 +462,27 @@ impl<'a> Memory<'a> {
             (
                 kind::BY_NAME_META,
                 kind::BY_NAME_POOL,
-                arena_sections(&self.by_name),
+                arena_sections(s.by_name),
             ),
             (
                 kind::EDGES_OUT_META,
                 kind::EDGES_OUT_POOL,
-                arena_sections(&self.edges_out),
+                arena_sections(s.edges_out),
             ),
             (
                 kind::EDGES_IN_META,
                 kind::EDGES_IN_POOL,
-                arena_sections(&self.edges_in),
+                arena_sections(s.edges_in),
+            ),
+            (
+                kind::EDGE_HIST_OUT_META,
+                kind::EDGE_HIST_OUT_POOL,
+                arena_sections(s.edges_hist_out),
+            ),
+            (
+                kind::EDGE_HIST_IN_META,
+                kind::EDGE_HIST_IN_POOL,
+                arena_sections(s.edges_hist_in),
             ),
             (
                 kind::TEMPORAL_META,
@@ -416,6 +534,10 @@ impl<'a> Memory<'a> {
         state.extend_from_slice(&self.next_entity.to_le_bytes());
         state.extend_from_slice(&s.bm25.docs().to_le_bytes());
         state.extend_from_slice(&s.bm25.total_len().to_le_bytes());
+        state.extend_from_slice(&self.bm25_tokenizer_version.to_le_bytes());
+        state.extend_from_slice(&0u32.to_le_bytes());
+        state.extend_from_slice(&self.next_edge.to_le_bytes());
+        state.extend_from_slice(&0u32.to_le_bytes());
         f(kind::ENGINE_STATE, &[&state])?;
         // The vector pool is one flat section (empty when dim is 0), streamed
         // as its two borrowed pieces so the dominant pool needs no owned copy.
@@ -460,7 +582,9 @@ impl<'a> Memory<'a> {
         mut sink: impl SnapshotSink,
     ) -> Result<(), Error> {
         let mut cfg_bytes = Vec::new();
-        self.cfg.encode(&mut cfg_bytes);
+        let mut cfg = self.cfg.clone();
+        s.layout.apply(&mut cfg);
+        cfg.encode(&mut cfg_bytes);
         let flags = if self.cfg.dim > 0 {
             crate::snapshot::FLAG_VECTORS
         } else {
@@ -584,16 +708,22 @@ impl<'a> Memory<'a> {
             section(&snap, kind::BY_NAME_META)?,
             section(&snap, kind::BY_NAME_POOL)?,
         )?;
-        mem.edges_out = Arena::load(
-            ord(cfg.shards_edges),
-            section(&snap, kind::EDGES_OUT_META)?,
-            section(&snap, kind::EDGES_OUT_POOL)?,
-        )?;
-        mem.edges_in = Arena::load(
-            ord(cfg.shards_edges),
-            section(&snap, kind::EDGES_IN_META)?,
-            section(&snap, kind::EDGES_IN_POOL)?,
-        )?;
+        // Absent edge sections mean an image older than the time-ordered
+        // layout (or an empty database); `finish_load` migrates it.
+        if let Some(edges) = edge_sections(&snap)? {
+            mem.edges_out = Arena::load(ord(cfg.shards_edges), edges.out_meta, edges.out_pool)?;
+            mem.edges_in = Arena::load(ord(cfg.shards_edges), edges.in_meta, edges.in_pool)?;
+            mem.edges_hist_out = Arena::load(
+                ord(cfg.shards_edges),
+                edges.hist_out_meta,
+                edges.hist_out_pool,
+            )?;
+            mem.edges_hist_in = Arena::load(
+                ord(cfg.shards_edges),
+                edges.hist_in_meta,
+                edges.hist_in_pool,
+            )?;
+        }
         mem.temporal = Arena::load(
             ord(cfg.shards_temporal),
             section(&snap, kind::TEMPORAL_META)?,
@@ -692,16 +822,25 @@ impl<'a> Memory<'a> {
             section(&snap, kind::BY_NAME_META)?,
             section(&snap, kind::BY_NAME_POOL)?,
         )?;
-        mem.edges_out = Arena::load_borrowed(
-            ord(cfg.shards_edges),
-            section(&snap, kind::EDGES_OUT_META)?,
-            section(&snap, kind::EDGES_OUT_POOL)?,
-        )?;
-        mem.edges_in = Arena::load_borrowed(
-            ord(cfg.shards_edges),
-            section(&snap, kind::EDGES_IN_META)?,
-            section(&snap, kind::EDGES_IN_POOL)?,
-        )?;
+        // A legacy image's edges are rebuilt owned by `finish_load` rather
+        // than borrowed: their bytes have to be re-keyed, so there is nothing
+        // to map. Everything else still borrows.
+        if let Some(edges) = edge_sections(&snap)? {
+            mem.edges_out =
+                Arena::load_borrowed(ord(cfg.shards_edges), edges.out_meta, edges.out_pool)?;
+            mem.edges_in =
+                Arena::load_borrowed(ord(cfg.shards_edges), edges.in_meta, edges.in_pool)?;
+            mem.edges_hist_out = Arena::load_borrowed(
+                ord(cfg.shards_edges),
+                edges.hist_out_meta,
+                edges.hist_out_pool,
+            )?;
+            mem.edges_hist_in = Arena::load_borrowed(
+                ord(cfg.shards_edges),
+                edges.hist_in_meta,
+                edges.hist_in_pool,
+            )?;
+        }
         mem.temporal = Arena::load_borrowed(
             ord(cfg.shards_temporal),
             section(&snap, kind::TEMPORAL_META)?,
@@ -763,24 +902,22 @@ impl<'a> Memory<'a> {
 
     /// Checks the stored config against the caller's (structural fields
     /// must match; tuning fields follow the caller) and adopts the
-    /// snapshot's lineage identity. Shared by both load paths.
+    /// snapshot's lineage identity and shard layout. Shared by both load
+    /// paths.
     fn reconcile_config(snap: &Snapshot<'_>, mut cfg: Config) -> Result<Config, Error> {
         let stored = Config::decode(snap.config())?;
         if stored.dim != cfg.dim {
             return Err(Error::ConfigMismatch("stored dim differs"));
         }
-        if [
-            (stored.shards_facts, cfg.shards_facts),
-            (stored.shards_entities, cfg.shards_entities),
-            (stored.shards_edges, cfg.shards_edges),
-            (stored.shards_temporal, cfg.shards_temporal),
-            (stored.shards_postings, cfg.shards_postings),
-        ]
-        .iter()
-        .any(|&(a, b)| a != b)
-        {
-            return Err(Error::ConfigMismatch("stored shard counts differ"));
-        }
+        // The shard counts are how this file is laid out, not something the
+        // caller gets a say in: the loader needs the stored ones to read the
+        // arena metadata at all, and the caller's are irrelevant to that. So
+        // they are adopted rather than compared — the same treatment `db_uuid`
+        // gets below, and what lets a database re-shard itself without every
+        // caller having to learn the new numbers. `Config::decode` has already
+        // bounded them by `MAX_SHARDS`, which is the only check that matters
+        // here: these become allocation sizes.
+        ShardLayout::of_config(&stored).apply(&mut cfg);
         if stored.max_bytes != cfg.max_bytes
             || stored.max_text != cfg.max_text
             || stored.max_blob != cfg.max_blob
@@ -806,17 +943,36 @@ impl<'a> Memory<'a> {
     /// panic-free on any bytes regardless (checked `from_utf8`, bounds-checked
     /// vector reads). Shared by both load paths.
     fn finish_load(mut mem: Self, snap: &Snapshot<'_>) -> Result<Self, Error> {
-        let state = section(snap, kind::ENGINE_STATE)?;
-        if state.len() != STATE_LEN {
-            return Err(Error::Corrupt("engine state section has a wrong length"));
+        let state = migrations::decode_engine_state(section(snap, kind::ENGINE_STATE)?)?;
+        mem.next_fact = state.next_fact;
+        mem.next_entity = state.next_entity;
+        mem.bm25_tokenizer_version = state.bm25_tokenizer_version;
+        mem.next_edge = state.next_edge;
+        // Current-format edge sections were absent: either the image predates
+        // the time-ordered layout, or it has no edges at all.
+        let cfg = mem.cfg.clone();
+        if mem.edges_hist_out.is_empty() && mem.edges_out.is_empty() {
+            mem.migrate_edges(snap, &cfg)?;
         }
-        mem.next_fact = u32::from_le_bytes(state[0..4].try_into().unwrap());
-        mem.next_entity = u32::from_le_bytes(state[4..8].try_into().unwrap());
+        let derived_next_edge = mem
+            .edges_hist_out
+            .iter()
+            .map(|edge| edge.edge.0)
+            .max()
+            .map(|edge| edge.saturating_add(1))
+            .unwrap_or(0);
+        if mem.next_edge < derived_next_edge {
+            if !state.predates_edge_versions {
+                return Err(Error::Corrupt("engine edge id counter below record count"));
+            }
+            mem.next_edge = derived_next_edge;
+        }
         if (mem.next_fact as usize) < mem.facts.len()
             || (mem.next_entity as usize) < mem.entities.len()
         {
             return Err(Error::Corrupt("engine id counters below record counts"));
         }
+        mem.tombstones = mem.facts.iter().filter(|fact| fact.is_tombstone()).count();
         mem.validate_references()?;
         Ok(mem)
     }
@@ -887,17 +1043,40 @@ impl<'a> Memory<'a> {
                 return Err(Error::Corrupt("by-name record references out of range"));
             }
         }
+        // Edges are range-checked, and only range-checked. Whether the two
+        // mirrors agree, and whether an open version is reachable as a current
+        // edge, are *consistency* properties: nothing an accessor indexes with
+        // depends on them, so a disagreement makes the graph wrong rather than
+        // unsafe. They cost a random lookup per edge, which on a
+        // million-record graph is most of an open, so they are checked by
+        // [`Memory::verify`] instead — with the rest of the deferred half.
         for arena in [&self.edges_out, &self.edges_in] {
             for edge in arena.iter() {
                 if edge.a.0 >= self.next_entity
                     || edge.b.0 >= self.next_entity
                     || edge.rel.0 >= terms
+                    || edge.edge.0 >= self.next_edge
                     || (edge.fact.0 != NONE_U32 && edge.fact.0 >= self.next_fact)
-                    || !self.entities.contains(&edge.a.0.to_be_bytes())
-                    || !self.entities.contains(&edge.b.0.to_be_bytes())
                 {
                     return Err(Error::Corrupt("edge record references out of range"));
                 }
+            }
+        }
+        if self.edges_out.len() != self.edges_in.len()
+            || self.edges_hist_out.len() != self.edges_hist_in.len()
+        {
+            return Err(Error::Corrupt("edge mirrors disagree"));
+        }
+        for edge in self.edges_hist_out.iter() {
+            if edge.a.0 >= self.next_entity
+                || edge.b.0 >= self.next_entity
+                || edge.edge.0 >= self.next_edge
+                || edge.rel.0 >= terms
+                || edge.kind != 0
+                || edge.valid_from > edge.valid_to
+                || (edge.fact.0 != NONE_U32 && edge.fact.0 >= self.next_fact)
+            {
+                return Err(Error::Corrupt("edge history references out of range"));
             }
         }
         for slot in self.temporal.iter() {
@@ -911,24 +1090,34 @@ impl<'a> Memory<'a> {
     /// Runs the integrity checks that `open` **defers** for speed and memory
     /// — the on-demand equivalent of SQLite's `integrity_check`.
     ///
-    /// A load (owned, overlay or read-only) validates only the metadata, so
-    /// the large byte pools stay non-resident on an mmap'd base — an overlay
-    /// open of a multi-gigabyte database faults in only what it must. This
-    /// method sweeps the deferred pools and confirms the whole image is
-    /// well-formed: every stored text is valid UTF-8, the vector pool is
-    /// self-consistent, and facts flagged with a vector map one-to-one onto
-    /// pool slots that name them back. It reads the text and vector pools in
-    /// full, so it costs one linear pass over them (and residents them).
+    /// A load (owned, overlay or read-only) validates only what an accessor
+    /// could be unsafe without: every stored id is in range, so nothing can
+    /// index past its structure. Two further classes are left to this method.
+    ///
+    /// The large byte pools stay untouched at open, so an mmap'd base faults
+    /// in only what it must; here every stored text is confirmed valid UTF-8,
+    /// every metadata blob confirmed well-formed, and facts flagged with a
+    /// vector confirmed to map one-to-one onto pool slots that name them back.
+    ///
+    /// The graph's *consistency* is checked here too: that the two edge
+    /// mirrors hold the same edges, that a current edge agrees with its open
+    /// history version, and that every open version is reachable as a current
+    /// edge. Those are cross-references between structures, not bounds — each
+    /// costs a random lookup per edge, which on a million-record graph is most
+    /// of the cost of opening the database, and being wrong about them makes
+    /// recall return a wrong graph rather than makes anything unsafe.
     ///
     /// Skipping it is safe: the accessors that read these pools tolerate bad
     /// bytes on their own (invalid text hides the fact, vector reads are
-    /// bounds-checked), so a corrupt image never panics — `verify` only turns
-    /// that latent corruption into an explicit [`Error::Corrupt`].
+    /// bounds-checked, an edge naming an unknown entity is skipped when
+    /// rendered), so a corrupt image never panics — `verify` only turns that
+    /// latent corruption into an explicit [`Error::Corrupt`].
     ///
     /// # Errors
     ///
     /// [`Error::Corrupt`] for the first inconsistency found.
     pub fn verify(&self) -> Result<(), Error> {
+        self.verify_graph()?;
         // Text: every stored blob is valid UTF-8. Accessors already tolerate
         // invalid text gracefully; this is the eager confirmation.
         for (_, text) in self.texts.iter() {
@@ -968,6 +1157,62 @@ impl<'a> Memory<'a> {
         Ok(())
     }
 
+    /// The graph half of [`Memory::verify`]: cross-references between the four
+    /// edge structures, each a random lookup per edge.
+    fn verify_graph(&self) -> Result<(), Error> {
+        for arena in [&self.edges_out, &self.edges_in] {
+            for edge in arena.iter() {
+                if !self.entities.contains(&edge.a.0.to_be_bytes())
+                    || !self.entities.contains(&edge.b.0.to_be_bytes())
+                {
+                    return Err(Error::Corrupt("edge names an entity that does not exist"));
+                }
+            }
+        }
+        for edge in self.edges_out.iter() {
+            if !self.edges_in.contains(&edge_key(edge.b, edge.rel, edge.a)) {
+                return Err(Error::Corrupt("edge mirrors disagree"));
+            }
+            // The current slot names its open version directly, so this is a
+            // point lookup rather than a search through the triple's history.
+            let version = self
+                .edges_hist_out
+                .get(&edge_history_key(edge.a, edge.valid_from, edge.edge))
+                .ok_or(Error::Corrupt("current edge has no history record"))?;
+            if version.valid_to != VALID_TO_OPEN
+                || version.rel != edge.rel
+                || version.b != edge.b
+                || version.fact != edge.fact
+            {
+                return Err(Error::Corrupt("current edge disagrees with its history"));
+            }
+        }
+        for edge in self.edges_hist_out.iter() {
+            if !self.entities.contains(&edge.a.0.to_be_bytes())
+                || !self.entities.contains(&edge.b.0.to_be_bytes())
+            {
+                return Err(Error::Corrupt(
+                    "edge history names an entity that does not exist",
+                ));
+            }
+            if !self
+                .edges_hist_in
+                .contains(&edge_history_key(edge.b, edge.valid_from, edge.edge))
+            {
+                return Err(Error::Corrupt("edge history mirrors disagree"));
+            }
+            // An open version must be reachable as a current edge: the two
+            // structures are one fact stored twice, and recall trusts the
+            // current graph to be exactly the open versions.
+            if edge.valid_to == VALID_TO_OPEN
+                && !self.edges_out.contains(&edge_key(edge.a, edge.rel, edge.b))
+            {
+                return Err(Error::Corrupt("open edge version is not a current edge"));
+            }
+        }
+        Ok(())
+    }
+
     /// Attributes [`Memory::verify`]'s content checks to individual facts — the
     /// salvage predicate for `recover`. Walks every live
     /// (non-tombstone) fact and returns those whose stored text is not valid
@@ -984,7 +1229,7 @@ impl<'a> Memory<'a> {
         let metas = self.metas.len() as u32;
         let mut pairs = Vec::new();
         let mut out = Vec::new();
-        for i in 0..self.next_fact {
+        for i in self.fact_ids_ascending() {
             let id = FactId(i);
             let Some(record) = self.fact(id) else {
                 continue; // unknown or tombstoned

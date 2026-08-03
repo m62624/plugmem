@@ -48,6 +48,77 @@ test("revise closes a fact and opens its successor", () => {
   });
 });
 
+test("rememberMany and tagsOf cover the host batch/read verbs", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-"));
+  try {
+    const db = new Plugmem(join(dir, "m.plugmem"));
+    const promise = db.rememberMany([
+      { text: "batch one", tags: ["batch", "one"], metadata: { source: "test" } },
+      { text: "batch two", tags: ["batch", "two"] },
+    ]);
+    assert.ok(promise instanceof Promise);
+    const outcomes = await promise;
+    assert.deepEqual(outcomes.map(({ id }) => id), [0, 1]);
+    assert.deepEqual(db.tagsOf(0), ["batch", "one"]);
+    assert.deepEqual(db.tagsOf(999), []);
+
+    const page = await db.exportPage();
+    assert.equal(page.nextCursor, undefined);
+    assert.deepEqual(page.facts.map(({ text }) => text), ["batch one", "batch two"]);
+    assert.deepEqual(page.facts[0].metadata, { source: "test" });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("exportPage is bounded, pull-driven and releases the lock between pages", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-"));
+  try {
+    const db = new Plugmem(join(dir, "m.plugmem"));
+    await db.rememberMany(
+      Array.from({ length: 260 }, (_, i) => ({ text: `page fact ${i}` })),
+    );
+
+    const first = await db.exportPage();
+    assert.equal(first.facts.length, 128);
+    assert.equal(typeof first.nextCursor, "number");
+
+    // The native read guard is gone when the Promise resolves. A write between
+    // pulls therefore progresses instead of forming a callback/read-lock cycle.
+    assert.equal(db.remember({ text: "written between pages" }).id, 260);
+
+    const second = await db.exportPage(first.nextCursor);
+    const third = await db.exportPage(second.nextCursor);
+    assert.equal(second.facts.length, 128);
+    assert.equal(third.facts.length, 5);
+    assert.equal(third.nextCursor, undefined);
+    assert.equal(
+      new Set([...first.facts, ...second.facts, ...third.facts].map(({ text }) => text)).size,
+      261,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("async tasks retain their host handle after close", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-"));
+  try {
+    const db = new Plugmem(join(dir, "m.plugmem"));
+    const pending = db.rememberMany([{ text: "survives close" }]);
+    db.close();
+    assert.deepEqual((await pending).map(({ id }) => id), [0]);
+    assert.throws(() => db.stats(), /closed/);
+
+    const reopened = new Plugmem(join(dir, "m.plugmem"));
+    const page = reopened.exportPage();
+    reopened.close();
+    assert.deepEqual((await page).facts.map(({ text }) => text), ["survives close"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("forget tombstones a live fact and reports freshness", () => {
   withDb((db) => {
     db.remember({ text: "the sky is blue", entity: "sky" });
@@ -56,9 +127,15 @@ test("forget tombstones a live fact and reports freshness", () => {
   });
 });
 
-test("link upserts a typed edge", () => {
+test("link upserts and unlink closes a typed edge", () => {
   withDb((db) => {
     assert.doesNotThrow(() => db.link({ src: "user", rel: "works_at", dst: "acme" }));
+    assert.equal(db.stats().edges, 1);
+    assert.equal(db.stats().edgeVersions, 1);
+    assert.equal(db.unlink({ src: "user", rel: "works_at", dst: "acme" }), true);
+    assert.equal(db.unlink({ src: "user", rel: "works_at", dst: "acme" }), false);
+    assert.equal(db.stats().edges, 0);
+    assert.equal(db.stats().edgeVersions, 1);
   });
 });
 
@@ -76,6 +153,38 @@ test("stats / export / maintain / checkpoint / verify", async () => {
     assert.equal(typeof report.purged, "number");
     await assert.doesNotReject(db.checkpoint());
     assert.doesNotThrow(() => db.verify());
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("maintain takes an explicit mode and full repacks the edges", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-"));
+  try {
+    const db = new Plugmem(join(dir, "m.plugmem"));
+    db.remember({ text: "anchor", entity: "hub" });
+    for (let round = 0; round < 4; round += 1) {
+      for (let target = 0; target < 8; target += 1) {
+        db.link({ src: "hub", rel: "assigned_to", dst: `t-${target}` });
+        db.unlink({ src: "hub", rel: "assigned_to", dst: `t-${target}` });
+      }
+    }
+    const versions = db.stats().edgeVersions;
+    assert.equal(versions, 32);
+
+    // The default is still `auto`, which does not touch the edge arenas.
+    const auto = await db.maintain();
+    assert.equal(auto.edgesCompacted, false);
+
+    const full = await db.maintain("full");
+    assert.equal(full.edgesCompacted, true);
+    assert.equal(full.edgeVersionsBefore, versions);
+    // History is never dropped by any mode.
+    assert.equal(db.stats().edgeVersions, versions);
+    assert.doesNotThrow(() => db.verify());
+
+    // An unknown mode is rejected at the boundary, before any work starts.
+    assert.throws(() => db.maintain("nonsense"), /MaintainMode/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -105,7 +214,7 @@ test("typed outputs are fully populated (serde round-trip + camelCase)", async (
     assert.equal(typeof card.record.flags, "number");
 
     const s = db.stats();
-    for (const key of ["facts", "entities", "terms", "edges", "vectors", "nextFact", "nextEntity", "poolBytes"]) {
+    for (const key of ["facts", "entities", "terms", "edges", "edgeVersions", "vectors", "nextFact", "nextEntity", "nextEdge", "poolBytes"]) {
       assert.equal(typeof s[key], "number", `stats.${key}`);
     }
 

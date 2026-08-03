@@ -40,28 +40,58 @@ Structures:
 - Postings in a `ChunkPool`: a sequence of `[delta(fact_id) varint][tf u8]`,
   fact_ids ascending (facts are inserted monotonically by id ⇒ append to the tail,
   sorting is free).
-- `doc_len: Arena<DocLen>` (Uniform, 8 B slot) plus global `total_docs`, `total_len`.
+- `doc_len: Arena<DocLen>` (Uniform, 16 B slot: fact 4 + len u16 + distinct u16 +
+  sig u64) plus global `total_docs`, `total_len`. Beyond the length BM25 scores
+  with, the slot summarizes the document's *term set* — the distinct-term count
+  and one hashed bit per term — which is what lets the write path bound term-set
+  overlap without re-tokenizing a candidate's text (`05-api.md`, similar
+  detection). It is written at index time, where the term set is already in hand.
+- `doc_len_dense: Vec<u32>` — the same lengths indexed by fact id. Derived state,
+  rebuilt at load, never persisted; capped to a dense id space and trusted only
+  below the first id it declined, since nothing range-checks the ids inside a
+  stored record and an id past the cap is answered from the arena.
 
-Scoring is classic BM25 (k1 = 1.2, b = 0.75, in Config). A query's terms → decode
-each posting accumulating `score[fact] += idf·tf_norm` in a reusable open-addressing
-scratch → top-K by sorting a small buffer. Cost is O(Σ df); no WAND heuristics at our
-scale (a v2 optimization at million-df).
+Scoring is classic BM25 (k1 = 1.2, b = 0.75, in Config). Cost is O(Σ df) in
+decodes and stays so — no WAND heuristics — because a decode is a few nanoseconds
+of varint over a contiguous chunk chain. What the scan must not have is a
+*random* lookup per posting, and it has none:
+
+- lengths come from `doc_len_dense`, not from the arena;
+- partial scores accumulate by **merging sorted runs**: the postings are already
+  ascending by fact id, so a term is folded in with a linear merge rather than a
+  probe per posting into a map too large to stay in cache. Terms are summed in
+  query order, which fixes the floating-point result exactly;
+- top-K partitions the candidates by score and asks the caller's admission
+  predicate — a fact-record lookup — only about documents in contention, since a
+  filter removes entries from a ranking but never reorders it. On an unfiltered
+  query that is exactly `k` calls, whatever Σ df was.
+
+The `decoded`, `scored` and `admitted` counters gate this split deterministically.
 
 A **stop-frequency filter**: a query term with df > corpus/8 (and df > 1024) is
 dropped — under idf weighting it barely discriminates yet its posting list dominates
 cost (a query with a "the"-class word cost O(corpus): 2.5 ms on 100k). If *all* query
-terms are stop-frequent, the least frequent is kept (a query always answers). After
-the filter, structural recall @100k is ~61 µs (budget 200 µs); the rule is
-deterministic and covered by a bench test. Tombstone/closed facts are filtered per
-candidate (a bit-check on the record) and fall out of the postings on the `maintain`
-rebuild.
+terms are stop-frequent, the least frequent is kept (a query always answers), and
+*that* is the engine's worst lexical input — a query made of one corpus-wide term
+decodes a posting list covering the corpus, measured at ~2.3 ms @100k and ~26 ms
+@1M. It is a charted row precisely because it is the number to budget for; no
+index tuning changes its shape, only its constant. After the filter, structural
+recall @100k is ~70 µs (budget 200 µs); the rule is deterministic and covered by a
+bench test. Tombstone/closed facts are filtered per candidate (a bit-check on the
+record) and fall out of the postings on the `maintain` rebuild.
 
 ## 3. Tags and entities
 
 - tag → facts: `Arena<TagHandle>` (key TermId) + ChunkPool lists of varint fact_id
   deltas (sorted by construction).
-- A query's tag filter: intersection of the sorted lists (merge), giving an allow-set
-  for the other sources (a bitmap in scratch).
+- A query's tag filter: intersection of the sorted lists (merge), giving an
+  allow-set for the other sources. The set stays a sorted vector because the
+  temporal source *enumerates* it, but every other source only asks "is this one
+  fact in it?" — thousands of times for a graph expansion — so membership goes
+  through a Bloom filter over the member ids: a clear bit is proof of absence,
+  and only "maybe" costs the search. The admission rule tests it **before**
+  reading the fact record, since a candidate outside the allow-set is rejected
+  whatever the record says and that read is the expensive step.
 - entity → facts: the same scheme (`EntityHandle`), filled on remember.
 
 ## 4. Time index

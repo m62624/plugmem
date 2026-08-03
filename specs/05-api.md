@@ -38,6 +38,14 @@ impl<'a> Memory<'a> {
         -> Result<RememberOutcome, Error>;
     pub fn forget<S: Storage>(&mut self, s: &mut S, now: u64, id: FactId) -> Result<bool, Error>;
     pub fn link<S: Storage>(&mut self, s: &mut S, input: LinkInput<'_>) -> Result<(), Error>;
+    /// Close the current edge of (src, rel, dst). Its history version stays,
+    /// so `as_of` before the close still sees it. `Ok(false)` when no such
+    /// edge is open.
+    pub fn unlink<S: Storage>(&mut self, s: &mut S, input: UnlinkInput<'_>)
+        -> Result<bool, Error>;
+    /// The integrity an open defers: text, metadata, the vector bijection and
+    /// the graph's cross-references (`03-snapshot.md`, `08-performance.md`).
+    pub fn verify(&self) -> Result<(), Error>;
 
     /// All upkeep. Explicit, no background.
     pub fn maintain<S: Storage>(&mut self, s: &mut S, now: u64) -> Result<MaintainReport, Error>;
@@ -103,6 +111,17 @@ the engine finds, the agent decides (`revise` / keep both / `forget`). Full dete
 (vector included) fits the remember budget ≤ 500 µs — against an embedder call the
 engine is invisible anyway.
 
+Comparing term sets exactly needs both of them, and only the new fact's is at hand.
+The candidate's is **not** recovered by re-reading and re-tokenizing its text — that
+was nine tenths of a write. The per-document BM25 record carries a summary of its
+term set (`04-recall.md`), and the summary bounds the overlap from above: a term
+whose bit is clear is absent, and Jaccard rises with the intersection, so a bound at
+or below the threshold settles the question. Only a candidate that survives the bound
+is read. **Any prefilter here must be a strict upper bound** — the hints are part of
+the answer, so one that can undershoot silently drops a conflict the caller was meant
+to see. The bound is trusted only while the index was built by the current tokenizer;
+a stale index falls back to reading every candidate.
+
 ```rust
 pub struct RecallQuery<'a> {
     pub now: u64,
@@ -145,10 +164,10 @@ markers, the id for a later revise/forget. An empty result → an empty string (
 | Field | Default | Note |
 |---|---|---|
 | `dim` | 0 | 0 = vector layer off |
-| `max_bytes` | 2 GiB | total pool ceiling |
+| `max_bytes` | 2 GiB | ceiling for **each** pool, not their sum; the default is the wasm32 passport |
 | `max_text` | 4096 | bytes |
 | `max_blob` | 64 KiB | |
-| `shards_facts / entities / edges / temporal / postings` | 1024 / 256 / 512 / 512 / 2048 | powers of 2 |
+| `shards_facts / entities / edges / temporal / postings` | the floor | **engine-managed**, see below |
 | `bm25_k1 / b` | 1.2 / 0.75 | |
 | `rrf_k` | 60 | |
 | `w_bm25 / w_vec / w_graph / w_time` | 1.0 | RRF weights |
@@ -159,12 +178,22 @@ markers, the id for a later revise/forget. An empty result → an empty string (
 | `flat_to_hnsw` | 24_000 | threshold, tuned by a bench |
 | `db_uuid` | 0 | u128 database lineage id: host-minted at creation, 0 = unnamed; on open 0 adopts the stored one, nonzero must match (`ConfigMismatch`); printed in `stats()` |
 
+**The shard counts are not a setting.** They describe how a file is laid out, and
+the engine derives them from how much it holds (`01-arena.md` for the rule and the
+measurement behind it). A new database starts on the floor, `open` **adopts**
+whatever the snapshot records — the caller's values are ignored, because the loader
+needs the stored ones to read the arenas at all — and `maintain` moves the layout as
+the data grows or shrinks, eagerly upward and lazily downward so a database near a
+boundary does not rebuild itself repeatedly. There is no `config.toml` key; the
+current layout is reported by `stats()`. Setting the fields in Rust affects only a
+database being created, and the next maintenance pass overrules it.
+
 **Integrity is not config.** Open trusts the file by default (trust/sparse, the SQLite
 model) and does not checksum the image. Byte integrity is on demand via `scrub()`
 (resumable); content integrity via `verify()`. Config is stored in the snapshot; on
-`open` the given config is checked — incompatible fields (dim, shards) against a
-non-empty database are `Error::ConfigMismatch` (changing dim = reindexing, a separate
-CLI utility).
+`open` the given config is checked — an incompatible `dim` against a non-empty
+database is `Error::ConfigMismatch` (changing dim = reindexing, a separate CLI
+utility).
 
 ## Errors
 
@@ -197,9 +226,10 @@ review policy).
 | remember | yes | a new open fact + indexes + similar hints |
 | revise | yes | close target (valid_to = new.valid_from), a new fact with revises=target |
 | forget | yes | tombstone immediately (recall hides it), physical purge in maintain |
-| link | yes | an edge (upsert by (src,rel,dst)) |
+| link | yes | opens an edge version for (src,rel,dst); a repeat closes the open one and opens a new one |
+| unlink | yes | closes the current edge; the version stays and `as_of` still sees it |
 | recall | no | a pure query |
-| maintain | yes (marker) | physical deletion of tombstoned records (ids burned; see 02-data-model.md), satellite rebuild, stat recompute, folding the vector tail into HNSW |
+| maintain | yes (marker) | physical deletion of tombstoned records (ids burned; see 02-data-model.md), satellite rebuild, stat recompute, folding the vector tail into HNSW. Policy-driven (`auto` / `compact` / `reindex-text` / `optimize-vectors` / `full`); **no mode ever drops a fact revision or an edge version** |
 | snapshot | clears | full image + clear_journal |
 
 `maintain` is the only place with O(database) cost; every other verb is microseconds

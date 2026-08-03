@@ -19,8 +19,8 @@ pub const ARG_FORMAT: &str = "Output format. \"json\" (default) returns compact 
 \"human\" returns the same data pretty-printed for eyeballing.";
 
 /// `plugmem_stats` tool description.
-pub const STATS_TOOL: &str = "Return engine size counters for the memory: facts, entities, terms, edges, vectors, and the \
-database uuid. A cheap health/size probe.";
+pub const STATS_TOOL: &str = "Return engine size counters for the memory: facts, entities, terms, current edges, edge \
+history versions, vectors, HNSW coverage, ids, and the database uuid. A cheap health/size probe.";
 
 /// `plugmem_version` tool description — the MCP analog of `plugmem-cli --version`.
 pub const VERSION_TOOL: &str = "Return the running plugmem version (e.g. \"plugmem 0.1.0\"). Call \
@@ -71,6 +71,10 @@ fact is not an error.";
 pub const LINK_TOOL: &str = "Upsert a typed edge `src -rel-> dst` between two entities (created \
 lazily). Edges feed the graph recall source. Time is the server's wall clock.";
 
+/// `plugmem_unlink` tool description.
+pub const UNLINK_TOOL: &str = "Close the current typed edge `src -rel-> dst` between two \
+entities. Historical `as_of` recall can still traverse the edge while it was active. Idempotent.";
+
 /// `plugmem_show` tool description.
 pub const SHOW_TOOL: &str = "Return one fact's full card by id — text, both time axes \
 (recorded_at, valid_from/valid_to) and state. A missing id is a tool error.";
@@ -81,17 +85,25 @@ recorded_at, valid_from). The counterpart of the CLI's JSONL export; useful for 
 inspection.";
 
 /// `plugmem_maintain` tool description.
-pub const MAINTAIN_TOOL: &str = "Purge tombstoned facts, compact storage, and build the vector \
-index past its threshold. Returns a report (purged count, bytes before/after). Time is the \
-server's wall clock.";
+pub const MAINTAIN_TOOL: &str = "Run policy-driven maintenance: no-op when nothing is pending, \
+purge tombstoned facts, compact storage, reindex text when needed and advance the vector index. \
+Returns a report with purge, byte and maintenance-action counters. Time is the server's wall clock.";
+
+/// The `mode` argument of `plugmem_maintain`.
+pub const ARG_MAINTAIN_MODE: &str = "How much work to do. `auto` (the default) does only what is \
+pending and is cheap enough to run often. `compact` purges tombstones and compacts storage; \
+`reindex-text` rebuilds the text index from the stored text; `optimize-vectors` builds or advances \
+the vector graph; `full` rebuilds everything and repacks the edge arenas, which is O(database) \
+work. No mode ever drops a fact revision or an edge version.";
 
 /// `plugmem_checkpoint` tool description.
 pub const CHECKPOINT_TOOL: &str = "Flush the journal into a fresh snapshot and clear it, leaving \
 the database checkpointed (read-ready for other processes). Returns ok.";
 
 /// `plugmem_verify` tool description.
-pub const VERIFY_TOOL: &str = "Check content integrity (fact text is valid UTF-8, the vector↔fact \
-mapping is consistent). A tool error on damage; ok otherwise.";
+pub const VERIFY_TOOL: &str = "Check the integrity an open defers: fact text is valid UTF-8, \
+metadata decodes, the vector↔fact mapping is consistent, and the edge graph agrees with itself. \
+A tool error on damage; ok otherwise.";
 
 // ── Argument descriptions ─────────────────────────────────────────────────
 
@@ -138,3 +150,43 @@ read, re-mapping only when the generation grew.";
 /// Prefix of the tool-error text when a write verb is called in read-only mode.
 pub const READ_ONLY_REFUSAL: &str = "read-only server: this tool is not available (start the server \
 without --read-only to write)";
+
+// ── Workspace mode: many databases, one server ────────────────────────────
+
+/// The `db` argument, present only when the server actually serves more than
+/// one database (see the `tools` module for the three startup modes).
+pub const ARG_DB: &str = "Which memory to use, by name (letters, digits, '-' and '_'). Not a path. \
+Ask plugmem_workspace_find when you do not know the name — do not guess one, and do not invent a \
+name for knowledge that belongs in an existing memory.";
+
+/// The `db` argument when the server has a default, so it is optional.
+pub const ARG_DB_OPTIONAL: &str = "Which memory to use, by name. Optional: omitted, it means this \
+server's default memory, which is almost always the right one. Name another only when the \
+knowledge plainly belongs elsewhere.";
+
+/// `plugmem_workspace_list` tool description.
+pub const WORKSPACE_LIST_TOOL: &str = "List every memory in this workspace with its description, \
+tags and owner. Small enough to read in full at a few hundred memories; past that, search with \
+plugmem_workspace_find.";
+
+/// `plugmem_workspace_find` tool description.
+pub const WORKSPACE_FIND_TOOL: &str = "Find memories by what they are for, in your own words \
+(\"the chat about releases\", \"Ann's notes\"), and get their names back. This is how you pick a \
+`db` when you do not already know its name. Owners are searchable too, even though they are not \
+in the text.";
+
+/// The `query` argument of `plugmem_workspace_find`.
+pub const ARG_WORKSPACE_QUERY: &str = "What the memory is for, in your own words. A person's name \
+also works — it finds what they own.";
+
+/// Tool-error text when a workspace server with no default is called without a
+/// `db` argument.
+pub const WORKSPACE_DB_REQUIRED: &str = "this server holds several memories, so every call must \
+say which one: pass `db`. Use plugmem_workspace_find to look one up by what it is for, or \
+plugmem_workspace_list to see them all.";
+
+/// Startup refusal: `--read-only` and `--workspace` together.
+pub const WORKSPACE_READ_ONLY: &str = "--read-only has no workspace form: a read-only handle pins \
+one immutable snapshot generation, and a pool of pinned snapshots that silently age is worse than \
+not offering it. Serve one memory read-only (--db FILE --read-only), or serve the workspace \
+read-write.";

@@ -131,6 +131,84 @@ fn arena_chain_and_split_work_is_bounded() {
     assert!(c.splits <= 540, "splits regressed: {}", c.splits);
 }
 
+/// The skewed-prefix regime: an `Ordered` arena whose keys all share their
+/// leading 8 bytes, so every record lands in one shard and the chain grows
+/// with the corpus. This is the engine's hub-entity edge shape (`[a | rel |
+/// b]` with `a`/`rel` fixed) and its temporal shape (a real millisecond clock
+/// never reaches the top bits of a `u64`, so `recorded_at` always maps to
+/// shard 0).
+///
+/// Locating a page here must cost a *logarithm* of the page count. Before the
+/// page directory this was a walk from the chain head, i.e. O(records) per
+/// operation and quadratic over a load: the same 100k inserts spent ~19.5M
+/// chain steps against ~0.8M now, and 1M edges took 355 us each.
+#[test]
+fn arena_skewed_prefix_work_is_bounded() {
+    const HUB: u64 = 7;
+    let mut a = Arena::<Rec16>::new(ArenaCfg::new(512, ShardMode::Ordered)).unwrap();
+    for i in 0..N as u32 {
+        a.insert(&Rec16 {
+            hi: HUB,
+            lo: i,
+            val: 1,
+        })
+        .unwrap();
+    }
+    // Measured @100k in one shard: chain_steps 671_480 (~6.7 peeks per insert
+    // against log2(391) ~ 8.6 pages), splits 390, pages_allocated 391. The
+    // page count is the exact 100_000 / 256: ascending inserts append into a
+    // fresh page instead of halving a full one, so pages stay packed.
+    let build = a.counters();
+    assert!(
+        build.chain_steps <= 806_000,
+        "insert chain_steps regressed: {} (a chain walk spends ~19.5M)",
+        build.chain_steps
+    );
+    assert!(build.splits <= 468, "splits regressed: {}", build.splits);
+    assert!(
+        build.pages_allocated <= 470,
+        "ascending inserts stopped packing pages: {} pages for {N} records",
+        build.pages_allocated
+    );
+
+    // Point lookups across the whole chain, including its far end.
+    a.reset_counters();
+    const LOOKUPS: usize = 10_000;
+    let mut found = 0u32;
+    for i in (0..N as u32).step_by(N / LOOKUPS) {
+        let mut kb = [0u8; 12];
+        key::write_pair(&mut kb, HUB, i);
+        found += u32::from(a.contains(&kb));
+    }
+    assert_eq!(found as usize, LOOKUPS);
+    // Measured @10k lookups over the 391-page chain: chain_steps 86_912
+    // (~8.7 peeks each — the binary search, not the position in the chain,
+    // which averaged ~195 hops before the directory).
+    let reads = a.counters();
+    assert!(
+        reads.chain_steps <= 104_000,
+        "lookup chain_steps regressed: {}",
+        reads.chain_steps
+    );
+    assert_eq!(reads.bytes_shifted, 0, "lookups must not move bytes");
+
+    // Ascending removal drains the chain from the front — the `unlink` shape.
+    a.reset_counters();
+    for i in 0..N as u32 {
+        let mut kb = [0u8; 12];
+        key::write_pair(&mut kb, HUB, i);
+        assert!(a.remove(&kb));
+    }
+    assert_eq!(a.len(), 0);
+    // Measured for the full ascending drain: chain_steps 770_048.
+    let drain = a.counters();
+    assert!(
+        drain.chain_steps <= 924_000,
+        "remove chain_steps regressed: {}",
+        drain.chain_steps
+    );
+}
+
 #[test]
 fn arena_get_work_is_bounded() {
     let mut a = Arena::<Rec16>::new(ArenaCfg::new(1024, ShardMode::Uniform)).unwrap();

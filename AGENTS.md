@@ -56,6 +56,8 @@ Low-level `no_std` storage primitives:
 
 Arena benchmarks describe the storage primitive itself. Do not present them as measurements of the complete memory engine.
 
+The crate has two contracts, not one: its single audited `unsafe`, and its allocation budget — zero allocations per operation, amortized growth only, and a published allocator-call count that a change may not raise without saying why. Both are spelled out in `crates/plugmem-arena/AGENTS.md`; treat them as equally binding.
+
 ### `crates/plugmem-core`
 
 The main `no_std` engine. It contains:
@@ -79,7 +81,7 @@ Important source areas include:
 - `src/journal.rs` and `src/snapshot.rs` — persistence formats;
 - `examples/` — executable examples and focused experiments.
 
-For vector storage, the slot stride is the fixed header plus signature bytes plus the quantized vector dimension. With dimension 384, the raw vector slot is 440 bytes before other engine structures. Flat search scans all slots, so its latency is primarily controlled by the number of stored vectors rather than by the requested result count. HNSW is built by maintenance/configuration paths; `remember` does not automatically rebuild the graph on every write.
+For vector storage, the slot stride is the fixed header plus signature bytes plus the quantized vector dimension. With dimension 384, the raw vector slot is 440 bytes before other engine structures. Flat search scans all slots, so its latency is primarily controlled by the number of stored vectors rather than by the requested result count. HNSW is advanced by maintenance/configuration paths with bounded work in `Auto`; `remember` does not automatically rebuild the graph on every write.
 
 ### `crates/plugmem-host`
 
@@ -108,6 +110,14 @@ Node.js N-API bindings. Treat it as a boundary layer; measure FFI overhead separ
 ### `crates/plugmem-testgen`
 
 Utilities for generating deterministic test data and scenarios. It is not part of the production storage path.
+
+### `fuzz`
+
+`cargo-fuzz` targets for the two untrusted files, the snapshot and the journal.
+Its own workspace (nightly plus a sanitizer runtime), excluded from the main
+one. The seed corpus is committed real images — without seeds the fuzzer never
+gets past the magic number. CI runs each target briefly on every pull request;
+a real campaign is a manual long run. See `fuzz/README.md`.
 
 ### `tools/bench-matrix`
 
@@ -173,20 +183,25 @@ For a targeted package or example, prefer a focused command first, then run the 
 ## Release versioning
 
 - Keep the workspace, Cargo manifests, `Cargo.lock`, and npm metadata at the
-  current development version between releases. The only manual release-prep
-  version edit is the `skill/SKILL.md` marker in its dedicated release commit.
+  current development version between releases. The `skill/SKILL.md` marker is
+  the one version string a human edits by hand.
 - Do not manually bump package versions in a feature or performance PR. The
   release workflow derives the release version from the pushed `vX.Y.Z` tag,
   updates the workspace and npm versions on its release-candidate branch, and
   opens the synchronization PR back to `main`.
-- Skill content may be updated in any normal PR; regular CI checks its
-  structure, frontmatter, and that the marker is well formed, but does not
-  compare it with the development package version. When the release workflow
-  creates `rc/vX.Y.Z` and synchronizes package versions from the `pin/vX.Y.Z`
-  trigger, update only the `<!-- skill-version: X.Y.Z -->` marker in
-  `skill/SKILL.md` on that RC branch (and its documentation if the skill
-  behavior changed). The release gate is the only version-equality check and
-  verifies the marker against the tag-derived package version.
+- Skill content may be updated in any normal PR, and so may the
+  `<!-- skill-version: X.Y.Z -->` marker — bump it to the version you are
+  heading for in whichever PR before that release is a natural place for it.
+  No rule reserves it for a release branch.
+- The marker exists so the skill cannot quietly fall behind the engine.
+  `skill/SKILL.md` is what an agent reads instead of the source, so a release
+  that changed verbs, flags or behavior has to be checked against it: read the
+  skill, confirm it still describes what shipped, update it if not, then set
+  the marker. The release gate compares the marker with the tag-derived
+  package version and fails when they differ — that failure is the reminder to
+  do the reading, not a versioning chore. Regular CI only checks the marker is
+  well formed and never compares it with the development version, so a bumped
+  marker sits on `main` until the release catches up with it.
 - Verify the release workflow when changing this policy: `.github/workflows/release.yml`
   is the source of truth for tag parsing, version synchronization, and the
   skill-version gate.

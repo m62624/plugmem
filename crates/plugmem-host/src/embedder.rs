@@ -40,6 +40,54 @@ impl Embedder for NullEmbedder {
     }
 }
 
+/// One embedder handed to several databases.
+///
+/// [`crate::DatabaseBuilder::embedder`] takes ownership, which is right for one
+/// database and wrong for a workspace: a hundred chats do not want a hundred
+/// HTTP clients pointed at the same endpoint. Each database gets its own
+/// `SharedEmbedder` over one shared provider instead.
+///
+/// Calls serialize on the inner mutex. That is not a compromise — the provider
+/// behind it is a single service, and the host already serializes embedding
+/// within a database. What matters is that the wait happens *outside* the
+/// engine lock, which is still true: the database embeds before it takes its
+/// own lock.
+#[derive(Clone)]
+pub struct SharedEmbedder(std::sync::Arc<std::sync::Mutex<Box<dyn Embedder>>>);
+
+impl SharedEmbedder {
+    /// Wraps `inner` so it can be cloned into many databases.
+    pub fn new(inner: Box<dyn Embedder>) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(inner)))
+    }
+
+    /// The inner provider. A panic in one caller's `embed` leaves the provider
+    /// itself intact (it is an HTTP client, not a half-mutated structure), so a
+    /// poisoned mutex is recovered rather than propagated — the same rule the
+    /// engine lock follows.
+    fn inner(&self) -> std::sync::MutexGuard<'_, Box<dyn Embedder>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl std::fmt::Debug for SharedEmbedder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedEmbedder")
+            .field("dim", &self.dim())
+            .finish()
+    }
+}
+
+impl Embedder for SharedEmbedder {
+    fn dim(&self) -> usize {
+        self.inner().dim()
+    }
+
+    fn embed(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>, HostError> {
+        self.inner().embed(texts)
+    }
+}
+
 /// An `/v1/embeddings` client for any OpenAI-compatible server.
 #[derive(Debug)]
 pub struct OpenAiCompatEmbedder {
@@ -142,5 +190,60 @@ impl Embedder for OpenAiCompatEmbedder {
             out[index] = v;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Counts its calls, so a test can tell one shared provider from several
+    /// independent ones.
+    struct Counting(usize);
+    impl Embedder for Counting {
+        fn dim(&self) -> usize {
+            3
+        }
+        fn embed(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>, HostError> {
+            self.0 += texts.len();
+            Ok(vec![vec![self.0 as f32; 3]; texts.len()])
+        }
+    }
+
+    #[test]
+    fn clones_of_a_shared_embedder_reach_the_same_provider() {
+        let shared = SharedEmbedder::new(Box::new(Counting(0)));
+        let mut a = shared.clone();
+        let mut b = shared.clone();
+
+        assert_eq!(a.dim(), 3);
+        assert_eq!(format!("{shared:?}"), "SharedEmbedder { dim: 3 }");
+
+        // Two databases' worth of handles, one counter behind them: the second
+        // call sees the first one's effect.
+        assert_eq!(a.embed(&["x"]).unwrap(), vec![vec![1.0; 3]]);
+        assert_eq!(b.embed(&["y", "z"]).unwrap(), vec![vec![3.0; 3]; 2]);
+    }
+
+    #[test]
+    fn a_poisoned_provider_is_recovered_rather_than_propagated() {
+        let shared = SharedEmbedder::new(Box::new(Counting(0)));
+        let poisoner = shared.clone();
+        // Panic while holding the lock, exactly as a failing provider would.
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.inner();
+            panic!("provider blew up");
+        })
+        .join();
+
+        let mut after = shared.clone();
+        assert_eq!(after.embed(&["still works"]).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_null_embedder_produces_one_empty_vector_per_text() {
+        let mut null = NullEmbedder;
+        assert_eq!(null.dim(), 0);
+        assert_eq!(null.embed(&["a", "b"]).unwrap(), vec![Vec::<f32>::new(); 2]);
     }
 }

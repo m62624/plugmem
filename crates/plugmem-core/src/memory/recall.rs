@@ -38,7 +38,9 @@ use crate::index::bm25::Bm25Scratch;
 use crate::index::hnsw::HnswScratch;
 use crate::index::vecpool::{VecScratch, dot_i8};
 use crate::index::{IntersectScratch, intersect};
-use crate::model::{FactRecord, VALID_TO_OPEN};
+use crate::model::{
+    FactRecord, VALID_TO_OPEN, edge_end, edge_floor, edge_history_ceiling, edge_history_floor,
+};
 use crate::tokenizer::Tokenizer;
 
 use super::Memory;
@@ -204,6 +206,7 @@ pub struct RecallScratch {
     bm25: Bm25Scratch,
     intersect: IntersectScratch,
     allow: Vec<FactId>,
+    allow_bits: AllowFilter,
     tag_terms: Vec<u32>,
     query_terms: Vec<u32>,
     bm25_out: Vec<(FactId, f32)>,
@@ -215,7 +218,6 @@ pub struct RecallScratch {
     time_out: Vec<(FactId, f32)>,
     time_tag: Vec<(FactId, u64)>,
     visited: Vec<(EntityId, f32)>,
-    edges_tmp: Vec<(EntityId, TermId, bool, FactId)>,
     fused: hashbrown::HashMap<u32, (f32, u8), xxhash_rust::xxh3::Xxh3Builder>,
     ranked: Vec<(FactId, f32, u8)>,
     tags_tmp: Vec<TermId>,
@@ -279,6 +281,13 @@ impl Memory<'_> {
         if filtered && (dead_tag || s.allow.is_empty()) {
             return Ok(());
         }
+        // Membership filter over the set the sources will test against, built
+        // once per query rather than searched once per candidate.
+        if filtered {
+            s.allow_bits.fill(&s.allow);
+        } else {
+            s.allow_bits.clear();
+        }
 
         // 2–3. Sources (each admits through the shared rule).
         s.bm25_out.clear();
@@ -308,11 +317,23 @@ impl Memory<'_> {
             }
             let facts = &self.facts;
             let allow = &s.allow;
+            let allow_bits = &s.allow_bits;
             self.bm25.search(
                 (self.cfg.bm25_k1, self.cfg.bm25_b),
                 &s.query_terms,
                 SOURCE_CAP,
-                &mut |id| admit(facts, allow, filtered, as_of, q.include_closed, id).is_some(),
+                &mut |id| {
+                    admit(
+                        facts,
+                        allow,
+                        allow_bits,
+                        filtered,
+                        as_of,
+                        q.include_closed,
+                        id,
+                    )
+                    .is_some()
+                },
                 &mut s.bm25,
                 &mut s.bm25_out,
             );
@@ -327,10 +348,22 @@ impl Memory<'_> {
             let res = if self.hnsw.indexed() == 0 {
                 let facts = &self.facts;
                 let allow = &s.allow;
+                let allow_bits = &s.allow_bits;
                 self.vecs.search(
                     v,
                     SOURCE_CAP,
-                    &mut |id| admit(facts, allow, filtered, as_of, q.include_closed, id).is_some(),
+                    &mut |id| {
+                        admit(
+                            facts,
+                            allow,
+                            allow_bits,
+                            filtered,
+                            as_of,
+                            q.include_closed,
+                            id,
+                        )
+                        .is_some()
+                    },
                     &mut s.vec,
                     &mut s.vec_out,
                 )
@@ -435,6 +468,7 @@ impl Memory<'_> {
             hnsw_out,
             vec_out,
             allow,
+            allow_bits,
             ..
         } = s;
         self.vecs.quantize_query(v, vec)?;
@@ -449,7 +483,17 @@ impl Memory<'_> {
         vec_out.clear();
         for &(slot, sim) in hnsw_out.iter() {
             let fact = FactId(self.vecs.slot_fact(slot as usize));
-            if admit(&self.facts, allow, filtered, as_of, q.include_closed, fact).is_some() {
+            if admit(
+                &self.facts,
+                allow,
+                allow_bits,
+                filtered,
+                as_of,
+                q.include_closed,
+                fact,
+            )
+            .is_some()
+            {
                 vec_out.push((fact, sim));
             }
         }
@@ -470,9 +514,9 @@ impl Memory<'_> {
     ) {
         let RecallScratch {
             allow,
+            allow_bits,
             graph_out,
             visited,
-            edges_tmp,
             ..
         } = s;
         graph_out.clear();
@@ -481,37 +525,51 @@ impl Memory<'_> {
         }
 
         // Breadth-first: `frontier` marks where the current depth starts.
+        //
+        // Both caps full means every further edge is a no-op — it can neither
+        // enter `out.edges` nor `visited` — so expansion stops there instead of
+        // decoding the rest of a hub's edge list. The visited prefix, and with
+        // it the result, is exactly what an exhaustive walk produced.
+        let full = |edges: &Vec<RecalledEdge>, visited: &Vec<(EntityId, f32)>| {
+            edges.len() >= GRAPH_EDGE_CAP && visited.len() >= GRAPH_ENTITY_CAP
+        };
         let mut frontier = 0usize;
         let mut weight = 1.0f32;
-        for _ in 0..self.cfg.graph_depth {
+        'expand: for _ in 0..self.cfg.graph_depth {
             let depth_end = visited.len();
             weight *= self.cfg.graph_decay;
             for at in frontier..depth_end {
-                let (entity, _) = visited[at];
-                self.neighbors(entity, edges_tmp);
-                let batch = core::mem::take(edges_tmp);
-                for &(neighbor, rel, this_side_src, provenance) in &batch {
-                    let (src, dst) = if this_side_src {
-                        (entity, neighbor)
-                    } else {
-                        (neighbor, entity)
-                    };
-                    let edge = RecalledEdge {
-                        src,
-                        rel,
-                        dst,
-                        provenance,
-                    };
-                    if out.edges.len() < GRAPH_EDGE_CAP && !out.edges.contains(&edge) {
-                        out.edges.push(edge);
-                    }
-                    if visited.len() < GRAPH_ENTITY_CAP
-                        && !visited.iter().any(|&(e, _)| e == neighbor)
-                    {
-                        visited.push((neighbor, weight));
-                    }
+                if full(&out.edges, visited) {
+                    break 'expand;
                 }
-                *edges_tmp = batch;
+                let (entity, _) = visited[at];
+                self.neighbors(
+                    entity,
+                    as_of,
+                    q.as_of.is_some(),
+                    &mut |neighbor, rel, this_side_src, provenance| {
+                        let (src, dst) = if this_side_src {
+                            (entity, neighbor)
+                        } else {
+                            (neighbor, entity)
+                        };
+                        let edge = RecalledEdge {
+                            src,
+                            rel,
+                            dst,
+                            provenance,
+                        };
+                        if out.edges.len() < GRAPH_EDGE_CAP && !out.edges.contains(&edge) {
+                            out.edges.push(edge);
+                        }
+                        if visited.len() < GRAPH_ENTITY_CAP
+                            && !visited.iter().any(|&(e, _)| e == neighbor)
+                        {
+                            visited.push((neighbor, weight));
+                        }
+                        !full(&out.edges, visited)
+                    },
+                );
             }
             frontier = depth_end;
         }
@@ -526,7 +584,17 @@ impl Memory<'_> {
                 if graph_out.len() >= GRAPH_FACT_CAP || examined > GRAPH_EXAMINE_CAP {
                     break 'entities;
                 }
-                if admit(&self.facts, allow, filtered, as_of, q.include_closed, fact).is_some() {
+                if admit(
+                    &self.facts,
+                    allow,
+                    allow_bits,
+                    filtered,
+                    as_of,
+                    q.include_closed,
+                    fact,
+                )
+                .is_some()
+                {
                     graph_out.push((fact, weight));
                 }
             }
@@ -537,7 +605,16 @@ impl Memory<'_> {
             }
             if let Some(fact) = edge.provenance.some()
                 && !graph_out.iter().any(|&(f, _)| f == fact)
-                && admit(&self.facts, allow, filtered, as_of, q.include_closed, fact).is_some()
+                && admit(
+                    &self.facts,
+                    allow,
+                    allow_bits,
+                    filtered,
+                    as_of,
+                    q.include_closed,
+                    fact,
+                )
+                .is_some()
             {
                 graph_out.push((fact, self.cfg.graph_decay));
             }
@@ -557,7 +634,10 @@ impl Memory<'_> {
             return;
         }
         let RecallScratch {
-            allow, time_out, ..
+            allow,
+            allow_bits,
+            time_out,
+            ..
         } = s;
         let mut from_key = [0u8; 12];
         plugmem_arena::key::write_pair(&mut from_key, from, 0);
@@ -567,6 +647,7 @@ impl Memory<'_> {
             if admit(
                 &self.facts,
                 allow,
+                allow_bits,
                 filtered,
                 as_of,
                 q.include_closed,
@@ -604,7 +685,15 @@ impl Memory<'_> {
         } = s;
         time_tag.clear();
         for &fact in allow.iter() {
-            let Some(record) = admit(&self.facts, &[], false, as_of, include_closed, fact) else {
+            let Some(record) = admit(
+                &self.facts,
+                &[],
+                &AllowFilter::default(),
+                false,
+                as_of,
+                include_closed,
+                fact,
+            ) else {
                 continue;
             };
             if record.recorded_at >= from && record.recorded_at < to {
@@ -620,24 +709,58 @@ impl Memory<'_> {
         );
     }
 
-    /// Collects the edges touching `entity` from both mirrored arenas
-    /// into `out` as `(neighbor, rel, entity_is_src, provenance)`.
-    fn neighbors(&self, entity: EntityId, out: &mut Vec<(EntityId, TermId, bool, FactId)>) {
-        out.clear();
-        let mut from = [0u8; 12];
-        plugmem_arena::key::write_u32(&mut from, entity.0);
-        let mut to = [0u8; 12];
-        plugmem_arena::key::write_u32(&mut to, entity.0 + 1);
-        out.extend(
-            self.edges_out
-                .range(&from, &to)
-                .map(|e| (e.b, e.rel, true, e.fact)),
-        );
-        out.extend(
-            self.edges_in
-                .range(&from, &to)
-                .map(|e| (e.b, e.rel, false, e.fact)),
-        );
+    /// Visits the edges touching `entity` in both mirrored arenas as
+    /// `(neighbor, rel, entity_is_src, provenance)` — outgoing in ascending
+    /// key order, then incoming.
+    ///
+    /// The walk is **lazy and interruptible**: `visit` returning `false` stops
+    /// it. A hub entity holds as many edges as the corpus has records, and
+    /// expansion consumes at most a fixed cap of them, so materializing the
+    /// whole list would make graph recall O(edges of the hub) for a bounded
+    /// answer. Stopping is a pure prefix of the same deterministic order, so
+    /// the caller's result is unchanged.
+    fn neighbors(
+        &self,
+        entity: EntityId,
+        as_of: u64,
+        historical: bool,
+        visit: &mut impl FnMut(EntityId, TermId, bool, FactId) -> bool,
+    ) {
+        if historical {
+            // History is keyed `[a | valid_from | edge]`, so walking backwards
+            // from `as_of` yields the entity's versions newest-first: those
+            // that most recently became true, and so the ones most likely to
+            // still be valid. The range already enforces `valid_from <= as_of`;
+            // `as_of < valid_to` is the other half of the validity test.
+            //
+            // The walk stops as soon as the caller has enough valid edges, so
+            // a deep history costs nothing extra for the usual question. The
+            // exception is an instant at which the entity had *no* valid edge
+            // at all: there is nothing to stop at, so proving the absence
+            // reads every version that had already begun. Answering that in
+            // sublinear time needs an interval index, not an ordering.
+            let from = edge_history_floor(entity);
+            let to = edge_history_ceiling(entity, as_of);
+            for (arena, entity_is_src) in
+                [(&self.edges_hist_out, true), (&self.edges_hist_in, false)]
+            {
+                for e in arena.range_rev(&from, &to) {
+                    if as_of < e.valid_to && !visit(e.b, e.rel, entity_is_src, e.fact) {
+                        return;
+                    }
+                }
+            }
+        } else {
+            let from = edge_floor(entity);
+            let to = edge_end(entity);
+            for (arena, entity_is_src) in [(&self.edges_out, true), (&self.edges_in, false)] {
+                for e in arena.range(&from, &to) {
+                    if !visit(e.b, e.rel, entity_is_src, e.fact) {
+                        return;
+                    }
+                }
+            }
+        }
     }
 
     /// Renders the compact prompt block (format fixed by golden tests).
@@ -680,37 +803,117 @@ impl Memory<'_> {
             out.rendered.push('\n');
         }
         for edge in &out.edges {
+            // Deferred validation, as for a fact's text and subject name: an
+            // edge whose endpoints do not resolve is rendered as nothing
+            // rather than as a panic. Only a corrupt image reaches this, and
+            // `verify` reports it explicitly.
+            let (Some(src), Some(dst)) = (self.entity_name(edge.src), self.entity_name(edge.dst))
+            else {
+                continue;
+            };
             let _ = writeln!(
                 out.rendered,
-                "- links: {} —{}→ {}",
-                self.entity_name(edge.src)
-                    .expect("edges reference existing entities"),
+                "- links: {src} —{}→ {dst}",
                 self.terms.resolve(edge.rel),
-                self.entity_name(edge.dst)
-                    .expect("edges reference existing entities"),
             );
         }
     }
 }
 
+/// The tag allow-set, as the sources actually use it.
+///
+/// The set is a sorted vector because [`Memory::time_source_from_tags`]
+/// *enumerates* it. Every other source asks a different question — "is this
+/// one fact in it?" — and asks it once per candidate, which for a graph
+/// expansion under a tag filter is thousands of times. A binary search
+/// answers that in a dozen unpredictable branches over a list sized like the
+/// tag; the filter below answers "no" in one word read, and only "maybe"
+/// costs the search.
+///
+/// The filter is a Bloom filter over the member ids: a member's bit is always
+/// set, so a clear bit is proof of absence and the exact answer is unchanged.
+#[derive(Debug, Default)]
+struct AllowFilter {
+    /// Bit per hashed id; length is a power of two so the hash needs no
+    /// modulo. Empty when no tag filter is active.
+    bits: Vec<u64>,
+    /// `log2(bits.len() * 64)`, the shift that maps a hash onto a bit index.
+    shift: u32,
+}
+
+/// Bits per member. Eight keeps the false-positive rate near 12% while the
+/// whole filter stays small enough to sit in L1 for a realistic tag.
+const ALLOW_BITS_PER_MEMBER: usize = 8;
+/// Smallest and largest filter, in 64-bit words: 64 bytes to 128 KiB.
+const ALLOW_MIN_WORDS: usize = 8;
+const ALLOW_MAX_WORDS: usize = 1 << 14;
+
+impl AllowFilter {
+    /// Rebuilds the filter over `allow`. Reuses the buffer, so a warm scratch
+    /// does not allocate.
+    fn fill(&mut self, allow: &[FactId]) {
+        // Clamped before rounding up: `next_power_of_two` overflows rather
+        // than saturates, and on wasm32 `usize` is 32 bits, so a large
+        // allow-set could reach that edge.
+        let words = allow
+            .len()
+            .saturating_mul(ALLOW_BITS_PER_MEMBER)
+            .div_ceil(64)
+            .clamp(ALLOW_MIN_WORDS, ALLOW_MAX_WORDS)
+            .next_power_of_two();
+        self.bits.clear();
+        self.bits.resize(words, 0);
+        self.shift = 64 - (words * 64).trailing_zeros();
+        for &id in allow {
+            let at = self.index(id);
+            self.bits[at / 64] |= 1u64 << (at % 64);
+        }
+    }
+
+    /// Drops the filter (no tag filter on this query).
+    fn clear(&mut self) {
+        self.bits.clear();
+    }
+
+    /// Bit index of `id`. Fibonacci hashing, the same mixing the arena shards
+    /// with, so ids that differ in their low bits do not collide in runs.
+    fn index(&self, id: FactId) -> usize {
+        (u64::from(id.0).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> self.shift) as usize
+    }
+
+    /// `false` proves `id` is not in the allow-set; `true` means the caller
+    /// must confirm against the set itself.
+    fn maybe_contains(&self, id: FactId) -> bool {
+        let at = self.index(id);
+        self.bits[at / 64] & (1u64 << (at % 64)) != 0
+    }
+}
+
 /// The shared admission rule of every source. Returns the record so
 /// callers can reuse it.
+///
+/// The tag test comes first on purpose. Reading the fact record is an arena
+/// lookup — the most expensive step here — and a candidate outside the
+/// allow-set is rejected whatever the record says, so fetching it would be
+/// work thrown away. The rule itself is unchanged: a candidate is admitted
+/// exactly when it was before.
 fn admit(
     facts: &plugmem_arena::Arena<'_, FactRecord>,
     allow: &[FactId],
+    filter: &AllowFilter,
     filtered: bool,
     as_of: u64,
     include_closed: bool,
     id: FactId,
 ) -> Option<FactRecord> {
+    if filtered && (!filter.maybe_contains(id) || allow.binary_search(&id).is_err()) {
+        return None;
+    }
     let record = facts.get(&id.0.to_be_bytes())?;
     if record.is_tombstone() || record.recorded_at > as_of || record.valid_from > as_of {
         return None;
     }
     if !include_closed && as_of >= record.valid_to {
-        return None;
-    }
-    if filtered && allow.binary_search(&id).is_err() {
         return None;
     }
     Some(record)

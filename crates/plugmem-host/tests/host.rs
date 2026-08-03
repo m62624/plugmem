@@ -4,11 +4,12 @@
 
 use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use plugmem_host::{
     Config, Database, Embedder, FactId, FsyncPolicy, HostError, NullEmbedder, OpenAiCompatEmbedder,
-    ReadOnlyDatabase, RecallQuery, RememberInput,
+    ReadOnlyDatabase, RecallQuery, RememberInput, ShardLayout, UnlinkInput,
 };
 
 /// A unique temp directory per test; removed on drop.
@@ -41,13 +42,7 @@ impl Drop for TempDir {
 }
 
 fn cfg() -> Config {
-    let mut cfg = Config::default();
-    cfg.shards_facts = 8;
-    cfg.shards_entities = 4;
-    cfg.shards_edges = 4;
-    cfg.shards_temporal = 4;
-    cfg.shards_postings = 16;
-    cfg
+    Config::default()
 }
 
 #[test]
@@ -71,15 +66,39 @@ fn open_remember_reopen_replays_the_journal() {
             provenance: Some(out.id),
         })
         .unwrap();
+        assert!(
+            db.unlink(UnlinkInput {
+                now: 2_500,
+                src: "user",
+                rel: "works_on",
+                dst: "plugmem",
+            })
+            .unwrap()
+        );
         out.id
     }; // drop releases the lock
 
     let (db, report) = Database::open(tmp.db(), cfg()).unwrap();
-    assert_eq!(report.replayed, 2, "the journal replays on reopen");
+    assert_eq!(report.replayed, 3, "the journal replays on reopen");
     let fact = db.get(id).expect("the fact survived the reopen");
     assert_eq!(fact.text, "prefers tokio");
     let out = db.recall(RecallQuery::text(3_000, "tokio")).unwrap();
     assert!(out.rendered.contains("prefers tokio"));
+    let current = db
+        .recall(RecallQuery {
+            entities: &["user"],
+            ..RecallQuery::text(3_000, "")
+        })
+        .unwrap();
+    assert!(current.edges.is_empty());
+    let historical = db
+        .recall(RecallQuery {
+            entities: &["user"],
+            as_of: Some(2_250),
+            ..RecallQuery::text(3_000, "")
+        })
+        .unwrap();
+    assert_eq!(historical.edges.len(), 1);
 }
 
 #[test]
@@ -177,6 +196,23 @@ fn maintain_policy_fires_on_forgets() {
     let stats = db.stats();
     assert_eq!(stats.facts, 3, "purged records are removed");
     assert_eq!(stats.next_fact, 6, "ids are never reused");
+}
+
+#[test]
+fn maintain_noop_does_not_rewrite_the_snapshot() {
+    let tmp = TempDir::new("maintain-noop");
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    db.remember(RememberInput::text(1, "stable fact")).unwrap();
+    db.checkpoint(2).unwrap();
+    let before = snapshot_file(&tmp.db());
+    let before_len = std::fs::metadata(&before).unwrap().len();
+
+    let report = db.maintain(3).unwrap();
+    assert!(report.no_op);
+    assert_eq!(report.purged, 0);
+    assert!(!report.structural_compacted);
+    assert_eq!(snapshot_file(&tmp.db()), before);
+    assert_eq!(std::fs::metadata(before).unwrap().len(), before_len);
 }
 
 #[test]
@@ -515,6 +551,36 @@ fn export_each_streams_the_same_facts_as_export() {
 }
 
 #[test]
+fn export_pages_are_bounded_and_advance_across_closed_and_tombstoned_ids() {
+    let tmp = TempDir::new("export-page");
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    db.remember(RememberInput::text(1, "alpha")).unwrap();
+    let beta = db.remember(RememberInput::text(2, "beta")).unwrap();
+    db.revise(beta.id, RememberInput::text(3, "beta prime"))
+        .unwrap();
+    let gone = db.remember(RememberInput::text(4, "gone")).unwrap();
+    db.forget(5, gone.id).unwrap();
+    db.remember(RememberInput::text(6, "omega")).unwrap();
+
+    let expected = db.export();
+    let mut cursor = 0;
+    let mut paged = Vec::new();
+    loop {
+        let page = db.export_page(cursor, NonZeroUsize::new(1).unwrap());
+        assert!(page.facts.len() <= 1, "the requested bound is hard");
+        paged.extend(page.facts);
+        let Some(next) = page.next_cursor else { break };
+        assert!(next > cursor, "a non-terminal page must make progress");
+        cursor = next;
+    }
+    assert_eq!(paged, expected);
+
+    let beyond_end = db.export_page(u32::MAX, NonZeroUsize::new(4).unwrap());
+    assert!(beyond_end.facts.is_empty());
+    assert_eq!(beyond_end.next_cursor, None);
+}
+
+#[test]
 fn embedder_transport_and_shape_errors_are_typed() {
     // A refused connection is a typed Embed error.
     let mut refused = OpenAiCompatEmbedder::new("http://127.0.0.1:1/v1", "m", 4);
@@ -715,18 +781,32 @@ fn gc_reclaims_unpinned_generations_and_a_pin_keeps_one() {
     assert_eq!(generation_count(&tmp.db()), 1);
 }
 
-/// Open file descriptors for this process, via `/proc/self/fd` (Linux). On
-/// other platforms it returns 0, so the fd-growth assertion below is a no-op
-/// there — the generation-count bound still holds everywhere, and valgrind
-/// (Linux) supplies the authoritative heap/mapping verdict.
+/// Open file descriptors belonging to `base`, via `/proc/self/fd` (Linux).
+/// Restricting the count to this test's unique database matters: the Rust test
+/// harness runs tests in parallel, and the workspace tests deliberately keep
+/// a pool of unrelated databases open. Counting the whole process would turn
+/// that legitimate activity into a false leak report.
+///
+/// On other platforms it returns 0, so the fd-growth assertion below is a
+/// no-op there — the generation-count bound still holds everywhere, and
+/// valgrind (Linux) supplies the authoritative heap/mapping verdict.
 #[cfg(target_os = "linux")]
-fn open_fd_count() -> usize {
+fn open_fd_count(base: &std::path::Path) -> usize {
+    let prefix = base.to_string_lossy();
     std::fs::read_dir("/proc/self/fd")
-        .map(|d| d.count())
+        .map(|d| {
+            d.flatten()
+                .filter(|entry| {
+                    std::fs::read_link(entry.path())
+                        .map(|target| target.to_string_lossy().starts_with(&*prefix))
+                        .unwrap_or(false)
+                })
+                .count()
+        })
         .unwrap_or(0)
 }
 #[cfg(not(target_os = "linux"))]
-fn open_fd_count() -> usize {
+fn open_fd_count(_base: &std::path::Path) -> usize {
     0
 }
 
@@ -775,11 +855,11 @@ fn readers_and_checkpoints_do_not_leak_across_rounds() {
 
     // Two identical passes: comparing the second delta against the first cancels
     // any one-time initialization (lazily-built caches, allocator arenas).
-    let fds_start = open_fd_count();
+    let fds_start = open_fd_count(&tmp.db());
     churn(&db);
-    let fds_after_first = open_fd_count();
+    let fds_after_first = open_fd_count(&tmp.db());
     churn(&db);
-    let fds_after_second = open_fd_count();
+    let fds_after_second = open_fd_count(&tmp.db());
 
     // Generations never accumulate: readers are dropped each round, so GC
     // settles the disk to the single current generation.
@@ -965,6 +1045,9 @@ fn open_readonly_matches_read_write() {
     assert_eq!(ro.stats().facts, facts);
     assert_eq!(ro.recall(q).unwrap().rendered, rendered);
     assert_eq!(ro.get(FactId(1)), Some(got1));
+    let page = ro.export_page(0, NonZeroUsize::new(1).unwrap());
+    assert_eq!(page.facts.len(), 1);
+    assert!(page.next_cursor.is_some());
     assert_eq!(ro.path(), tmp.db());
     // Debug is a summary, never the contents.
     assert!(format!("{ro:?}").contains("ReadOnlyDatabase"));
@@ -1768,4 +1851,145 @@ fn metadata_round_trips_through_get_and_export_sorted() {
         want,
         "import preserves metadata"
     );
+}
+
+/// A growing database re-shards itself. Nothing else would: automatic
+/// maintenance is opt-in, so without this trigger a database would keep the
+/// layout it was created with until somebody ran `maintain` by hand, paying
+/// for it in memory the whole time.
+#[test]
+fn a_growing_database_reshards_itself_without_being_asked() {
+    let tmp = TempDir::new("reshard");
+    // This test proves the automatic layout transition, not per-record
+    // durability or the ordinary snapshot cadence. Keep those policies out of
+    // the workload: on Windows, the default EachOp journal sync would turn
+    // the ~175k records below into a many-minute CI durability benchmark.
+    let (db, _) = Database::builder(cfg())
+        .fsync(FsyncPolicy::OnSnapshot)
+        .snapshot_every_ops(0)
+        .snapshot_journal_bytes(0)
+        .open(tmp.db())
+        .unwrap();
+    let floor = db.stats().shards;
+
+    // Enough facts to push the fact arena one step past the floor. The rule
+    // sizes each group by its payload, so this follows from the slot width and
+    // the per-shard target rather than being a guessed number.
+    const FACT_SLOT: usize = 48;
+    const SHARD_TARGET: usize = 64 * 4096;
+    // Past the floor is not enough — a rebuild waits for the growth margin.
+    let n = floor.facts * ShardLayout::GROWTH_MARGIN * SHARD_TARGET / FACT_SLOT + 1;
+    for i in 0..n {
+        db.remember(RememberInput::text(i as u64 + 1, "a short fact"))
+            .unwrap();
+    }
+
+    let grown = db.stats().shards;
+    assert!(
+        grown.facts > floor.facts,
+        "layout stayed at {floor:?} after {n} facts"
+    );
+    assert_eq!(db.stats().facts, n, "re-sharding is a rearrangement");
+
+    // It survives a reopen: the file records the layout, and the caller's
+    // config — still on the floor — does not override it.
+    drop(db);
+    let (reopened, _) = Database::open(tmp.db(), cfg()).unwrap();
+    assert_eq!(reopened.stats().shards, grown);
+    assert_eq!(reopened.stats().facts, n);
+    reopened.verify().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Workspace: many small databases at once. This is what the derived shard
+// layout bought — before it, a database holding a thousand facts cost 14 MB of
+// pages, so a bot with a memory per conversation was not affordable at all. The
+// gate belongs here rather than in a README because it is the property that
+// makes the whole feature viable, and it is exactly the kind of thing a future
+// change to shard sizing would silently undo.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fifty_small_memories_fit_in_a_budget_a_bot_can_afford() {
+    use plugmem_host::{DbName, IfMissing, Settings, WorkspaceLimits};
+
+    const MEMORIES: usize = 50;
+    const FACTS_EACH: u64 = 200;
+    /// Engine pool bytes one memory of this size may hold.
+    ///
+    /// This, not the resident set, is the gate. `pool_bytes` counts what the
+    /// engine allocated and is identical on every platform and profile, while
+    /// RSS is the allocator's and the OS's answer to a different question — it
+    /// varies by page accounting and malloc zone, which makes a tight budget on
+    /// it a tripwire for the CI runner rather than for the engine.
+    ///
+    /// The regression it guards is not subtle: with the fixed shard counts this
+    /// branch was built on top of, a memory this size cost ~14 MB of pages
+    /// whatever it held. A hundredth of that is still generous for 200 facts.
+    const POOL_BUDGET: usize = 256 * 1024;
+    /// A resident-set sanity bound, deliberately loose. It exists to catch a
+    /// pool that never evicts (fifty memories held open at once), not to count
+    /// bytes — sixteen pooled handles at the old floor would be past 200 MB, so
+    /// anything under this is unambiguously "the floor is gone".
+    const RSS_BUDGET: usize = 96 * 1024 * 1024;
+
+    let tmp = TempDir::new("workspace-rss");
+    let settings = Settings::from_table(None).unwrap();
+    let ws = settings.open_workspace(&tmp.0).unwrap();
+    assert_eq!(
+        ws.limits(),
+        WorkspaceLimits::default(),
+        "the budget below is sized against the default pool"
+    );
+
+    let before = rss();
+    for i in 0..MEMORIES {
+        let name = DbName::parse(&format!("chat-{i}")).unwrap();
+        let db = ws.get(&name, 1_000, IfMissing::Create).unwrap();
+        for f in 0..FACTS_EACH {
+            db.remember(RememberInput::text(
+                1_000 + f,
+                &format!("memory {i} fact {f}: the sky was a shade of blue that day"),
+            ))
+            .unwrap();
+        }
+        db.checkpoint(2_000).unwrap();
+    }
+    let grew = rss().saturating_sub(before);
+
+    assert_eq!(ws.layout().list().unwrap().len(), MEMORIES);
+    // The pool is what bounds this: fifty memories were written, at most
+    // `max_open` are held, and the rest were closed on the way through.
+    assert!(
+        ws.open_count() <= WorkspaceLimits::default().max_open,
+        "pool held {} handles",
+        ws.open_count()
+    );
+    assert!(
+        grew < RSS_BUDGET,
+        "{MEMORIES} memories of {FACTS_EACH} facts added {grew} resident bytes \
+         (loose bound {RSS_BUDGET})"
+    );
+
+    // The deterministic half: every memory is intact, independent, and small.
+    for i in 0..MEMORIES {
+        let name = DbName::parse(&format!("chat-{i}")).unwrap();
+        let db = ws.get(&name, 3_000, IfMissing::Fail).unwrap();
+        let stats = db.stats();
+        assert_eq!(stats.facts, FACTS_EACH as usize);
+        assert!(
+            stats.pool_bytes < POOL_BUDGET,
+            "chat-{i} holds {} pool bytes for {FACTS_EACH} facts (budget {POOL_BUDGET})",
+            stats.pool_bytes
+        );
+    }
+
+    for i in [0, MEMORIES / 2, MEMORIES - 1] {
+        let name = DbName::parse(&format!("chat-{i}")).unwrap();
+        let db = ws.get(&name, 3_000, IfMissing::Fail).unwrap();
+        let out = db
+            .recall(plugmem_host::RecallQuery::text(3_000, "shade of blue"))
+            .unwrap();
+        assert!(out.rendered.contains(&format!("memory {i} fact")), "{i}");
+    }
 }

@@ -1,9 +1,10 @@
-//! The `Plugmem` class: a 1:1 napi mirror of plugmem-host's [`Database`] (and,
+//! The `Plugmem` class: the napi surface over plugmem-host's [`Database`] (and,
 //! in read-only mode, [`ReadOnlyDatabase`]).
 //!
 //! Every method wraps the identically-named host verb — the engine logic is
 //! 100% `plugmem-host`; this layer only marshals arguments and results across
-//! the Node boundary. Inputs are typed `#[napi(object)]` structs so napi emits
+//! the Node boundary. `recover` is deliberately CLI-only alongside `import`
+//! and `scrub` — salvage is a path-level operation on the host's own disk. Inputs are typed `#[napi(object)]` structs so napi emits
 //! precise TypeScript interfaces (autocomplete in a TS host like Pi); results
 //! come back as the typed mirrors in [`crate::types`]. A [`HostError`] becomes a
 //! thrown JS `Error`; the clock is the system clock, read per call (the engine
@@ -11,23 +12,30 @@
 //!
 //! Opened `readOnly`, the instance observes another process's writer over a
 //! shared snapshot: the read verbs answer, the write verbs throw, and the two
-//! freshness verbs (`generation`/`refresh`) become available. Async offloading
-//! lands in the next milestone.
+//! freshness verbs (`generation`/`refresh`) become available.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use napi::bindgen_prelude::AsyncTask;
 use napi::{Env, Error, Result, Task};
 use napi_derive::napi;
 use plugmem_host::{
-    Database, FactId, HostError, LinkInput, ReadOnlyDatabase, RecallQuery, RememberInput, Settings,
-    SettingsError,
+    Database, FactId, HostError, LinkInput, MaintenanceOptions, ReadOnlyDatabase, RecallQuery,
+    RememberInput, Settings, SettingsError, UnlinkInput,
 };
 
 use crate::types::{
-    self, ExportedFact, FactSnapshot, MaintainReport, RecallResult, RememberOutcome, Stats,
+    self, ExportPage, ExportedFact, FactSnapshot, MaintainMode, MaintainReport, RecallResult,
+    RememberOutcome, Stats,
 };
+
+/// Keep one native→JS transfer bounded. This matches the workspace's existing
+/// conservative batch grain (CLI import) without exposing a tuning knob that
+/// would let callers accidentally reconstruct an unbounded export.
+const EXPORT_PAGE_LIMIT: NonZeroUsize = NonZeroUsize::new(128).unwrap();
 
 /// Options for [`Plugmem::new`].
 #[napi(object)]
@@ -112,12 +120,11 @@ pub struct LinkArgs {
 }
 
 /// The open handle behind a [`Plugmem`]: a read-write writer, or a read-only
-/// observer of another process's writer. `Reader` is boxed — a
-/// [`ReadOnlyDatabase`] owns a memory map and is far larger than the writer's
-/// `Arc` handle, so boxing keeps the two variants close in size.
+/// observer of another process's writer. The reader is reference-counted so an
+/// async export task can outlive the JS object that scheduled it.
 enum Handle {
     Writer(Database),
-    Reader(Box<ReadOnlyDatabase>),
+    Reader(Arc<ReadOnlyDatabase>),
 }
 
 /// A memory over one plugmem file — the napi mirror of [`plugmem_host::Database`]
@@ -188,7 +195,7 @@ impl Plugmem {
             // A read-only handle observes another writer's snapshot and never
             // auto-embeds; drop the embedder and open over `settings.config`.
             let ro = Database::open_readonly(&path, settings.config).map_err(to_napi_err)?;
-            Handle::Reader(Box::new(ro))
+            Handle::Reader(Arc::new(ro))
         } else {
             // The writer takes the embedder and maintenance policy from settings.
             let db = settings.open(&path).map_err(to_napi_err)?;
@@ -199,11 +206,36 @@ impl Plugmem {
         })
     }
 
+    /// Wraps a database handle a workspace already opened.
+    ///
+    /// Not a JS constructor: a memory in a workspace is reached by name through
+    /// `Workspace.open`, which is what keeps a name from ever being a path.
+    /// The class it hands back is this one, so a named memory has every verb a
+    /// path-opened one does and there is no second implementation to drift.
+    pub(crate) fn from_database(db: Database) -> Self {
+        Self {
+            handle: Some(Handle::Writer(db)),
+        }
+    }
+
     /// Stores a fact; returns its id plus similar/conflicting live facts.
     /// @throws in read-only mode.
     #[napi]
     pub fn remember(&self, args: RememberArgs) -> Result<RememberOutcome> {
         do_remember(self.writer()?, &args, None)
+    }
+
+    /// Stores a batch of facts and resolves with one outcome per input.
+    ///
+    /// A batch may call a remote embedder and always performs one journal sync,
+    /// so it runs on napi-rs' libuv worker pool.
+    #[napi(ts_return_type = "Promise<RememberOutcome[]>")]
+    pub fn remember_many(&self, args: Vec<RememberArgs>) -> Result<AsyncTask<RememberManyTask>> {
+        Ok(AsyncTask::new(RememberManyTask {
+            db: self.writer()?.clone(),
+            args,
+            now: now_ms(),
+        }))
     }
 
     /// Closes fact `id` and records `args` as its successor; returns the outcome.
@@ -268,6 +300,19 @@ impl Plugmem {
             .map_err(to_napi_err)
     }
 
+    /// Closes the current typed edge `src -rel-> dst`. @throws in read-only mode.
+    #[napi]
+    pub fn unlink(&self, args: LinkArgs) -> Result<bool> {
+        self.writer()?
+            .unlink(UnlinkInput {
+                now: now_ms(),
+                src: &args.src,
+                rel: &args.rel,
+                dst: &args.dst,
+            })
+            .map_err(to_napi_err)
+    }
+
     /// One fact's full card by `id`, or `null` if unknown/tombstoned.
     #[napi]
     pub fn get(&self, id: u32) -> Result<Option<FactSnapshot>> {
@@ -298,7 +343,36 @@ impl Plugmem {
             Handle::Writer(db) => db.export(),
             Handle::Reader(db) => db.export(),
         };
-        types::to_typed(&facts)
+        Ok(facts.into_iter().map(ExportedFact::from).collect())
+    }
+
+    /// Returns at most 128 inspected fact ids' open facts on a libuv worker
+    /// thread. A sparse page can be empty and still carry `nextCursor`.
+    ///
+    /// Pass `nextCursor` back as `cursor` until it is absent. Each Promise owns
+    /// exactly one bounded page and resolves only after its native scan has
+    /// completed; there is no callback queue and no database lock held while JS
+    /// processes the result. A writer may change between page calls, so do not
+    /// mutate it during a snapshot-style backup; a read-only handle is stable.
+    #[napi(ts_return_type = "Promise<ExportPage>")]
+    pub fn export_page(&self, cursor: Option<u32>) -> Result<AsyncTask<ExportPageTask>> {
+        let source = match self.handle()? {
+            Handle::Writer(db) => ExportSource::Writer(db.clone()),
+            Handle::Reader(db) => ExportSource::Reader(Arc::clone(db)),
+        };
+        Ok(AsyncTask::new(ExportPageTask {
+            source,
+            cursor: cursor.unwrap_or(0),
+        }))
+    }
+
+    /// One fact's tags, or an empty array for an unknown or tombstoned id.
+    #[napi]
+    pub fn tags_of(&self, id: u32) -> Result<Vec<String>> {
+        match self.handle()? {
+            Handle::Writer(db) => Ok(db.tags_of(FactId(id))),
+            Handle::Reader(db) => Ok(db.tags_of(FactId(id))),
+        }
     }
 
     /// Content-integrity check; throws on the first inconsistency found.
@@ -311,15 +385,29 @@ impl Plugmem {
         .map_err(to_napi_err)
     }
 
-    /// Purges tombstones, compacts, and builds the vector index; resolves with
-    /// the before/after report. **Async** (returns a `Promise`): the pass does
-    /// disk I/O (compaction, HNSW build), so it runs on a libuv worker thread and
-    /// never blocks the event loop. @throws synchronously in read-only mode.
+    /// Runs policy-driven maintenance; resolves with the before/after report.
+    /// **Async** (returns a `Promise`): the pass may do disk I/O (compaction,
+    /// HNSW work), so it runs on a libuv worker thread and never blocks the
+    /// event loop. @throws synchronously in read-only mode.
+    ///
+    /// `mode` defaults to `auto`, which does only what is pending. `full`
+    /// rebuilds everything and repacks the edge arenas — O(database) work, and
+    /// the only mode that reclaims edge-history page slack.
     #[napi(ts_return_type = "Promise<MaintainReport>")]
-    pub fn maintain(&self) -> Result<AsyncTask<MaintainTask>> {
+    pub fn maintain(
+        &self,
+        // The generated type for a napi string enum is `const enum`, which
+        // TypeScript refuses to import from a declaration file under
+        // `isolatedModules` — the setting Vite, esbuild and swc all imply. The
+        // runtime has always accepted the plain string (the enum's values *are*
+        // these strings), so the declared type says so and both worlds work.
+        #[napi(ts_arg_type = "'auto' | 'compact' | 'reindex-text' | 'optimize-vectors' | 'full'")]
+        mode: Option<MaintainMode>,
+    ) -> Result<AsyncTask<MaintainTask>> {
         Ok(AsyncTask::new(MaintainTask {
             db: self.writer()?.clone(),
             now: now_ms(),
+            options: mode.unwrap_or(MaintainMode::Auto).into(),
         }))
     }
 
@@ -346,7 +434,12 @@ impl Plugmem {
     #[napi]
     pub fn refresh(&mut self) -> Result<bool> {
         match self.handle_mut()? {
-            Handle::Reader(db) => db.refresh().map_err(to_napi_err),
+            Handle::Reader(db) => Arc::get_mut(db)
+                .ok_or_else(|| {
+                    Error::from_reason("cannot refresh while an export page is running")
+                })?
+                .refresh()
+                .map_err(to_napi_err),
             Handle::Writer(_) => Err(writer_only_error("refresh")),
         }
     }
@@ -394,6 +487,7 @@ impl Plugmem {
 pub struct MaintainTask {
     db: Database,
     now: u64,
+    options: MaintenanceOptions,
 }
 
 impl Task for MaintainTask {
@@ -401,7 +495,9 @@ impl Task for MaintainTask {
     type JsValue = MaintainReport;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        self.db.maintain(self.now).map_err(to_napi_err)
+        self.db
+            .maintain_with_options(self.now, self.options)
+            .map_err(to_napi_err)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -426,6 +522,95 @@ impl Task for CheckpointTask {
 
     fn resolve(&mut self, _env: Env, (): Self::Output) -> Result<Self::JsValue> {
         Ok(())
+    }
+}
+
+/// The libuv-thread body of [`Plugmem::remember_many`].
+pub struct RememberManyTask {
+    db: Database,
+    args: Vec<RememberArgs>,
+    now: u64,
+}
+
+impl Task for RememberManyTask {
+    type Output = Vec<plugmem_host::RememberOutcome>;
+    type JsValue = Vec<RememberOutcome>;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let tags: Vec<Vec<&str>> = self.args.iter().map(|args| str_refs(&args.tags)).collect();
+        let links: Vec<Vec<(&str, &str)>> = self
+            .args
+            .iter()
+            .map(|args| {
+                args.links
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(|link| (link.rel.as_str(), link.entity.as_str()))
+                    .collect()
+            })
+            .collect();
+        let metadata: Vec<Vec<(&str, &str)>> = self
+            .args
+            .iter()
+            .map(|args| {
+                args.metadata
+                    .as_ref()
+                    .map(|metadata| {
+                        metadata
+                            .iter()
+                            .map(|(key, value)| (key.as_str(), value.as_str()))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        let inputs: Vec<RememberInput<'_>> = self
+            .args
+            .iter()
+            .enumerate()
+            .map(|(i, args)| RememberInput {
+                entity: args.entity.as_deref(),
+                tags: &tags[i],
+                links: &links[i],
+                metadata: (!metadata[i].is_empty()).then_some(metadata[i].as_slice()),
+                valid_from: args.valid_from.map(|value| value as u64),
+                ..RememberInput::text(self.now, &args.text)
+            })
+            .collect();
+
+        self.db.remember_many(inputs).map_err(to_napi_err)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output.into_iter().map(RememberOutcome::from).collect())
+    }
+}
+
+enum ExportSource {
+    Writer(Database),
+    Reader(Arc<ReadOnlyDatabase>),
+}
+
+/// The libuv-thread body of [`Plugmem::export_page`].
+pub struct ExportPageTask {
+    source: ExportSource,
+    cursor: u32,
+}
+
+impl Task for ExportPageTask {
+    type Output = plugmem_host::ExportPage;
+    type JsValue = ExportPage;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        Ok(match &self.source {
+            ExportSource::Writer(db) => db.export_page(self.cursor, EXPORT_PAGE_LIMIT),
+            ExportSource::Reader(db) => db.export_page(self.cursor, EXPORT_PAGE_LIMIT),
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(ExportPage::from(output))
     }
 }
 
@@ -465,7 +650,7 @@ fn do_remember(
         None => db.remember(input),
     }
     .map_err(to_napi_err)?;
-    types::to_typed(&outcome)
+    Ok(RememberOutcome::from(outcome))
 }
 
 /// Borrow an optional `Vec<String>` as `&[&str]` (empty when absent).
@@ -478,13 +663,13 @@ fn str_refs(v: &Option<Vec<String>>) -> Vec<&str> {
 }
 
 /// A host error as a thrown JS `Error` (the message is the host's own text).
-fn to_napi_err(e: HostError) -> Error {
+pub(crate) fn to_napi_err(e: HostError) -> Error {
     Error::from_reason(e.to_string())
 }
 
 /// A config-resolution error (bad `config.toml`, or an `[embedder]` missing a
 /// required field) as a thrown JS `Error`.
-fn settings_to_napi(e: SettingsError) -> Error {
+pub(crate) fn settings_to_napi(e: SettingsError) -> Error {
     Error::from_reason(e.to_string())
 }
 
@@ -504,7 +689,7 @@ fn closed_error() -> Error {
 }
 
 /// Wall-clock now in unix milliseconds (the engine keeps no clock).
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)

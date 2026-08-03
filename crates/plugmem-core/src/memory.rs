@@ -19,33 +19,38 @@ use alloc::vec::Vec;
 
 use plugmem_arena::{
     Arena, ArenaCfg, BlobHeap, BlobHeapCfg, BlobId, ChunkPool, ChunkPoolCfg, Interner, ListHandle,
-    ShardMode, TermId, key,
+    ShardMode, Slot, TermId, key,
 };
 
 use crate::config::Config;
 use crate::error::Error;
-use crate::id::{EntityId, FactId, NONE_U32};
+use crate::id::{EdgeId, EntityId, FactId, NONE_U32};
 use crate::index::IdListIndex;
 use crate::index::bm25::Bm25Index;
 use crate::index::hnsw::HnswGraph;
 use crate::index::vecpool::VecPool;
 use crate::journal::{JournalScan, Op, scan};
 use crate::model::{
-    EdgeSlot, EntityByName, EntityRecord, FactAux, FactRecord, TemporalSlot, VALID_TO_OPEN,
-    fact_flags,
+    EdgeHistorySlot, EdgeSlot, EntityByName, EntityRecord, FactAux, FactRecord, TemporalSlot,
+    VALID_TO_OPEN, close_edge_history_payload, edge_history_key, edge_key, fact_flags,
 };
 use crate::storage::Storage;
 use crate::tokenizer::Tokenizer;
+
+use maintain::TOKENIZER_INDEX_VERSION;
 
 /// Most recent same-entity facts examined by similar-detection.
 const SIMILAR_CANDIDATE_CAP: usize = 32;
 
 mod maintain;
+mod migrations;
 mod persist;
 mod recall;
+mod shards;
 
-pub use maintain::MaintainReport;
+pub use maintain::{MaintainReport, MaintenanceMode, MaintenanceOptions};
 pub use recall::{RecallQuery, RecallResult, RecallScratch, RecalledEdge, RecalledFact, source};
+pub use shards::ShardLayout;
 
 /// Input of `remember` and `revise`.
 #[derive(Clone, Copy, Debug)]
@@ -104,6 +109,20 @@ pub struct LinkInput<'a> {
     pub dst: &'a str,
     /// Optional provenance fact.
     pub provenance: Option<FactId>,
+}
+
+/// Input of `unlink`.
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct UnlinkInput<'a> {
+    /// Host timestamp, unix milliseconds.
+    pub now: u64,
+    /// Source entity name.
+    pub src: &'a str,
+    /// Relation term, verbatim.
+    pub rel: &'a str,
+    /// Destination entity name.
+    pub dst: &'a str,
 }
 
 /// Result of `remember`/`revise`.
@@ -190,19 +209,34 @@ pub struct Stats {
     /// Directed edges (each `(src, rel, dst)` counted once; the mirrored
     /// in-arena is an internal detail).
     pub edges: usize,
+    /// Historical edge versions, including closed versions.
+    pub edge_versions: usize,
     /// Quantized vector slots.
     pub vectors: usize,
+    /// Tombstoned fact records awaiting physical purge.
+    pub tombstones: usize,
+    /// Vector slots already covered by the HNSW graph; slots after this are
+    /// searched as the flat tail.
+    pub hnsw_indexed: u32,
     /// The next fact id to be assigned. Ids below it are in use or burned
     /// (forgotten and purged) — never reissued.
     pub next_fact: u32,
     /// The next entity id to be assigned.
     pub next_entity: u32,
+    /// The next edge-version id to be assigned.
+    pub next_edge: u32,
     /// The database lineage identity ([`Config::db_uuid`]); `0` for an
     /// unnamed database.
     pub db_uuid: u128,
     /// Total bytes held by the engine's pools (arenas, blob heaps, chunk
     /// pools, the term dictionary and the vector pool).
     pub pool_bytes: usize,
+    /// How the arenas are currently sharded.
+    ///
+    /// The engine chooses this from what it holds and moves it during
+    /// `maintain`, so it is state to observe rather than a setting to pick —
+    /// see [`Config::shards_facts`](crate::Config::shards_facts).
+    pub shards: ShardLayout,
 }
 
 /// Report of an `open`: what the journal replay found.
@@ -232,6 +266,8 @@ pub struct Memory<'a> {
     by_name: Arena<'a, EntityByName>,
     edges_out: Arena<'a, EdgeSlot>,
     edges_in: Arena<'a, EdgeSlot>,
+    edges_hist_out: Arena<'a, EdgeHistorySlot>,
+    edges_hist_in: Arena<'a, EdgeHistorySlot>,
     temporal: Arena<'a, TemporalSlot>,
     /// Fact texts and canonical entity names.
     texts: BlobHeap<'a>,
@@ -258,6 +294,10 @@ pub struct Memory<'a> {
     // -- id allocation (derived from the arenas on load) --
     next_fact: u32,
     next_entity: u32,
+    next_edge: u32,
+    // -- maintenance state --
+    tombstones: usize,
+    bm25_tokenizer_version: u32,
     // -- reusable scratches --
     tokenizer: Tokenizer,
     tf_scratch: Vec<(u32, u8)>,
@@ -287,6 +327,8 @@ impl<'a> Memory<'a> {
             by_name: Arena::new(ord(cfg.shards_entities))?,
             edges_out: Arena::new(ord(cfg.shards_edges))?,
             edges_in: Arena::new(ord(cfg.shards_edges))?,
+            edges_hist_out: Arena::new(ord(cfg.shards_edges))?,
+            edges_hist_in: Arena::new(ord(cfg.shards_edges))?,
             temporal: Arena::new(ord(cfg.shards_temporal))?,
             texts: BlobHeap::new(blob),
             metas: BlobHeap::new(blob),
@@ -299,6 +341,9 @@ impl<'a> Memory<'a> {
             hnsw: HnswGraph::new(cfg.hnsw_m, cfg.hnsw_m0, cfg.max_bytes)?,
             next_fact: 0,
             next_entity: 0,
+            next_edge: 0,
+            tombstones: 0,
+            bm25_tokenizer_version: maintain::TOKENIZER_INDEX_VERSION,
             tokenizer: Tokenizer::new(),
             tf_scratch: Vec::new(),
             name_scratch: String::new(),
@@ -465,11 +510,21 @@ impl<'a> Memory<'a> {
                     self.apply_link(now, src, rel, dst, provenance)?;
                     report.replayed += 1;
                 }
-                Op::Maintain { .. } => {
+                Op::Unlink { now, src, rel, dst } => {
+                    self.apply_unlink(now, src, rel, dst)?;
+                    report.replayed += 1;
+                }
+                Op::Maintain {
+                    mode,
+                    max_hnsw_inserts,
+                    ..
+                } => {
                     // Re-execute the compaction deterministically, so a
                     // replayed image matches one snapshotted after a live
                     // maintain byte for byte.
-                    self.replay_maintain()?;
+                    let options =
+                        maintain::MaintenanceOptions::from_journal(mode, max_hnsw_inserts)?;
+                    self.replay_maintain_with_options(options)?;
                     report.replayed += 1;
                 }
             }
@@ -520,8 +575,23 @@ impl<'a> Memory<'a> {
     /// entity whose term sets overlap the new fact's above the
     /// `similar_jaccard` threshold. Bounded: the entity's most recent
     /// [`SIMILAR_CANDIDATE_CAP`] facts are compared (a hub's full list is
-    /// not re-tokenized), candidate texts are tokenized against the
-    /// term-frequency scratch the new fact just filled.
+    /// not re-tokenized).
+    ///
+    /// Comparing two term sets exactly means having both, and only the new
+    /// fact's is at hand — the candidate's would have to be recovered by
+    /// reading its text and running it back through the tokenizer. Doing that
+    /// for every candidate of every write is what the term-set summary in
+    /// [`DocLenSlot`](crate::index::bm25::DocLenSlot) exists to avoid: it
+    /// bounds the overlap from above, and a bound below the threshold settles
+    /// the question, because Jaccard rises with the intersection. Only a
+    /// candidate that survives the bound is read and tokenized, so the
+    /// answer is the same one the exhaustive comparison gives.
+    ///
+    /// The bound is trusted only while the index was built by the current
+    /// tokenizer. A stale index may hold terms today's tokenizer would not
+    /// produce, which would make the summary describe a different term set
+    /// than the comparison uses; then every candidate is read, exactly as
+    /// before the summary existed.
     fn find_similar(&mut self, outcome: &mut RememberOutcome) {
         let Some(entity) = outcome.entity else { return };
         // The new fact's term set is still in tf_scratch (apply_remember
@@ -544,8 +614,21 @@ impl<'a> Memory<'a> {
                 n += 1;
             }
         }
+        let summaries_trustworthy = self.bm25_tokenizer_version == TOKENIZER_INDEX_VERSION;
+        // Without a vector on the new fact, a lexical overlap is the only hint
+        // a candidate can produce, so one ruled out by the summary contributes
+        // nothing whatever its record says — and its record is the second
+        // arena lookup of the pair this loop would otherwise pay per
+        // candidate. (`new_terms` is non-empty here: the two being empty
+        // together returned above.)
+        let lexical_only = new_vec.is_none();
         let mut cand_terms: Vec<u32> = Vec::new();
         for &fact in ring.iter().take(n.min(SIMILAR_CANDIDATE_CAP)) {
+            let may_overlap = !new_terms.is_empty()
+                && self.overlap_possible(fact, &new_terms, summaries_trustworthy);
+            if lexical_only && !may_overlap {
+                continue;
+            }
             let Some(record) = self.fact(fact) else {
                 continue;
             };
@@ -557,9 +640,7 @@ impl<'a> Memory<'a> {
             let mut lexical = None;
             // Deferred validation: a load no longer scans the
             // text pool, so an unreadable text simply yields no lexical signal.
-            if !new_terms.is_empty()
-                && let Ok(text) = core::str::from_utf8(self.texts.get(record.text))
-            {
+            if may_overlap && let Ok(text) = core::str::from_utf8(self.texts.get(record.text)) {
                 cand_terms.clear();
                 let terms = &self.terms;
                 let cand = &mut cand_terms;
@@ -608,6 +689,40 @@ impl<'a> Memory<'a> {
             .similar
             .sort_unstable_by(|a, b| b.score.total_cmp(&a.score).then(a.id.cmp(&b.id)));
         outcome.similar.truncate(8);
+    }
+
+    /// Whether `candidate` could possibly overlap `new_terms` above
+    /// `similar_jaccard` — the cheap half of [`Memory::find_similar`].
+    ///
+    /// `false` is a proof, not a guess. The candidate's summary marks a term
+    /// absent only when it really is absent, so the terms it *might* share is
+    /// an upper bound `u` on the true intersection `i`. Jaccard
+    /// `i / (|A| + |B| - i)` is increasing in `i`, so `u` at or below the
+    /// threshold puts the true value there too. `true` means "unknown" and
+    /// sends the caller to the exact comparison — which is also what an
+    /// unsummarized document and an untrustworthy index return.
+    fn overlap_possible(&self, candidate: FactId, new_terms: &[u32], trust_summary: bool) -> bool {
+        if !trust_summary {
+            return true;
+        }
+        let Some(doc) = self.bm25.doc(candidate) else {
+            return true;
+        };
+        if !doc.has_signature() {
+            return true;
+        }
+        let bound = doc.overlap_bound(new_terms);
+        // `overlap_bound` counts a subset of `new_terms`, so the subtraction
+        // is grouped to happen where it provably cannot go below zero. The
+        // union is then at least `distinct`, which `has_signature` just
+        // established is non-zero — no underflow and no division by zero, on a
+        // 64-bit `usize` or a 32-bit one.
+        debug_assert!(
+            bound <= new_terms.len(),
+            "the overlap bound counts query terms, so it cannot exceed them"
+        );
+        let union = (new_terms.len() - bound) + usize::from(doc.distinct);
+        bound as f32 / union as f32 > self.cfg.similar_jaccard
     }
 
     /// Revises `target`: closes its validity at the new fact's
@@ -672,6 +787,28 @@ impl<'a> Memory<'a> {
             .append_journal(&entry)
             .map_err(|e| Error::Storage(format!("{e:?}")))?;
         Ok(())
+    }
+
+    /// Closes the current typed edge between two entities. Returns `false`
+    /// when the edge is already absent.
+    pub fn unlink<S: Storage>(
+        &mut self,
+        store: &mut S,
+        input: UnlinkInput<'_>,
+    ) -> Result<bool, Error> {
+        let fresh = self.apply_unlink(input.now, input.src, input.rel, input.dst)?;
+        let mut entry = Vec::new();
+        Op::Unlink {
+            now: input.now,
+            src: input.src,
+            rel: input.rel,
+            dst: input.dst,
+        }
+        .encode(&mut entry);
+        store
+            .append_journal(&entry)
+            .map_err(|e| Error::Storage(format!("{e:?}")))?;
+        Ok(fresh)
     }
 
     /// Returns a fact unless it is tombstoned (closed facts are
@@ -786,9 +923,13 @@ impl<'a> Memory<'a> {
             entities: self.entities.len(),
             terms: self.terms.len(),
             edges: self.edges_out.len(),
+            edge_versions: self.edges_hist_out.len(),
             vectors: self.vecs.len(),
+            tombstones: self.tombstones,
+            hnsw_indexed: self.hnsw.indexed(),
             next_fact: self.next_fact,
             next_entity: self.next_entity,
+            next_edge: self.next_edge,
             db_uuid: self.cfg.db_uuid,
             pool_bytes: self.facts.pool_bytes()
                 + self.fact_aux.pool_bytes()
@@ -796,6 +937,8 @@ impl<'a> Memory<'a> {
                 + self.by_name.pool_bytes()
                 + self.edges_out.pool_bytes()
                 + self.edges_in.pool_bytes()
+                + self.edges_hist_out.pool_bytes()
+                + self.edges_hist_in.pool_bytes()
                 + self.temporal.pool_bytes()
                 + self.texts.pool_bytes()
                 + self.terms.pool_bytes()
@@ -805,6 +948,7 @@ impl<'a> Memory<'a> {
                 + self.entity_facts.pool_bytes()
                 + self.vecs.pool_bytes()
                 + self.hnsw.pool_bytes(),
+            shards: shards::ShardLayout::of_config(&self.cfg),
         }
     }
 
@@ -958,7 +1102,7 @@ impl<'a> Memory<'a> {
             for &(rel, dst_name) in input.links {
                 let dst = self.resolve_or_create_entity(dst_name, input.now)?;
                 let rel = self.terms.intern(rel)?;
-                self.upsert_edge(src, rel, dst, id)?;
+                self.open_edge(input.now, src, rel, dst, id)?;
             }
             self.entity_facts.push(src.0, id, 0)?;
         }
@@ -1008,6 +1152,7 @@ impl<'a> Memory<'a> {
             .expect("record fetched above");
         let flags = record.flags | fact_flags::TOMBSTONE;
         payload[4..6].copy_from_slice(&flags.to_be_bytes());
+        self.tombstones += 1;
         Ok(true)
     }
 
@@ -1022,31 +1167,142 @@ impl<'a> Memory<'a> {
         let src = self.resolve_or_create_entity(src, now)?;
         let dst = self.resolve_or_create_entity(dst, now)?;
         let rel = self.terms.intern(rel)?;
-        self.upsert_edge(src, rel, dst, provenance)
+        self.open_edge(now, src, rel, dst, provenance)
     }
 
-    fn upsert_edge(
+    fn apply_unlink(&mut self, now: u64, src: &str, rel: &str, dst: &str) -> Result<bool, Error> {
+        let Some(src) = self.lookup_entity_name(src) else {
+            return Ok(false);
+        };
+        let Some(dst) = self.lookup_entity_name(dst) else {
+            return Ok(false);
+        };
+        let Some(rel) = self.terms.lookup(rel) else {
+            return Ok(false);
+        };
+        self.close_current_edge(now, src, rel, dst)
+    }
+
+    fn open_edge(
         &mut self,
+        now: u64,
         src: EntityId,
         rel: TermId,
         dst: EntityId,
         fact: FactId,
     ) -> Result<(), Error> {
+        if let Some(current) = self.current_edge(src, rel, dst) {
+            if current.fact == fact {
+                return Ok(());
+            }
+            self.close_current_edge(now, src, rel, dst)?;
+        }
+        let edge = EdgeId(self.next_edge);
+        let history = EdgeHistorySlot {
+            a: src,
+            rel,
+            b: dst,
+            edge,
+            fact,
+            flags: 0,
+            kind: 0,
+            recorded_at: now,
+            valid_from: now,
+            valid_to: VALID_TO_OPEN,
+        };
+        self.insert_history_edge(history)?;
+        self.insert_current_edge(src, rel, dst, fact, edge, now)?;
+        self.next_edge += 1;
+        Ok(())
+    }
+
+    fn insert_current_edge(
+        &mut self,
+        src: EntityId,
+        rel: TermId,
+        dst: EntityId,
+        fact: FactId,
+        edge: EdgeId,
+        valid_from: u64,
+    ) -> Result<(), Error> {
         for (arena, a, b) in [
             (&mut self.edges_out, src, dst),
             (&mut self.edges_in, dst, src),
         ] {
-            let slot = EdgeSlot { a, rel, b, fact };
+            let slot = EdgeSlot {
+                a,
+                rel,
+                b,
+                fact,
+                edge,
+                valid_from,
+            };
             if !arena.insert(&slot)? {
-                let mut kb = [0u8; 12];
-                key::write_u32(&mut kb, a.0);
-                key::write_u32(&mut kb[4..], rel.0);
-                key::write_u32(&mut kb[8..], b.0);
-                let payload = arena.payload_mut(&kb).expect("insert reported a duplicate");
-                payload.copy_from_slice(&fact.0.to_be_bytes());
+                let payload = arena
+                    .payload_mut(&edge_key(a, rel, b))
+                    .expect("insert reported a duplicate");
+                let mut full = [0u8; EdgeSlot::SIZE];
+                slot.write(&mut full);
+                payload.copy_from_slice(&full[EdgeSlot::KEY_LEN..]);
             }
         }
         Ok(())
+    }
+
+    fn insert_history_edge(&mut self, edge: EdgeHistorySlot) -> Result<(), Error> {
+        self.edges_hist_out.insert(&edge)?;
+        self.edges_hist_in.insert(&EdgeHistorySlot {
+            a: edge.b,
+            b: edge.a,
+            ..edge
+        })?;
+        Ok(())
+    }
+
+    /// Closes the open version of `(src, rel, dst)` and drops it from the
+    /// current graph. Returns `false` when there is no such edge.
+    ///
+    /// The current slot names its own history record — `edge` and `valid_from`
+    /// are that record's key tail — so both mirrors are addressed directly.
+    fn close_current_edge(
+        &mut self,
+        now: u64,
+        src: EntityId,
+        rel: TermId,
+        dst: EntityId,
+    ) -> Result<bool, Error> {
+        let Some(current) = self.current_edge(src, rel, dst) else {
+            return Ok(false);
+        };
+        // A version never ends before it began, even if the caller's clock
+        // moved backwards between the link and the unlink.
+        let close_at = now.max(current.valid_from);
+        let out_key = edge_history_key(src, current.valid_from, current.edge);
+        let in_key = edge_history_key(dst, current.valid_from, current.edge);
+        close_edge_history_payload(
+            self.edges_hist_out
+                .payload_mut(&out_key)
+                .ok_or(Error::Corrupt("missing outgoing edge history"))?,
+            close_at,
+        );
+        close_edge_history_payload(
+            self.edges_hist_in
+                .payload_mut(&in_key)
+                .ok_or(Error::Corrupt("missing incoming edge history"))?,
+            close_at,
+        );
+        let out_removed = self.edges_out.remove(&edge_key(src, rel, dst));
+        let in_removed = self.edges_in.remove(&edge_key(dst, rel, src));
+        if out_removed != in_removed {
+            return Err(Error::Corrupt("edge mirrors disagree"));
+        }
+        Ok(out_removed)
+    }
+
+    fn current_edge(&self, src: EntityId, rel: TermId, dst: EntityId) -> Option<EdgeSlot> {
+        self.edges_out
+            .get_slot(&edge_key(src, rel, dst))
+            .map(EdgeSlot::read)
     }
 
     /// Looks an entity up by its already-normalized name (read-only:
@@ -1059,6 +1315,16 @@ impl<'a> Memory<'a> {
         key::write_u32(&mut to, term.0);
         to[4..].copy_from_slice(&u32::MAX.to_be_bytes());
         self.by_name.range(&from, &to).next().map(|e| e.id)
+    }
+
+    fn lookup_entity_name(&mut self, name: &str) -> Option<EntityId> {
+        let mut norm = core::mem::take(&mut self.name_scratch);
+        normalize_name(&mut self.tokenizer, name, &mut norm);
+        let result = (!norm.is_empty())
+            .then(|| self.lookup_entity_by_norm(&norm))
+            .flatten();
+        self.name_scratch = norm;
+        result
     }
 
     fn resolve_or_create_entity(&mut self, name: &str, now: u64) -> Result<EntityId, Error> {

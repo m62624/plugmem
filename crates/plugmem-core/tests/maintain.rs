@@ -6,7 +6,8 @@
 //! workload is observation-equivalent before and after (proptest).
 
 use plugmem_core::{
-    Config, EntityId, FactId, LinkInput, MemStorage, Memory, RecallQuery, RememberInput,
+    Config, EntityId, FactId, LinkInput, MaintenanceMode, MaintenanceOptions, MemStorage, Memory,
+    RecallQuery, RememberInput, ShardLayout, Storage,
 };
 #[cfg(not(target_family = "wasm"))]
 use proptest::prelude::*;
@@ -14,14 +15,9 @@ use proptest::prelude::*;
 const DAY: u64 = 86_400_000;
 
 fn cfg(dim: usize) -> Config {
-    let mut c = Config::default();
-    c.dim = dim;
-    c.shards_facts = 16;
-    c.shards_entities = 8;
-    c.shards_edges = 8;
-    c.shards_temporal = 8;
-    c.shards_postings = 32;
-    c
+    let mut cfg = Config::default();
+    cfg.dim = dim;
+    cfg
 }
 
 /// A deterministic LCG for vector payloads.
@@ -181,6 +177,107 @@ fn maintain_preserves_observable_state() {
 }
 
 #[test]
+fn auto_maintain_noop_does_not_append_a_marker() {
+    let (mut mem, mut store) = (Memory::new(cfg(0)).unwrap(), MemStorage::new());
+    let report = mem.maintain(&mut store, DAY).unwrap();
+    assert!(report.no_op);
+    assert_eq!(report.purged, 0);
+    assert!(!report.structural_compacted);
+    assert_eq!(store.read_journal().unwrap().len(), 0);
+}
+
+#[test]
+fn ordinary_compaction_reuses_bm25_postings_without_reindexing() {
+    let (mut mem, mut store) = (Memory::new(cfg(0)).unwrap(), MemStorage::new());
+    let keep = mem
+        .remember(
+            &mut store,
+            RememberInput::text(DAY, "alpha beta searchable survivor"),
+        )
+        .unwrap()
+        .id;
+    let drop = mem
+        .remember(&mut store, RememberInput::text(DAY, "alpha beta removed"))
+        .unwrap()
+        .id;
+    mem.forget(&mut store, 2 * DAY, drop).unwrap();
+
+    let report = mem.maintain(&mut store, 3 * DAY).unwrap();
+    assert!(report.structural_compacted);
+    assert!(report.bm25_compacted);
+    assert!(!report.bm25_reindexed);
+    assert_eq!(report.purged, 1);
+    assert_eq!(report.tombstones_before, 1);
+    assert_eq!(mem.stats().tombstones, 0);
+
+    let out = mem
+        .recall(RecallQuery::text(4 * DAY, "searchable survivor"))
+        .unwrap();
+    assert_eq!(out.facts.first().map(|f| f.id), Some(keep));
+    assert!(out.facts.iter().all(|f| f.id != drop));
+}
+
+#[test]
+fn explicit_reindex_text_rebuilds_bm25_without_compacting_when_no_tombstones() {
+    let (mut mem, mut store) = (Memory::new(cfg(0)).unwrap(), MemStorage::new());
+    mem.remember(&mut store, RememberInput::text(DAY, "alpha beta gamma"))
+        .unwrap();
+    let report = mem
+        .maintain_with_options(
+            &mut store,
+            2 * DAY,
+            MaintenanceOptions {
+                mode: MaintenanceMode::ReindexText,
+                max_hnsw_inserts: Some(0),
+            },
+        )
+        .unwrap();
+    assert!(!report.no_op);
+    assert!(!report.structural_compacted);
+    assert!(report.bm25_reindexed);
+    assert!(!report.bm25_compacted);
+    assert_eq!(report.purged, 0);
+}
+
+#[test]
+fn vector_optimization_can_be_bounded() {
+    let dim = 16;
+    let mut c = cfg(dim);
+    c.flat_to_hnsw = 8;
+    let (mut mem, mut store) = (Memory::new(c).unwrap(), MemStorage::new());
+    let mut rng = Lcg(0xCAFE);
+    for i in 0..32u64 {
+        let v = rng.vector(dim);
+        mem.remember(
+            &mut store,
+            RememberInput {
+                vector: Some(&v),
+                ..RememberInput::text(i * DAY, "vector fact")
+            },
+        )
+        .unwrap();
+    }
+
+    let report = mem
+        .maintain_with_options(
+            &mut store,
+            40 * DAY,
+            MaintenanceOptions {
+                mode: MaintenanceMode::OptimizeVectors,
+                max_hnsw_inserts: Some(5),
+            },
+        )
+        .unwrap();
+    assert!(report.hnsw_rebuilt);
+    assert_eq!(report.hnsw_inserted, 5);
+    assert_eq!(mem.stats().hnsw_indexed, 5);
+    assert!(mem.maintenance_needed(MaintenanceOptions {
+        mode: MaintenanceMode::OptimizeVectors,
+        max_hnsw_inserts: Some(5),
+    }));
+}
+
+#[test]
 fn maintain_reclaims_space() {
     let (mut mem, mut store) = (Memory::new(cfg(0)).unwrap(), MemStorage::new());
     let big = "x".repeat(2000);
@@ -279,6 +376,95 @@ fn maintain_preserves_ids_chains_and_edges() {
         })
         .unwrap();
     assert!(out.rendered.contains("depends_on"));
+}
+
+/// `Full` rewrites the edge arenas page-dense. Two things must hold: not one
+/// version is lost — history has no retention policy — and the bytes actually
+/// shrink on the workload that fragments them, a churn of relations whose
+/// incoming mirror is keyed by the far endpoint and so lands mid-page.
+#[test]
+fn full_maintain_repacks_edges_without_dropping_history() {
+    const TARGETS: u32 = 24;
+    const ROUNDS: u64 = 40;
+    let (mut mem, mut store) = (Memory::new(cfg(0)).unwrap(), MemStorage::new());
+    let names: Vec<String> = (0..TARGETS).map(|i| format!("target-{i}")).collect();
+    for round in 0..ROUNDS {
+        for name in &names {
+            mem.link(
+                &mut store,
+                LinkInput {
+                    now: (round + 1) * DAY,
+                    src: "hub",
+                    rel: "assigned_to",
+                    dst: name,
+                    provenance: None,
+                },
+            )
+            .unwrap();
+            if round + 1 < ROUNDS {
+                mem.unlink(
+                    &mut store,
+                    plugmem_core::UnlinkInput {
+                        now: (round + 1) * DAY + DAY / 2,
+                        src: "hub",
+                        rel: "assigned_to",
+                        dst: name,
+                    },
+                )
+                .unwrap();
+            }
+        }
+    }
+    let before = mem.stats();
+    assert_eq!(before.edge_versions, TARGETS as usize * ROUNDS as usize);
+    let graph_before = |mem: &Memory<'_>, as_of: Option<u64>| {
+        mem.recall(RecallQuery {
+            entities: &["hub"],
+            as_of,
+            k: 64,
+            ..RecallQuery::text(ROUNDS * DAY + DAY, "")
+        })
+        .unwrap()
+        .edges
+    };
+    let current = graph_before(&mem, None);
+    let historical = graph_before(&mem, Some(5 * DAY));
+
+    let report = mem
+        .maintain_with_options(&mut store, ROUNDS * DAY + DAY, MaintenanceOptions::full())
+        .unwrap();
+
+    assert!(report.edges_compacted, "Full must repack the edge arenas");
+    assert_eq!(report.edges_before, before.edges);
+    assert_eq!(report.edge_versions_before, before.edge_versions);
+    let after = mem.stats();
+    assert_eq!(after.edges, before.edges, "current edges are preserved");
+    assert_eq!(
+        after.edge_versions, before.edge_versions,
+        "no version is ever dropped"
+    );
+    assert!(
+        report.bytes_after < report.bytes_before,
+        "repack reclaimed nothing: {} -> {}",
+        report.bytes_before,
+        report.bytes_after
+    );
+    // Both graph answers are identical across the rewrite.
+    assert_eq!(graph_before(&mem, None), current);
+    assert_eq!(graph_before(&mem, Some(5 * DAY)), historical);
+    mem.verify().unwrap();
+
+    // A second pass finds the arenas already dense, so it cannot grow them.
+    let packed = report.bytes_after;
+    let again = mem
+        .maintain_with_options(
+            &mut store,
+            ROUNDS * DAY + 2 * DAY,
+            MaintenanceOptions::full(),
+        )
+        .unwrap();
+    assert!(again.bytes_after <= packed);
+    assert_eq!(mem.stats().edge_versions, before.edge_versions);
 }
 
 #[test]
@@ -533,4 +719,203 @@ fn purge_is_physical_and_ids_stay_burned() {
     let (loaded, _) = Memory::from_bytes(Some(&bytes), &[], cfg(0)).unwrap();
     assert_eq!(loaded.snapshot_bytes(0), bytes);
     assert_eq!(loaded.facts_len(), mem.facts_len());
+}
+
+// ---- shard layout ----
+
+/// Facts needed to push the fact arena past its floor, plus a margin. The
+/// rule sizes a group by its payload, so this is derived rather than guessed:
+/// the floor covers `MIN_SHARDS` shards' worth, and one record past that asks
+/// for the next power of two.
+fn facts_to_outgrow_the_floor() -> usize {
+    const FACT_SLOT: usize = 48;
+    const SHARD_TARGET: usize = 64 * 4096;
+    let floor = ShardLayout::default().facts;
+    // Past the floor is not enough — a rebuild waits for the growth margin,
+    // because running under-sharded is the cheap direction.
+    floor * ShardLayout::GROWTH_MARGIN * SHARD_TARGET / FACT_SLOT + 1
+}
+
+fn fill(mem: &mut Memory<'_>, store: &mut MemStorage, n: usize) {
+    for i in 0..n {
+        mem.remember(store, RememberInput::text(DAY + i as u64, "a short fact"))
+            .unwrap();
+    }
+}
+
+/// An oversized layout, as an older database or a hand-tuned config would
+/// leave one.
+fn oversized(dim: usize) -> Config {
+    let mut c = cfg(dim);
+    c.shards_facts = 1024;
+    c.shards_entities = 1024;
+    c.shards_edges = 1024;
+    c.shards_temporal = 1024;
+    c.shards_postings = 1024;
+    c
+}
+
+#[test]
+fn a_database_that_outgrows_its_layout_is_resharded_and_keeps_everything() {
+    let (mut mem, mut store) = (Memory::new(cfg(0)).unwrap(), MemStorage::new());
+    let before = mem.stats().shards;
+    assert_eq!(before, ShardLayout::default());
+
+    fill(&mut mem, &mut store, facts_to_outgrow_the_floor());
+    let facts = mem.stats().facts;
+    let sample = mem
+        .recall(RecallQuery::text(900 * DAY, "short fact"))
+        .unwrap()
+        .rendered;
+
+    let report = mem.maintain(&mut store, 900 * DAY).unwrap();
+    assert!(!report.no_op);
+    assert_eq!(report.shards_before, before);
+    assert!(
+        report.shards_after.facts > before.facts,
+        "{:?} did not grow past {:?}",
+        report.shards_after,
+        before
+    );
+    assert_eq!(mem.stats().shards, report.shards_after);
+    // Growing is a rearrangement, not a change: same facts, same answers.
+    assert_eq!(mem.stats().facts, facts);
+    assert_eq!(
+        mem.recall(RecallQuery::text(900 * DAY, "short fact"))
+            .unwrap()
+            .rendered,
+        sample
+    );
+    // And the new layout is stable: a second pass has nothing left to do.
+    assert!(mem.maintain(&mut store, 901 * DAY).unwrap().no_op);
+}
+
+#[test]
+fn a_database_far_below_its_layout_is_shrunk() {
+    let (mut mem, mut store) = (Memory::new(oversized(0)).unwrap(), MemStorage::new());
+    fill(&mut mem, &mut store, 20);
+    let before = mem.stats().shards;
+    assert_eq!(before.facts, 1024);
+
+    let report = mem.maintain(&mut store, 900 * DAY).unwrap();
+    assert!(!report.no_op);
+    assert_eq!(report.shards_after, ShardLayout::default());
+    assert_eq!(mem.stats().shards, ShardLayout::default());
+    assert_eq!(mem.stats().facts, 20);
+    assert!(mem.maintain(&mut store, 901 * DAY).unwrap().no_op);
+}
+
+/// Only a pass that rebuilds the arenas may move the layout. A pass that does
+/// not would leave the config describing a shape the file does not have — the
+/// loader would then read those arenas with the wrong shard count.
+#[test]
+fn a_pass_that_rebuilds_nothing_leaves_the_layout_alone() {
+    for mode in [
+        MaintenanceMode::OptimizeVectors,
+        MaintenanceMode::Auto,
+        MaintenanceMode::Compact,
+        MaintenanceMode::ReindexText,
+        MaintenanceMode::Full,
+    ] {
+        let (mut mem, mut store) = (Memory::new(oversized(0)).unwrap(), MemStorage::new());
+        fill(&mut mem, &mut store, 20);
+        let before = mem.stats().shards;
+
+        let report = mem
+            .maintain_with_options(
+                &mut store,
+                900 * DAY,
+                MaintenanceOptions {
+                    mode,
+                    max_hnsw_inserts: Some(0),
+                },
+            )
+            .unwrap();
+        let after = mem.stats().shards;
+        assert_eq!(after, report.shards_after, "{mode:?}");
+        if report.structural_compacted {
+            assert_ne!(after, before, "{mode:?} rebuilt but kept the old layout");
+        } else {
+            assert_eq!(after, before, "{mode:?} moved a layout it did not rebuild");
+        }
+        // Whatever it claimed, the file must still be readable — that is the
+        // property a wrong claim would break.
+        let bytes = mem.snapshot_bytes(0);
+        let (loaded, _) = Memory::from_bytes(Some(&bytes), &[], cfg(0)).unwrap();
+        assert_eq!(loaded.stats().shards, after, "{mode:?}");
+        assert_eq!(loaded.stats().facts, 20, "{mode:?}");
+    }
+}
+
+/// The trap the asymmetric band exists to avoid: a database out of layout must
+/// not ask for maintenance again the moment it finishes one.
+#[test]
+fn resharding_settles_instead_of_asking_forever() {
+    let (mut mem, mut store) = (Memory::new(oversized(0)).unwrap(), MemStorage::new());
+    fill(&mut mem, &mut store, 20);
+
+    let mut passes = 0;
+    let mut now = 900 * DAY;
+    while mem.maintenance_needed(MaintenanceOptions::auto()) {
+        mem.maintain(&mut store, now).unwrap();
+        now += DAY;
+        passes += 1;
+        assert!(passes <= 2, "maintenance never settled");
+    }
+    assert_eq!(passes, 1);
+
+    // The same holds while the database keeps growing: each doubling costs one
+    // pass, not one per write.
+    let mut resharded = 0;
+    for i in 0..facts_to_outgrow_the_floor() {
+        mem.remember(
+            &mut store,
+            RememberInput::text(now + i as u64, "a short fact"),
+        )
+        .unwrap();
+        if mem.maintenance_needed(MaintenanceOptions::auto()) {
+            let report = mem.maintain(&mut store, now + i as u64).unwrap();
+            if report.shards_after != report.shards_before {
+                resharded += 1;
+            }
+        }
+    }
+    assert!(
+        resharded <= 2,
+        "resharded {resharded} times while doubling once"
+    );
+}
+
+/// The four edge arenas are rebuilt by a different helper than everything
+/// else. Both must act on one decision, or a single snapshot ends up holding
+/// arenas laid out two ways.
+#[test]
+fn the_edge_arenas_reshard_with_the_rest() {
+    let (mut mem, mut store) = (Memory::new(oversized(0)).unwrap(), MemStorage::new());
+    for i in 0..40u64 {
+        mem.link(
+            &mut store,
+            LinkInput {
+                now: DAY + i,
+                src: "user",
+                rel: "knows",
+                dst: &format!("peer{i}"),
+                provenance: None,
+            },
+        )
+        .unwrap();
+    }
+    assert_eq!(mem.stats().shards.edges, 1024);
+
+    let report = mem
+        .maintain_with_options(&mut store, 900 * DAY, MaintenanceOptions::full())
+        .unwrap();
+    assert!(report.edges_compacted);
+    assert_eq!(mem.stats().shards, ShardLayout::default());
+
+    // The whole image agrees with the config it was written with.
+    let bytes = mem.snapshot_bytes(0);
+    let (loaded, _) = Memory::from_bytes(Some(&bytes), &[], cfg(0)).unwrap();
+    assert_eq!(loaded.stats().edges, 40);
+    loaded.verify().unwrap();
 }

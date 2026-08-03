@@ -103,6 +103,22 @@ A snapshot can come from anywhere (a wasm host, a foreign file). The loader cont
   (chain cycles, bounds, counts), ChunkPool handles; slot *contents* are not checked
   and are validated lazily at the core level (a bad BlobId gives a typed error on
   access);
+- the line between what a load checks and what it defers is **safety, not
+  correctness**: a load range-checks every stored id, so no accessor can index past
+  its structure; anything that only makes the data *disagree with itself* — the two
+  edge mirrors, a current edge against its open history version, stored text, the
+  vector bijection — is `verify()`'s job. Each of those costs a random lookup per
+  record, which is most of the cost of opening a large database, and being wrong
+  about one produces a wrong answer, never an unsafe read;
+- **a size taken from the file may not become an allocation size.** Ids inside stored
+  records are not range-checked, so any derived array sized from one is capped by
+  what the data justifies and falls back to a lookup past the cap. `usize` is 32 bits
+  on wasm32, so this is also where an offset computation has to be provably in range
+  there — compute in `u64` and compare against a real slice length before casting.
+  The config block's shard counts are the sharpest case: each is handed straight to an
+  arena as the length of its per-shard vectors, so `validate` bounds them by
+  `MAX_SHARDS` — a ceiling derived from the 32-bit page arithmetic and the per-arena
+  metadata budget, and set high enough that no database a pool can hold ever reaches it;
 - **open trusts the file by default** (the SQLite model): the container xxh3 is not
   read on open, so a large database opens sparse. Integrity is on demand: `scrub()` is
   byte-level (per-section + file_hash xxh3, resumable), `verify()` is content-level

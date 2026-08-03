@@ -5,13 +5,7 @@
 use plugmem_core::{Config, Error, FactFault, FactId, MemStorage, Memory, RememberInput, Storage};
 
 fn cfg() -> Config {
-    let mut cfg = Config::default();
-    cfg.shards_facts = 8;
-    cfg.shards_entities = 4;
-    cfg.shards_edges = 4;
-    cfg.shards_temporal = 4;
-    cfg.shards_postings = 16;
-    cfg
+    Config::default()
 }
 
 fn engine() -> (Memory<'static>, MemStorage) {

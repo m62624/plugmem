@@ -1,9 +1,9 @@
 //! Renders the benchmark `#TSV` rows into the README chart SVGs — the
 //! arena charts from the [`plugmem-bench-matrix`](../bench-matrix) stand
 //! and the core recall-latency chart from `plugmem-core`'s `bench_ops`
-//! example, plus the native file-backed database benchmark and its 100k-vs-1M
-//! recall comparison. A chart whose rows are absent from the input is left
-//! alone, so any source can be rendered on its own or all can be piped together.
+//! example, plus the native file-backed database and edge-lifecycle benchmarks.
+//! A chart whose rows are absent from the input is left alone, so any source can
+//! be rendered on its own or all can be piped together.
 //!
 //! Pure Rust: [plotters](https://github.com/plotters-rs/plotters) with its
 //! SVG backend, so there is no browser, no WebDriver and nothing downloaded
@@ -72,6 +72,15 @@ struct Chart {
     log: bool,
 }
 
+/// One same-workload size comparison chart.
+struct ScaleChart {
+    file: &'static str,
+    title: &'static str,
+    rows: &'static [(&'static str, &'static str, &'static str)],
+    y_title: &'static str,
+    log: bool,
+}
+
 /// Where each chart set is written (fixed repo paths, not user config).
 const ARENA_OUT: &str = "crates/plugmem-arena/assets";
 const CORE_OUT: &str = "crates/plugmem-core/assets";
@@ -82,7 +91,7 @@ const HOST_OUT: &str = "crates/plugmem-host/assets";
 /// `runtime = native`, `metric = latency_us`).
 const CORE_CHARTS: &[Chart] = &[Chart {
     file: "recall-latency.svg",
-    title: "recall source latency — µs, native (lower is better)",
+    title: "recall source latency — native, log scale (lower is better)",
     n: "core",
     metric: "latency_us",
     structures: &[
@@ -91,8 +100,12 @@ const CORE_CHARTS: &[Chart] = &[Chart {
         "flat vector (24k, d384)",
         "HNSW (30k, d384)",
     ],
-    y_title: "µs",
-    log: false,
+    y_title: "µs (log)",
+    // Logarithmic for the reason stated at the top of this file: the sources
+    // span two and a half orders of magnitude (BM25 ~10 µs against HNSW
+    // ~3300 µs), and on a linear axis the two cheap sources were a one-pixel
+    // line — a chart comparing four sources that showed two of them.
+    log: true,
 }];
 
 /// Native file-backed database charts. Rows come from the
@@ -112,8 +125,11 @@ const DATABASE_CHARTS: &[Chart] = &[
         title: "file-backed database — 1M lifecycle phase time",
         n: "database-1m",
         metric: "elapsed_ms",
+        // No `mixed_stream`: the load phase reports `load_ms`, not
+        // `elapsed_ms`, so naming it here charted nothing — and it has its own
+        // throughput chart above, where ops/second is the number that means
+        // something for a streamed load.
         structures: &[
-            "mixed_stream",
             "checkpoint",
             "maintain",
             "writer_verify",
@@ -154,16 +170,74 @@ const DATABASE_CHARTS: &[Chart] = &[
 ];
 
 /// The like-for-like recall comparison chart. Its input contains one
-/// `database-100k` and one `database-1m` series, both emitted by the same
-/// file-backed runner and rendered in the same units.
-const DATABASE_SCALE_SERIES: [(&str, RGBColor); 2] = [
+/// `database-5k`, `database-100k` and `database-1m` series, all emitted by the
+/// same file-backed runner and rendered in the same units.
+///
+/// The 5k point is the size an ordinary personal memory actually is, and until
+/// the layout followed the data it was the size that behaved worst — so it
+/// belongs on the chart rather than being extrapolated from the other two.
+const DATABASE_SCALE_SERIES: [(&str, RGBColor); 3] = [
+    ("5k operations", RGBColor(21, 128, 61)),
     ("100k operations", RGBColor(30, 58, 138)),
     ("1M operations", RGBColor(190, 24, 93)),
 ];
+/// The corpus sizes those series read, in the same order.
+const DATABASE_SCALE_SIZES: [&str; 3] = ["database-5k", "database-100k", "database-1m"];
 const DATABASE_SCALE_ROWS: &[(&str, &str, &str)] = &[
     ("text_only", "writer_diagnostic/text_only", "p50_us"),
     ("tag + range", "writer_diagnostic/text_tag_range", "p50_us"),
     ("full hybrid", "writer_diagnostic/full_hybrid", "p50_us"),
+    // The degenerate lexical query: one term the corpus uses everywhere, so
+    // its posting list is the corpus. Charted next to the others because the
+    // worst case is the number a caller has to budget for.
+    ("common term", "writer_diagnostic/text_common", "p50_us"),
+];
+
+/// Like-for-like edge-lifecycle comparison series. Rows come from
+/// `plugmem-host/examples/bench_edges.rs`; the SVGs are rendered only when both
+/// 100k and 1M inputs are present.
+const EDGE_SCALE_SERIES: [(&str, RGBColor); 2] = [
+    ("100k edges", RGBColor(30, 58, 138)),
+    ("1M edges", RGBColor(190, 24, 93)),
+];
+const EDGE_LATENCY_ROWS: &[(&str, &str, &str)] = &[
+    ("link", "link", "latency_us_per_op"),
+    ("unlink", "unlink", "latency_us_per_op"),
+    ("full maintain", "full_maintain", "latency_us_per_op"),
+];
+const EDGE_RECALL_ROWS: &[(&str, &str, &str)] = &[
+    ("current open", "current_graph_recall/open_edges", "p50_us"),
+    (
+        "history as_of",
+        "historical_graph_recall/as_of_open",
+        "p50_us",
+    ),
+    (
+        "current after unlink",
+        "current_graph_recall/after_unlink",
+        "p50_us",
+    ),
+];
+// There is no growth chart. Plotting "N edges linked, N history records
+// retained, 0 current after unlink" draws the workload's own definition back
+// at the reader: every bar is a number the benchmark was told to produce, not
+// one it measured. The retention claim it was meant to make is a sentence, and
+// the edge table states it.
+const EDGE_SCALE_CHARTS: &[ScaleChart] = &[
+    ScaleChart {
+        file: "edge-lifecycle-latency-100k-1m.svg",
+        title: "edge lifecycle — operation cost by corpus size",
+        rows: EDGE_LATENCY_ROWS,
+        y_title: "µs / edge",
+        log: true,
+    },
+    ScaleChart {
+        file: "edge-lifecycle-recall-100k-1m.svg",
+        title: "edge lifecycle — graph recall by corpus size",
+        rows: EDGE_RECALL_ROWS,
+        y_title: "microseconds",
+        log: true,
+    },
 ];
 
 /// The arena chart set. Every structure name matches a row the bench
@@ -375,6 +449,43 @@ fn main() {
         }
     }
 
+    for chart in EDGE_SCALE_CHARTS {
+        let cells = edge_scale_cells(chart, &new);
+        if !scale_complete(&new, &["edge-100k", "edge-1m"], chart.rows) {
+            continue;
+        }
+        total += 1;
+        let verdict = if force {
+            Verdict::Render { max_delta: 0.0 }
+        } else {
+            decide(&cells, &base, cfg.threshold)
+        };
+        match verdict {
+            Verdict::Render { max_delta } => {
+                std::fs::create_dir_all(HOST_OUT)
+                    .unwrap_or_else(|e| panic!("creating {HOST_OUT}: {e}"));
+                render_edge_scale(chart, &new, Path::new(HOST_OUT));
+                for (key, value) in &cells {
+                    next_baseline.insert(key.clone(), (*value, 1));
+                }
+                updated += 1;
+                println!(
+                    "{:32} rewritten (Δmax {:.0}%)",
+                    chart.file,
+                    max_delta * 100.0
+                );
+            }
+            Verdict::Skip { max_delta } => {
+                println!(
+                    "{:32} unchanged (Δmax {:.0}% ≤ {:.0}%)",
+                    chart.file,
+                    max_delta * 100.0,
+                    cfg.threshold * 100.0
+                );
+            }
+        }
+    }
+
     let scale_cells = database_scale_cells(&new);
     let has_100k = scale_cells.iter().any(|(key, _)| key.0 == "database-100k");
     let has_1m = scale_cells.iter().any(|(key, _)| key.0 == "database-1m");
@@ -396,14 +507,14 @@ fn main() {
                 updated += 1;
                 println!(
                     "{:32} rewritten (Δmax {:.0}%)",
-                    "database-recall-scale-100k-1m.svg",
+                    "database-recall-scale.svg",
                     max_delta * 100.0
                 );
             }
             Verdict::Skip { max_delta } => {
                 println!(
                     "{:32} unchanged (Δmax {:.0}% ≤ {:.0}%)",
-                    "database-recall-scale-100k-1m.svg",
+                    "database-recall-scale.svg",
                     max_delta * 100.0,
                     cfg.threshold * 100.0
                 );
@@ -535,9 +646,22 @@ fn chart_cells(chart: &Chart, new: &Table) -> Vec<(Key, f64)> {
 
 /// Returns the rows consumed by the corpus-size comparison chart.
 fn database_scale_cells(new: &Table) -> Vec<(Key, f64)> {
+    scale_cells(new, &DATABASE_SCALE_SIZES, DATABASE_SCALE_ROWS)
+}
+
+/// Returns the rows consumed by an edge-lifecycle size comparison chart.
+fn edge_scale_cells(chart: &ScaleChart, new: &Table) -> Vec<(Key, f64)> {
+    scale_cells(new, &["edge-100k", "edge-1m"], chart.rows)
+}
+
+fn scale_cells(
+    new: &Table,
+    sizes: &[&str],
+    rows: &[(&'static str, &'static str, &'static str)],
+) -> Vec<(Key, f64)> {
     let mut cells = Vec::new();
-    for &size in ["database-100k", "database-1m"].iter() {
-        for &(_, structure, metric) in DATABASE_SCALE_ROWS {
+    for &size in sizes {
+        for &(_, structure, metric) in rows {
             let key = (
                 size.into(),
                 "native".into(),
@@ -550,6 +674,23 @@ fn database_scale_cells(new: &Table) -> Vec<(Key, f64)> {
         }
     }
     cells
+}
+
+fn scale_complete(new: &Table, sizes: &[&str], rows: &[(&str, &str, &str)]) -> bool {
+    rows.iter().all(|&(_, structure, metric)| {
+        sizes.iter().all(|&size| {
+            avg(
+                new,
+                &(
+                    size.into(),
+                    "native".into(),
+                    structure.into(),
+                    metric.into(),
+                ),
+            )
+            .is_some()
+        })
+    })
 }
 
 /// Whether a chart moved enough to rewrite.
@@ -645,19 +786,70 @@ fn render(chart: &Chart, new: &Table, out_dir: &Path) {
     if chart.log {
         draw_bars(&data, (lo..hi).log_scale());
     } else {
-        draw_bars(&data, 0.0..(max * 1.15).max(1.0));
+        draw_bars(&data, 0.0..(max * LINEAR_HEADROOM).max(1.0));
     }
 }
 
 /// Renders the same-workload recall comparison at 100k and 1M operations.
 fn render_database_scale(new: &Table, out_dir: &Path) {
-    let path = out_dir.join("database-recall-scale-100k-1m.svg");
+    render_scale(
+        ScaleRender {
+            file: "database-recall-scale.svg",
+            title: "file-backed database — recall p50 by corpus size — 5k, 100k, 1M (log)",
+            rows: DATABASE_SCALE_ROWS,
+            y_title: "microseconds (log)",
+            // The rows span two orders of magnitude once the degenerate query
+            // is among them: on a linear axis its bar is the chart and the
+            // other three are a flat line, which is the opposite of what a
+            // comparison is for.
+            log: true,
+        },
+        new,
+        out_dir,
+        &DATABASE_SCALE_SIZES,
+        &DATABASE_SCALE_SERIES,
+    );
+}
+
+fn render_edge_scale(chart: &ScaleChart, new: &Table, out_dir: &Path) {
+    render_scale(
+        ScaleRender {
+            file: chart.file,
+            title: chart.title,
+            rows: chart.rows,
+            y_title: chart.y_title,
+            log: chart.log,
+        },
+        new,
+        out_dir,
+        &["edge-100k", "edge-1m"],
+        &EDGE_SCALE_SERIES,
+    );
+}
+
+struct ScaleRender {
+    file: &'static str,
+    title: &'static str,
+    rows: &'static [(&'static str, &'static str, &'static str)],
+    y_title: &'static str,
+    log: bool,
+}
+
+fn render_scale(
+    chart: ScaleRender,
+    new: &Table,
+    out_dir: &Path,
+    sizes: &[&str],
+    series: &[(&str, RGBColor)],
+) {
+    let path = out_dir.join(chart.file);
     let mut categories = Vec::new();
     let mut bars = Vec::new();
+    let mut min_pos = f64::INFINITY;
     let mut max = 0.0f64;
-    for &(label, structure, metric) in DATABASE_SCALE_ROWS {
+    for &(label, structure, metric) in chart.rows {
         let mut row = Vec::new();
-        for &size in ["database-100k", "database-1m"].iter() {
+        for &size in sizes {
             let key = (
                 size.into(),
                 "native".into(),
@@ -667,6 +859,9 @@ fn render_database_scale(new: &Table, out_dir: &Path) {
             let value = avg(new, &key);
             if let Some(value) = value {
                 max = max.max(value);
+                if value > 0.0 {
+                    min_pos = min_pos.min(value);
+                }
             }
             row.push(value);
         }
@@ -677,21 +872,44 @@ fn render_database_scale(new: &Table, out_dir: &Path) {
     }
     let data = BarData {
         path: &path,
-        title: "file-backed database — recall p50 by corpus size",
-        y_title: "microseconds",
+        title: chart.title,
+        y_title: chart.y_title,
         categories: &categories,
-        series: &DATABASE_SCALE_SERIES,
+        series,
         bars: &bars,
-        y_base: 0.0,
+        y_base: if chart.log {
+            log_bounds(min_pos, max).0
+        } else {
+            0.0
+        },
     };
-    draw_bars(&data, 0.0..(max * 1.15).max(1.0));
+    if chart.log {
+        let (lo, hi) = log_bounds(min_pos, max);
+        draw_bars(&data, (lo..hi).log_scale());
+    } else {
+        draw_bars(&data, 0.0..(max * LINEAR_HEADROOM).max(1.0));
+    }
 }
 
 /// Nearest enclosing powers of ten for a logarithmic axis, with at least
 /// one decade of span so a chart of equal values still renders.
+///
+/// `min` is the smallest **positive** value in the data (a log axis cannot show
+/// zero, and the callers compute it that way); a run with no positive value at
+/// all arrives as infinity and falls back to a single decade.
+///
+/// The floor follows the data rather than stopping at 1. It used to clamp
+/// there, which was invisible until a measurement came in below a microsecond —
+/// a graph recall after every edge was unlinked, at 0.7 µs — and its bar was
+/// silently drawn beneath the axis. A chart that hides a real result reads as
+/// missing data, which is worse than an unhelpful scale.
 fn log_bounds(min: f64, max: f64) -> (f64, f64) {
-    let lo = 10f64.powf(min.max(1.0).log10().floor());
-    let hi = 10f64.powf(max.max(10.0).log10().ceil());
+    let lo = if min.is_finite() && min > 0.0 {
+        10f64.powf(min.log10().floor())
+    } else {
+        1.0
+    };
+    let hi = 10f64.powf(max.max(lo * 10.0).log10().ceil());
     (lo, hi.max(lo * 10.0))
 }
 
@@ -709,6 +927,40 @@ struct BarData<'a> {
     /// The bar baseline: `0.0` for a linear axis, the axis floor for log.
     y_base: f64,
 }
+
+impl BarData<'_> {
+    /// Where to put the legend: over whichever end of the chart has the
+    /// shorter bars.
+    ///
+    /// A legend pinned to one corner sits on top of the data whenever the
+    /// tallest bar is at that end, and a bar whose top is hidden cannot be
+    /// read at all. Comparing the two halves costs nothing and is right far
+    /// more often than a fixed corner.
+    fn legend_position(&self) -> SeriesLabelPosition {
+        let tallest = |group: &Vec<Option<f64>>| {
+            group
+                .iter()
+                .flatten()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max)
+        };
+        let mid = self.bars.len().div_ceil(2);
+        let left = self.bars[..mid].iter().map(tallest).fold(0.0, f64::max);
+        let right = self.bars[mid..].iter().map(tallest).fold(0.0, f64::max);
+        if left <= right {
+            SeriesLabelPosition::UpperLeft
+        } else {
+            SeriesLabelPosition::UpperRight
+        }
+    }
+}
+
+/// Headroom above the tallest bar on a linear axis.
+///
+/// Enough that the legend clears it: at 1.15 the tallest bar reached 87 % of
+/// the height and the legend was drawn over its top, which is the one part of
+/// a bar that carries information.
+const LINEAR_HEADROOM: f64 = 1.35;
 
 /// Draws a grouped bar chart (one bar per present runtime within each
 /// category group) to `d.path`. Generic over the y-axis coordinate so the
@@ -771,7 +1023,7 @@ where
 
     chart
         .configure_series_labels()
-        .position(SeriesLabelPosition::UpperRight)
+        .position(d.legend_position())
         .background_style(WHITE.mix(0.85))
         .border_style(BLACK.mix(0.35))
         .label_font(("sans-serif", 12))
@@ -839,6 +1091,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_log_axis_reaches_down_to_the_smallest_measurement() {
+        // The case that exposed the old clamp: a sub-microsecond result next to
+        // tens of microseconds. Its decade has to be on the axis, or the bar is
+        // drawn below the floor and reads as no data at all.
+        assert_eq!(log_bounds(0.735, 50.353), (0.1, 100.0));
+
+        // Ordinary ranges are unchanged.
+        assert_eq!(log_bounds(1.6, 3.0), (1.0, 10.0));
+        assert_eq!(log_bounds(24.0, 900.0), (10.0, 1000.0));
+
+        // At least one decade of span, even for a single repeated value.
+        assert_eq!(log_bounds(5.0, 5.0), (1.0, 10.0));
+        assert_eq!(log_bounds(0.02, 0.02), (0.01, 0.1));
+
+        // No positive value at all (every sample zero): a usable default rather
+        // than a log of zero.
+        assert_eq!(log_bounds(f64::INFINITY, 0.0), (1.0, 10.0));
+    }
+
+    #[test]
     fn database_labels_are_stable_for_common_sizes() {
         assert_eq!(database_label_for("100000"), "database-100k");
         assert_eq!(database_label_for("1000000"), "database-1m");
@@ -893,5 +1165,26 @@ mod tests {
         let cells = database_scale_cells(&table);
         assert_eq!(cells.len(), 4);
         assert!(cells.iter().all(|(key, _)| key.3 == "p50_us"));
+    }
+
+    #[test]
+    fn edge_lifecycle_charts_collect_their_rows() {
+        let table = parse(
+            "# plugmem edge lifecycle benchmark: edges=100000\n\
+             #DB\tedge-100k\tnative\tlink\tlatency_us_per_op\t24.2\n\
+             #DB\tedge-100k\tnative\tunlink\tlatency_us_per_op\t18.1\n\
+             #DB\tedge-100k\tnative\tfull_maintain\tlatency_us_per_op\t2.7\n\
+             #DB\tedge-100k\tnative\tcurrent_graph_recall/open_edges\tp50_us\t2200.0\n\
+             #DB\tedge-100k\tnative\thistorical_graph_recall/as_of_open\tp50_us\t7400.0\n\
+             #DB\tedge-100k\tnative\tcurrent_edges/after_unlink\tcount\t0\n\
+             #DB\tedge-100k\tnative\tedge_history/after_unlink\tcount\t100000\n",
+        );
+
+        // Two charts: operation cost and graph recall. The counts in the input
+        // are still emitted by the benchmark and still read by the tables —
+        // they are simply not charted, because they restate the workload.
+        assert_eq!(EDGE_SCALE_CHARTS.len(), 2);
+        assert_eq!(edge_scale_cells(&EDGE_SCALE_CHARTS[0], &table).len(), 3);
+        assert_eq!(edge_scale_cells(&EDGE_SCALE_CHARTS[1], &table).len(), 2);
     }
 }

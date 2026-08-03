@@ -65,9 +65,29 @@ fn tokenizer_generic_unicode_path_allocates_nothing_after_warmup() {
     let _serial = serial();
     let mut tokenizer = Tokenizer::new();
     let input = "Hello МИР-42 café Straße नमस्ते";
-    for _ in 0..8 {
-        tokenizer.tokenize(input, &mut |_| {});
+
+    // Warm-up is a property, not a magic number: ICU's generic path may defer
+    // a one-time scratch/cache allocation until a later iterator boundary.
+    // Require a stable zero-allocation run, but keep a finite bound so a
+    // complex-script path that allocates on every call fails instead of
+    // spinning forever.
+    const STABLE_ZERO_CALLS: usize = 8;
+    const MAX_WARMUP_CALLS: usize = 128;
+    let mut stable_zero_calls = 0;
+    let mut warmup_calls = 0;
+    while stable_zero_calls < STABLE_ZERO_CALLS && warmup_calls < MAX_WARMUP_CALLS {
+        let (n, ()) = allocs(|| tokenizer.tokenize(input, &mut |_| {}));
+        warmup_calls += 1;
+        if n == 0 {
+            stable_zero_calls += 1;
+        } else {
+            stable_zero_calls = 0;
+        }
     }
+    assert_eq!(
+        stable_zero_calls, STABLE_ZERO_CALLS,
+        "generic tokenizer path did not settle after {warmup_calls} warm-up calls"
+    );
 
     let (n, ()) = allocs(|| {
         for _ in 0..128 {
@@ -83,11 +103,6 @@ fn recall_and_get_allocate_nothing_after_warmup() {
     let dim = 32usize;
     let mut cfg = Config::default();
     cfg.dim = dim;
-    cfg.shards_facts = 64;
-    cfg.shards_entities = 16;
-    cfg.shards_edges = 16;
-    cfg.shards_temporal = 16;
-    cfg.shards_postings = 128;
     let mut mem = Memory::new(cfg).unwrap();
     let mut store = MemStorage::new();
 
@@ -167,11 +182,6 @@ fn graph_regime_recall_allocates_nothing_after_warmup() {
     let mut cfg = Config::default();
     cfg.dim = dim;
     cfg.flat_to_hnsw = 64;
-    cfg.shards_facts = 16;
-    cfg.shards_entities = 8;
-    cfg.shards_edges = 8;
-    cfg.shards_temporal = 8;
-    cfg.shards_postings = 32;
     let mut mem = Memory::new(cfg).unwrap();
     let mut store = MemStorage::new();
     let embed = |seed: u64| -> Vec<f32> {
@@ -232,9 +242,7 @@ fn overlay_open_does_not_clone_the_base_pools() {
     // `from_bytes_overlay` borrows its byte pools, so it allocates only the
     // small owned metadata — nowhere near the whole image the owned open copies.
     let _serial = serial();
-    let mut cfg = Config::default();
-    cfg.shards_facts = 64;
-    cfg.shards_postings = 128;
+    let cfg = Config::default();
 
     // A snapshot whose byte pools dominate: many facts, each with real text.
     let mut mem = Memory::new(cfg.clone()).unwrap();

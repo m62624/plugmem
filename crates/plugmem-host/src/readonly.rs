@@ -213,6 +213,18 @@ impl ReadOnlyDatabase {
         self.with_mem(|mem| mem.stats())
     }
 
+    /// One fact's tags, or an empty vector for an unknown or tombstoned id.
+    pub fn tags_of(&self, id: FactId) -> Vec<String> {
+        self.with_mem(|mem| {
+            let mut terms = Vec::new();
+            mem.tags_of(id, &mut terms);
+            terms
+                .iter()
+                .map(|term| mem.term(*term).to_string())
+                .collect()
+        })
+    }
+
     /// Runs the on-demand integrity check — the equivalent of
     /// SQLite's `integrity_check`. A read-only open validates only the metadata
     /// (the mapped text and vector pools stay non-resident); this sweeps them
@@ -271,6 +283,14 @@ impl ReadOnlyDatabase {
     /// [`Database::export_each`](crate::Database::export_each)).
     pub fn export_each(&self, f: impl FnMut(crate::db::ExportedFact)) {
         self.with_mem(|mem| crate::db::export_facts_each(mem, f));
+    }
+
+    /// Returns at most `limit` open facts starting at the opaque fact-id
+    /// `cursor`. The mapped generation is immutable, so paging this handle is a
+    /// snapshot-consistent bounded export. Pass the returned `next_cursor` to
+    /// continue; `None` means the scan is complete.
+    pub fn export_page(&self, cursor: u32, limit: std::num::NonZeroUsize) -> crate::db::ExportPage {
+        self.with_mem(|mem| crate::db::export_facts_page(mem, cursor, limit.get()))
     }
 
     /// The database base path.

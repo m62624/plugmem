@@ -39,9 +39,9 @@ with files, locking, mmap and embedders).
    `memcpy` of its sections; loading is bounds-checking the metadata and
    adopting the bytes.
 2. **Costs are local.** Every operation touches O(1) 4 KiB pages: a shard
-   is picked in O(1) (top key bits or Fibonacci hash), a short chain walk
-   peeks one first-key per page, then binary search and a bounded `memmove`
-   inside one page.
+   is picked in O(1) (top key bits or Fibonacci hash), a binary search over
+   the shard's page directory peeks O(log pages) first-keys, then binary
+   search and a bounded `memmove` inside one page.
 3. **32-bit friendly.** Ids are `u32`; byte-pool offsets are `usize`, so a
    pool follows the target's address space — capped at 4 GiB on wasm32 linear
    memory, RAM-bound on a 64-bit host. Serialized dumps store lengths, not
@@ -103,15 +103,26 @@ are excluded from written output.
 
 ### Relation to a B-tree
 
-`Arena` is the leaf level of a B+-tree without interior nodes. Where
-`std::collections::BTreeMap` allocates linked nodes of up to 11 elements
-and descends them by pointer (each hop is a potential cache miss and its
-own heap allocation), the arena replaces the interior levels with O(1)
-sharding and keeps records in 4 KiB pages inside one pool. The measured
-consequences at 1M records: **40 allocator calls versus 133,419** for
-`BTreeMap`, no pointer chasing on lookups, and a serialization format for
-free. The price is paid in page fill (see the memory numbers) and in the
-in-page `memmove` on insert.
+`Arena` is the leaf level of a B+-tree, with sharding plus one flat page
+directory in place of the interior nodes. Where `std::collections::BTreeMap`
+allocates linked nodes of up to 11 elements and descends them by pointer (each
+hop is a potential cache miss and its own heap allocation), the arena picks a
+shard in O(1), binary-searches a contiguous array to find the page, and
+keeps records in 4 KiB pages inside one pool.
+
+Each directory entry carries the page id **and a copy of that page's first
+key** — 20 bytes per 4 KiB page, about 0.5%. The copy is the point: comparing
+first keys by reading them from the pool would make every probe a random access
+into a structure the size of the data, whereas the directory of a 64 MB arena
+is 320 KB and stays in cache. The key rides inside the existing entry rather
+than in a second parallel vector, so the number of allocator calls is
+unchanged. The directory is derived state — rebuilt when an image is loaded,
+absent from the format.
+
+The measured consequences at 1M records: a few dozen allocator calls versus
+**133,419** for `BTreeMap`, no pointer chasing on lookups, and a serialization
+format for free. The price is paid in page fill (see the memory numbers) and in
+the in-page `memmove` on insert.
 
 ## The four structures
 
@@ -196,9 +207,12 @@ do not need ordering, range scans or the snapshot property.
 ![allocator calls at 1M](assets/arena-allocs-1m.svg)
 ![insert tail latency p99 at 1M](assets/arena-tails-1m.svg)
 
-Memory is the arena's main cost: split pages average ~70% fill and the
-pool grows by doubling, so bytes/element sit above `BTreeMap`'s (a planned
-compaction rebuild recovers most of it). In return the allocator is barely
+Memory is the arena's main cost: pages split in half under scattered keys
+and the pool grows by doubling, so bytes/element sit above `BTreeMap`'s
+(rebuilding a container in key order recovers it). Ascending keys — ids,
+timestamps — do not pay this: an insert past a full page's last key starts a
+fresh page instead of halving the full one, so a monotonic load packs pages
+completely. In return the allocator is barely
 touched — a near-constant ~40 calls to build a million records, versus one
 per node for `BTreeMap` — so build time carries no allocator noise and
 fragmentation does not accumulate. The insert tail (p99) stays bounded: a

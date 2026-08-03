@@ -1,6 +1,7 @@
 //! Canonical token emission and byte-budget handling.
 
 use super::{tables::is_word_joiner, unicode::UnicodeBackend};
+use unicode_normalization::char::canonical_combining_class;
 
 /// Upper bound on an emitted token, in bytes.
 pub const MAX_TOKEN_BYTES: usize = 64;
@@ -10,9 +11,10 @@ pub const MAX_TOKEN_BYTES: usize = 64;
 /// lexical base, so leading marks and joiners are removed without allocating.
 /// Keeping either would make re-tokenization context-sensitive (for example,
 /// `\u{300}word` → `word`, `_word` → `word`, and `word.` → `word`). A mark-only
-/// token is retained when it has Unicode Alphabetic semantics; this keeps
-/// valid standalone script marks such as U+0F71 searchable. Empty and
-/// non-lexical tokens are guarded against rather than asserted.
+/// token is retained only when it is a single mark with Unicode Alphabetic
+/// semantics; this keeps valid standalone script marks such as U+0F71
+/// searchable without letting contextual mark/filler runs escape as tokens.
+/// Empty and non-lexical tokens are guarded against rather than asserted.
 pub(super) fn emit_truncated(token: &str, sink: &mut dyn FnMut(&str)) {
     let token = trim_leading_contextual_chars(token);
     // Some Unicode marks carry the `Alphabetic` property and are
@@ -20,11 +22,12 @@ pub(super) fn emit_truncated(token: &str, sink: &mut dyn FnMut(&str)) {
     // U+0300, are only an Extend character: ICU will not tokenize them when
     // presented alone. Never emit a mark-only/non-alphabetic token, because
     // it cannot satisfy the tokenizer's fixed-point contract.
-    if token.is_empty()
-        || !token
-            .chars()
-            .any(|c| c.is_alphanumeric() || UnicodeBackend::is_alphabetic(c))
-    {
+    if token.is_empty() || !has_emit_lexical_content(token) {
+        return;
+    }
+    if let Some((start, end)) = invalid_apostrophe_joiner(token) {
+        emit_truncated(&token[..start], sink);
+        emit_truncated(&token[end..], sink);
         return;
     }
     let mut end = token.len().min(MAX_TOKEN_BYTES);
@@ -59,6 +62,9 @@ pub(super) fn emit_truncated(token: &str, sink: &mut dyn FnMut(&str)) {
         end = original_end;
     }
     if end == 0 {
+        return;
+    }
+    if !has_emit_lexical_content(&token[..end]) {
         return;
     }
     sink(&token[..end]);
@@ -100,4 +106,56 @@ fn trim_leading_contextual_chars(mut token: &str) -> &str {
         }
         token = next;
     }
+}
+
+fn invalid_apostrophe_joiner(token: &str) -> Option<(usize, usize)> {
+    let mut chars = token.char_indices().peekable();
+    while let Some((offset, c)) = chars.next() {
+        if c != '\'' && c != '\u{2019}' {
+            continue;
+        }
+        let left = previous_non_mark(&token[..offset]).is_some_and(is_letter);
+        let right = next_non_mark(chars.clone()).is_some_and(is_letter);
+        if !left || !right {
+            return Some((offset, offset + c.len_utf8()));
+        }
+    }
+    None
+}
+
+fn previous_non_mark(text: &str) -> Option<char> {
+    text.chars().rev().find(|&c| !UnicodeBackend::is_mark(c))
+}
+
+fn next_non_mark<'a>(chars: impl Iterator<Item = (usize, char)> + 'a) -> Option<char> {
+    chars.map(|(_, c)| c).find(|&c| !UnicodeBackend::is_mark(c))
+}
+
+fn is_letter(c: char) -> bool {
+    c.is_alphabetic() || UnicodeBackend::is_alphabetic(c)
+}
+
+fn has_emit_lexical_content(token: &str) -> bool {
+    let mut chars = token.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    let mut only_one = true;
+    let mut all_marks = UnicodeBackend::is_mark(first);
+    if !all_marks && is_lexical_base(first) {
+        return true;
+    }
+    for c in chars {
+        only_one = false;
+        let is_mark = UnicodeBackend::is_mark(c);
+        all_marks &= is_mark;
+        if !is_mark && is_lexical_base(c) {
+            return true;
+        }
+    }
+    all_marks && only_one && first.is_alphanumeric() && canonical_combining_class(first) != 0
+}
+
+fn is_lexical_base(c: char) -> bool {
+    (c.is_alphanumeric() || UnicodeBackend::is_alphabetic(c)) && !UnicodeBackend::is_mark(c)
 }

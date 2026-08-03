@@ -4,7 +4,8 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use plugmem_host::MaintenanceMode;
 
 /// `plugmem` — a temporal memory for LLM agents in a single file.
 #[derive(Parser)]
@@ -17,9 +18,17 @@ use clap::{Parser, Subcommand};
     disable_help_subcommand = true,
 )]
 pub(crate) struct Cli {
-    /// Database file (default: the platform data path, or $PLUGMEM_DB).
-    #[arg(long, global = true, value_name = "PATH")]
-    pub(crate) db: Option<PathBuf>,
+    /// Database file (default: the platform data path, or $PLUGMEM_DB). With a
+    /// workspace configured this also takes a bare memory *name* — `work` is a
+    /// name, `./work.plugmem` is a path.
+    #[arg(long, global = true, value_name = "PATH|NAME")]
+    pub(crate) db: Option<String>,
+
+    /// Directory of named memories (default: $PLUGMEM_WORKSPACE, else
+    /// [workspace].dir). Unset means one database addressed by path, which is
+    /// the default and needs nothing configured.
+    #[arg(long, global = true, value_name = "DIR")]
+    pub(crate) workspace: Option<PathBuf>,
 
     /// Config file (default: $PLUGMEM_CONFIG, else
     /// $XDG_CONFIG_HOME/plugmem/config.toml). Sections: [database],
@@ -38,7 +47,7 @@ pub(crate) struct Cli {
 /// The `--help` long description.
 const LONG_ABOUT: &str = "\
 A local memory an agent talks to in four verbs — remember / recall / revise / forget — \
-plus link / show / stats / maintain / checkpoint / export / import, integrity: verify / \
+plus link / unlink / show / stats / maintain / checkpoint / export / import, integrity: verify / \
 scrub / recover, and an interactive `repl` (one open handle, host speed). Recall fuses lexical \
 (BM25), vector, entity-graph and temporal evidence into one \
 ranked, token-budgeted block. One database is a single snapshot file plus a journal; point \
@@ -139,6 +148,15 @@ pub(crate) enum Command {
         /// Destination entity.
         dst: String,
     },
+    /// Close the current typed edge between two entities.
+    Unlink {
+        /// Source entity.
+        src: String,
+        /// Relation.
+        rel: String,
+        /// Destination entity.
+        dst: String,
+    },
     /// Print one fact's full card (text, both time axes, state).
     Show {
         /// The fact id.
@@ -146,14 +164,23 @@ pub(crate) enum Command {
     },
     /// Print engine size counters and identity.
     Stats,
-    /// Run a maintenance pass now (purge tombstones, compact, build HNSW).
-    Maintain,
+    /// Run a maintenance pass now (no-op, compact, reindex or optimize).
+    Maintain {
+        /// How much work to do. `auto` (the default) does only what is
+        /// pending: purge tombstones, refresh a stale text index, and advance
+        /// the vector graph within a bounded budget. `full` rebuilds
+        /// everything and repacks the edge arenas — offline-grade work, and
+        /// the only mode that reclaims edge-history page slack.
+        #[arg(long, value_enum, default_value_t = MaintainMode::Auto)]
+        mode: MaintainMode,
+    },
     /// Flush the journal into a fresh snapshot now and clear it. Leaves the
     /// database checkpointed, so the read-only path (`scrub`, and any
     /// shared-lock open) can proceed without a dirty-journal `NeedsCheckpoint`.
     Checkpoint,
-    /// Check content integrity (text UTF-8, vector↔fact consistency) — the
-    /// on-demand equivalent of SQLite's `integrity_check`. Exit 2 on damage.
+    /// Check the integrity an open defers: text UTF-8, metadata, vector↔fact
+    /// consistency, and that the edge graph agrees with itself — the on-demand
+    /// equivalent of SQLite's `integrity_check`. Exit 2 on damage.
     Verify,
     /// Scrub the snapshot's byte-level container integrity (per-section and
     /// whole-file checksums), a slice at a time. Requires a checkpointed
@@ -182,9 +209,12 @@ pub(crate) enum Command {
         #[arg(long, value_name = "N")]
         batch: Option<usize>,
     },
-    /// Interactive session: open the database once and run commands from stdin
-    /// (one per line, same grammar as the subcommands), keeping the engine in
-    /// memory for native (host) speed instead of reloading per command. Type
+    /// Interactive session for a person at a terminal: open the database once
+    /// and run commands from stdin (one per line, same grammar as the
+    /// subcommands), keeping the engine in memory for native (host) speed
+    /// instead of reloading per command. NOT for a script or an agent — it
+    /// reads until end-of-input, so a caller that cannot type into it waits
+    /// forever; run one verb per invocation instead. Type
     /// `help` for the verb list, `exit`/`quit` (or EOF) to leave; the session
     /// checkpoints on exit. `scrub`/`recover` stay one-shot.
     Repl {
@@ -200,6 +230,93 @@ pub(crate) enum Command {
         #[arg(long)]
         read_only: bool,
     },
+    /// Manage a directory of named memories. Only useful once `[workspace].dir`
+    /// (or `--workspace`) points somewhere; without one there is a single
+    /// database and nothing here applies.
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommand,
+    },
+}
+
+/// The `workspace` subcommands.
+#[derive(Subcommand)]
+pub(crate) enum WorkspaceCommand {
+    /// List every memory in the workspace, with its description when it has one.
+    List,
+    /// Find memories by what they are for — or by who owns them.
+    Find {
+        /// What the memory is for, in your own words. A person's name works too.
+        query: String,
+        /// Max results (default 8).
+        #[arg(long, value_name = "N")]
+        k: Option<usize>,
+    },
+    /// Say what a memory is for. Written into the memory itself and into the
+    /// registry, so the registry can always be rebuilt from the memories.
+    /// Creates the memory if it does not exist.
+    Describe {
+        /// The memory's name.
+        name: String,
+        /// What it is for.
+        text: String,
+        /// Tags to filter by (repeatable).
+        #[arg(long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
+        /// Who it belongs to.
+        #[arg(long)]
+        owner: Option<String>,
+    },
+    /// Label a memory archived. It stays where it is and stays openable.
+    Archive {
+        /// The memory's name.
+        name: String,
+    },
+    /// Rebuild the registry from the memories' own descriptions.
+    Reindex,
+    /// Check the registry against the directory. Reports; never repairs.
+    Verify,
+    /// Print the shell line that points this terminal at a memory:
+    /// `eval "$(plugmem-cli workspace use work)"`. It sets $PLUGMEM_DB in the
+    /// shell you run it in — deliberately not a file on disk, so one window
+    /// cannot silently redirect another.
+    Use {
+        /// The memory's name.
+        name: String,
+    },
+}
+
+/// The `maintain --mode` values, mirroring [`MaintenanceMode`] one to one.
+///
+/// A separate enum so the command line owns its own spelling and help text;
+/// the engine's variants are not a CLI contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum MaintainMode {
+    /// Only pending work: purge tombstones, refresh a stale text index, and
+    /// advance the vector graph within a bounded budget. Cheap and safe to
+    /// run often; a no-op when nothing is pending.
+    Auto,
+    /// Physically purge tombstoned facts and compact storage and indexes.
+    Compact,
+    /// Rebuild the text index by re-reading and re-tokenizing every fact.
+    ReindexText,
+    /// Build or advance the vector graph without compacting anything else.
+    OptimizeVectors,
+    /// Rebuild every rebuildable structure, fully optimize vectors, and
+    /// repack the edge arenas. O(database) work; no history is ever dropped.
+    Full,
+}
+
+impl From<MaintainMode> for MaintenanceMode {
+    fn from(mode: MaintainMode) -> Self {
+        match mode {
+            MaintainMode::Auto => Self::Auto,
+            MaintainMode::Compact => Self::Compact,
+            MaintainMode::ReindexText => Self::ReindexText,
+            MaintainMode::OptimizeVectors => Self::OptimizeVectors,
+            MaintainMode::Full => Self::Full,
+        }
+    }
 }
 
 /// Detailed help topics that are intentionally separate from ordinary `--help`.

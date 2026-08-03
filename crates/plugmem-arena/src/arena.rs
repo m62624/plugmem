@@ -3,10 +3,18 @@
 //! Full v2 mechanics of: each shard owns a **chain of
 //! range-partitioned pages** — every page holds a sorted run of keys, pages
 //! in a chain follow each other in ascending key ranges (a B+-tree leaf
-//! level without interior nodes; chains stay short because shard hashing
-//! spreads the load). A full page **splits** in half instead of failing, and
+//! level). A full page **splits** in half instead of failing, and
 //! a page emptied by removals is unlinked into a **free-list** for reuse, so
 //! capacity is bounded only by [`ArenaCfg::max_bytes`].
+//!
+//! Chains are *not* assumed to be short. Shard hashing spreads uniform keys,
+//! but an [`ShardMode::Ordered`] arena whose keys share their leading bytes
+//! concentrates everything in one shard — every edge of a hub entity, every
+//! timestamp of a real clock — and that chain grows with the record count. So
+//! the interior level is a flat runtime **page directory** ([`Arena::dir`]):
+//! locating a page is a binary search over it, O(log pages), never a walk. The
+//! directory is derived state, rebuilt by the load walk and absent from the
+//! on-disk image.
 //!
 //! The structure is tuned for **wasm environments first**: `no_std + alloc`,
 //! a single linear byte pool (snapshot = memcpy), no threads, and the one
@@ -30,6 +38,7 @@
 //! `examples/overlay.rs`.
 
 use alloc::vec::Vec;
+use core::cmp::Ordering;
 use core::fmt;
 use core::marker::PhantomData;
 
@@ -97,8 +106,11 @@ pub enum ShardMode {
     /// Shard = top bits of the key's leading bytes. Shard index order equals
     /// key order, so [`Arena::iter`] yields globally ascending keys and
     /// [`Arena::range`] scans work. Keys arriving in a narrow value range
-    /// will concentrate in few shards — their chains simply grow longer;
-    /// that is the trade-off for ordering.
+    /// concentrate in few shards — commonly in exactly one, since the top bits
+    /// of a real timestamp or of a repeated id prefix are constant. Their
+    /// chains then grow with the record count; the page directory keeps
+    /// locating a page logarithmic anyway, so this costs ordering, not
+    /// asymptotics.
     Ordered,
 }
 
@@ -157,8 +169,10 @@ pub struct Counters {
     pub bytes_shifted: u64,
     /// Pages taken from the pool or the free-list.
     pub pages_allocated: u64,
-    /// Steps taken walking page chains (each step peeks one page's first
-    /// key — one cache line).
+    /// First-key peeks spent locating a page (one cache line each). With the
+    /// page directory this is the binary search's probe count, so it grows
+    /// with the *logarithm* of a shard's page count; a value that grows
+    /// linearly with the record count means the directory stopped being used.
     pub chain_steps: u64,
     /// Page splits performed by inserts into full pages.
     pub splits: u64,
@@ -172,8 +186,9 @@ pub struct Counters {
 ///
 /// - all state is `pool` + small metadata arrays — persisting the arena is a
 ///   `memcpy` of defined bytes;
-/// - every operation touches O(1) pages: a short chain walk (one first-key
-///   peek per step), then binary search and shifts inside one 4 KiB page;
+/// - every operation touches O(1) pages: a binary search over the page
+///   directory, then binary search and shifts inside one 4 KiB page — so a
+///   skewed key distribution costs a logarithm, not a scan;
 /// - capacity is bounded only by [`ArenaCfg::max_bytes`] — full pages split,
 ///   emptied pages are recycled through a free-list;
 /// - `Arena` deliberately implements neither `Clone` nor `PartialEq`: pages
@@ -211,6 +226,18 @@ pub struct Arena<'a, T: Slot> {
     /// Shard -> last page of its chain (`NONE` when empty). Runtime-only
     /// metadata paired with `heads` for reverse ordered scans.
     tails: Vec<u32>,
+    /// Every chain page, shard after shard, each shard's run in chain (=
+    /// ascending key) order — the **page directory** that turns locating a
+    /// page into a binary search instead of a walk. See [`Arena::find_page`].
+    ///
+    /// Runtime-only, like `prev`/`tails`: rebuilt by the load walk, absent
+    /// from the on-disk image. Flat by design — one [`PageEntry`] per 4 KiB
+    /// page (≈0.5% overhead), no `Box`, no map.
+    dir: Vec<PageEntry>,
+    /// Shard -> start of that shard's run in `dir`; `shards + 1` entries, the
+    /// last one being `dir.len()`, so shard `s` owns `dir[dir_at[s]..
+    /// dir_at[s + 1]]`.
+    dir_at: Vec<u32>,
     /// Head of the free-list of recycled pages (linked through `next`).
     free_head: u32,
     /// Total records across all shards.
@@ -233,12 +260,52 @@ pub struct Arena<'a, T: Slot> {
     _marker: PhantomData<fn() -> T>,
 }
 
+/// Bytes of a page's first key cached in the directory. Every key this crate
+/// is used with fits; a wider one is compared on its prefix and disambiguated
+/// against the pool (see [`Arena::dir_cmp`]).
+const DIR_KEY_BYTES: usize = 16;
+
+/// One entry of the page directory: a chain page and a copy of its first key.
+///
+/// The copy is the whole point. A binary search over the directory compares
+/// first keys, and reading each one from the pool means a random access into
+/// a structure sized like the data — several cache misses per lookup, growing
+/// with the arena. Carrying the key here turns the search into a walk over a
+/// compact array: 20 bytes per 4 KiB page, so the directory of a 64 MB arena
+/// is 320 KB and stays in L2 while the pool does not.
+///
+/// The key rides *inside* the directory rather than in a second parallel
+/// vector on purpose: one collection means the same number of allocator calls
+/// the directory already made, and the key sits in the same cache line as the
+/// page id that follows it.
+#[derive(Clone, Copy, Debug)]
+struct PageEntry {
+    /// The page's first key, zero-padded to [`DIR_KEY_BYTES`].
+    key: [u8; DIR_KEY_BYTES],
+    /// The chain page.
+    page: u32,
+}
+
+impl PageEntry {
+    /// An entry whose cached key is not yet known — the caller must follow up
+    /// with [`Arena::refresh_dir_key`] once the page has its first record.
+    fn pending(page: u32) -> Self {
+        Self {
+            key: [0; DIR_KEY_BYTES],
+            page,
+        }
+    }
+}
+
 /// Where a key's record lives (or would live).
 struct Target {
     /// Page preceding `page` in its chain, `NONE` when `page` is the head.
     prev: u32,
     /// The chain page whose key range covers the key.
     page: u32,
+    /// Index of `page` in [`Arena::dir`] — the mutation paths (split, page
+    /// recycling) update the directory there without searching for it again.
+    at: usize,
 }
 
 impl<'a, T: Slot> Arena<'a, T> {
@@ -266,6 +333,8 @@ impl<'a, T: Slot> Arena<'a, T> {
             prev: Vec::new(),
             counts: Vec::new(),
             tails: alloc::vec![NONE; cfg.shards],
+            dir: Vec::new(),
+            dir_at: alloc::vec![0; cfg.shards + 1],
             free_head: NONE,
             total: 0,
             scratch: Vec::new(),
@@ -337,7 +406,13 @@ impl<'a, T: Slot> Arena<'a, T> {
                 let page = self.alloc_page()?;
                 self.heads[shard] = page;
                 self.tails[shard] = page;
-                Target { prev: NONE, page }
+                let at = self.dir_at[shard] as usize;
+                self.dir_insert(shard, at, page);
+                Target {
+                    prev: NONE,
+                    page,
+                    at,
+                }
             }
         };
 
@@ -353,10 +428,15 @@ impl<'a, T: Slot> Arena<'a, T> {
             }
         };
 
+        let mut at = target.at;
         if count == Self::slots_per_page() {
             // Split the full page; afterwards (page, pos, count) address the
-            // half that must receive the new record.
-            (page, pos, count) = self.split(page, pos)?;
+            // half that must receive the new record, which is either the page
+            // that split or the fresh one directly after it in the directory.
+            (page, pos, count) = self.split(shard, at, pos)?;
+            if page != self.dir[at].page {
+                at += 1;
+            }
         }
 
         let slot_start = pos * T::SIZE;
@@ -372,42 +452,59 @@ impl<'a, T: Slot> Arena<'a, T> {
 
         self.counts[page as usize] += 1;
         self.total += 1;
+        if pos == 0 {
+            // The record now sorts first on its page, so the directory's copy
+            // of that key is stale — including the case of a page that had no
+            // records at all until now.
+            debug_assert_eq!(self.dir[at].page, page);
+            self.refresh_dir_key(at);
+        }
         Ok(true)
     }
 
-    /// Splits full `page`, given the insert position `pos` inside it.
-    /// Returns `(target_page, target_pos, target_count)` for the record that
-    /// triggered the split.
-    fn split(&mut self, page: u32, pos: usize) -> Result<(u32, usize, usize), Error> {
+    /// Splits full `page` — the chain page at directory index `at` of `shard`
+    /// — given the insert position `pos` inside it. Returns
+    /// `(target_page, target_pos, target_count)` for the record that triggered
+    /// the split.
+    fn split(&mut self, shard: usize, at: usize, pos: usize) -> Result<(u32, usize, usize), Error> {
         let spp = Self::slots_per_page();
+        let page = self.dir[at].page;
         let fresh = self.alloc_page()?;
         bump!(self, splits, 1);
 
-        // Link the fresh page right after the split one.
+        // Link the fresh page right after the split one, in the chain and in
+        // the directory alike.
         let successor = self.next[page as usize];
         self.next[fresh as usize] = successor;
         self.prev[fresh as usize] = page;
         self.next[page as usize] = fresh;
         if successor == NONE {
-            let shard = self.shard_of(self.first_key(page));
             self.tails[shard] = fresh;
         } else {
             self.prev[successor as usize] = fresh;
         }
+        self.dir_insert(shard, at + 1, fresh);
+
+        if pos == spp {
+            // Appending past the last key: splitting in half would leave both
+            // pages half empty forever, because nothing will ever sort into
+            // the lower one again. Every id and timestamp this crate stores
+            // arrives ascending, so this is the common case — hand the record
+            // a fresh page and leave the full one full. Pages stay 100% packed
+            // under a monotonic load instead of 50%.
+            return Ok((fresh, 0, 0));
+        }
 
         if spp == 1 {
-            // Degenerate single-slot pages (T::SIZE > PAGE_BYTES / 2): the
-            // "upper half" is the whole record when the new key precedes it,
-            // otherwise the fresh page simply receives the new record.
-            return Ok(if pos == 0 {
-                self.move_slots(page, 0, fresh, T::SIZE);
-                bump!(self, bytes_shifted, T::SIZE);
-                self.counts[page as usize] = 0;
-                self.counts[fresh as usize] = 1;
-                (page, 0, 0)
-            } else {
-                (fresh, 0, 0)
-            });
+            // Degenerate single-slot pages (T::SIZE > PAGE_BYTES / 2): `pos`
+            // can only be 0 here (`pos == spp` returned above), so the record
+            // sorts before the existing one, which moves to the fresh page.
+            self.move_slots(page, 0, fresh, T::SIZE);
+            bump!(self, bytes_shifted, T::SIZE);
+            self.counts[page as usize] = 0;
+            self.counts[fresh as usize] = 1;
+            self.refresh_dir_key(at + 1);
+            return Ok((page, 0, 0));
         }
 
         // Move the upper half [half..spp) into the fresh page.
@@ -417,6 +514,9 @@ impl<'a, T: Slot> Arena<'a, T> {
         bump!(self, bytes_shifted, moved * T::SIZE);
         self.counts[page as usize] = half as u16;
         self.counts[fresh as usize] = moved as u16;
+        // The split page keeps its first record, so only the fresh page's
+        // cached key is new.
+        self.refresh_dir_key(at + 1);
 
         // `pos` was computed against the full page; place the new record in
         // whichever half now owns that position (pos == half belongs at the
@@ -502,7 +602,7 @@ impl<'a, T: Slot> Arena<'a, T> {
     pub fn remove(&mut self, key: &[u8]) -> bool {
         assert_eq!(key.len(), T::KEY_LEN, "key length must equal Slot::KEY_LEN");
         let shard = self.shard_of(key);
-        let Some(Target { prev, page }) = self.find_page(shard, key) else {
+        let Some(Target { prev, page, at }) = self.find_page(shard, key) else {
             return false;
         };
         let count = self.counts[page as usize] as usize;
@@ -545,6 +645,11 @@ impl<'a, T: Slot> Arena<'a, T> {
             self.next[page as usize] = self.free_head;
             self.prev[page as usize] = NONE;
             self.free_head = page;
+            self.dir_remove(shard, at);
+        } else if pos == 0 {
+            // The page survives but its first record is gone, so the
+            // directory's copy of that key no longer names it.
+            self.refresh_dir_key(at);
         }
         true
     }
@@ -883,7 +988,12 @@ impl<'a, T: Slot> Arena<'a, T> {
         // pages and (after the walks) orphans.
         let mut seen = alloc::vec![false; pages];
         let mut live = 0u64;
+        // The walk already visits every chain page in shard-then-key order —
+        // exactly the page directory's contents, so it is built here for free.
+        let mut dir = Vec::with_capacity(pages);
+        let mut dir_at = alloc::vec![0u32; shards + 1];
         for (shard, &head) in heads.iter().enumerate() {
+            dir_at[shard] = dir.len() as u32;
             let mut page = head;
             let mut predecessor = NONE;
             while page != NONE {
@@ -914,10 +1024,17 @@ impl<'a, T: Slot> Arena<'a, T> {
                 if next[p] == NONE {
                     tails[shard] = page;
                 }
+                // `first` is this page's first key, already read and validated
+                // above — the directory's cached copy costs nothing here.
+                let mut cached = [0u8; DIR_KEY_BYTES];
+                let n = T::KEY_LEN.min(DIR_KEY_BYTES);
+                cached[..n].copy_from_slice(&first[..n]);
+                dir.push(PageEntry { key: cached, page });
                 predecessor = page;
                 page = next[p];
             }
         }
+        dir_at[shards] = dir.len() as u32;
         let mut page = free_head;
         while page != NONE {
             let p = page as usize;
@@ -947,36 +1064,130 @@ impl<'a, T: Slot> Arena<'a, T> {
         arena.prev = prev_links;
         arena.counts = counts;
         arena.tails = tails;
+        arena.dir = dir;
+        arena.dir_at = dir_at;
         arena.free_head = free_head;
         arena.total = total as usize;
         Ok(arena)
     }
 
-    /// Walks the shard's chain to the page whose key range covers `key`.
-    /// `None` when the shard is empty.
+    /// Locates the chain page whose key range covers `key`. `None` when the
+    /// shard is empty.
+    ///
+    /// A shard's pages are range-partitioned and ascending, so the covering
+    /// page is the **last** one whose first key is `<= key` (or the head, when
+    /// `key` sorts below every page). The directory holds exactly that
+    /// sequence, so this is a binary search over `dir`: O(log pages) first-key
+    /// peeks instead of one per page.
+    ///
+    /// That difference is the whole point of the directory. A chain is short
+    /// only while the shard hash spreads the load; an `Ordered` arena whose
+    /// keys share their leading 8 bytes (every edge of one hub entity, every
+    /// timestamp of a real clock) concentrates in a single shard, and a walk
+    /// there costs O(records) per operation — quadratic over a load.
     fn find_page(&self, shard: usize, key: &[u8]) -> Option<Target> {
-        let head = self.heads[shard];
-        if head == NONE {
+        let (lo, hi) = self.dir_run(shard);
+        if lo == hi {
+            debug_assert_eq!(self.heads[shard], NONE, "empty directory run, live chain");
             return None;
         }
-        let mut prev = NONE;
-        let mut page = head;
+        // Partition point of `first_key(page) <= key` over the run *after* the
+        // head: the head covers everything below the second page's first key,
+        // so it never needs a probe — and a single-page shard costs nothing.
         let mut steps = 0u64;
-        loop {
-            let nxt = self.next[page as usize];
-            // Advance while the next page's range can still contain the key
-            // (its first key is <= key). Peeking a first key touches one
-            // cache line.
-            if nxt == NONE || self.first_key(nxt) > key {
-                break;
-            }
+        let (mut left, mut right) = (lo + 1, hi);
+        while left < right {
+            let mid = left + (right - left) / 2;
             steps += COUNT as u64;
-            prev = page;
-            page = nxt;
+            if self.dir_cmp(&self.dir[mid], key).is_le() {
+                left = mid + 1;
+            } else {
+                right = mid;
+            }
         }
         bump!(self, chain_steps, steps);
         let _ = steps; // read only by the counters feature
-        Some(Target { prev, page })
+        let at = left - 1;
+        self.debug_assert_dir_key(at);
+        Some(Target {
+            prev: if at > lo { self.dir[at - 1].page } else { NONE },
+            page: self.dir[at].page,
+            at,
+        })
+    }
+
+    /// Orders a directory entry's first key against `key`.
+    ///
+    /// The cached copy answers this outright for every key that fits in
+    /// [`DIR_KEY_BYTES`], which is every key this crate is used with. A wider
+    /// `Slot` still works: its entries are ordered on the cached prefix, and
+    /// only a tie there — pages whose first keys share their leading 16 bytes
+    /// — costs the pool read the cache exists to avoid.
+    fn dir_cmp(&self, entry: &PageEntry, key: &[u8]) -> Ordering {
+        let n = T::KEY_LEN.min(DIR_KEY_BYTES);
+        match entry.key[..n].cmp(&key[..n]) {
+            Ordering::Equal if T::KEY_LEN > DIR_KEY_BYTES => self.first_key(entry.page).cmp(key),
+            other => other,
+        }
+    }
+
+    /// Re-reads the cached first key of directory index `at` from the pool.
+    /// Called wherever a mutation can change which record sits first on a
+    /// page: a fresh page receiving its first record, an insert at position
+    /// zero, a removal of position zero, or a split moving records across.
+    fn refresh_dir_key(&mut self, at: usize) {
+        let page = self.dir[at].page;
+        let mut key = [0u8; DIR_KEY_BYTES];
+        let n = T::KEY_LEN.min(DIR_KEY_BYTES);
+        key[..n].copy_from_slice(&self.first_key(page)[..n]);
+        self.dir[at].key = key;
+    }
+
+    /// Asserts that one directory entry's cached key still matches its page.
+    ///
+    /// Debug builds only: the directory is derived state, and a stale entry
+    /// misdirects a lookup instead of failing loudly. Checking the single
+    /// entry a search just landed on — rather than sweeping the directory
+    /// after every mutation — catches the same staleness, because a stale
+    /// entry has to be *used* to do harm, and it keeps the check O(1) instead
+    /// of making a debug-build load quadratic.
+    fn debug_assert_dir_key(&self, at: usize) {
+        #[cfg(debug_assertions)]
+        {
+            let n = T::KEY_LEN.min(DIR_KEY_BYTES);
+            let entry = &self.dir[at];
+            debug_assert_eq!(
+                &entry.key[..n],
+                &self.first_key(entry.page)[..n],
+                "page directory key is stale for page {}",
+                entry.page
+            );
+        }
+        let _ = at;
+    }
+
+    /// The half-open `dir` range owned by `shard`.
+    fn dir_run(&self, shard: usize) -> (usize, usize) {
+        (self.dir_at[shard] as usize, self.dir_at[shard + 1] as usize)
+    }
+
+    /// Records `page` at directory index `at`, which must be inside (or at the
+    /// end of) `shard`'s run. Shifts the following runs by one.
+    fn dir_insert(&mut self, shard: usize, at: usize, page: u32) {
+        debug_assert!(self.dir_at[shard] as usize <= at && at <= self.dir_at[shard + 1] as usize);
+        self.dir.insert(at, PageEntry::pending(page));
+        for start in &mut self.dir_at[shard + 1..] {
+            *start += 1;
+        }
+    }
+
+    /// Drops directory index `at` from `shard`'s run.
+    fn dir_remove(&mut self, shard: usize, at: usize) {
+        debug_assert!(self.dir_at[shard] as usize <= at && at < self.dir_at[shard + 1] as usize);
+        self.dir.remove(at);
+        for start in &mut self.dir_at[shard + 1..] {
+            *start -= 1;
+        }
     }
 
     /// First key of a page. Caller guarantees the page is non-empty (every

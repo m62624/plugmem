@@ -6,18 +6,21 @@ description: >-
   project or past decisions (one fact = one statement, with optional entity,
   tags and validity time), and to RECALL them later as a compact ranked block
   ready for the prompt: hybrid retrieval fuses BM25 text search, optional
-  embedding vectors, an entity graph and time. When a new fact contradicts an
-  old one, the engine surfaces the conflict and YOU decide: revise (it
-  changed), keep both (compatible) or forget (it was wrong). Supports "what
-  was true then" (as-of) queries and episodic time ranges. Reach for it at the
-  start of a task (recall context) and whenever you learn something worth
-  keeping across sessions.
+  embedding vectors, an entity graph and time. Link entities with typed
+  relationships, and unlink relationships when they stop being true without
+  destroying their historical as-of answers. When a new fact contradicts an old
+  one, the engine surfaces the conflict and YOU decide: revise (it changed),
+  keep both (compatible) or forget (it was wrong). Supports "what was true
+  then" (as-of) queries and episodic time ranges. Reach for it at the start of
+  a task (recall context) and whenever you learn something worth keeping across
+  sessions.
 ---
 
 # plugmem — long-term memory for agents
 
 plugmem is an embedded memory engine (the SQLite model: a library plus one
-snapshot file and a journal — no server). You talk to it through four verbs:
+snapshot file and a journal — no server). You talk to it through these main
+verbs:
 
 - **remember** — store one durable fact: short text, optional subject entity,
   tags, optional embedding vector, optional `valid_from`.
@@ -26,6 +29,9 @@ snapshot file and a journal — no server). You talk to it through four verbs:
 - **revise** — close an old fact and chain its successor (history survives:
   "lived in Moscow (2023 → 2025)" stays answerable via `as_of`).
 - **forget** — tombstone a fact immediately; `maintain` purges it physically.
+- **link** — create or update a typed relationship between two entities.
+- **unlink** — close a typed relationship for current recall while preserving
+  its historical `as_of` interval.
 
 ## When to remember
 
@@ -45,7 +51,9 @@ current file, a transient value, anything re-derivable next turn).
   a ranking source, so don't stuff the query into a tag.
 - **Link related entities** with a typed edge (`--link works_at:acme`, or the
   standalone `link ada works_at acme`) — the graph source expands recall from
-  an anchor entity to its neighbours.
+  an anchor entity to its neighbours. When the relationship stops being true,
+  use `unlink ada works_at acme`; current recall stops using the edge, while
+  `recall --as-of <then>` can still see the historical relationship.
 - **Metadata is an opaque pointer, not content** (`--meta uri=s3://…/doc.pdf
   --meta mime=application/pdf`). The engine stores and returns it verbatim and
   never searches it — use it for a URI to the real payload in another store, or
@@ -126,17 +134,42 @@ MANDATORY.
   | `revise` | `revise <id> "<text>" [same flags as remember]` |
   | `forget` | `forget <id>` |
   | `link` | `link <src> <rel> <dst>` |
+  | `unlink` | `unlink <src> <rel> <dst>` |
   | `show` / `stats` | `show <id>` · `stats` |
-  | upkeep | `maintain` · `checkpoint` · `verify` · `scrub` · `recover <dst>` |
+  | upkeep | `maintain [--mode M]` · `checkpoint` · `verify` · `scrub` · `recover <dst>` |
   | bulk | `export` (JSONL to stdout) · `import <file> [--batch N]` |
-  | session | `repl [--read-only]` — keep the engine open, one command per line |
 
   Add `--json` to any read verb for machine output; `plugmem-cli --version`
   reports the engine version (used in Step 0c).
 
+  **Never run `repl`.** It is an interactive session: it reads commands from
+  stdin until end-of-input, so an agent that starts it **hangs** — the command
+  never returns and the turn is stuck. It exists for a person at a terminal,
+  where keeping the engine open between commands is worth it. You are not that
+  person: run one verb per invocation. Every one of them is available as a
+  one-shot command, so nothing is lost by avoiding it.
+
+  **Which `maintain`.** Plain `maintain` is `--mode auto`: it does only what is
+  pending and is a no-op when nothing is. That is the one to run routinely —
+  after a batch of `forget`s, or before handing the file to another process.
+  Reach for `--mode full` only when you want the file *small*: it rebuilds
+  every index and repacks the edge arenas, which is work proportional to the
+  whole database. The narrow modes (`compact`, `reindex-text`,
+  `optimize-vectors`) exist for when you know exactly which structure you want
+  rebuilt. **No mode ever deletes a fact revision or an edge version** — the
+  heavier ones buy bytes and index freshness, never less history. The MCP tool
+  takes the same values as an optional `mode` argument.
+
+  **What `verify` is for.** Opening a database checks that nothing in the file
+  can make a read unsafe — it does not check that the graph agrees with itself.
+  `verify` is the pass that does: stored text, metadata, the vector mapping,
+  and both directions of every edge. It costs a full sweep, so run it when you
+  have a reason (a file from elsewhere, a crash, a suspicion), not before every
+  session. An open that succeeded is not a clean bill of health; `verify` is.
+
 - **No shell, but your tools include `plugmem_recall` →** MCP. The server
   exposes, as tools: `plugmem_remember`, `plugmem_recall`, `plugmem_revise`,
-  `plugmem_forget`, `plugmem_link`, `plugmem_show`, `plugmem_stats`,
+  `plugmem_forget`, `plugmem_link`, `plugmem_unlink`, `plugmem_show`, `plugmem_stats`,
   `plugmem_export`, `plugmem_maintain`, `plugmem_checkpoint`, `plugmem_verify`,
   plus `plugmem_version` and `plugmem_about`. A read-only server adds
   `plugmem_generation` / `plugmem_refresh` and refuses the write verbs.
@@ -205,10 +238,54 @@ comparison line:
 plugmem version check: skill <marker> vs engine <reported> → OK | MISMATCH
 ```
 
-<!-- skill-version: 0.2.0 -->
+<!-- skill-version: 0.3.0 -->
 
 If they differ in ANY way: **stop**, warn the user that skill and engine
 describe different functionality, and proceed only on their explicit
 confirmation — tagging every result "unverified — version mismatch".
+
+## Several memories (only if you see a `db` argument)
+
+**Normally there is one memory and you never think about this.** No `db`
+argument on the tools, no choice to make, nothing in this section applies. That
+is the ordinary setup and the one you should assume.
+
+**The signal is the schema, not this text.** If `plugmem_remember` and the rest
+carry a `db` argument, this server holds several memories and you have to say
+which one each call is for. If they do not, skip the rest of this section.
+
+Two shapes, and the schema tells you which:
+
+- **`db` is optional and shows a default.** One memory is this session's own —
+  almost always the right one. Omit `db`. Name another only when the knowledge
+  plainly belongs elsewhere (shared team knowledge going to a common memory).
+- **`db` is required.** Nothing is implied; every call must name a memory.
+
+### Picking a name
+
+- **You were told the name** (the harness passed it, the user said it) → use it.
+- **You were not** → call `plugmem_workspace_find` with a description of what
+  you are looking for ("the chat about releases", "Ann's notes"). It returns
+  names. A person's name works too — owners are searchable even though they are
+  not in the description text. `plugmem_workspace_list` shows everything when
+  there are few enough to read.
+- **Never invent a name to guess with.** Writing to a name nobody has used
+  *creates* a memory, so a guess does not fail loudly — it silently starts an
+  empty one, and the knowledge you meant to file is now somewhere nobody looks.
+
+### Which memory something belongs in
+
+- Knowledge about this conversation → this conversation's memory.
+- Knowledge true for everyone → the shared memory (usually `common`), if the
+  workspace has one. Do not copy it into every conversation.
+- **Do not spread one fact across memories.** They are independent; there is no
+  search that spans them, so a fact filed in the wrong one is lost, not merely
+  misplaced.
+
+Names are lowercase letters, digits, `-` and `_`. A name is never a path.
+
+On the CLI the same thing is `--db <name>` instead of `--db <file>`, plus a
+`plugmem-cli workspace` command group (`list`, `find`, `describe`, `archive`,
+`verify`, `reindex`). Ask for `plugmem-cli workspace --help` if you need it.
 
 <!-- wasm-strip:end -->

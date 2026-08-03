@@ -206,14 +206,16 @@ fn writer_verbs_round_trip() {
             r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"plugmem_revise","arguments":{"id":0,"text":"prefers async-std","entity":"user"}}}"#,
             // link two entities
             r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"plugmem_link","arguments":{"src":"user","rel":"works_at","dst":"acme"}}}"#,
+            // close that current edge
+            r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"plugmem_unlink","arguments":{"src":"user","rel":"works_at","dst":"acme"}}}"#,
             // export the open facts
-            r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"plugmem_export","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"plugmem_export","arguments":{}}}"#,
             // operational verbs
-            r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"plugmem_maintain","arguments":{}}}"#,
-            r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"plugmem_checkpoint","arguments":{}}}"#,
-            r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"plugmem_verify","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"plugmem_maintain","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"plugmem_checkpoint","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"plugmem_verify","arguments":{}}}"#,
             // forget the (revised) successor fact 1
-            r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"plugmem_forget","arguments":{"id":1}}}"#,
+            r#"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"plugmem_forget","arguments":{"id":1}}}"#,
         ],
     );
 
@@ -246,19 +248,24 @@ fn writer_verbs_round_trip() {
     // link ok.
     assert_eq!(resps[4]["result"]["isError"], false);
 
+    // unlink ok.
+    let unlinked: Value =
+        serde_json::from_str(resps[5]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(unlinked["unlinked"], true);
+
     // export → a JSON array of the open facts (>=1).
     let exported: Value =
-        serde_json::from_str(resps[5]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        serde_json::from_str(resps[6]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert!(exported.as_array().map(|a| !a.is_empty()).unwrap_or(false));
 
     // maintain/checkpoint/verify all succeed.
-    assert_eq!(resps[6]["result"]["isError"], false);
     assert_eq!(resps[7]["result"]["isError"], false);
     assert_eq!(resps[8]["result"]["isError"], false);
+    assert_eq!(resps[9]["result"]["isError"], false);
 
     // forget the live successor → forgotten: true.
     let forgotten: Value =
-        serde_json::from_str(resps[9]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        serde_json::from_str(resps[10]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(forgotten["forgotten"], true);
 }
 
@@ -429,4 +436,179 @@ fn human_format_pretty_prints() {
     let text = resps[0]["result"]["content"][0]["text"].as_str().unwrap();
     // Pretty JSON is multi-line and indented; compact JSON is not.
     assert!(text.contains('\n'), "human format should be pretty: {text}");
+}
+
+/// A unique workspace directory under the cargo target tmp dir.
+fn temp_workspace(tag: &str) -> PathBuf {
+    let dir = temp_db(tag);
+    dir.parent().unwrap().to_path_buf()
+}
+
+/// Drive a server started over a workspace directory rather than one file.
+/// `extra` carries the rest of the flags (`--db NAME`, `--allow`, `--no-create`).
+fn workspace_roundtrip(root: &PathBuf, extra: &[&str], requests: &[&str]) -> Vec<Value> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_plugmem-mcp"))
+        .arg("--workspace")
+        .arg(root)
+        .args(extra)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn plugmem-mcp");
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    let mut replies = Vec::new();
+    for r in requests {
+        writeln!(stdin, "{r}").unwrap();
+        stdin.flush().unwrap();
+        let mut line = String::new();
+        stdout.read_line(&mut line).unwrap();
+        replies.push(serde_json::from_str(line.trim()).unwrap());
+    }
+    drop(stdin);
+    let _ = child.wait();
+    replies
+}
+
+/// The `text` of a tool-call reply.
+fn reply_text(v: &Value) -> &str {
+    v["result"]["content"][0]["text"].as_str().unwrap()
+}
+
+#[test]
+fn a_workspace_server_routes_by_name_and_keeps_memories_apart() {
+    let root = temp_workspace("ws-route");
+    let replies = workspace_roundtrip(
+        &root,
+        &[],
+        &[
+            r#"{"id":1,"method":"tools/call","params":{"name":"plugmem_remember","arguments":{"db":"chat-42","text":"the sky is blue"}}}"#,
+            r#"{"id":2,"method":"tools/call","params":{"name":"plugmem_remember","arguments":{"db":"chat-43","text":"the grass is green"}}}"#,
+            r#"{"id":3,"method":"tools/call","params":{"name":"plugmem_recall","arguments":{"db":"chat-42","query":"sky grass","format":"human"}}}"#,
+        ],
+    );
+    assert_eq!(replies[0]["result"]["isError"], false);
+    let recalled = reply_text(&replies[2]);
+    assert!(recalled.contains("the sky is blue"), "{recalled}");
+    assert!(!recalled.contains("the grass is green"), "{recalled}");
+
+    // Both memories are files in the workspace, created by their first write.
+    assert!(root.join("db/chat-42.plugmem.journal").exists());
+    assert!(root.join("db/chat-43.plugmem.journal").exists());
+}
+
+#[test]
+fn the_db_argument_tracks_how_the_server_was_started() {
+    let root = temp_workspace("ws-schema");
+    let list = r#"{"id":1,"method":"tools/list"}"#;
+
+    // No default: `db` is advertised and required.
+    let bare = workspace_roundtrip(&root, &[], &[list]);
+    let remember = &bare[0]["result"]["tools"][0];
+    assert_eq!(remember["name"], "plugmem_remember");
+    assert!(remember["inputSchema"]["properties"]["db"].is_object());
+    assert_eq!(remember["inputSchema"]["required"][0], "db");
+
+    // A default: still advertised, no longer required, and it says the default.
+    let defaulted = workspace_roundtrip(&root, &["--db", "chat-42"], &[list]);
+    let remember = &defaulted[0]["result"]["tools"][0];
+    assert_eq!(
+        remember["inputSchema"]["properties"]["db"]["default"],
+        "chat-42"
+    );
+    assert_eq!(remember["inputSchema"]["required"][0], "text");
+}
+
+#[test]
+fn one_memory_at_a_path_is_untouched_by_any_of_this() {
+    // The guard on the default: started the old way, the server advertises no
+    // `db` argument at all and creates nothing but the file it was given.
+    let db = temp_db("ws-default-guard");
+    let replies = roundtrip(&db, &[r#"{"id":1,"method":"tools/list"}"#]);
+    let tools = replies[0]["result"]["tools"].as_array().unwrap();
+    for tool in tools {
+        assert!(
+            tool["inputSchema"]["properties"]["db"].is_null(),
+            "{} advertises a db argument",
+            tool["name"]
+        );
+        let name = tool["name"].as_str().unwrap();
+        assert!(
+            !name.starts_with("plugmem_workspace"),
+            "{name} is advertised"
+        );
+    }
+    let dir = db.parent().unwrap();
+    assert!(!dir.join("registry.plugmem").exists());
+    assert!(!dir.join("db").exists());
+}
+
+#[test]
+fn a_workspace_server_finds_a_memory_by_what_it_is_for() {
+    let root = temp_workspace("ws-find");
+    let replies = workspace_roundtrip(
+        &root,
+        &[],
+        &[
+            r#"{"id":1,"method":"tools/call","params":{"name":"plugmem_remember","arguments":{"db":"chat-42","text":"a fact"}}}"#,
+            r#"{"id":2,"method":"tools/call","params":{"name":"plugmem_workspace_list","arguments":{}}}"#,
+            r#"{"id":3,"method":"tools/call","params":{"name":"plugmem_stats","arguments":{}}}"#,
+        ],
+    );
+    // Nothing described yet: the list is empty rather than an error.
+    assert_eq!(reply_text(&replies[1]), "[]");
+    // And a call with no `db` on a server with no default is refused, with the
+    // way out named in the message.
+    assert_eq!(replies[2]["result"]["isError"], true);
+    assert!(reply_text(&replies[2]).contains("plugmem_workspace_find"));
+}
+
+#[test]
+fn a_workspace_server_refuses_read_only_rather_than_pretending() {
+    let root = temp_workspace("ws-readonly");
+    let out = Command::new(env!("CARGO_BIN_EXE_plugmem-mcp"))
+        .arg("--workspace")
+        .arg(&root)
+        .arg("--read-only")
+        .output()
+        .expect("spawn plugmem-mcp");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--read-only has no workspace form"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn a_startup_name_that_is_not_a_name_stops_the_server() {
+    let root = temp_workspace("ws-badname");
+    for (flag, value) in [("--db", "../etc"), ("--allow", "Nope")] {
+        let out = Command::new(env!("CARGO_BIN_EXE_plugmem-mcp"))
+            .arg("--workspace")
+            .arg(&root)
+            .arg(flag)
+            .arg(value)
+            .output()
+            .expect("spawn plugmem-mcp");
+        assert_eq!(out.status.code(), Some(2), "{flag} {value}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(flag), "{stderr}");
+    }
+
+    // A default outside its own allow set could never be served, so saying so
+    // at startup beats failing on every call.
+    let out = Command::new(env!("CARGO_BIN_EXE_plugmem-mcp"))
+        .arg("--workspace")
+        .arg(&root)
+        .args(["--db", "work", "--allow", "other"])
+        .output()
+        .expect("spawn plugmem-mcp");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("could never be served"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

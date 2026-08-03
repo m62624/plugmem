@@ -146,6 +146,21 @@ pub enum Op<'a> {
     Maintain {
         /// Host timestamp of the operation.
         now: u64,
+        /// Maintenance mode encoded by the engine.
+        mode: u8,
+        /// HNSW insertion budget, or `u32::MAX` for unlimited.
+        max_hnsw_inserts: u32,
+    },
+    /// Op 6: close the current typed edge between two entities.
+    Unlink {
+        /// Host timestamp of the operation.
+        now: u64,
+        /// Source entity name.
+        src: &'a str,
+        /// Relation term, verbatim.
+        rel: &'a str,
+        /// Destination entity name.
+        dst: &'a str,
     },
 }
 
@@ -284,8 +299,21 @@ impl<'a> Op<'a> {
                 put_str(&mut payload, dst);
                 4
             }
-            Op::Maintain { now } => {
+            Op::Unlink { now, src, rel, dst } => {
                 payload.extend_from_slice(&now.to_le_bytes());
+                put_str(&mut payload, src);
+                put_str(&mut payload, rel);
+                put_str(&mut payload, dst);
+                6
+            }
+            Op::Maintain {
+                now,
+                mode,
+                max_hnsw_inserts,
+            } => {
+                payload.extend_from_slice(&now.to_le_bytes());
+                payload.push(*mode);
+                payload.extend_from_slice(&max_hnsw_inserts.to_le_bytes());
                 5
             }
         };
@@ -377,9 +405,31 @@ impl<'a> Op<'a> {
                     provenance,
                 }
             }
-            5 => Op::Maintain {
-                now: take_u64(payload, at)?,
-            },
+            5 => {
+                let now = take_u64(payload, at)?;
+                let (mode, max_hnsw_inserts) = if *at == payload.len() {
+                    (0, u32::MAX)
+                } else {
+                    let mode = *payload
+                        .get(*at)
+                        .ok_or(Error::Corrupt("journal record truncated inside a field"))?;
+                    *at += 1;
+                    let max_hnsw_inserts = take_u32(payload, at)?;
+                    (mode, max_hnsw_inserts)
+                };
+                Op::Maintain {
+                    now,
+                    mode,
+                    max_hnsw_inserts,
+                }
+            }
+            6 => {
+                let now = take_u64(payload, at)?;
+                let src = take_str(payload, at)?;
+                let rel = take_str(payload, at)?;
+                let dst = take_str(payload, at)?;
+                Op::Unlink { now, src, rel, dst }
+            }
             _ => return Err(Error::Corrupt("unknown journal op")),
         };
         if *at != payload.len() {

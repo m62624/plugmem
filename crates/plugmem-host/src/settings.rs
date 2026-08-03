@@ -17,7 +17,10 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{Config, Database, DatabaseBuilder, Embedder, HostError, OpenAiCompatEmbedder};
+use crate::{
+    Config, Database, DatabaseBuilder, Embedder, HostError, MAX_OPEN_CEILING, OpenAiCompatEmbedder,
+    Opener, SharedEmbedder, Workspace, WorkspaceLayout, WorkspaceLimits,
+};
 
 /// Environment variable naming the config file (below an explicit path).
 const ENV_CONFIG: &str = "PLUGMEM_CONFIG";
@@ -26,18 +29,9 @@ const ENV_EMBEDDER: &str = "PLUGMEM_EMBEDDER";
 // Keep these inventories next to the parser. The settings-help tests compare
 // them with the public documentation catalogue, so adding a parser key without
 // adding its help entry fails loudly.
-pub(crate) const ENGINE_SETTING_KEYS: &[&str] = &[
-    "dim",
-    "max_bytes",
-    "max_text",
-    "max_blob",
-    "shards_facts",
-    "shards_entities",
-    "shards_edges",
-    "shards_temporal",
-    "shards_postings",
-];
+pub(crate) const ENGINE_SETTING_KEYS: &[&str] = &["dim", "max_bytes", "max_text", "max_blob"];
 pub(crate) const DATABASE_SETTING_KEYS: &[&str] = &["path"];
+pub(crate) const WORKSPACE_SETTING_KEYS: &[&str] = &["dir", "max_open", "idle_timeout_ms"];
 pub(crate) const EMBEDDER_SETTING_KEYS: &[&str] = &["kind", "url", "model", "api_key_env"];
 pub(crate) const MAINTENANCE_SETTING_KEYS: &[&str] = &[
     "snapshot_every_ops",
@@ -80,6 +74,21 @@ pub struct Settings {
     pub snapshot_journal_bytes: Option<u64>,
     /// `[maintenance].maintain_every_forgets`, if set.
     pub maintain_every_forgets: Option<u64>,
+    /// The `[workspace]` section. Its `dir` is `None` unless the file names
+    /// one — **the default is a single database**, and nothing turns a
+    /// workspace on by itself.
+    pub workspace: WorkspaceSettings,
+}
+
+/// The `[workspace]` section: where a directory of named databases lives, and
+/// how many of them to keep open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceSettings {
+    /// `[workspace].dir`, if set. Unset is the default and means there is no
+    /// workspace: one database, addressed by path, exactly as before.
+    pub dir: Option<PathBuf>,
+    /// Pool limits, defaulted when the section omits them.
+    pub limits: WorkspaceLimits,
 }
 
 impl Settings {
@@ -102,6 +111,10 @@ impl Settings {
         let mut snapshot_every_ops = None;
         let mut snapshot_journal_bytes = None;
         let mut maintain_every_forgets = None;
+        let mut workspace = WorkspaceSettings {
+            dir: None,
+            limits: WorkspaceLimits::default(),
+        };
 
         if let Some(table) = table {
             if let Some(t) = table.get("database").and_then(toml::Value::as_table) {
@@ -129,6 +142,9 @@ impl Settings {
                 snapshot_journal_bytes = table_u64(t, MAINTENANCE_SETTING_KEYS[1]);
                 maintain_every_forgets = table_u64(t, MAINTENANCE_SETTING_KEYS[2]);
             }
+            if let Some(t) = table.get("workspace").and_then(toml::Value::as_table) {
+                workspace = parse_workspace(t)?;
+            }
         }
 
         if let Some(kind) = std::env::var_os(ENV_EMBEDDER) {
@@ -143,6 +159,7 @@ impl Settings {
             snapshot_every_ops,
             snapshot_journal_bytes,
             maintain_every_forgets,
+            workspace,
         })
     }
 
@@ -166,6 +183,92 @@ impl Settings {
         }
         Ok(b.open(path)?.0)
     }
+
+    /// Opens a [`Workspace`] rooted at `root`: many named databases, each built
+    /// with these same settings.
+    ///
+    /// The embedder is shared rather than duplicated — a hundred chats pointed
+    /// at one endpoint want one client, not a hundred (see [`SharedEmbedder`]).
+    ///
+    /// `root` is passed rather than read from [`WorkspaceSettings::dir`] so a
+    /// wrapper keeps its own precedence (flag, then environment, then config),
+    /// the same way it already does for the database path.
+    ///
+    /// # Errors
+    ///
+    /// Nothing yet — the databases open lazily, so a bad root is reported by
+    /// the first [`Workspace::get`] rather than here. The signature is
+    /// fallible because that is where the failure will move if the root ever
+    /// needs validating up front.
+    pub fn open_workspace(self, root: &Path) -> Result<Workspace, crate::WorkspaceError> {
+        let Settings {
+            config,
+            embedder,
+            snapshot_every_ops,
+            snapshot_journal_bytes,
+            maintain_every_forgets,
+            workspace,
+            ..
+        } = self;
+        let shared = embedder.map(SharedEmbedder::new);
+
+        let open: Opener = Box::new(move |path: &Path| {
+            let mut b = Database::builder(config.clone());
+            if let Some(v) = snapshot_every_ops {
+                b = b.snapshot_every_ops(v);
+            }
+            if let Some(v) = snapshot_journal_bytes {
+                b = b.snapshot_journal_bytes(v);
+            }
+            if let Some(v) = maintain_every_forgets {
+                b = b.maintain_every_forgets(v);
+            }
+            if let Some(e) = &shared {
+                b = b.embedder(Box::new(e.clone()));
+            }
+            Ok(b.open(path)?.0)
+        });
+        Ok(Workspace::new(
+            WorkspaceLayout::new(root),
+            open,
+            workspace.limits,
+        ))
+    }
+}
+
+/// Parses the `[workspace]` section. An out-of-range pool limit is a usage
+/// error rather than a silent clamp: a person who wrote a number meant it, and
+/// finding out later that it was ignored is worse than being told now.
+fn parse_workspace(t: &toml::Table) -> Result<WorkspaceSettings, SettingsError> {
+    let mut out = WorkspaceSettings {
+        dir: None,
+        limits: WorkspaceLimits::default(),
+    };
+    if let Some(value) = t.get(WORKSPACE_SETTING_KEYS[0]) {
+        let dir = value
+            .as_str()
+            .ok_or_else(|| SettingsError::config("[workspace].dir must be a string"))?;
+        if dir.is_empty() {
+            return Err(SettingsError::config("[workspace].dir must not be empty"));
+        }
+        out.dir = Some(PathBuf::from(dir));
+    }
+    if let Some(n) = table_u64(t, WORKSPACE_SETTING_KEYS[1]) {
+        if n == 0 || n > MAX_OPEN_CEILING as u64 {
+            return Err(SettingsError::config(format!(
+                "[workspace].max_open must be between 1 and {MAX_OPEN_CEILING} \
+                 (one open database costs several file descriptors)"
+            )));
+        }
+        // In range by the check above, so the narrowing cannot truncate — the
+        // comparison happens in `u64` precisely so it holds where `usize` is 32
+        // bits too.
+        out.limits.max_open = n as usize;
+    }
+    if let Some(n) = table_u64(t, WORKSPACE_SETTING_KEYS[2]) {
+        out.limits.idle_timeout_ms = n;
+    }
+    Ok(out)
 }
 
 /// Reads and parses `config.toml`, or `Ok(None)` if none applies. An explicit
@@ -220,11 +323,6 @@ fn apply_engine(cfg: &mut Config, t: &toml::Table) -> Result<(), SettingsError> 
         (ENGINE_SETTING_KEYS[1], &mut cfg.max_bytes),
         (ENGINE_SETTING_KEYS[2], &mut cfg.max_text),
         (ENGINE_SETTING_KEYS[3], &mut cfg.max_blob),
-        (ENGINE_SETTING_KEYS[4], &mut cfg.shards_facts),
-        (ENGINE_SETTING_KEYS[5], &mut cfg.shards_entities),
-        (ENGINE_SETTING_KEYS[6], &mut cfg.shards_edges),
-        (ENGINE_SETTING_KEYS[7], &mut cfg.shards_temporal),
-        (ENGINE_SETTING_KEYS[8], &mut cfg.shards_postings),
     ];
     for (key, slot) in fields {
         if let Some(v) = t.get(key) {
@@ -329,7 +427,7 @@ mod tests {
         let text = "\
 [engine]
 dim = 384
-shards_facts = 16
+max_text = 2048
 [maintenance]
 snapshot_every_ops = 50
 snapshot_journal_bytes = 8192
@@ -338,7 +436,7 @@ maintain_every_forgets = 3
         let table: toml::Table = text.parse().unwrap();
         let s = Settings::from_table(Some(&table)).unwrap();
         assert_eq!(s.config.dim, 384);
-        assert_eq!(s.config.shards_facts, 16);
+        assert_eq!(s.config.max_text, 2048);
         assert_eq!(s.snapshot_every_ops, Some(50));
         assert_eq!(s.snapshot_journal_bytes, Some(8192));
         assert_eq!(s.maintain_every_forgets, Some(3));
@@ -418,9 +516,88 @@ dim = 8
             snapshot_every_ops: Some(4),
             snapshot_journal_bytes: Some(4096),
             maintain_every_forgets: Some(2),
+            workspace: WorkspaceSettings {
+                dir: None,
+                limits: WorkspaceLimits::default(),
+            },
         };
         let db = settings.open(&tmp.0.join("m.plugmem")).unwrap();
         assert_eq!(db.stats().facts, 0);
+    }
+
+    #[test]
+    fn the_workspace_section_is_absent_by_default_and_parsed_when_present() {
+        // The default is one database: no section, no workspace, nothing to
+        // configure. This is the case that must never drift.
+        let bare = Settings::from_table(None).unwrap();
+        assert_eq!(bare.workspace.dir, None);
+        assert_eq!(bare.workspace.limits, WorkspaceLimits::default());
+
+        let table: toml::Table =
+            "[workspace]\ndir = \"/srv/bot\"\nmax_open = 4\nidle_timeout_ms = 5000\n"
+                .parse()
+                .unwrap();
+        let s = Settings::from_table(Some(&table)).unwrap();
+        assert_eq!(s.workspace.dir, Some(PathBuf::from("/srv/bot")));
+        assert_eq!(s.workspace.limits.max_open, 4);
+        assert_eq!(s.workspace.limits.idle_timeout_ms, 5_000);
+
+        // A section that only sets the directory keeps the defaults.
+        let only_dir: toml::Table = "[workspace]\ndir = \"/srv/bot\"\n".parse().unwrap();
+        let s = Settings::from_table(Some(&only_dir)).unwrap();
+        assert_eq!(s.workspace.limits, WorkspaceLimits::default());
+    }
+
+    #[test]
+    fn a_workspace_pool_limit_out_of_range_is_a_usage_error() {
+        // Not clamped: a number somebody wrote is a number they meant, and
+        // discovering later that it was ignored is worse than being told now.
+        for bad in [
+            "[workspace]\nmax_open = 0\n".to_string(),
+            format!("[workspace]\nmax_open = {}\n", MAX_OPEN_CEILING + 1),
+            // Well past what a 32-bit `usize` could hold, so the range check
+            // has to happen before the narrowing.
+            "[workspace]\nmax_open = 9999999999\n".to_string(),
+        ] {
+            let table: toml::Table = bad.parse().unwrap();
+            assert!(
+                matches!(Settings::from_table(Some(&table)), Err(SettingsError::Config(m)) if m.contains("max_open")),
+                "{bad}"
+            );
+        }
+
+        for bad in ["[workspace]\ndir = 42\n", "[workspace]\ndir = \"\"\n"] {
+            let table: toml::Table = bad.parse().unwrap();
+            assert!(
+                matches!(Settings::from_table(Some(&table)), Err(SettingsError::Config(m)) if m.contains("dir")),
+                "{bad}"
+            );
+        }
+
+        // The largest accepted value is accepted.
+        let table: toml::Table = format!("[workspace]\nmax_open = {MAX_OPEN_CEILING}\n")
+            .parse()
+            .unwrap();
+        let s = Settings::from_table(Some(&table)).unwrap();
+        assert_eq!(s.workspace.limits.max_open, MAX_OPEN_CEILING);
+    }
+
+    #[test]
+    fn open_workspace_builds_databases_from_the_same_settings() {
+        let tmp = TempDir::new("open-workspace");
+        let table: toml::Table = "[engine]\ndim = 8\n[maintenance]\nsnapshot_every_ops = 4\n\
+             snapshot_journal_bytes = 4096\nmaintain_every_forgets = 2\n"
+            .parse()
+            .unwrap();
+        let settings = Settings::from_table(Some(&table)).unwrap();
+        let ws = settings.open_workspace(&tmp.0).unwrap();
+
+        let name = crate::DbName::parse("chat-42").unwrap();
+        let db = ws.get(&name, 1_000, crate::IfMissing::Create).unwrap();
+        db.remember(crate::RememberInput::text(1_000, "prefers tokio"))
+            .unwrap();
+        assert_eq!(db.stats().facts, 1);
+        assert!(ws.layout().exists(&name));
     }
 
     #[test]
@@ -504,6 +681,7 @@ dim = 8
         let docs = crate::settings_help::settings_help().docs();
         for (section, keys) in [
             ("database", DATABASE_SETTING_KEYS),
+            ("workspace", WORKSPACE_SETTING_KEYS),
             ("engine", ENGINE_SETTING_KEYS),
             ("embedder", EMBEDDER_SETTING_KEYS),
             ("maintenance", MAINTENANCE_SETTING_KEYS),
