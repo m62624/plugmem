@@ -18,6 +18,12 @@
 > Claude models, in roughly equal measure. Expect non-professional design
 > choices, rough edges, broken behavior, or mistakes. Use it at your own risk.
 
+**[What it is](#what-plugmem-is) · [Which crate](#which-crate-do-i-need) ·
+[How recall works](#what-recall-does) · [Measured scale](#measured-scale) ·
+[Install](#install) · [License](#license)**
+
+## What plugmem is
+
 An embeddable **memory database for local LLM agents** — you link it into your
 program like SQLite, in-process and single-file. plugmem stores short
 **facts** — with a subject entity, tags, optional metadata, an optional
