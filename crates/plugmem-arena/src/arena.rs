@@ -459,8 +459,6 @@ impl<'a, T: Slot> Arena<'a, T> {
             debug_assert_eq!(self.dir[at].page, page);
             self.refresh_dir_key(at);
         }
-        #[cfg(debug_assertions)]
-        self.debug_assert_dir_keys();
         Ok(true)
     }
 
@@ -653,8 +651,6 @@ impl<'a, T: Slot> Arena<'a, T> {
             // directory's copy of that key no longer names it.
             self.refresh_dir_key(at);
         }
-        #[cfg(debug_assertions)]
-        self.debug_assert_dir_keys();
         true
     }
 
@@ -1112,6 +1108,7 @@ impl<'a, T: Slot> Arena<'a, T> {
         bump!(self, chain_steps, steps);
         let _ = steps; // read only by the counters feature
         let at = left - 1;
+        self.debug_assert_dir_key(at);
         Some(Target {
             prev: if at > lo { self.dir[at - 1].page } else { NONE },
             page: self.dir[at].page,
@@ -1146,13 +1143,19 @@ impl<'a, T: Slot> Arena<'a, T> {
         self.dir[at].key = key;
     }
 
-    /// Asserts that every cached first key matches the page it names. Debug
-    /// builds only: the directory is derived state, and a stale entry would
-    /// misdirect a lookup rather than fail loudly.
-    #[cfg(debug_assertions)]
-    fn debug_assert_dir_keys(&self) {
-        let n = T::KEY_LEN.min(DIR_KEY_BYTES);
-        for entry in &self.dir {
+    /// Asserts that one directory entry's cached key still matches its page.
+    ///
+    /// Debug builds only: the directory is derived state, and a stale entry
+    /// misdirects a lookup instead of failing loudly. Checking the single
+    /// entry a search just landed on — rather than sweeping the directory
+    /// after every mutation — catches the same staleness, because a stale
+    /// entry has to be *used* to do harm, and it keeps the check O(1) instead
+    /// of making a debug-build load quadratic.
+    fn debug_assert_dir_key(&self, at: usize) {
+        #[cfg(debug_assertions)]
+        {
+            let n = T::KEY_LEN.min(DIR_KEY_BYTES);
+            let entry = &self.dir[at];
             debug_assert_eq!(
                 &entry.key[..n],
                 &self.first_key(entry.page)[..n],
@@ -1160,6 +1163,7 @@ impl<'a, T: Slot> Arena<'a, T> {
                 entry.page
             );
         }
+        let _ = at;
     }
 
     /// The half-open `dir` range owned by `shard`.

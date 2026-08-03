@@ -291,24 +291,19 @@ impl<'a> Bm25Index<'a> {
     /// [`Bm25Index::doc_len_of`] reads the stored arena for an id the flat
     /// index does not cover.
     fn note_dense(&mut self, doc: &DocLenSlot) {
-        let at = match usize::try_from(doc.fact.0) {
-            Ok(at) if at < self.dense_capacity() => at,
+        // A `u32` id always fits a `usize`, on wasm32 as on a 64-bit host; the
+        // bound that matters is the capacity below.
+        let at = doc.fact.0 as usize;
+        if at >= self.dense_capacity() {
             // Declined. The array can never speak for this id, and documents
             // do not arrive in id order (compaction walks a hashed arena), so
             // a later id may extend the array right over this one — hence the
             // watermark rather than a bare skip.
-            Ok(at) => {
-                self.dense_limit = self.dense_limit.min(at);
-                return;
-            }
-            Err(_) => {
-                self.dense_limit = 0;
-                return;
-            }
-        };
+            self.dense_limit = self.dense_limit.min(at);
+            return;
+        }
         if at >= self.doc_len_dense.len() {
-            let Some(len) = at.checked_add(1) else { return };
-            self.doc_len_dense.resize(len, DOC_LEN_ABSENT);
+            self.doc_len_dense.resize(at + 1, DOC_LEN_ABSENT);
         }
         self.doc_len_dense[at] = u32::from(doc.len);
     }
@@ -325,12 +320,13 @@ impl<'a> Bm25Index<'a> {
     ///
     /// This bounds memory, never correctness: an id past the cap is answered
     /// from the arena.
+    /// Saturating throughout, which is also what makes `at + 1` safe wherever
+    /// `at < dense_capacity()` holds: the capacity never exceeds `usize::MAX`,
+    /// so an id below it is below `usize::MAX` too.
     fn dense_capacity(&self) -> usize {
         const SLACK: usize = 8;
-        usize::try_from(self.total_docs)
-            .unwrap_or(usize::MAX)
-            .saturating_add(1)
-            .saturating_mul(SLACK)
+        let docs = self.total_docs.min(usize::MAX as u64) as usize;
+        docs.saturating_add(1).saturating_mul(SLACK)
     }
 
     /// Rebuilds the flat length index from the stored records (the load path).
@@ -405,13 +401,11 @@ impl<'a> Bm25Index<'a> {
         // the array is allocated only for an id space that is actually dense.
         // Declining costs speed and nothing else — an unsummarized document
         // keeps reading its text.
-        let mut rebuilt = match usize::try_from(max_fact)
-            .ok()
-            .and_then(|m| m.checked_add(1))
-            .filter(|&len| legacy > 0 && len <= out.dense_capacity())
-        {
-            Some(len) => alloc::vec![(0u64, 0u16); len],
-            None => Vec::new(),
+        let highest = max_fact as usize;
+        let mut rebuilt = if legacy > 0 && highest < out.dense_capacity() {
+            alloc::vec![(0u64, 0u16); highest + 1]
+        } else {
+            Vec::new()
         };
         for slot in self.postings.slots() {
             for (fact, tf) in self.postings.entries(slot.key) {
