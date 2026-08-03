@@ -18,9 +18,17 @@ use plugmem_host::MaintenanceMode;
     disable_help_subcommand = true,
 )]
 pub(crate) struct Cli {
-    /// Database file (default: the platform data path, or $PLUGMEM_DB).
-    #[arg(long, global = true, value_name = "PATH")]
-    pub(crate) db: Option<PathBuf>,
+    /// Database file (default: the platform data path, or $PLUGMEM_DB). With a
+    /// workspace configured this also takes a bare memory *name* — `work` is a
+    /// name, `./work.plugmem` is a path.
+    #[arg(long, global = true, value_name = "PATH|NAME")]
+    pub(crate) db: Option<String>,
+
+    /// Directory of named memories (default: $PLUGMEM_WORKSPACE, else
+    /// [workspace].dir). Unset means one database addressed by path, which is
+    /// the default and needs nothing configured.
+    #[arg(long, global = true, value_name = "DIR")]
+    pub(crate) workspace: Option<PathBuf>,
 
     /// Config file (default: $PLUGMEM_CONFIG, else
     /// $XDG_CONFIG_HOME/plugmem/config.toml). Sections: [database],
@@ -201,9 +209,12 @@ pub(crate) enum Command {
         #[arg(long, value_name = "N")]
         batch: Option<usize>,
     },
-    /// Interactive session: open the database once and run commands from stdin
-    /// (one per line, same grammar as the subcommands), keeping the engine in
-    /// memory for native (host) speed instead of reloading per command. Type
+    /// Interactive session for a person at a terminal: open the database once
+    /// and run commands from stdin (one per line, same grammar as the
+    /// subcommands), keeping the engine in memory for native (host) speed
+    /// instead of reloading per command. NOT for a script or an agent — it
+    /// reads until end-of-input, so a caller that cannot type into it waits
+    /// forever; run one verb per invocation instead. Type
     /// `help` for the verb list, `exit`/`quit` (or EOF) to leave; the session
     /// checkpoints on exit. `scrub`/`recover` stay one-shot.
     Repl {
@@ -218,6 +229,60 @@ pub(crate) enum Command {
         /// and does not write (no checkpoint on exit).
         #[arg(long)]
         read_only: bool,
+    },
+    /// Manage a directory of named memories. Only useful once `[workspace].dir`
+    /// (or `--workspace`) points somewhere; without one there is a single
+    /// database and nothing here applies.
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommand,
+    },
+}
+
+/// The `workspace` subcommands.
+#[derive(Subcommand)]
+pub(crate) enum WorkspaceCommand {
+    /// List every memory in the workspace, with its description when it has one.
+    List,
+    /// Find memories by what they are for — or by who owns them.
+    Find {
+        /// What the memory is for, in your own words. A person's name works too.
+        query: String,
+        /// Max results (default 8).
+        #[arg(long, value_name = "N")]
+        k: Option<usize>,
+    },
+    /// Say what a memory is for. Written into the memory itself and into the
+    /// registry, so the registry can always be rebuilt from the memories.
+    /// Creates the memory if it does not exist.
+    Describe {
+        /// The memory's name.
+        name: String,
+        /// What it is for.
+        text: String,
+        /// Tags to filter by (repeatable).
+        #[arg(long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
+        /// Who it belongs to.
+        #[arg(long)]
+        owner: Option<String>,
+    },
+    /// Label a memory archived. It stays where it is and stays openable.
+    Archive {
+        /// The memory's name.
+        name: String,
+    },
+    /// Rebuild the registry from the memories' own descriptions.
+    Reindex,
+    /// Check the registry against the directory. Reports; never repairs.
+    Verify,
+    /// Print the shell line that points this terminal at a memory:
+    /// `eval "$(plugmem-cli workspace use work)"`. It sets $PLUGMEM_DB in the
+    /// shell you run it in — deliberately not a file on disk, so one window
+    /// cannot silently redirect another.
+    Use {
+        /// The memory's name.
+        name: String,
     },
 }
 

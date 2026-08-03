@@ -14,6 +14,7 @@
 
 mod cli;
 mod config;
+mod workspace;
 
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
@@ -87,7 +88,28 @@ fn run_parsed(cli: Cli, out: &mut impl Write) -> u8 {
         Ok(s) => s,
         Err(e) => return report_err(&e.into()),
     };
-    let path = resolve_db_path(cli.db.as_deref(), settings.database_path.as_deref());
+    // A workspace is opt-in: with no flag, no environment variable and no
+    // `[workspace].dir`, `root` is `None` and everything below behaves exactly
+    // as it did before workspaces existed — `--db` is a path, and the
+    // `workspace` group says there is nothing to manage.
+    let root = workspace::resolve_root(cli.workspace.as_deref(), &settings);
+    if let Command::Workspace { command } = &cli.command {
+        return match workspace::execute(command, root, settings, cli.json, out) {
+            Ok(code) => code,
+            Err(e) => {
+                let _ = out.flush();
+                report_err(&e)
+            }
+        };
+    }
+    let path = resolve_db_path(
+        cli.db.as_deref(),
+        settings.database_path.as_deref(),
+        root.as_ref(),
+    );
+    if let Err(e) = workspace::ensure_dir(&path, root.as_ref()) {
+        return report_err(&e);
+    }
 
     // `recover` is a standalone salvage on file paths — it opens the source
     // itself (under an exclusive lock) and writes a fresh destination, so it
@@ -219,12 +241,19 @@ fn report_locked(path: &std::path::Path) -> u8 {
 
 /// Database path precedence: `--db` flag > `$PLUGMEM_DB` >
 /// `[database].path` > the platform default.
+///
+/// With a workspace configured, the first two may name a memory instead of a
+/// path — see [`workspace::resolve_target`]. `[database].path` and the platform
+/// default are always paths: they are file settings, not names.
 fn resolve_db_path(
-    flag: Option<&std::path::Path>,
+    flag: Option<&str>,
     config_path: Option<&std::path::Path>,
+    root: Option<&PathBuf>,
 ) -> PathBuf {
-    flag.map(PathBuf::from)
-        .or_else(|| std::env::var_os(ENV_DB).map(PathBuf::from))
+    flag.map(|value| workspace::resolve_target(value, root))
+        .or_else(|| {
+            std::env::var_os(ENV_DB).map(|v| workspace::resolve_target(&v.to_string_lossy(), root))
+        })
         .or_else(|| config_path.map(PathBuf::from))
         .or_else(plugmem_host::default_database_path)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_DB))
@@ -494,6 +523,7 @@ fn execute(
         | Command::Recover { .. }
         | Command::Repl { .. }
         | Command::Import { .. }
+        | Command::Workspace { .. }
         | Command::Help { .. } => {
             unreachable!("this command is dispatched before execute")
         }
@@ -1340,6 +1370,10 @@ mod tests {
             snapshot_every_ops: None,
             snapshot_journal_bytes: None,
             maintain_every_forgets: None,
+            workspace: plugmem_host::WorkspaceSettings {
+                dir: None,
+                limits: plugmem_host::WorkspaceLimits::default(),
+            },
         }
     }
 
@@ -1958,16 +1992,50 @@ mod tests {
 
     #[test]
     fn resolve_db_path_prefers_the_flag() {
-        let p = std::path::Path::new("/tmp/explicit.plugmem");
-        assert_eq!(resolve_db_path(Some(p), None), PathBuf::from(p));
+        let p = "/tmp/explicit.plugmem";
+        assert_eq!(resolve_db_path(Some(p), None, None), PathBuf::from(p));
         let configured = std::path::Path::new("/tmp/configured.plugmem");
         assert_eq!(
-            resolve_db_path(None, Some(configured)),
+            resolve_db_path(None, Some(configured), None),
             PathBuf::from(configured)
         );
         // With no flag/config it falls back to $PLUGMEM_DB or the platform default — we
         // only assert the code path runs and yields some path.
-        let _ = resolve_db_path(None, None);
+        let _ = resolve_db_path(None, None, None);
+    }
+
+    #[test]
+    fn a_bare_name_is_a_memory_only_when_a_workspace_is_configured() {
+        let root = PathBuf::from("/srv/bot");
+
+        // Without a workspace, everything is a path — this is the guard on the
+        // default: the old behaviour of `--db` is not allowed to shift.
+        assert_eq!(
+            resolve_db_path(Some("work"), None, None),
+            PathBuf::from("work")
+        );
+
+        // With one, a bare name resolves inside it...
+        assert_eq!(
+            resolve_db_path(Some("work"), None, Some(&root)),
+            PathBuf::from("/srv/bot/db/work.plugmem")
+        );
+        // ...and anything that is not a name stays a path, so an explicit file
+        // is still reachable from inside a workspace.
+        for path in ["./work", "work.plugmem", "/srv/other.plugmem", "../up"] {
+            assert_eq!(
+                resolve_db_path(Some(path), None, Some(&root)),
+                PathBuf::from(path),
+                "{path}"
+            );
+        }
+
+        // `[database].path` is a file setting, never a name.
+        let configured = std::path::Path::new("work");
+        assert_eq!(
+            resolve_db_path(None, Some(configured), Some(&root)),
+            PathBuf::from("work")
+        );
     }
 
     #[test]
@@ -1999,7 +2067,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("m.plugmem");
         let cli = Cli {
-            db: Some(path.clone()),
+            db: Some(path.display().to_string()),
+            workspace: None,
             config: None,
             json: false,
             command: Command::Stats,
@@ -2111,7 +2180,8 @@ mod tests {
             (Database::open(&path, Config::default()).unwrap(), dir)
         };
         let cli = Cli {
-            db: Some(dir.join("m.plugmem")),
+            db: Some(dir.join("m.plugmem").display().to_string()),
+            workspace: None,
             config: None,
             json: false,
             command: Command::Stats,
@@ -2130,7 +2200,8 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let cli = Cli {
-            db: Some(dir.join("m.plugmem")),
+            db: Some(dir.join("m.plugmem").display().to_string()),
+            workspace: None,
             config: None,
             json: false,
             command: Command::Remember {
@@ -2349,7 +2420,8 @@ mod tests {
 
         // A remember through the read-write path leaves a dirty journal.
         let remember = Cli {
-            db: Some(path.clone()),
+            db: Some(path.display().to_string()),
+            workspace: None,
             config: None,
             json: false,
             command: Command::Remember {
@@ -2365,7 +2437,8 @@ mod tests {
 
         // The new command: human shape.
         let checkpoint = |json| Cli {
-            db: Some(path.clone()),
+            db: Some(path.display().to_string()),
+            workspace: None,
             config: None,
             json,
             command: Command::Checkpoint,
@@ -2384,7 +2457,8 @@ mod tests {
         // The journal is now clean, so scrub (a shared-lock, read-only open)
         // succeeds — it would fail `NeedsCheckpoint` on a dirty journal.
         let scrub = Cli {
-            db: Some(path),
+            db: Some(path.display().to_string()),
+            workspace: None,
             config: None,
             json: false,
             command: Command::Scrub,
@@ -2406,7 +2480,8 @@ mod tests {
         }
         // stats routes through open_readonly (mmap, shared)
         let cli = Cli {
-            db: Some(path.clone()),
+            db: Some(path.display().to_string()),
+            workspace: None,
             config: None,
             json: false,
             command: Command::Stats,
@@ -2417,7 +2492,8 @@ mod tests {
 
         // recall with no embedder also uses the read-only path
         let cli = Cli {
-            db: Some(path),
+            db: Some(path.display().to_string()),
+            workspace: None,
             config: None,
             json: false,
             command: Command::Recall {

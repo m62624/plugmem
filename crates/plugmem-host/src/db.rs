@@ -748,6 +748,19 @@ impl Database {
         })
     }
 
+    /// One fact's tags, or an empty vector for an unknown or tombstoned id.
+    ///
+    /// [`FactSnapshot`] carries text and metadata but not tags, so without this
+    /// the only way to read one fact's tags is [`Database::export`] — a full
+    /// scan to answer a question about a single id.
+    pub fn tags_of(&self, id: plugmem_core::FactId) -> Vec<String> {
+        self.read().engine.read(|mem| {
+            let mut terms = Vec::new();
+            mem.tags_of(id, &mut terms);
+            terms.iter().map(|t| mem.term(*t).to_string()).collect()
+        })
+    }
+
     /// Engine size counters.
     pub fn stats(&self) -> Stats {
         self.read().engine.read(|mem| mem.stats())

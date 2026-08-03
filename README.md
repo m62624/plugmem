@@ -114,6 +114,39 @@ recency boost (tags filter; they are not a source):
 | **Graph** | entity graph with current typed edges on the hot path; `as_of` queries use edge history | relational knowledge |
 | **Temporal** | range scans over a `recorded_at`-ordered index; bitemporal validity | "what was true *then*", time windows |
 
+## Many memories in one directory (optional)
+
+**Default: one memory, one file.** Point `--db` at it and nothing below applies.
+
+When one process serves many independent memories — a memory per conversation,
+per tenant — point it at a directory instead and address them by name:
+
+```console
+$ plugmem-cli --workspace ~/bot-data --db chat-42 remember "prefers tokio"
+$ plugmem-mcp --workspace ~/bot-data          # every tool gains a `db` argument
+```
+
+A name (`[a-z0-9][a-z0-9_-]*`) is not a path and cannot become one, so it
+resolves to exactly one file inside the directory. A first write to an unused
+name creates that memory — no registration step. Each memory can describe what
+it is for, and `workspace find` searches those descriptions when the caller does
+not know the name.
+
+Two things worth knowing before you build on it:
+
+- **results are never merged across memories.** Measured: asking the right
+  memory answers 98–99 % of questions well, while asking all of them and fusing
+  gives 92–94 % — and 62–66 % across topics. Routing beats merging, so pick a
+  memory rather than searching them all.
+- **who may use which memory is not this project's responsibility.** The `db`
+  comes from the caller. Your harness sees the call before the server does; put
+  the policy there. The simplest setup avoids the question entirely: one process
+  per conversation, started with `--db <its own memory>`, where the tools have
+  no `db` argument at all.
+
+Details in [`specs/10-workspace.md`](specs/10-workspace.md); settings in
+[`crates/plugmem-host/SETTINGS.md`](crates/plugmem-host/SETTINGS.md).
+
 ## Measured scale
 
 The following is a like-for-like native, file-backed benchmark using the same

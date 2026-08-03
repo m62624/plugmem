@@ -204,6 +204,68 @@ A failure to start (bad config, or the file already locked by another writer) is
 reported to stderr with a non-zero exit, so the spawning host sees the server
 did not come up.
 
+## Many memories from one server (optional)
+
+**Default: one memory, and the tools have no `db` argument.** That is the right
+shape for one process per conversation, and it is what everything above
+describes. This section is for the other case.
+
+### Which shape to run
+
+| your situation | run |
+|---|---|
+| one agent, one memory | `--db FILE` — the default, nothing to configure |
+| one server process per conversation or per user, each with its own memory | `--db <that memory>`, workspace or not. The process boundary already answers "which memory", so the model is never asked |
+| one server process for many conversations | `--workspace DIR`, and pass `db` on every call |
+| mostly one memory, occasionally a shared one | `--workspace DIR --db <the usual one>` — `db` is then optional and defaults to it |
+
+Prefer a process per memory when you can. It is the shape with no way to address
+the wrong memory, and its extra cost is small: a chat-sized memory opens in
+milliseconds and holds well under a megabyte resident.
+
+Reach for one process for many when spawning per conversation is not practical —
+hundreds of live conversations, or a host that keeps one long-lived connection.
+
+### How it works
+
+Started with `--workspace DIR`, the server holds a directory of named memories
+and every tool that touches one gains a `db` argument:
+
+| started with | `db` in the tool schema |
+|---|---|
+| `--db FILE` | absent — nothing changes |
+| `--workspace DIR --db NAME` | present, optional, defaults to `NAME` |
+| `--workspace DIR` | present, required |
+
+The argument disappearing when it has no answer to give is the point. In MCP the
+*model* fills tool arguments, so a `db` field is a decision the model makes on
+every call — while the process that spawned the server usually knew the answer
+for certain. Where the answer is known, the question is not asked: it cannot be
+got wrong and it costs no tokens.
+
+There is no verb to switch memories. With a worker pool that would be shared
+mutable state, and worker A switching to X while B switches to Y is a race that
+writes to the wrong person's memory.
+
+Two extra tools appear: `plugmem_workspace_list` and `plugmem_workspace_find`
+(search the memories' descriptions — the way a model picks a `db` when it does
+not know the name).
+
+A write to an unused name creates that memory, which is how a new conversation
+gets one without a registration step; a *read* of an unknown name is refused,
+because such a read is a typo far more often than a new memory. `--no-create`
+turns the write case off too.
+
+`--read-only` has no workspace form: a read-only handle pins one immutable
+snapshot generation, and a pool of pinned snapshots that silently age is worse
+than not offering it.
+
+**Access control is not this server's job.** `db` arrives from the caller, and
+the harness that spawned this process sees the call before the server does — put
+the policy there. `--allow <name>` (repeatable) is a convenience for a
+single-tenant process, not a boundary. The simplest deployment avoids the
+question altogether: one server per conversation with `--db <file>`.
+
 ## Concurrency
 
 One reader thread pulls stdin lines into a channel; a pool of worker threads

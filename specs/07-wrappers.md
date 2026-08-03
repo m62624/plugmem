@@ -9,7 +9,8 @@ differences are the transport and how the bytes are fetched.
 Priority: flag/parameter > env > config file > default.
 
 - Database: `--db PATH` | `PLUGMEM_DB` | `./plugmem.plugmem` if it exists |
-  `$XDG_DATA_HOME/plugmem/default.plugmem` (created).
+  `$XDG_DATA_HOME/plugmem/default.plugmem` (created). With a workspace configured,
+  `--db`/`PLUGMEM_DB` may also be a bare memory *name* — see `10-workspace.md`.
 - Config file: `$XDG_CONFIG_HOME/plugmem/config.toml` — `[engine]` (the Config fields
   from `05-api.md`), `[embedder]` (`kind`, `url`, `model`, `api_key_env`),
   `[maintenance]` (`auto_after_ops`, `journal_snapshot_bytes`).
@@ -54,7 +55,9 @@ takes `format` ("json" default | "human"). `plugmem_remember`'s description says
 outright: "if similar contains a contradiction, decide: plugmem_revise or keep both".
 
 The server owns one database (path from argument/env as in the CLI), the embedder from
-the same config. `maintain` runs on the `[maintenance]` policy between requests (no
+the same config. With `--workspace DIR` it instead serves a directory of named memories,
+and every tool that touches one gains a `db` argument — absent otherwise, so the
+single-database default is unchanged. See `10-workspace.md`; that mode is opt-in. `maintain` runs on the `[maintenance]` policy between requests (no
 background thread — a check after each call). `SKILL.md` is embedded via `include_str!`
 and shipped as a release artifact; `plugmem_version`/`plugmem_about` tell the agent to
 load the version-matched skill.
@@ -64,11 +67,18 @@ load the version-matched skill.
 A **native napi addon, not wasm**: the host is compiled as-is (real mmap/MVCC/locks, no
 RAM bloat and no 4 GiB ceiling). The crate is `crate-type = ["cdylib", "rlib"]`,
 `publish = false` (it ships to npm as the meta package `plugmem` plus six platform
-packages). The `Plugmem` class mirrors the host `Database` 1:1; inputs/outputs are
+packages). The `Plugmem` class wraps the host `Database` verb for verb — every method is
+the identically-named host verb — though it is not yet the *whole* of `Database`:
+`remember_many`, `export_each` and `tags_of` are not exposed, and `recover` is CLI-only
+like `import` and `scrub`. The crate README names the gaps. Inputs/outputs are
 `napi(object)` mapped to hand-written TypeScript interfaces; the heavy verbs
 (`maintain`/`checkpoint`) are async on libuv. Node opens a file directly (real file
-I/O), so there is no JS storage bridge. The test suite is `node --test` smoke plus
-parity with native (the same scenario → the same rendered block).
+I/O), so there is no JS storage bridge. A `Workspace` class mirrors the host type the
+same way, and its `open(name)` returns the same `Plugmem` class — so a named memory has
+every verb (see `10-workspace.md`). The test suite is `node --test` smoke plus parity
+with native (the same scenario → the same rendered block), and a **type-check gate**:
+the generated `index.d.ts` is compiled with a consumer-shaped type test under `strict`
+plus `isolatedModules`, because a surface can be valid Rust and unusable TypeScript.
 
 ## SKILL.md
 
@@ -98,4 +108,5 @@ mechanics and required checks are in `08-performance.md`.
 - MCP: scenario JSON-RPC sessions: tools/list, each tool, bad inputs → correct JSON-RPC
   errors.
 - napi: `node --test` smoke (open→remember→recall→checkpoint→reopen); rendered parity
-  with native on a shared scenario.
+  with native on a shared scenario; `npm run typecheck` compiles the generated
+  declarations and asserts the inferred types.

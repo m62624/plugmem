@@ -750,18 +750,32 @@ fn gc_reclaims_unpinned_generations_and_a_pin_keeps_one() {
     assert_eq!(generation_count(&tmp.db()), 1);
 }
 
-/// Open file descriptors for this process, via `/proc/self/fd` (Linux). On
-/// other platforms it returns 0, so the fd-growth assertion below is a no-op
-/// there — the generation-count bound still holds everywhere, and valgrind
-/// (Linux) supplies the authoritative heap/mapping verdict.
+/// Open file descriptors belonging to `base`, via `/proc/self/fd` (Linux).
+/// Restricting the count to this test's unique database matters: the Rust test
+/// harness runs tests in parallel, and the workspace tests deliberately keep
+/// a pool of unrelated databases open. Counting the whole process would turn
+/// that legitimate activity into a false leak report.
+///
+/// On other platforms it returns 0, so the fd-growth assertion below is a
+/// no-op there — the generation-count bound still holds everywhere, and
+/// valgrind (Linux) supplies the authoritative heap/mapping verdict.
 #[cfg(target_os = "linux")]
-fn open_fd_count() -> usize {
+fn open_fd_count(base: &std::path::Path) -> usize {
+    let prefix = base.to_string_lossy();
     std::fs::read_dir("/proc/self/fd")
-        .map(|d| d.count())
+        .map(|d| {
+            d.flatten()
+                .filter(|entry| {
+                    std::fs::read_link(entry.path())
+                        .map(|target| target.to_string_lossy().starts_with(&*prefix))
+                        .unwrap_or(false)
+                })
+                .count()
+        })
         .unwrap_or(0)
 }
 #[cfg(not(target_os = "linux"))]
-fn open_fd_count() -> usize {
+fn open_fd_count(_base: &std::path::Path) -> usize {
     0
 }
 
@@ -810,11 +824,11 @@ fn readers_and_checkpoints_do_not_leak_across_rounds() {
 
     // Two identical passes: comparing the second delta against the first cancels
     // any one-time initialization (lazily-built caches, allocator arenas).
-    let fds_start = open_fd_count();
+    let fds_start = open_fd_count(&tmp.db());
     churn(&db);
-    let fds_after_first = open_fd_count();
+    let fds_after_first = open_fd_count(&tmp.db());
     churn(&db);
-    let fds_after_second = open_fd_count();
+    let fds_after_second = open_fd_count(&tmp.db());
 
     // Generations never accumulate: readers are dropped each round, so GC
     // settles the disk to the single current generation.
@@ -1841,4 +1855,98 @@ fn a_growing_database_reshards_itself_without_being_asked() {
     assert_eq!(reopened.stats().shards, grown);
     assert_eq!(reopened.stats().facts, n);
     reopened.verify().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Workspace: many small databases at once. This is what the derived shard
+// layout bought — before it, a database holding a thousand facts cost 14 MB of
+// pages, so a bot with a memory per conversation was not affordable at all. The
+// gate belongs here rather than in a README because it is the property that
+// makes the whole feature viable, and it is exactly the kind of thing a future
+// change to shard sizing would silently undo.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fifty_small_memories_fit_in_a_budget_a_bot_can_afford() {
+    use plugmem_host::{DbName, IfMissing, Settings, WorkspaceLimits};
+
+    const MEMORIES: usize = 50;
+    const FACTS_EACH: u64 = 200;
+    /// Engine pool bytes one memory of this size may hold.
+    ///
+    /// This, not the resident set, is the gate. `pool_bytes` counts what the
+    /// engine allocated and is identical on every platform and profile, while
+    /// RSS is the allocator's and the OS's answer to a different question — it
+    /// varies by page accounting and malloc zone, which makes a tight budget on
+    /// it a tripwire for the CI runner rather than for the engine.
+    ///
+    /// The regression it guards is not subtle: with the fixed shard counts this
+    /// branch was built on top of, a memory this size cost ~14 MB of pages
+    /// whatever it held. A hundredth of that is still generous for 200 facts.
+    const POOL_BUDGET: usize = 256 * 1024;
+    /// A resident-set sanity bound, deliberately loose. It exists to catch a
+    /// pool that never evicts (fifty memories held open at once), not to count
+    /// bytes — sixteen pooled handles at the old floor would be past 200 MB, so
+    /// anything under this is unambiguously "the floor is gone".
+    const RSS_BUDGET: usize = 96 * 1024 * 1024;
+
+    let tmp = TempDir::new("workspace-rss");
+    let settings = Settings::from_table(None).unwrap();
+    let ws = settings.open_workspace(&tmp.0).unwrap();
+    assert_eq!(
+        ws.limits(),
+        WorkspaceLimits::default(),
+        "the budget below is sized against the default pool"
+    );
+
+    let before = rss();
+    for i in 0..MEMORIES {
+        let name = DbName::parse(&format!("chat-{i}")).unwrap();
+        let db = ws.get(&name, 1_000, IfMissing::Create).unwrap();
+        for f in 0..FACTS_EACH {
+            db.remember(RememberInput::text(
+                1_000 + f,
+                &format!("memory {i} fact {f}: the sky was a shade of blue that day"),
+            ))
+            .unwrap();
+        }
+        db.checkpoint(2_000).unwrap();
+    }
+    let grew = rss().saturating_sub(before);
+
+    assert_eq!(ws.layout().list().unwrap().len(), MEMORIES);
+    // The pool is what bounds this: fifty memories were written, at most
+    // `max_open` are held, and the rest were closed on the way through.
+    assert!(
+        ws.open_count() <= WorkspaceLimits::default().max_open,
+        "pool held {} handles",
+        ws.open_count()
+    );
+    assert!(
+        grew < RSS_BUDGET,
+        "{MEMORIES} memories of {FACTS_EACH} facts added {grew} resident bytes \
+         (loose bound {RSS_BUDGET})"
+    );
+
+    // The deterministic half: every memory is intact, independent, and small.
+    for i in 0..MEMORIES {
+        let name = DbName::parse(&format!("chat-{i}")).unwrap();
+        let db = ws.get(&name, 3_000, IfMissing::Fail).unwrap();
+        let stats = db.stats();
+        assert_eq!(stats.facts, FACTS_EACH as usize);
+        assert!(
+            stats.pool_bytes < POOL_BUDGET,
+            "chat-{i} holds {} pool bytes for {FACTS_EACH} facts (budget {POOL_BUDGET})",
+            stats.pool_bytes
+        );
+    }
+
+    for i in [0, MEMORIES / 2, MEMORIES - 1] {
+        let name = DbName::parse(&format!("chat-{i}")).unwrap();
+        let db = ws.get(&name, 3_000, IfMissing::Fail).unwrap();
+        let out = db
+            .recall(plugmem_host::RecallQuery::text(3_000, "shade of blue"))
+            .unwrap();
+        assert!(out.rendered.contains(&format!("memory {i} fact")), "{i}");
+    }
 }

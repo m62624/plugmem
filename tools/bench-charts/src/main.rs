@@ -91,7 +91,7 @@ const HOST_OUT: &str = "crates/plugmem-host/assets";
 /// `runtime = native`, `metric = latency_us`).
 const CORE_CHARTS: &[Chart] = &[Chart {
     file: "recall-latency.svg",
-    title: "recall source latency — µs, native (lower is better)",
+    title: "recall source latency — native, log scale (lower is better)",
     n: "core",
     metric: "latency_us",
     structures: &[
@@ -100,8 +100,12 @@ const CORE_CHARTS: &[Chart] = &[Chart {
         "flat vector (24k, d384)",
         "HNSW (30k, d384)",
     ],
-    y_title: "µs",
-    log: false,
+    y_title: "µs (log)",
+    // Logarithmic for the reason stated at the top of this file: the sources
+    // span two and a half orders of magnitude (BM25 ~10 µs against HNSW
+    // ~3300 µs), and on a linear axis the two cheap sources were a one-pixel
+    // line — a chart comparing four sources that showed two of them.
+    log: true,
 }];
 
 /// Native file-backed database charts. Rows come from the
@@ -121,8 +125,11 @@ const DATABASE_CHARTS: &[Chart] = &[
         title: "file-backed database — 1M lifecycle phase time",
         n: "database-1m",
         metric: "elapsed_ms",
+        // No `mixed_stream`: the load phase reports `load_ms`, not
+        // `elapsed_ms`, so naming it here charted nothing — and it has its own
+        // throughput chart above, where ops/second is the number that means
+        // something for a streamed load.
         structures: &[
-            "mixed_stream",
             "checkpoint",
             "maintain",
             "writer_verify",
@@ -779,7 +786,7 @@ fn render(chart: &Chart, new: &Table, out_dir: &Path) {
     if chart.log {
         draw_bars(&data, (lo..hi).log_scale());
     } else {
-        draw_bars(&data, 0.0..(max * 1.15).max(1.0));
+        draw_bars(&data, 0.0..(max * LINEAR_HEADROOM).max(1.0));
     }
 }
 
@@ -880,15 +887,29 @@ fn render_scale(
         let (lo, hi) = log_bounds(min_pos, max);
         draw_bars(&data, (lo..hi).log_scale());
     } else {
-        draw_bars(&data, 0.0..(max * 1.15).max(1.0));
+        draw_bars(&data, 0.0..(max * LINEAR_HEADROOM).max(1.0));
     }
 }
 
 /// Nearest enclosing powers of ten for a logarithmic axis, with at least
 /// one decade of span so a chart of equal values still renders.
+///
+/// `min` is the smallest **positive** value in the data (a log axis cannot show
+/// zero, and the callers compute it that way); a run with no positive value at
+/// all arrives as infinity and falls back to a single decade.
+///
+/// The floor follows the data rather than stopping at 1. It used to clamp
+/// there, which was invisible until a measurement came in below a microsecond —
+/// a graph recall after every edge was unlinked, at 0.7 µs — and its bar was
+/// silently drawn beneath the axis. A chart that hides a real result reads as
+/// missing data, which is worse than an unhelpful scale.
 fn log_bounds(min: f64, max: f64) -> (f64, f64) {
-    let lo = 10f64.powf(min.max(1.0).log10().floor());
-    let hi = 10f64.powf(max.max(10.0).log10().ceil());
+    let lo = if min.is_finite() && min > 0.0 {
+        10f64.powf(min.log10().floor())
+    } else {
+        1.0
+    };
+    let hi = 10f64.powf(max.max(lo * 10.0).log10().ceil());
     (lo, hi.max(lo * 10.0))
 }
 
@@ -906,6 +927,40 @@ struct BarData<'a> {
     /// The bar baseline: `0.0` for a linear axis, the axis floor for log.
     y_base: f64,
 }
+
+impl BarData<'_> {
+    /// Where to put the legend: over whichever end of the chart has the
+    /// shorter bars.
+    ///
+    /// A legend pinned to one corner sits on top of the data whenever the
+    /// tallest bar is at that end, and a bar whose top is hidden cannot be
+    /// read at all. Comparing the two halves costs nothing and is right far
+    /// more often than a fixed corner.
+    fn legend_position(&self) -> SeriesLabelPosition {
+        let tallest = |group: &Vec<Option<f64>>| {
+            group
+                .iter()
+                .flatten()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max)
+        };
+        let mid = self.bars.len().div_ceil(2);
+        let left = self.bars[..mid].iter().map(tallest).fold(0.0, f64::max);
+        let right = self.bars[mid..].iter().map(tallest).fold(0.0, f64::max);
+        if left <= right {
+            SeriesLabelPosition::UpperLeft
+        } else {
+            SeriesLabelPosition::UpperRight
+        }
+    }
+}
+
+/// Headroom above the tallest bar on a linear axis.
+///
+/// Enough that the legend clears it: at 1.15 the tallest bar reached 87 % of
+/// the height and the legend was drawn over its top, which is the one part of
+/// a bar that carries information.
+const LINEAR_HEADROOM: f64 = 1.35;
 
 /// Draws a grouped bar chart (one bar per present runtime within each
 /// category group) to `d.path`. Generic over the y-axis coordinate so the
@@ -968,7 +1023,7 @@ where
 
     chart
         .configure_series_labels()
-        .position(SeriesLabelPosition::UpperRight)
+        .position(d.legend_position())
         .background_style(WHITE.mix(0.85))
         .border_style(BLACK.mix(0.35))
         .label_font(("sans-serif", 12))
@@ -1034,6 +1089,26 @@ fn pretty(structure: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_log_axis_reaches_down_to_the_smallest_measurement() {
+        // The case that exposed the old clamp: a sub-microsecond result next to
+        // tens of microseconds. Its decade has to be on the axis, or the bar is
+        // drawn below the floor and reads as no data at all.
+        assert_eq!(log_bounds(0.735, 50.353), (0.1, 100.0));
+
+        // Ordinary ranges are unchanged.
+        assert_eq!(log_bounds(1.6, 3.0), (1.0, 10.0));
+        assert_eq!(log_bounds(24.0, 900.0), (10.0, 1000.0));
+
+        // At least one decade of span, even for a single repeated value.
+        assert_eq!(log_bounds(5.0, 5.0), (1.0, 10.0));
+        assert_eq!(log_bounds(0.02, 0.02), (0.01, 0.1));
+
+        // No positive value at all (every sample zero): a usable default rather
+        // than a log of zero.
+        assert_eq!(log_bounds(f64::INFINITY, 0.0), (1.0, 10.0));
+    }
 
     #[test]
     fn database_labels_are_stable_for_common_sizes() {

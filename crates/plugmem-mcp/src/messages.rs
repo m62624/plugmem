@@ -150,3 +150,43 @@ read, re-mapping only when the generation grew.";
 /// Prefix of the tool-error text when a write verb is called in read-only mode.
 pub const READ_ONLY_REFUSAL: &str = "read-only server: this tool is not available (start the server \
 without --read-only to write)";
+
+// ── Workspace mode: many databases, one server ────────────────────────────
+
+/// The `db` argument, present only when the server actually serves more than
+/// one database (see the `tools` module for the three startup modes).
+pub const ARG_DB: &str = "Which memory to use, by name (letters, digits, '-' and '_'). Not a path. \
+Ask plugmem_workspace_find when you do not know the name — do not guess one, and do not invent a \
+name for knowledge that belongs in an existing memory.";
+
+/// The `db` argument when the server has a default, so it is optional.
+pub const ARG_DB_OPTIONAL: &str = "Which memory to use, by name. Optional: omitted, it means this \
+server's default memory, which is almost always the right one. Name another only when the \
+knowledge plainly belongs elsewhere.";
+
+/// `plugmem_workspace_list` tool description.
+pub const WORKSPACE_LIST_TOOL: &str = "List every memory in this workspace with its description, \
+tags and owner. Small enough to read in full at a few hundred memories; past that, search with \
+plugmem_workspace_find.";
+
+/// `plugmem_workspace_find` tool description.
+pub const WORKSPACE_FIND_TOOL: &str = "Find memories by what they are for, in your own words \
+(\"the chat about releases\", \"Ann's notes\"), and get their names back. This is how you pick a \
+`db` when you do not already know its name. Owners are searchable too, even though they are not \
+in the text.";
+
+/// The `query` argument of `plugmem_workspace_find`.
+pub const ARG_WORKSPACE_QUERY: &str = "What the memory is for, in your own words. A person's name \
+also works — it finds what they own.";
+
+/// Tool-error text when a workspace server with no default is called without a
+/// `db` argument.
+pub const WORKSPACE_DB_REQUIRED: &str = "this server holds several memories, so every call must \
+say which one: pass `db`. Use plugmem_workspace_find to look one up by what it is for, or \
+plugmem_workspace_list to see them all.";
+
+/// Startup refusal: `--read-only` and `--workspace` together.
+pub const WORKSPACE_READ_ONLY: &str = "--read-only has no workspace form: a read-only handle pins \
+one immutable snapshot generation, and a pool of pinned snapshots that silently age is worse than \
+not offering it. Serve one memory read-only (--db FILE --read-only), or serve the workspace \
+read-write.";

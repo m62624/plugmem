@@ -192,6 +192,64 @@ plugmem-cli checkpoint && plugmem-cli scrub  # flush journal, then byte-level ch
 plugmem-cli recover agent.recovered.plugmem   # salvage into a clean copy
 ```
 
+## Many memories in one directory (optional)
+
+**Default: one memory, one file.** `--db path/to/memory.plugmem` and nothing
+here applies. Reach for this only when you keep several independent
+memories — one per project, per client, per agent — and want to address them by
+name instead of remembering where each file is.
+
+Point the CLI at a directory and `--db` starts taking a name:
+
+```console
+$ export PLUGMEM_WORKSPACE=~/memories        # or --workspace, or [workspace].dir
+$ plugmem-cli --db work remember "the release branch is integration/0.3.0"
+$ plugmem-cli --db personal recall "release branch"   # sees nothing: separate memory
+```
+
+The rule is one line: a name has no separator and no dot, so `work` is a name
+while `work.plugmem`, `./work` and `/srv/work` stay paths. A name resolves to
+`<dir>/db/<name>.plugmem` and nowhere else — it is not a path and cannot become
+one. A first write to an unused name creates that memory; there is no
+registration step.
+
+Memories are **independent**: no search spans them, and there is no way to link
+an entity across them. That is the point (one memory answering for another is
+what makes a shared store useless), and it is also the thing to decide up front
+— a fact filed in the wrong memory is not merely misplaced, it is unreachable
+from the other.
+
+### The `workspace` command group
+
+Administrative, and none of it is needed for everyday use:
+
+| command | what it does |
+|---|---|
+| `workspace list` | every memory on disk, with its description when it has one |
+| `workspace find <QUERY> [-k N]` | which memory is the one about… — searches descriptions, and a person's name finds what they own |
+| `workspace describe <NAME> <TEXT> [--tag T]… [--owner WHO]` | say what a memory is for; creates it if absent |
+| `workspace archive <NAME>` | label it archived (it stays where it is and stays openable) |
+| `workspace reindex` | rebuild the registry from the memories' own descriptions |
+| `workspace verify` | report where the registry and the directory disagree; exit `1` if they do |
+| `workspace use <NAME>` | print the shell line that points **this terminal** at a memory |
+
+The description lives in two places: inside the memory itself, and in a registry
+(`<dir>/registry.plugmem`, an ordinary plugmem database). The directory is the
+truth and the registry is only a searchable index over it — delete it and
+`workspace reindex` rebuilds it from the memories; what you lose is search, not
+data.
+
+`workspace use` writes **nothing to disk**. It prints a line for the shell:
+
+```console
+$ eval "$(plugmem-cli workspace use work)"     # sh / bash / zsh
+$ plugmem-cli workspace use work | Invoke-Expression   # PowerShell
+```
+
+The selection then lives in that terminal, so a second window is unaffected — a
+state file shared by every window would let one of them silently redirect a
+script running in another.
+
 ## Interactive mode (`repl`)
 
 `plugmem repl` opens the database **once** and runs commands from stdin (one

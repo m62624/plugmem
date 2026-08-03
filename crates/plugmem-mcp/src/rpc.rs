@@ -19,7 +19,7 @@ use std::thread;
 use plugmem_host::Database;
 use serde_json::{Value, json};
 
-use crate::tools::ReaderShared;
+use crate::tools::{ReaderShared, WorkspaceShared};
 use crate::{messages, tools};
 
 /// A per-worker handle to the backend, cloned into every worker thread. A
@@ -32,6 +32,9 @@ pub enum Shared {
     Writer(Database),
     /// Read-only: read verbs + `refresh`/`generation`; write verbs are refused.
     Reader(Arc<ReaderShared>),
+    /// Many databases addressed by name: the full verb surface plus a `db`
+    /// argument, and the two verbs for finding a name.
+    Workspace(Arc<WorkspaceShared>),
 }
 
 /// Run the server: a read thread feeding an `mpsc` channel, `workers` worker
@@ -114,6 +117,7 @@ fn handle(shared: &Shared, req: &Value) -> Option<Value> {
             let tools = match shared {
                 Shared::Writer(_) => tools::definitions(),
                 Shared::Reader(_) => tools::definitions_ro(),
+                Shared::Workspace(ws) => tools::definitions_ws(ws.default_db()),
             };
             result(id, json!({ "tools": tools }))
         }),
@@ -122,6 +126,7 @@ fn handle(shared: &Shared, req: &Value) -> Option<Value> {
             match shared {
                 Shared::Writer(db) => tools::call(db, id, params),
                 Shared::Reader(reader) => tools::call_ro(reader, id, params),
+                Shared::Workspace(ws) => tools::call_ws(ws, id, params),
             }
         }),
         // Unknown method: error only for requests (notifications are ignored).

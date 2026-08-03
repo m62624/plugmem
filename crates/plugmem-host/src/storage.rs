@@ -260,6 +260,22 @@ impl SnapshotSink for &mut FileSink {
     }
 }
 
+/// Whether a database exists at `base`.
+///
+/// Not `base.exists()`: the base path holds the published snapshot, and that is
+/// written by the *first checkpoint*. A database created a moment ago and
+/// written to is a journal and a lock with no base file at all, and it is
+/// unmistakably a database — reopening it replays the journal and the facts are
+/// there. Anything asking "is there a database here?" (a workspace listing a
+/// directory, a caller deciding whether to create one) must ask this rather
+/// than stat the base path, or it will overwrite live data.
+///
+/// The lock file alone does not count: it can outlive a database that was
+/// deleted, and a bare lock has no content to lose.
+pub fn database_exists(base: &Path) -> bool {
+    base.exists() || suffixed(base, "journal").exists()
+}
+
 /// `"a.plugmem"` + `"lock"` → `"a.plugmem.lock"`.
 fn suffixed(base: &Path, ext: &str) -> PathBuf {
     let mut s = base.as_os_str().to_os_string();

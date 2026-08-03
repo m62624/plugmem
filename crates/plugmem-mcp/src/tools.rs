@@ -12,8 +12,8 @@
 use std::sync::{Mutex, RwLock};
 
 use plugmem_host::{
-    Database, Embedder, FactId, HostError, LinkInput, MaintenanceMode, MaintenanceOptions,
-    ReadOnlyDatabase, RecallQuery, RememberInput, UnlinkInput,
+    Database, DbEntry, DbName, Embedder, FactId, HostError, IfMissing, LinkInput, MaintenanceMode,
+    MaintenanceOptions, ReadOnlyDatabase, RecallQuery, RememberInput, UnlinkInput, Workspace,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -92,6 +92,40 @@ pub fn definitions() -> Vec<Value> {
     ]
 }
 
+/// Tools that answer without a database: the version, the blurb, the settings
+/// catalogue. Named as a set because a workspace server must not make a caller
+/// nominate a memory to ask what version it is running.
+const STATELESS_TOOLS: &[&str] = &[VERSION, ABOUT, SETTINGS_HELP];
+
+/// Tools that act on one database.
+const DATABASE_TOOLS: &[&str] = &[
+    REMEMBER, RECALL, REVISE, FORGET, LINK, UNLINK, SHOW, STATS, EXPORT, MAINTAIN, CHECKPOINT,
+    VERIFY,
+];
+
+/// Answers the tools that need no database, or `None` for anything else.
+fn stateless(name: &str, id: &Value, args: Option<&Value>) -> Option<Value> {
+    let id = id.clone();
+    match name {
+        VERSION => Some(rpc::tool_result(
+            id,
+            format!("plugmem {}", env!("CARGO_PKG_VERSION")),
+            false,
+        )),
+        ABOUT => Some(rpc::tool_result(
+            id,
+            messages::ABOUT_TOOL.to_string(),
+            false,
+        )),
+        SETTINGS_HELP => Some(rpc::tool_result(
+            id,
+            render(&settings_help_value(), format_arg(args)),
+            false,
+        )),
+        _ => None,
+    }
+}
+
 /// Execute a `tools/call`: route by tool name, then hand off. A missing `params`
 /// is a JSON-RPC error; an unknown tool is a tool-level error (`isError`).
 pub fn call(db: &Database, id: Value, params: Option<&Value>) -> Value {
@@ -101,6 +135,9 @@ pub fn call(db: &Database, id: Value, params: Option<&Value>) -> Value {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     let args = params.get("arguments");
 
+    if let Some(reply) = stateless(name, &id, args) {
+        return reply;
+    }
     match name {
         REMEMBER => remember(db, id, args, None),
         RECALL => recall(db, id, args),
@@ -126,9 +163,6 @@ pub fn call(db: &Database, id: Value, params: Option<&Value>) -> Value {
             Ok(()) => rpc::tool_result(id, render(&json!({ "ok": true }), format_arg(args)), false),
             Err(e) => tool_error(id, &e),
         },
-        VERSION => rpc::tool_result(id, format!("plugmem {}", env!("CARGO_PKG_VERSION")), false),
-        ABOUT => rpc::tool_result(id, messages::ABOUT_TOOL.to_string(), false),
-        SETTINGS_HELP => settings_help(db, id, args),
         other => rpc::tool_result(id, format!("unknown tool: {other}"), true),
     }
 }
@@ -162,6 +196,9 @@ pub fn call_ro(reader: &ReaderShared, id: Value, params: Option<&Value>) -> Valu
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     let args = params.get("arguments");
 
+    if let Some(reply) = stateless(name, &id, args) {
+        return reply;
+    }
     match name {
         RECALL => recall_ro(reader, id, args),
         SHOW => {
@@ -208,8 +245,6 @@ pub fn call_ro(reader: &ReaderShared, id: Value, params: Option<&Value>) -> Valu
                 Err(e) => tool_error(id, &e),
             }
         }
-        VERSION => rpc::tool_result(id, format!("plugmem {}", env!("CARGO_PKG_VERSION")), false),
-        ABOUT => rpc::tool_result(id, messages::ABOUT_TOOL.to_string(), false),
         // A known write verb, or anything else: refused in read-only mode.
         REMEMBER | REVISE | FORGET | LINK | MAINTAIN | CHECKPOINT => {
             rpc::tool_result(id, messages::READ_ONLY_REFUSAL.into(), true)
@@ -219,6 +254,237 @@ pub fn call_ro(reader: &ReaderShared, id: Value, params: Option<&Value>) -> Valu
         }
         other => rpc::tool_result(id, format!("unknown tool: {other}"), true),
     }
+}
+
+// ── Workspace mode ────────────────────────────────────────────────────────
+
+/// Argument naming which database a call is for. Present in the schema **only**
+/// in workspace mode — see [`definitions_ws`].
+const DB_ARG: &str = "db";
+
+const WORKSPACE_LIST: &str = "plugmem_workspace_list";
+const WORKSPACE_FIND: &str = "plugmem_workspace_find";
+
+/// Tools that may bring a database into existence.
+///
+/// A write to a name nobody has used yet is how a new chat gets a memory —
+/// that is the whole plug-and-play story. A *read* of an unknown name is
+/// something else: almost always a typo or a hallucinated name, and answering
+/// it with an empty result would hide the mistake. So creation is a property of
+/// the verb, and this list is what says which.
+const CREATING_TOOLS: &[&str] = &[REMEMBER, REVISE, FORGET, LINK, UNLINK, MAINTAIN, CHECKPOINT];
+
+/// Workspace-mode server state, shared across worker threads.
+///
+/// There is deliberately **no "current database"**. With a worker pool, a
+/// switch verb would make it shared mutable state: worker A switches to X, B
+/// switches to Y, A reads and gets Y — a race that reproduces once in a
+/// hundred calls and corrupts the wrong memory when it does. Every call carries
+/// its own `db` instead, so the workers share only the pool, which has its own
+/// lock.
+pub struct WorkspaceShared {
+    workspace: Workspace,
+    /// The database used when a call omits `db`. `None` makes `db` required.
+    default: Option<DbName>,
+    /// Names this server will serve, or empty for "any name in the workspace".
+    allowed: Vec<DbName>,
+    /// Whether a write to an unknown name creates it.
+    create: bool,
+}
+
+impl WorkspaceShared {
+    /// Wraps a workspace for serving.
+    pub fn new(
+        workspace: Workspace,
+        default: Option<DbName>,
+        allowed: Vec<DbName>,
+        create: bool,
+    ) -> Self {
+        Self {
+            workspace,
+            default,
+            allowed,
+            create,
+        }
+    }
+
+    /// The workspace itself — the janitor thread sweeps idle handles through it.
+    pub fn workspace(&self) -> &Workspace {
+        &self.workspace
+    }
+
+    /// The database served when a call omits `db`, if there is one. `None` is
+    /// what makes `db` a required argument in the advertised schema.
+    pub fn default_db(&self) -> Option<&DbName> {
+        self.default.as_ref()
+    }
+
+    /// Resolves the `db` argument of one call to an open database.
+    fn resolve(&self, tool: &str, args: Option<&Value>) -> Result<Database, String> {
+        let name = match arg_str(args, DB_ARG) {
+            Some(given) => DbName::parse(given).map_err(|e| e.to_string())?,
+            None => self
+                .default
+                .clone()
+                .ok_or_else(|| messages::WORKSPACE_DB_REQUIRED.to_string())?,
+        };
+        if !self.allowed.is_empty() && !self.allowed.contains(&name) {
+            return Err(format!(
+                "{name} is not one of the memories this server was started with"
+            ));
+        }
+        let missing = if self.create && CREATING_TOOLS.contains(&tool) {
+            IfMissing::Create
+        } else {
+            IfMissing::Fail
+        };
+        self.workspace
+            .get(&name, now_ms(), missing)
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Tool definitions a workspace server advertises: the ordinary set with a `db`
+/// argument threaded through, plus the two verbs for finding a name.
+///
+/// The `db` property is **injected** rather than written into fifteen schemas,
+/// so a tool's own definition stays the single description of that tool, and
+/// the three startup modes cannot drift apart:
+///
+/// | started with | `db` |
+/// |---|---|
+/// | `--db FILE` | not in the schema at all (this function is not called) |
+/// | `--workspace DIR --db NAME` | present, optional, defaulted |
+/// | `--workspace DIR` | present, required |
+///
+/// That the field *disappears* in the single-database case is the point. In
+/// MCP the model fills tool arguments, so a `db` field is a decision the model
+/// makes on every call — while the caller that spawned the server usually knew
+/// the answer for certain. Where the answer is already known, the question
+/// should not be asked: it cannot be got wrong, and it costs no tokens.
+pub fn definitions_ws(default: Option<&DbName>) -> Vec<Value> {
+    let mut out = definitions();
+    for tool in &mut out {
+        // The tools that answer without a database keep their schema: nobody
+        // should have to name a memory to ask what version is running.
+        if tool
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|n| STATELESS_TOOLS.contains(&n))
+        {
+            continue;
+        }
+        let Some(schema) = tool.get_mut("inputSchema") else {
+            continue;
+        };
+        schema["properties"][DB_ARG] = match default {
+            Some(name) => json!({
+                "type": "string",
+                "default": name.as_str(),
+                "description": messages::ARG_DB_OPTIONAL,
+            }),
+            None => json!({ "type": "string", "description": messages::ARG_DB }),
+        };
+        if default.is_none() {
+            let required = schema
+                .get_mut("required")
+                .and_then(Value::as_array_mut)
+                .map(std::mem::take)
+                .unwrap_or_default();
+            // `db` first: it is the one argument every one of these tools now
+            // shares, and reading it first is reading which memory this is about.
+            let mut with_db = vec![json!(DB_ARG)];
+            with_db.extend(required);
+            schema["required"] = Value::Array(with_db);
+        }
+    }
+    out.push(workspace_list_def());
+    out.push(workspace_find_def());
+    out
+}
+
+/// Execute a `tools/call` against a workspace server: resolve `db`, then hand
+/// the whole call to the ordinary single-database executor.
+///
+/// Resolution is the only thing this adds. Every verb behaves exactly as it
+/// does against one database, because it *is* the same code — there is no
+/// second implementation of `remember` to drift.
+pub fn call_ws(shared: &WorkspaceShared, id: Value, params: Option<&Value>) -> Value {
+    let Some(params) = params else {
+        return rpc::error(id, -32602, "missing params");
+    };
+    let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+    let args = params.get("arguments");
+
+    if let Some(reply) = stateless(name, &id, args) {
+        return reply;
+    }
+    match name {
+        WORKSPACE_LIST => match shared.workspace.entries() {
+            Ok(entries) => {
+                rpc::tool_result(id, render(&entries_json(&entries), format_arg(args)), false)
+            }
+            Err(e) => rpc::tool_result(id, e.to_string(), true),
+        },
+        WORKSPACE_FIND => {
+            let query = arg_str(args, "query").unwrap_or_default();
+            let k = arg_u64(args, "k").unwrap_or(8).min(64) as usize;
+            match shared.workspace.find(query, k, now_ms()) {
+                Ok(entries) => {
+                    rpc::tool_result(id, render(&entries_json(&entries), format_arg(args)), false)
+                }
+                Err(e) => rpc::tool_result(id, e.to_string(), true),
+            }
+        }
+        // Resolution runs only for a tool that will actually use a database:
+        // making an unrecognized name fail with "no such memory" would name the
+        // wrong problem.
+        name if DATABASE_TOOLS.contains(&name) => match shared.resolve(name, args) {
+            Ok(db) => call(&db, id, Some(params)),
+            Err(message) => rpc::tool_result(id, message, true),
+        },
+        other => rpc::tool_result(id, format!("unknown tool: {other}"), true),
+    }
+}
+
+/// Registry entries as JSON. `DbEntry` is a host type without `serde`, and
+/// adding a serialization dependency to the host for one wrapper's convenience
+/// would be the wrong trade.
+fn entries_json(entries: &[DbEntry]) -> Value {
+    Value::Array(
+        entries
+            .iter()
+            .map(|e| {
+                json!({
+                    "db": e.name.as_str(),
+                    "description": e.description,
+                    "tags": e.tags,
+                    "owner": e.owner,
+                    "archived": e.is_archived(),
+                })
+            })
+            .collect(),
+    )
+}
+
+fn workspace_list_def() -> Value {
+    simple_def(WORKSPACE_LIST, messages::WORKSPACE_LIST_TOOL)
+}
+
+fn workspace_find_def() -> Value {
+    json!({
+        "name": WORKSPACE_FIND,
+        "description": messages::WORKSPACE_FIND_TOOL,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": messages::ARG_WORKSPACE_QUERY },
+                "k": { "type": "integer", "minimum": 0, "description": messages::ARG_K },
+                "format": format_prop()
+            },
+            "required": ["query"]
+        }
+    })
 }
 
 /// Read-only `recall`: embed the query text with the server's embedder (if any)
@@ -633,11 +899,6 @@ fn settings_help_def() -> Value {
     format_only_def(SETTINGS_HELP, messages::SETTINGS_HELP_TOOL)
 }
 
-fn settings_help(db: &Database, id: Value, args: Option<&Value>) -> Value {
-    let _ = db;
-    rpc::tool_result(id, render(&settings_help_value(), format_arg(args)), false)
-}
-
 fn settings_help_value() -> Value {
     let help = plugmem_host::settings_help();
     let settings: Vec<_> = help
@@ -831,19 +1092,19 @@ mod tests {
     }
 
     /// A tool-call `params` object.
-    fn params(name: &str, args: Value) -> Value {
+    pub(super) fn params(name: &str, args: Value) -> Value {
         json!({ "name": name, "arguments": args })
     }
 
     /// The `text` field of a tool-call result envelope.
-    fn text(v: &Value) -> String {
+    pub(super) fn text(v: &Value) -> String {
         v["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
             .to_string()
     }
 
-    fn is_error(v: &Value) -> bool {
+    pub(super) fn is_error(v: &Value) -> bool {
         v["result"]["isError"].as_bool().unwrap()
     }
 
@@ -1263,6 +1524,400 @@ mod tests {
                 is_error(&call_ro(&reader, json!(11), Some(&params(verb, json!({}))))),
                 "{verb} must be refused"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::tests::{is_error, params, text};
+    use super::*;
+    use plugmem_host::{Config, Settings};
+
+    /// A unique temp directory; removed on drop.
+    struct TempDir(std::path::PathBuf);
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "plugmem-mcp-ws-{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            TempDir(dir)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn name(s: &str) -> DbName {
+        DbName::parse(s).unwrap()
+    }
+
+    fn shared(
+        tmp: &TempDir,
+        default: Option<&str>,
+        allow: &[&str],
+        create: bool,
+    ) -> WorkspaceShared {
+        let workspace = Settings::from_table(None)
+            .unwrap()
+            .open_workspace(&tmp.0)
+            .unwrap();
+        WorkspaceShared::new(
+            workspace,
+            default.map(name),
+            allow.iter().copied().map(name).collect(),
+            create,
+        )
+    }
+
+    /// Every tool that takes a `db` argument, with its schema.
+    fn db_prop(defs: &[Value], tool: &str) -> Option<Value> {
+        defs.iter()
+            .find(|d| d["name"] == tool)
+            .and_then(|d| d["inputSchema"]["properties"].get(DB_ARG).cloned())
+    }
+
+    fn required(defs: &[Value], tool: &str) -> Vec<String> {
+        defs.iter()
+            .find(|d| d["name"] == tool)
+            .and_then(|d| d["inputSchema"]["required"].as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .map(|v| v.as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_db_argument_appears_only_where_it_is_a_real_question() {
+        // One database: the field does not exist. This is the default mode and
+        // the one the model should never have to think about.
+        let plain = definitions();
+        assert_eq!(db_prop(&plain, REMEMBER), None);
+        assert_eq!(required(&plain, REMEMBER), ["text"]);
+        assert!(!plain.iter().any(|d| d["name"] == WORKSPACE_FIND));
+
+        // A workspace with a default: the field exists, is optional, and says
+        // what omitting it means.
+        let defaulted = definitions_ws(Some(&name("chat-42")));
+        let prop = db_prop(&defaulted, REMEMBER).unwrap();
+        assert_eq!(prop["default"], "chat-42");
+        assert_eq!(required(&defaulted, REMEMBER), ["text"]);
+
+        // A workspace with no default: required, and listed first — the first
+        // thing to settle is which memory this is about.
+        let bare = definitions_ws(None);
+        assert!(db_prop(&bare, REMEMBER).unwrap().get("default").is_none());
+        assert_eq!(required(&bare, REMEMBER), [DB_ARG, "text"]);
+        // Even a tool that required nothing before now requires `db`.
+        assert_eq!(required(&bare, STATS), [DB_ARG]);
+
+        // Both workspace modes advertise the two verbs for finding a name.
+        for defs in [&defaulted, &bare] {
+            assert!(defs.iter().any(|d| d["name"] == WORKSPACE_LIST));
+            assert!(defs.iter().any(|d| d["name"] == WORKSPACE_FIND));
+        }
+    }
+
+    #[test]
+    fn every_tool_is_either_database_scoped_or_deliberately_not() {
+        // The two sets together are exactly what the server advertises, so a
+        // tool added later cannot quietly land in neither — which would leave
+        // it unroutable in workspace mode.
+        let mut advertised: Vec<String> = definitions()
+            .iter()
+            .map(|d| d["name"].as_str().unwrap().to_string())
+            .collect();
+        advertised.sort();
+        let mut known: Vec<String> = DATABASE_TOOLS
+            .iter()
+            .chain(STATELESS_TOOLS)
+            .map(|s| (*s).to_string())
+            .collect();
+        known.sort();
+        assert_eq!(advertised, known);
+
+        // Database-scoped tools gained `db`; the others deliberately did not.
+        let bare = definitions_ws(None);
+        for tool in DATABASE_TOOLS {
+            assert!(db_prop(&bare, tool).is_some(), "{tool} has no {DB_ARG}");
+        }
+        for tool in STATELESS_TOOLS {
+            assert_eq!(
+                db_prop(&bare, tool),
+                None,
+                "{tool} should not take {DB_ARG}"
+            );
+        }
+    }
+
+    #[test]
+    fn asking_what_version_is_running_needs_no_memory() {
+        let tmp = TempDir::new("stateless");
+        let ws = shared(&tmp, None, &[], true);
+        for tool in STATELESS_TOOLS {
+            let out = call_ws(&ws, json!(1), Some(&params(tool, json!({}))));
+            assert!(!is_error(&out), "{tool}: {}", text(&out));
+        }
+    }
+
+    #[test]
+    fn a_call_reaches_the_named_database_and_only_that_one() {
+        let tmp = TempDir::new("route");
+        let ws = shared(&tmp, None, &[], true);
+
+        for (db, fact) in [
+            ("chat-42", "the sky is blue"),
+            ("chat-43", "the sky is red"),
+        ] {
+            let out = call_ws(
+                &ws,
+                json!(1),
+                Some(&params(REMEMBER, json!({ "db": db, "text": fact }))),
+            );
+            assert!(!is_error(&out), "{}", text(&out));
+        }
+
+        let out = call_ws(
+            &ws,
+            json!(2),
+            Some(&params(RECALL, json!({ "db": "chat-42", "query": "sky" }))),
+        );
+        assert!(text(&out).contains("the sky is blue"), "{}", text(&out));
+        assert!(!text(&out).contains("the sky is red"), "{}", text(&out));
+    }
+
+    #[test]
+    fn without_a_default_the_db_argument_is_required_at_call_time_too() {
+        let tmp = TempDir::new("required");
+        let ws = shared(&tmp, None, &[], true);
+
+        // A schema says required; a server must enforce it, because a model
+        // that omits it must be told, not silently served someone else's memory.
+        let out = call_ws(&ws, json!(1), Some(&params(STATS, json!({}))));
+        assert!(is_error(&out));
+        assert!(
+            text(&out).contains("plugmem_workspace_find"),
+            "{}",
+            text(&out)
+        );
+
+        // With a default, the same call works and means the default.
+        let ws = shared(&tmp, Some("chat-42"), &[], true);
+        call_ws(
+            &ws,
+            json!(2),
+            Some(&params(REMEMBER, json!({ "text": "a fact" }))),
+        );
+        let out = call_ws(&ws, json!(3), Some(&params(STATS, json!({}))));
+        assert!(!is_error(&out));
+        assert!(text(&out).contains("\"facts\":1"), "{}", text(&out));
+    }
+
+    #[test]
+    fn creation_follows_the_verb_not_the_name() {
+        let tmp = TempDir::new("create");
+        let ws = shared(&tmp, None, &[], true);
+
+        // Reading a name nobody has used is a typo far more often than it is a
+        // new memory, so it is refused rather than answered with nothing.
+        let out = call_ws(
+            &ws,
+            json!(1),
+            Some(&params(RECALL, json!({ "db": "typo", "query": "x" }))),
+        );
+        assert!(is_error(&out));
+        assert!(text(&out).contains("typo"));
+        assert!(!ws.workspace().layout().exists(&name("typo")));
+
+        // Writing to one creates it: that is how a new conversation gets a
+        // memory without a registration step.
+        let out = call_ws(
+            &ws,
+            json!(2),
+            Some(&params(
+                REMEMBER,
+                json!({ "db": "chat-99", "text": "hello" }),
+            )),
+        );
+        assert!(!is_error(&out), "{}", text(&out));
+        assert!(ws.workspace().layout().exists(&name("chat-99")));
+
+        // --no-create turns even that off.
+        let strict = shared(&tmp, None, &[], false);
+        let out = call_ws(
+            &strict,
+            json!(3),
+            Some(&params(
+                REMEMBER,
+                json!({ "db": "chat-100", "text": "hello" }),
+            )),
+        );
+        assert!(is_error(&out));
+        assert!(!ws.workspace().layout().exists(&name("chat-100")));
+    }
+
+    #[test]
+    fn a_name_outside_the_alphabet_or_the_allow_set_is_refused() {
+        let tmp = TempDir::new("refuse");
+        let ws = shared(&tmp, None, &["chat-42"], true);
+
+        // Not a name at all — refused by the type, before any path is built.
+        let out = call_ws(
+            &ws,
+            json!(1),
+            Some(&params(STATS, json!({ "db": "../etc/passwd" }))),
+        );
+        assert!(is_error(&out));
+        assert!(text(&out).contains("not a usable database name"));
+
+        // A perfectly good name this server was not started for.
+        let out = call_ws(
+            &ws,
+            json!(2),
+            Some(&params(STATS, json!({ "db": "other" }))),
+        );
+        assert!(is_error(&out));
+        assert!(text(&out).contains("not one of the memories"));
+
+        // The allowed one works.
+        call_ws(
+            &ws,
+            json!(3),
+            Some(&params(REMEMBER, json!({ "db": "chat-42", "text": "x" }))),
+        );
+        let out = call_ws(
+            &ws,
+            json!(4),
+            Some(&params(STATS, json!({ "db": "chat-42" }))),
+        );
+        assert!(!is_error(&out));
+    }
+
+    #[test]
+    fn the_workspace_verbs_return_names_to_use_as_db() {
+        let tmp = TempDir::new("find");
+        let ws = shared(&tmp, None, &[], true);
+        ws.workspace()
+            .describe(
+                &name("chat-42"),
+                1_000,
+                plugmem_host::Description {
+                    text: "release planning and performance work",
+                    tags: &["kind:chat"],
+                    owner: Some("ann"),
+                },
+            )
+            .unwrap();
+
+        let listed = call_ws(&ws, json!(1), Some(&params(WORKSPACE_LIST, json!({}))));
+        assert!(
+            text(&listed).contains("\"db\":\"chat-42\""),
+            "{}",
+            text(&listed)
+        );
+        assert!(text(&listed).contains("\"owner\":\"ann\""));
+        assert!(text(&listed).contains("\"archived\":false"));
+
+        let found = call_ws(
+            &ws,
+            json!(2),
+            Some(&params(
+                WORKSPACE_FIND,
+                json!({ "query": "release planning" }),
+            )),
+        );
+        assert!(
+            text(&found).contains("\"db\":\"chat-42\""),
+            "{}",
+            text(&found)
+        );
+
+        // And the name that came back is usable as `db` — the whole point.
+        let out = call_ws(
+            &ws,
+            json!(3),
+            Some(&params(STATS, json!({ "db": "chat-42" }))),
+        );
+        assert!(!is_error(&out));
+    }
+
+    #[test]
+    fn concurrent_calls_to_different_databases_do_not_cross() {
+        let tmp = TempDir::new("concurrent");
+        let ws = std::sync::Arc::new(shared(&tmp, None, &[], true));
+        let dbs = ["a", "b", "c", "d"];
+        for db in dbs {
+            call_ws(
+                &ws,
+                json!(0),
+                Some(&params(
+                    REMEMBER,
+                    json!({ "db": db, "text": format!("i am {db}") }),
+                )),
+            );
+        }
+
+        // The direct test for the race a "switch database" verb would have
+        // created: many workers, one shared server, each asking for a different
+        // memory. Every answer must be its own.
+        let mut handles = Vec::new();
+        for db in dbs {
+            for _ in 0..8 {
+                let ws = std::sync::Arc::clone(&ws);
+                handles.push(std::thread::spawn(move || {
+                    let out = call_ws(
+                        &ws,
+                        json!(1),
+                        Some(&params(RECALL, json!({ "db": db, "query": "i am" }))),
+                    );
+                    assert!(
+                        text(&out).contains(&format!("i am {db}")),
+                        "{db} got {}",
+                        text(&out)
+                    );
+                    for other in dbs.iter().filter(|o| **o != db) {
+                        assert!(!text(&out).contains(&format!("i am {other}")));
+                    }
+                }));
+            }
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn an_unknown_tool_and_missing_params_behave_as_they_do_elsewhere() {
+        let tmp = TempDir::new("misc");
+        let ws = shared(&tmp, Some("chat-42"), &[], true);
+
+        assert_eq!(call_ws(&ws, json!(1), None)["error"]["code"], -32602);
+        let out = call_ws(&ws, json!(2), Some(&params("plugmem_nope", json!({}))));
+        assert!(is_error(&out));
+        assert!(text(&out).contains("unknown tool"));
+    }
+
+    #[test]
+    fn a_registry_failure_is_a_tool_error_not_a_panic() {
+        let tmp = TempDir::new("registry-busy");
+        let ws = shared(&tmp, None, &[], true);
+        // Hold the registry from "another process" so opening it fails.
+        std::fs::create_dir_all(&tmp.0).unwrap();
+        let _held = Database::open(ws.workspace().layout().registry_path(), Config::default())
+            .unwrap()
+            .0;
+
+        for tool in [WORKSPACE_LIST, WORKSPACE_FIND] {
+            let out = call_ws(&ws, json!(1), Some(&params(tool, json!({ "query": "x" }))));
+            assert!(is_error(&out), "{tool}");
         }
     }
 }

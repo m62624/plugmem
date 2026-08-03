@@ -31,11 +31,13 @@
     "node": ">= 16"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^2.18.4"
+    "@napi-rs/cli": "^2.18.4",
+    "typescript": "^5.9.3"
   },
   "scripts": {
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
-    "test": "node --test __test__/*.test.mjs"
+    "test": "node --test __test__/*.test.mjs",
+    "typecheck": "tsc -p tsconfig.json"
   }
 }

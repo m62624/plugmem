@@ -36,17 +36,23 @@ mod settings;
 #[cfg(feature = "config")]
 mod settings_help;
 mod storage;
+mod workspace;
 
 pub use db::{Database, DatabaseBuilder, ExportedFact, FactSnapshot, RecoverReport};
-pub use embedder::{Embedder, NullEmbedder, OpenAiCompatEmbedder};
+pub use embedder::{Embedder, NullEmbedder, OpenAiCompatEmbedder, SharedEmbedder};
 pub use error::HostError;
 pub use paths::{default_config_dir, default_config_path, default_data_dir, default_database_path};
 pub use readonly::{ReadOnlyDatabase, Scrub};
 #[cfg(feature = "config")]
-pub use settings::{Settings, SettingsError, read_config};
+pub use settings::{Settings, SettingsError, WorkspaceSettings, read_config};
 #[cfg(feature = "config")]
 pub use settings_help::{SettingDoc, SettingScope, SettingsHelp, settings_help};
 pub use storage::{FileScratch, FileStorage, FsyncPolicy};
+pub use workspace::{
+    ARCHIVED_TAG, DEFAULT_IDLE_TIMEOUT_MS, DEFAULT_MAX_OPEN, DbEntry, DbName, Description,
+    ENTRY_TAG, IfMissing, MAX_DB_NAME, MAX_OPEN_CEILING, NameProblem, Opener, ReindexReport,
+    SELF_ENTITY, Workspace, WorkspaceError, WorkspaceIssue, WorkspaceLayout, WorkspaceLimits,
+};
 
 // The engine types a host caller works with, re-exported so simple
 // embedders need only this crate.

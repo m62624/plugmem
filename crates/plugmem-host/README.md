@@ -190,6 +190,29 @@ journal tail for speed. On open, the journal is replayed over the
 snapshot deterministically; a torn tail from a crash mid-append is
 detected, dropped and reported.
 
+## Workspaces (optional)
+
+**Default: one `Database`, one file.** `Workspace` is for a process serving many
+independent memories — a directory of named databases, opened on demand and
+pooled, plus an optional registry of what each is for.
+
+```rust,no_run
+use plugmem_host::{DbName, IfMissing, Settings};
+
+let ws = Settings::load(None)?.open_workspace("/srv/bot".as_ref())?;
+let db = ws.get(&DbName::parse("chat-42")?, now_ms, IfMissing::Create)?;
+# fn now_ms() -> u64 { 0 }
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+A name is `[a-z0-9][a-z0-9_-]*` and cannot represent a path, so it resolves to
+exactly one file inside the directory. The pool bounds how many stay open;
+`close_idle` releases the rest, which matters because an open writer holds the
+file's exclusive lock — the timeout is a liveness setting, not a memory one.
+
+The core is untouched by any of this: one `Memory` is still one database.
+See [`specs/10-workspace.md`](https://github.com/m62624/plugmem/blob/main/specs/10-workspace.md).
+
 ## Concurrency model
 
 The engine is single-writer by design. The host runs a WAL/MVCC-style
