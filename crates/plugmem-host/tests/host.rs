@@ -1826,7 +1826,16 @@ fn metadata_round_trips_through_get_and_export_sorted() {
 #[test]
 fn a_growing_database_reshards_itself_without_being_asked() {
     let tmp = TempDir::new("reshard");
-    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    // This test proves the automatic layout transition, not per-record
+    // durability or the ordinary snapshot cadence. Keep those policies out of
+    // the workload: on Windows, the default EachOp journal sync would turn
+    // the ~175k records below into a many-minute CI durability benchmark.
+    let (db, _) = Database::builder(cfg())
+        .fsync(FsyncPolicy::OnSnapshot)
+        .snapshot_every_ops(0)
+        .snapshot_journal_bytes(0)
+        .open(tmp.db())
+        .unwrap();
     let floor = db.stats().shards;
 
     // Enough facts to push the fact arena one step past the floor. The rule
