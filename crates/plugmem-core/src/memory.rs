@@ -607,8 +607,20 @@ impl<'a> Memory<'a> {
             }
         }
         let summaries_trustworthy = self.bm25_tokenizer_version == TOKENIZER_INDEX_VERSION;
+        // Without a vector on the new fact, a lexical overlap is the only hint
+        // a candidate can produce, so one ruled out by the summary contributes
+        // nothing whatever its record says — and its record is the second
+        // arena lookup of the pair this loop would otherwise pay per
+        // candidate. (`new_terms` is non-empty here: the two being empty
+        // together returned above.)
+        let lexical_only = new_vec.is_none();
         let mut cand_terms: Vec<u32> = Vec::new();
         for &fact in ring.iter().take(n.min(SIMILAR_CANDIDATE_CAP)) {
+            let may_overlap = !new_terms.is_empty()
+                && self.overlap_possible(fact, &new_terms, summaries_trustworthy);
+            if lexical_only && !may_overlap {
+                continue;
+            }
             let Some(record) = self.fact(fact) else {
                 continue;
             };
@@ -620,10 +632,7 @@ impl<'a> Memory<'a> {
             let mut lexical = None;
             // Deferred validation: a load no longer scans the
             // text pool, so an unreadable text simply yields no lexical signal.
-            if !new_terms.is_empty()
-                && self.overlap_possible(fact, &new_terms, summaries_trustworthy)
-                && let Ok(text) = core::str::from_utf8(self.texts.get(record.text))
-            {
+            if may_overlap && let Ok(text) = core::str::from_utf8(self.texts.get(record.text)) {
                 cand_terms.clear();
                 let terms = &self.terms;
                 let cand = &mut cand_terms;
