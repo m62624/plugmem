@@ -173,6 +173,10 @@ const DATABASE_SCALE_ROWS: &[(&str, &str, &str)] = &[
     ("text_only", "writer_diagnostic/text_only", "p50_us"),
     ("tag + range", "writer_diagnostic/text_tag_range", "p50_us"),
     ("full hybrid", "writer_diagnostic/full_hybrid", "p50_us"),
+    // The degenerate lexical query: one term the corpus uses everywhere, so
+    // its posting list is the corpus. Charted next to the others because the
+    // worst case is the number a caller has to budget for.
+    ("common term", "writer_diagnostic/text_common", "p50_us"),
 ];
 
 /// Like-for-like edge-lifecycle comparison series. Rows come from

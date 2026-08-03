@@ -47,7 +47,7 @@ fn bm25_decode_work_is_bounded() {
     }
     let mut scratch = Bm25Scratch::new();
     let mut out = Vec::new();
-    idx.reset_decoded();
+    idx.reset_query_counters();
     // One common + one mid + one rare term, the bench query shape.
     idx.search(
         (1.2, 0.75),
@@ -65,6 +65,70 @@ fn bm25_decode_work_is_bounded() {
     let df_sum = u64::from(idx.df(1) + idx.df(400) + idx.df(2500));
     assert_eq!(idx.decoded(), df_sum, "decodes must equal Σ df");
     assert_eq!(df_sum, 1_399, "corpus drifted: Σ df changed");
+}
+
+/// The two counters that separate cheap work from expensive work.
+///
+/// `decoded` is varint arithmetic over a contiguous chunk chain — nanoseconds
+/// per entry, and it is legitimately O(Σ df). `scored` and `admitted` are the
+/// random probes: a document-length lookup and a fact-record lookup, each into
+/// an arena whose depth and cache behavior degrade with the corpus. Those two
+/// are what make a lexical query cost milliseconds instead of microseconds, so
+/// they get their own ceilings, lowered-only.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn bm25_probe_work_is_bounded() {
+    let mut idx = Bm25Index::new(2048, usize::MAX).unwrap();
+    for (fact, terms) in corpus().iter().enumerate() {
+        idx.index_doc(FactId(fact as u32), terms).unwrap();
+    }
+    let mut scratch = Bm25Scratch::new();
+    let mut out = Vec::new();
+
+    // The ordinary query shape: one common + one mid + one rare term.
+    idx.reset_query_counters();
+    idx.search(
+        (1.2, 0.75),
+        &[1, 400, 2500],
+        8,
+        &mut |_| true,
+        &mut scratch,
+        &mut out,
+    );
+    assert!(!out.is_empty());
+    assert!(
+        idx.scored() <= 1_399,
+        "documents scored: {} > 1399",
+        idx.scored()
+    );
+    assert!(
+        idx.admitted() <= 1_394,
+        "live predicate calls: {} > 1394",
+        idx.admitted()
+    );
+
+    // The degenerate query: the single most frequent term of the corpus, whose
+    // posting list is most of the corpus. Only `k` documents can be returned,
+    // so the probe counters must not scale with `df` — this is the ceiling
+    // that the millisecond worst case shows up in.
+    idx.reset_query_counters();
+    idx.search((1.2, 0.75), &[0], 8, &mut |_| true, &mut scratch, &mut out);
+    assert!(!out.is_empty());
+    assert_eq!(
+        u64::from(idx.df(0)),
+        4_388,
+        "corpus drifted: df of the most common term"
+    );
+    assert!(
+        idx.scored() <= 4_388,
+        "documents scored for one common term: {} > 4388",
+        idx.scored()
+    );
+    assert!(
+        idx.admitted() <= 4_388,
+        "live predicate calls for one common term: {} > 4388",
+        idx.admitted()
+    );
 }
 
 // 5000-vector pool: minutes under the miri interpreter, no extra UB coverage

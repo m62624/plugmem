@@ -89,6 +89,22 @@ pub struct Bm25Index<'a> {
     /// deterministic cost metric of the lexical source.
     #[cfg(feature = "counters")]
     decoded: Cell<u64>,
+    /// Documents whose BM25 contribution was actually evaluated — a document
+    /// length fetched and `tf_norm` computed (feature `counters`).
+    ///
+    /// Decoding a posting entry is a few nanoseconds of varint; *scoring* it
+    /// costs a document-length lookup, which is a random probe into an arena
+    /// that grows with the corpus. The two counters therefore measure
+    /// different things, and this is the one that dominates a large query.
+    #[cfg(feature = "counters")]
+    scored: Cell<u64>,
+    /// Calls to the caller's `live` predicate (feature `counters`).
+    ///
+    /// Every call is a fact-record lookup on the engine side — the second
+    /// random probe per candidate. A candidate that cannot reach the top `k`
+    /// should never cost one.
+    #[cfg(feature = "counters")]
+    admitted: Cell<u64>,
 }
 
 impl<'a> Bm25Index<'a> {
@@ -104,6 +120,10 @@ impl<'a> Bm25Index<'a> {
             total_len: 0,
             #[cfg(feature = "counters")]
             decoded: Cell::new(0),
+            #[cfg(feature = "counters")]
+            scored: Cell::new(0),
+            #[cfg(feature = "counters")]
+            admitted: Cell::new(0),
         })
     }
 
@@ -204,6 +224,8 @@ impl<'a> Bm25Index<'a> {
         let avg_len = self.total_len as f32 / self.total_docs as f32;
         #[cfg(feature = "counters")]
         let mut decoded = 0u64;
+        #[cfg(feature = "counters")]
+        let mut scored = 0u64;
         for &term in terms {
             let df = self.postings.count(term);
             if df == 0 {
@@ -218,6 +240,10 @@ impl<'a> Bm25Index<'a> {
                 let Some(doc) = self.doc_len.get(&fact.0.to_be_bytes()) else {
                     continue;
                 };
+                #[cfg(feature = "counters")]
+                {
+                    scored += 1;
+                }
                 let tf = f32::from(tf);
                 let norm =
                     tf * (k1 + 1.0) / (tf + k1 * (1.0 - b + b * f32::from(doc.len) / avg_len));
@@ -225,7 +251,12 @@ impl<'a> Bm25Index<'a> {
             }
         }
         #[cfg(feature = "counters")]
-        self.decoded.set(self.decoded.get() + decoded);
+        {
+            self.decoded.set(self.decoded.get() + decoded);
+            self.scored.set(self.scored.get() + scored);
+            self.admitted
+                .set(self.admitted.get() + scratch.acc.len() as u64);
+        }
 
         // Top-k: collect survivors, sort the (small) buffer. k is ≤ 64 in
         // the engine; a heap would not buy anything at these sizes.
@@ -278,6 +309,10 @@ impl<'a> Bm25Index<'a> {
             total_len,
             #[cfg(feature = "counters")]
             decoded: Cell::new(0),
+            #[cfg(feature = "counters")]
+            scored: Cell::new(0),
+            #[cfg(feature = "counters")]
+            admitted: Cell::new(0),
         }
     }
 
@@ -287,9 +322,25 @@ impl<'a> Bm25Index<'a> {
         self.decoded.get()
     }
 
-    /// Resets the decode counter (feature `counters`).
+    /// Documents scored so far — document-length fetches (feature
+    /// `counters`). See the [`Bm25Index::scored`] field docs for why this is
+    /// tracked apart from [`Bm25Index::decoded`].
     #[cfg(feature = "counters")]
-    pub fn reset_decoded(&self) {
+    pub fn scored(&self) -> u64 {
+        self.scored.get()
+    }
+
+    /// `live` predicate calls so far (feature `counters`).
+    #[cfg(feature = "counters")]
+    pub fn admitted(&self) -> u64 {
+        self.admitted.get()
+    }
+
+    /// Resets the query work counters (feature `counters`).
+    #[cfg(feature = "counters")]
+    pub fn reset_query_counters(&self) {
         self.decoded.set(0);
+        self.scored.set(0);
+        self.admitted.set(0);
     }
 }
