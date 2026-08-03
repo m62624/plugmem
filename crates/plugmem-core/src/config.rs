@@ -7,7 +7,53 @@
 
 use alloc::vec::Vec;
 
+use plugmem_arena::PAGE_BYTES;
+
 use crate::error::Error;
+
+/// Runtime metadata an arena keeps per shard: the `heads`, `tails` and
+/// `dir_at` vectors, one `u32` each.
+const SHARD_META_BYTES: usize = 3 * core::mem::size_of::<u32>();
+/// Pages per shard the engine aims for. A shard's page directory is sorted,
+/// so an insert in the middle memmoves within it — keeping the page count per
+/// shard bounded is what keeps that cost bounded.
+pub const PAGES_PER_SHARD: usize = 12;
+/// Payload bytes one shard is meant to hold: [`PAGES_PER_SHARD`] pages.
+pub const SHARD_TARGET_BYTES: usize = PAGES_PER_SHARD * PAGE_BYTES;
+
+/// Largest shard count any arena may be configured with.
+///
+/// A shard count arrives from an untrusted snapshot, and `Arena::new` turns it
+/// straight into three vectors plus a page pool — so it is an allocation size
+/// taken from a file, and those need a ceiling. This one is derived, not
+/// picked:
+///
+/// - `MAX_SHARDS * PAGE_BYTES` is 256 MiB, which fits a 32-bit `usize`, so page
+///   arithmetic cannot overflow on wasm32;
+/// - per-shard runtime metadata stays bounded at
+///   `MAX_SHARDS * SHARD_META_BYTES` (768 KiB) per arena;
+/// - it cannot bind on a database that can actually exist: the default 2 GiB
+///   pool ceiling at [`SHARD_TARGET_BYTES`] per shard justifies at most
+///   `2 GiB / SHARD_TARGET_BYTES` ≈ 43690 shards, which rounds up to exactly
+///   this value. Anything larger describes a database no pool could hold.
+pub const MAX_SHARDS: usize = 1 << 16;
+
+/// Ceiling for one arena's per-shard runtime metadata, which is what stops
+/// [`MAX_SHARDS`] from being a number someone can raise without noticing the
+/// cost: every arena pays this, and the engine builds roughly a dozen.
+const MAX_SHARD_META_BYTES: usize = 1024 * 1024;
+
+const _: () = {
+    assert!(MAX_SHARDS.is_power_of_two());
+    // The wasm32 bound: pages of every shard must be addressable there.
+    assert!(MAX_SHARDS <= u32::MAX as usize / PAGE_BYTES);
+    // The metadata bound.
+    assert!(MAX_SHARDS * SHARD_META_BYTES <= MAX_SHARD_META_BYTES);
+    // The "cannot bind in practice" bound, spelled out so a change to
+    // PAGES_PER_SHARD that invalidates it fails the build instead of silently
+    // turning MAX_SHARDS into a real limit.
+    assert!(MAX_SHARDS >= (2 * 1024 * 1024 * 1024usize) / SHARD_TARGET_BYTES);
+};
 
 /// Serialized width of one `u64`-encoded size field.
 const U64_BYTES: usize = core::mem::size_of::<u64>();
@@ -174,24 +220,40 @@ impl Config {
         if self.dim > 4096 {
             return Err(Error::ConfigMismatch("dim must be <= 4096"));
         }
-        for (shards, what) in [
-            (self.shards_facts, "shards_facts must be a power of two"),
+        // Both checks matter for untrusted input: a snapshot supplies these,
+        // and `Arena::new` turns each straight into an allocation size.
+        for (shards, not_pow2, too_many) in [
+            (
+                self.shards_facts,
+                "shards_facts must be a power of two",
+                "shards_facts exceeds MAX_SHARDS",
+            ),
             (
                 self.shards_entities,
                 "shards_entities must be a power of two",
+                "shards_entities exceeds MAX_SHARDS",
             ),
-            (self.shards_edges, "shards_edges must be a power of two"),
+            (
+                self.shards_edges,
+                "shards_edges must be a power of two",
+                "shards_edges exceeds MAX_SHARDS",
+            ),
             (
                 self.shards_temporal,
                 "shards_temporal must be a power of two",
+                "shards_temporal exceeds MAX_SHARDS",
             ),
             (
                 self.shards_postings,
                 "shards_postings must be a power of two",
+                "shards_postings exceeds MAX_SHARDS",
             ),
         ] {
             if !shards.is_power_of_two() {
-                return Err(Error::ConfigMismatch(what));
+                return Err(Error::ConfigMismatch(not_pow2));
+            }
+            if shards > MAX_SHARDS {
+                return Err(Error::ConfigMismatch(too_many));
             }
         }
         if self.max_text == 0 || self.max_text > self.max_blob {

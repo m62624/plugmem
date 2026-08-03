@@ -5,8 +5,8 @@
 use plugmem_arena::{Arena, ArenaCfg, ShardMode, Slot};
 use plugmem_core::model::EdgeHistorySlot;
 use plugmem_core::{
-    Config, EdgeSlot, Error, FactId, LinkInput, MemScratch, MemStorage, Memory, RecallQuery,
-    RememberInput, Scratch, Storage, UnlinkInput,
+    Config, EdgeSlot, Error, FactId, LinkInput, MAX_SHARDS, MemScratch, MemStorage, Memory,
+    RecallQuery, RememberInput, Scratch, Storage, UnlinkInput,
     snapshot::{Snapshot, SnapshotWriter},
 };
 
@@ -27,6 +27,12 @@ const SNAP_ALIGN: usize = 64;
 const SNAP_FLAGS_AT: usize = 6;
 const SNAP_SECTION_COUNT_AT: usize = 8;
 const SNAP_CONFIG_LEN_AT: usize = 16;
+/// Width of one size field inside the config block (all are `u64`).
+const CFG_U64: usize = 8;
+/// Offset of `shards_facts` in the config block: it follows `dim`,
+/// `max_bytes`, `max_text` and `max_blob`, and the five shard counts are
+/// consecutive from there.
+const CFG_SHARDS_AT: usize = 4 * CFG_U64;
 const SNAP_CREATED_AT: usize = 28;
 const KIND_ENGINE_STATE: u16 = 36;
 const KIND_EDGES_OUT_META: u16 = 50;
@@ -372,6 +378,33 @@ fn config_gates_reject_structural_drift() {
     other.w_bm25 = 2.0;
     other.rrf_k = 30;
     assert!(Memory::from_bytes(Some(&bytes), &[], other).is_ok());
+}
+
+#[test]
+fn a_snapshot_claiming_absurdly_many_shards_is_refused_before_allocating() {
+    let (mut mem, mut store) = (Memory::new(cfg()).unwrap(), MemStorage::new());
+    workload(&mut mem, &mut store);
+    let bytes = mem.snapshot_bytes(0);
+
+    // A shard count is an allocation size taken from the file: the arena turns
+    // it straight into per-shard vectors plus a page pool. Left unbounded, the
+    // value below asks the loader for gigabytes before anything else is read.
+    let hostile = (MAX_SHARDS * 2) as u64;
+    for (field, message) in [
+        (0usize, "shards_facts exceeds MAX_SHARDS"),
+        (1, "shards_entities exceeds MAX_SHARDS"),
+        (2, "shards_edges exceeds MAX_SHARDS"),
+        (3, "shards_temporal exceeds MAX_SHARDS"),
+        (4, "shards_postings exceeds MAX_SHARDS"),
+    ] {
+        let mut damaged = bytes.clone();
+        let at = SNAP_HEADER + CFG_SHARDS_AT + field * CFG_U64;
+        damaged[at..at + CFG_U64].copy_from_slice(&hostile.to_le_bytes());
+        assert_eq!(
+            Memory::from_bytes(Some(&damaged), &[], cfg()).unwrap_err(),
+            Error::ConfigMismatch(message)
+        );
+    }
 }
 
 #[test]

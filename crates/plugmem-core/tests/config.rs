@@ -1,7 +1,7 @@
 //! Config validation tests: the defaults pass, and every documented range
 //! check fires with its own message (each `validate` branch is reachable).
 
-use plugmem_core::{Config, Error};
+use plugmem_core::{Config, Error, MAX_SHARDS};
 
 /// Asserts that mutating one field trips `validate` with `msg`.
 fn rejects(mutate: impl FnOnce(&mut Config), msg: &str) {
@@ -57,6 +57,26 @@ fn every_range_check_fires() {
     rejects(
         |c| c.shards_postings = 6,
         "shards_postings must be a power of two",
+    );
+    rejects(
+        |c| c.shards_facts = MAX_SHARDS * 2,
+        "shards_facts exceeds MAX_SHARDS",
+    );
+    rejects(
+        |c| c.shards_entities = MAX_SHARDS * 2,
+        "shards_entities exceeds MAX_SHARDS",
+    );
+    rejects(
+        |c| c.shards_edges = MAX_SHARDS * 2,
+        "shards_edges exceeds MAX_SHARDS",
+    );
+    rejects(
+        |c| c.shards_temporal = MAX_SHARDS * 2,
+        "shards_temporal exceeds MAX_SHARDS",
+    );
+    rejects(
+        |c| c.shards_postings = MAX_SHARDS * 2,
+        "shards_postings exceeds MAX_SHARDS",
     );
     rejects(|c| c.max_text = 0, "max_text must be in 1..=max_blob");
     rejects(

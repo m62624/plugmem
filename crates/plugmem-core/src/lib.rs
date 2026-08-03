@@ -31,7 +31,7 @@ pub mod snapshot;
 pub mod storage;
 pub mod tokenizer;
 
-pub use config::Config;
+pub use config::{Config, MAX_SHARDS};
 pub use error::Error;
 pub use id::{EdgeId, EntityId, FactId, NONE_U32};
 pub use memory::{

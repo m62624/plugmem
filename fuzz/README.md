@@ -61,6 +61,15 @@ never reach, and one that turns untrusted bytes into an allocation size.
 `summarized.snap` is the same shape of database in the current format. When a
 layout changes, add an image in the new one and leave the old ones alone.
 
+`huge-shards.snap` is the exception to "real images produced by the CLI": it is
+`summarized.snap` with one field rewritten to a shard count far past
+`MAX_SHARDS`. A shard count is a number the loader takes from the file and hands
+to the arena as an allocation size, and the value chosen is a power of two — so
+the shape check passes and only the ceiling stands between the file and a
+multi-gigabyte request. The seed exists so that region is reached on the first
+run instead of after the fuzzer guesses a valid header, a valid section table
+and a plausible power of two.
+
 `corpus/` is the fuzzer's own working set. It is **ignored by git**: a single
 run grows it by thousands of files, all derived from the seeds. Pass it first
 and `seeds/` second so libFuzzer writes new finds into the corpus and treats

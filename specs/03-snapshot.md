@@ -114,7 +114,11 @@ A snapshot can come from anywhere (a wasm host, a foreign file). The loader cont
   records are not range-checked, so any derived array sized from one is capped by
   what the data justifies and falls back to a lookup past the cap. `usize` is 32 bits
   on wasm32, so this is also where an offset computation has to be provably in range
-  there — compute in `u64` and compare against a real slice length before casting;
+  there — compute in `u64` and compare against a real slice length before casting.
+  The config block's shard counts are the sharpest case: each is handed straight to an
+  arena as the length of its per-shard vectors, so `validate` bounds them by
+  `MAX_SHARDS` — a ceiling derived from the 32-bit page arithmetic and the per-arena
+  metadata budget, and set high enough that no database a pool can hold ever reaches it;
 - **open trusts the file by default** (the SQLite model): the container xxh3 is not
   read on open, so a large database opens sparse. Integrity is on demand: `scrub()` is
   byte-level (per-section + file_hash xxh3, resumable), `verify()` is content-level
