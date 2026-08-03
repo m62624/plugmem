@@ -27,11 +27,17 @@
 //! The registry lives in the root while the databases live one level down, so
 //! no name can ever collide with it.
 
+mod registry;
+
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::{Database, HostError};
+
+pub use registry::{
+    ARCHIVED_TAG, DbEntry, Description, ENTRY_TAG, ReindexReport, SELF_ENTITY, WorkspaceIssue,
+};
 
 /// Longest database name a workspace accepts, in bytes.
 ///
@@ -370,6 +376,7 @@ pub struct Workspace {
     open: Opener,
     limits: WorkspaceLimits,
     pool: Mutex<Vec<Pooled>>,
+    registry: Mutex<Option<Database>>,
 }
 
 impl Workspace {
@@ -380,7 +387,48 @@ impl Workspace {
             open,
             limits,
             pool: Mutex::new(Vec::new()),
+            registry: Mutex::new(None),
         }
+    }
+
+    /// The registry database, opened on first use.
+    ///
+    /// Lazily, and that matters: a process that only ever resolves names it was
+    /// given never opens the registry, so it neither creates the file nor holds
+    /// a lock on it. The registry is a search index — a caller that is not
+    /// searching should not pay for it, and two processes that never search can
+    /// share one workspace without contending over it.
+    ///
+    /// It lives outside the handle pool because it is not one of the databases:
+    /// it has no [`DbName`], it is never evicted, and it is never handed out by
+    /// [`Workspace::get`].
+    ///
+    /// # Errors
+    ///
+    /// [`WorkspaceError::Io`] if the root cannot be created, or whatever the
+    /// open reports — including [`HostError::Locked`] if another process holds
+    /// the registry.
+    pub fn registry(&self) -> Result<Database, WorkspaceError> {
+        let mut slot = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(db) = slot.as_ref() {
+            return Ok(db.clone());
+        }
+        let root = self.layout.root();
+        std::fs::create_dir_all(root).map_err(|e| WorkspaceError::io(root, e))?;
+        let db = (self.open)(&self.layout.registry_path())?;
+        *slot = Some(db.clone());
+        Ok(db)
+    }
+
+    /// Closes the registry handle, if one is open. Returns whether there was
+    /// one. The same liveness concern as [`Workspace::close_idle`]: a held
+    /// registry is a registry no other process can write.
+    pub fn close_registry(&self) -> bool {
+        self.registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .is_some()
     }
 
     /// Where the files are.
@@ -513,17 +561,21 @@ impl fmt::Debug for Workspace {
     }
 }
 
+/// Fixtures shared by this module's tests and the registry's.
 #[cfg(test)]
-mod tests {
+pub(crate) mod testkit {
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::*;
+    use super::{DbName, Opener, Workspace, WorkspaceLayout, WorkspaceLimits};
+    use crate::Database;
 
     /// A unique temp directory; removed on drop.
-    pub(super) struct TempDir(pub PathBuf);
+    pub(crate) struct TempDir(pub PathBuf);
+
     impl TempDir {
-        pub(super) fn new(tag: &str) -> Self {
+        pub(crate) fn new(tag: &str) -> Self {
             let dir = std::env::temp_dir().join(format!(
                 "plugmem-workspace-{tag}-{}-{}",
                 std::process::id(),
@@ -536,11 +588,43 @@ mod tests {
             TempDir(dir)
         }
     }
+
     impl Drop for TempDir {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
+
+    /// A workspace of plain default databases, plus a count of how many times
+    /// the opener actually ran — the only way to tell a pool hit from a reopen.
+    pub(crate) fn workspace(
+        tmp: &TempDir,
+        limits: WorkspaceLimits,
+    ) -> (Workspace, Arc<AtomicUsize>) {
+        let opens = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&opens);
+        let open: Opener = Box::new(move |path: &std::path::Path| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(Database::open(path, crate::Config::default())?.0)
+        });
+        (
+            Workspace::new(WorkspaceLayout::new(&tmp.0), open, limits),
+            opens,
+        )
+    }
+
+    /// A name that must parse.
+    pub(crate) fn name(s: &str) -> DbName {
+        DbName::parse(s).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+
+    use super::testkit::{TempDir, name, workspace};
+    use super::*;
 
     fn problem(s: &str) -> NameProblem {
         match DbName::parse(s) {
@@ -693,26 +777,6 @@ mod tests {
             path: PathBuf::from("/ws/db/gone.plugmem"),
         };
         assert!(missing.to_string().contains("gone"));
-    }
-
-    /// A workspace whose databases are plain defaults, plus a counter of how
-    /// many times the opener actually ran — the only way to tell a pool hit
-    /// from a reopen.
-    fn workspace(tmp: &TempDir, limits: WorkspaceLimits) -> (Workspace, Arc<AtomicUsize>) {
-        let opens = Arc::new(AtomicUsize::new(0));
-        let counted = Arc::clone(&opens);
-        let open: Opener = Box::new(move |path: &Path| {
-            counted.fetch_add(1, Ordering::SeqCst);
-            Ok(Database::open(path, crate::Config::default())?.0)
-        });
-        (
-            Workspace::new(WorkspaceLayout::new(&tmp.0), open, limits),
-            opens,
-        )
-    }
-
-    fn name(s: &str) -> DbName {
-        DbName::parse(s).unwrap()
     }
 
     #[test]

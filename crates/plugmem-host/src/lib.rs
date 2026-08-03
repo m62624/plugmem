@@ -49,8 +49,9 @@ pub use settings::{Settings, SettingsError, read_config};
 pub use settings_help::{SettingDoc, SettingScope, SettingsHelp, settings_help};
 pub use storage::{FileScratch, FileStorage, FsyncPolicy};
 pub use workspace::{
-    DEFAULT_IDLE_TIMEOUT_MS, DEFAULT_MAX_OPEN, DbName, IfMissing, MAX_DB_NAME, NameProblem, Opener,
-    Workspace, WorkspaceError, WorkspaceLayout, WorkspaceLimits,
+    ARCHIVED_TAG, DEFAULT_IDLE_TIMEOUT_MS, DEFAULT_MAX_OPEN, DbEntry, DbName, Description,
+    ENTRY_TAG, IfMissing, MAX_DB_NAME, NameProblem, Opener, ReindexReport, SELF_ENTITY, Workspace,
+    WorkspaceError, WorkspaceIssue, WorkspaceLayout, WorkspaceLimits,
 };
 
 // The engine types a host caller works with, re-exported so simple
