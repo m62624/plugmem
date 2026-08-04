@@ -1,0 +1,154 @@
+name: property search
+
+# Where the randomness went.
+#
+# The property tests (25 of them, tokenizer/arena/index/journal/recall/…) are
+# searches, not assertions: each one samples an input space and hopes to land on
+# a counterexample. Proptest seeds every search from OS entropy by default, so
+# running them on the release path meant every push rolled several hundred dice
+# across the OS×feature matrix. That is a fine way to *find* bugs and a terrible
+# way to *gate* a merge: a find lands on whichever commit happened to be pushed
+# — docs-only commits have gone red this way — and it cannot be reproduced,
+# because the seed dies with the job.
+#
+# So CI pins the seed (see PROPTEST_RNG_SEED in ci.yml) and the exploration
+# lives here instead:
+#   - a fresh seed per run, printed and carried into the failure report, so any
+#     find is reproducible with one command;
+#   - a uniform case budget well above what most properties get on the release
+#     path (many run 32-256 cases there), bounded by the job timeout below;
+#   - and it reports. It gates nothing. A find opens an issue for a human to
+#     triage into a pinned regression case, which is what actually makes the
+#     bug stay fixed.
+on:
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: "Proptest seed (blank = random)"
+        required: false
+        type: string
+      cases:
+        description: "Cases per property"
+        required: false
+        default: "2000"
+        type: string
+  schedule:
+    # Nightly at 03:41 UTC. Off the hour to avoid the scheduler's rush.
+    - cron: "41 3 * * *"
+
+concurrency:
+  group: property-search
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  search:
+    name: search (${{ matrix.feature_name }})
+    runs-on: ubuntu-latest
+    # Cases apply per property, and the heavy ones (maintain, recall) build a
+    # memory per case. Bound the job so a widened search cannot sit on a runner
+    # for hours; a search that needs longer should narrow its scope instead.
+    timeout-minutes: 120
+    strategy:
+      # One profile's find is not another's: let every profile finish so a
+      # nightly reports everything it saw rather than the first thing.
+      fail-fast: false
+      matrix:
+        include:
+          - { feature_name: default, feature_args: "" }
+          - { feature_name: serde, feature_args: "--features serde" }
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # A seed is chosen *here*, not left to proptest, so it exists as a value
+      # we can print and hand to a human. An unreproducible find is barely a
+      # find at all — that was the whole failure mode this workflow exists to
+      # end.
+      - name: Choose a seed
+        id: seed
+        run: |
+          seed="${{ inputs.seed }}"
+          if [ -z "$seed" ]; then seed="$(( RANDOM * 32768 + RANDOM ))"; fi
+          echo "seed=$seed" >> "$GITHUB_OUTPUT"
+          echo "Searching with PROPTEST_RNG_SEED=$seed"
+
+      - name: Search
+        id: search
+        env:
+          PROPTEST_RNG_SEED: ${{ steps.seed.outputs.seed }}
+          PROPTEST_CASES: ${{ inputs.cases || '2000' }}
+        run: |
+          set -o pipefail
+          cargo test --workspace ${{ matrix.feature_args }} 2>&1 | tee search.log
+
+      # `.proptest-regressions/*` is proptest's own record of what failed. On a
+      # find it is the fastest path from "CI is red" to a committed regression
+      # test, so keep it even though the runner is about to be destroyed.
+      - name: Keep the regression files
+        # Scoped to the search step, not a bare `failure()`: that fires when
+        # *any* earlier step failed — a flaky checkout, a toolchain download —
+        # and there is nothing to keep in that case.
+        if: steps.search.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: proptest-regressions-${{ matrix.feature_name }}
+          path: |
+            crates/**/.proptest-regressions/**
+            search.log
+          if-no-files-found: warn
+
+      - name: Report the find
+        # Only when the *search* failed. A bare `failure()` would also fire on
+        # a failed checkout or toolchain install and file an issue claiming a
+        # counterexample that was never found — an automated report that lies
+        # is worse than no report.
+        if: steps.search.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SEED: ${{ steps.seed.outputs.seed }}
+          PROFILE: ${{ matrix.feature_name }}
+        run: |
+          # The body carries the one command that reproduces it. Without the
+          # seed this issue would be a rumour.
+          {
+            echo "The nightly property search found a counterexample."
+            echo
+            echo '```'
+            echo "PROPTEST_RNG_SEED=$SEED PROPTEST_CASES=${{ inputs.cases || '2000' }} \\"
+            echo "  cargo test --workspace ${{ matrix.feature_args }}"
+            echo '```'
+            echo
+            echo "Failing properties:"
+            echo '```'
+            grep -E "^test .* FAILED|minimal failing input|Test failed:" search.log | head -40 || true
+            echo '```'
+            echo
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            echo "Triage: reproduce with the command above, then pin the input as"
+            echo "an ordinary test case so it is checked on every push."
+          } > body.md
+          # A bug nobody has fixed yet is still there tomorrow night, and the
+          # night after. Filing a fresh issue each time would bury the triage
+          # under its own duplicates, so an open report for this profile gets a
+          # comment — same information, one thread. The seed varies per run, so
+          # the match is on the title's stable prefix.
+          prefix="property search: counterexample on $PROFILE"
+          existing="$(gh issue list --state open --limit 100 \
+            --json number,title \
+            --jq "map(select(.title | startswith(\"$prefix\"))) | .[0].number // empty")"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file body.md
+          else
+            # No --label on purpose: `gh` fails outright on a label the repo
+            # does not define, and a nightly that cannot file its find is worse
+            # than an unlabelled issue.
+            gh issue create --title "$prefix (seed $SEED)" --body-file body.md
+          fi

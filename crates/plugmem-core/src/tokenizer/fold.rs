@@ -54,6 +54,14 @@ fn fold_into(
         return false;
     }
     if is_ignorable_format(c) {
+        // Dropping the character makes its neighbours adjacent, and neighbours
+        // that were not composable across it may be composable now — NFKC
+        // joins `LV + T` into an LVT Hangul syllable once the ZWJ between them
+        // is gone. The composed pieces need not be marks (a jamo is `Lo`), so
+        // the mark branch below does not cover this; without re-normalizing,
+        // the pass emits a spelling that a second pass would still change.
+        // Nothing precedes a leading ignorable, so that case composes nothing.
+        *needs_nfkc_again |= !out.is_empty();
         return false;
     }
     if UnicodeBackend::is_mark(c) {
