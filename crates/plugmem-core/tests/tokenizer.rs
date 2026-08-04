@@ -406,6 +406,33 @@ fn combining_marks_after_joiners_are_canonical() {
     assert_canonical_tokens("_\u{0610}_\u{0300}").unwrap();
 }
 
+/// Dropping a default-ignorable can create a composition that was not
+/// available while it sat between its neighbours, so the fold has to
+/// re-normalize afterwards. Removing the ZWJ below makes the Hangul `LV`
+/// syllable and the trailing `T` jamo adjacent, and NFKC composes them into one
+/// `LVT` syllable; emitting `LV + T` instead would be a spelling a second pass
+/// still changes — the same text would index under two different terms
+/// depending on how many times it had been through the tokenizer.
+///
+/// A jamo is `Lo`, not a mark, so the mark path did not cover this. Found by
+/// `unicode_stress_tokens_are_canonical`; pinned here so it is checked on every
+/// push rather than when a search happens to land on it again.
+#[test]
+fn ignorables_between_composable_neighbours_are_renormalized() {
+    // 뤄 (U+B904, LV) + ZWJ + ᆨ (U+11A8, T) + Ͱ  ->  뤅 (U+B905, LVT) + ͱ
+    let emitted = tokens("\u{B904}\u{200D}\u{11A8}\u{0370}");
+    assert_eq!(emitted, ["\u{B905}\u{0371}"]);
+    // The token is its own fixed point, which is what the property asserts.
+    assert_eq!(tokens(&emitted[0]), emitted);
+
+    // A soft hyphen is the same hazard with a different ignorable.
+    assert_eq!(tokens("\u{B904}\u{00AD}\u{11A8}"), ["\u{B905}"]);
+
+    // Nothing precedes a leading ignorable, so it composes nothing and must
+    // not be treated as a composition boundary either.
+    assert_eq!(tokens("\u{200D}\u{B904}\u{11A8}"), ["\u{B905}"]);
+}
+
 #[test]
 fn word_joiners_are_internal_and_canonical() {
     let cases: &[(&str, &[&str])] = &[
