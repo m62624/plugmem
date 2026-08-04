@@ -364,11 +364,11 @@ pub struct WorkspaceProblem {
 /// mirror's fields match the host type's serialized names, so serde maps them
 /// with no hand-written per-field code. Unmapped host fields (e.g. `Stats`'s
 /// `db_uuid`) are dropped.
-pub(crate) fn to_typed<T: DeserializeOwned>(v: &impl Serialize) -> napi::Result<T> {
+pub(crate) fn to_typed<T: DeserializeOwned>(v: &impl Serialize) -> crate::error::Result<T> {
     let value = serde_json::to_value(v)
-        .map_err(|e| napi::Error::from_reason(format!("serialization error: {e}")))?;
+        .map_err(|e| crate::error::internal(format!("serialization error: {e}")))?;
     serde_json::from_value(value)
-        .map_err(|e| napi::Error::from_reason(format!("result shape error: {e}")))
+        .map_err(|e| crate::error::internal(format!("result shape error: {e}")))
 }
 
 #[cfg(test)]

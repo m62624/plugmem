@@ -6,9 +6,10 @@
 //! the Node boundary. `recover` is deliberately CLI-only alongside `import`
 //! and `scrub` — salvage is a path-level operation on the host's own disk. Inputs are typed `#[napi(object)]` structs so napi emits
 //! precise TypeScript interfaces (autocomplete in a TS host like Pi); results
-//! come back as the typed mirrors in [`crate::types`]. A [`HostError`] becomes a
-//! thrown JS `Error`; the clock is the system clock, read per call (the engine
-//! keeps none), exactly as the MCP server does.
+//! come back as the typed mirrors in [`crate::types`]. A failure becomes a
+//! thrown JS `Error` carrying a `code` — see [`crate::error`] for what is coded
+//! and why the engine's own failures are not; the clock is the system clock,
+//! read per call (the engine keeps none), exactly as the MCP server does.
 //!
 //! Opened `readOnly`, the instance observes another process's writer over a
 //! shared snapshot: the read verbs answer, the write verbs throw, and the two
@@ -20,13 +21,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use napi::bindgen_prelude::AsyncTask;
-use napi::{Env, Error, Result, Task};
+use napi::{Env, Task};
 use napi_derive::napi;
 use plugmem_host::{
-    Database, FactId, HostError, LinkInput, MaintenanceOptions, ReadOnlyDatabase, RecallQuery,
-    RememberInput, Settings, SettingsError, UnlinkInput,
+    Database, Embedder, FactId, LinkInput, MaintenanceOptions, ReadOnlyDatabase, RecallQuery,
+    RememberInput, Settings, UnlinkInput,
 };
 
+use crate::error::{self, Error, Result, code};
 use crate::types::{
     self, ExportPage, ExportedFact, FactSnapshot, MaintainMode, MaintainReport, RecallResult,
     RememberOutcome, Stats,
@@ -46,8 +48,12 @@ pub struct OpenOptions {
     /// authoritative and this — if given — must agree with it.
     pub dim: Option<u32>,
     /// Open read-only over another process's writer (requires a checkpointed
-    /// database). The write verbs then throw; `generation`/`refresh` appear. A
-    /// read-only handle never auto-embeds a text query — pass a vector instead.
+    /// database). The write verbs then throw; `generation`/`refresh` appear.
+    ///
+    /// A text `recall` still reaches the vector source: the engine cannot embed
+    /// on a read-only handle (replaying into it would defeat the zero-copy
+    /// open), so this binding embeds the query itself before asking — the same
+    /// thing the CLI and the MCP server do for their read-only paths.
     pub read_only: Option<bool>,
     /// Path to a `config.toml` (`[database]` / `[engine]` / `[embedder]` /
     /// `[maintenance]`). When the constructor path is omitted, `[database].path`
@@ -108,6 +114,34 @@ pub struct RecallArgs {
     pub closed: Option<bool>,
 }
 
+impl RecallArgs {
+    /// The `[from, to)` window as the engine wants it.
+    ///
+    /// Exactly two elements, or the call is refused. A short array used to make
+    /// the window vanish silently, and with it the engine's whole temporal
+    /// source: `recall({ range: [from] })` came back with no time-ranked
+    /// candidates at all, indistinguishable from a call that never asked for
+    /// any. A plausible wrong answer is worse than an error.
+    fn window(&self) -> Result<Option<(u64, u64)>> {
+        let Some(range) = self.range.as_deref() else {
+            return Ok(None);
+        };
+        let [from, to] = range else {
+            return Err(error::invalid_arg(format!(
+                "range must be exactly [from, to] in unix milliseconds, got {} value(s)",
+                range.len()
+            )));
+        };
+        let (from, to) = (checked_ms(*from, "range[0]")?, checked_ms(*to, "range[1]")?);
+        if from > to {
+            return Err(error::invalid_arg(format!(
+                "range start {from} is after its end {to}"
+            )));
+        }
+        Ok(Some((from, to)))
+    }
+}
+
 /// Arguments for [`Plugmem::link`].
 #[napi(object)]
 pub struct LinkArgs {
@@ -124,7 +158,22 @@ pub struct LinkArgs {
 /// async export task can outlive the JS object that scheduled it.
 enum Handle {
     Writer(Database),
-    Reader(Arc<ReadOnlyDatabase>),
+    Reader {
+        db: Arc<ReadOnlyDatabase>,
+        /// The read-only handle's own embedder, if the config built one.
+        ///
+        /// A [`ReadOnlyDatabase`] deliberately carries none — embedding inside
+        /// it would mutate a mapping opened zero-copy — so the query is embedded
+        /// out here and passed in as a vector.
+        ///
+        /// Owned outright, with no lock: [`Embedder::embed`] wants `&mut self`,
+        /// and `recall` takes `&mut self` to give it one. A `Mutex` would be
+        /// pure ceremony — one JS instance is only ever touched by its own
+        /// thread, and the async verbs capture cloned engine handles, never
+        /// this. (The MCP server does wrap its embedder, because there one
+        /// reader really is shared by a pool of worker threads.)
+        embedder: Option<Box<dyn Embedder>>,
+    },
 }
 
 /// A memory over one plugmem file — the napi mirror of [`plugmem_host::Database`]
@@ -134,6 +183,11 @@ enum Handle {
 pub struct Plugmem {
     /// `None` once `close()`d — every verb then throws "memory is closed".
     handle: Option<Handle>,
+    /// The file this handle resolved to. Kept because the constructor may
+    /// resolve it from `PLUGMEM_DB`, the config or the platform default, and a
+    /// caller that passed no path otherwise has no way to learn which file it
+    /// just opened.
+    path: PathBuf,
 }
 
 #[napi]
@@ -152,7 +206,7 @@ impl Plugmem {
         // path. This is what attaches the `[embedder]`, so a text-only
         // `remember`/`recall` auto-embeds at parity with the other surfaces.
         let mut settings =
-            Settings::load(options.config.as_deref().map(Path::new)).map_err(settings_to_napi)?;
+            Settings::load(options.config.as_deref().map(Path::new)).map_err(error::settings)?;
 
         let env_path = std::env::var_os("PLUGMEM_DB").map(PathBuf::from);
         let use_config_or_default_path = path.is_none() && env_path.is_none();
@@ -168,10 +222,10 @@ impl Plugmem {
             && let Some(parent) = path.parent()
         {
             std::fs::create_dir_all(parent).map_err(|e| {
-                Error::from_reason(format!(
-                    "cannot create database directory {}: {e}",
-                    parent.display()
-                ))
+                error::coded(
+                    code::OPEN,
+                    format!("cannot create database directory {}: {e}", parent.display()),
+                )
             })?;
         }
 
@@ -183,7 +237,7 @@ impl Plugmem {
             if let Some(e) = &settings.embedder
                 && e.dim() != dim
             {
-                return Err(Error::from_reason(format!(
+                return Err(error::invalid_arg(format!(
                     "dim option {dim} disagrees with the configured embedder dimension {}",
                     e.dim()
                 )));
@@ -192,17 +246,25 @@ impl Plugmem {
         }
 
         let handle = if options.read_only.unwrap_or(false) {
-            // A read-only handle observes another writer's snapshot and never
-            // auto-embeds; drop the embedder and open over `settings.config`.
-            let ro = Database::open_readonly(&path, settings.config).map_err(to_napi_err)?;
-            Handle::Reader(Arc::new(ro))
+            // A read-only handle observes another writer's snapshot. The engine
+            // cannot embed inside it, so the embedder is kept out here and the
+            // query is embedded before the read — the same arrangement the CLI
+            // and the MCP server use for their read-only paths, so a text
+            // `recall` reaches the vector source on every surface.
+            let embedder = settings.embedder.take();
+            let ro = Database::open_readonly(&path, settings.config).map_err(error::open)?;
+            Handle::Reader {
+                db: Arc::new(ro),
+                embedder,
+            }
         } else {
             // The writer takes the embedder and maintenance policy from settings.
-            let db = settings.open(&path).map_err(to_napi_err)?;
+            let db = settings.open(&path).map_err(error::open)?;
             Handle::Writer(db)
         };
         Ok(Self {
             handle: Some(handle),
+            path,
         })
     }
 
@@ -212,10 +274,22 @@ impl Plugmem {
     /// `Workspace.open`, which is what keeps a name from ever being a path.
     /// The class it hands back is this one, so a named memory has every verb a
     /// path-opened one does and there is no second implementation to drift.
-    pub(crate) fn from_database(db: Database) -> Self {
+    pub(crate) fn from_database(db: Database, path: PathBuf) -> Self {
         Self {
             handle: Some(Handle::Writer(db)),
+            path,
         }
+    }
+
+    /// The file this memory is open on.
+    ///
+    /// Worth having because the constructor may resolve the path rather than be
+    /// given one — `PLUGMEM_DB`, then `[database].path`, then the platform data
+    /// path — and `new Plugmem()` with no argument otherwise leaves the caller
+    /// unable to say which file it just wrote to.
+    #[napi]
+    pub fn path(&self) -> String {
+        self.path.display().to_string()
     }
 
     /// Stores a fact; returns its id plus similar/conflicting live facts.
@@ -231,9 +305,24 @@ impl Plugmem {
     /// so it runs on napi-rs' libuv worker pool.
     #[napi(ts_return_type = "Promise<RememberOutcome[]>")]
     pub fn remember_many(&self, args: Vec<RememberArgs>) -> Result<AsyncTask<RememberManyTask>> {
+        let db = self.writer()?.clone();
+        // Validated here, on the JS thread, not inside `compute`: an argument
+        // this wrapper refuses has to throw where the caller stands, and a
+        // coded error cannot cross the `Task` boundary anyway (see `error`).
+        let valid_from = args
+            .iter()
+            .enumerate()
+            .map(|(i, input)| {
+                input
+                    .valid_from
+                    .map(|value| checked_ms(value, &format!("[{i}].validFrom")))
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>>>()?;
         Ok(AsyncTask::new(RememberManyTask {
-            db: self.writer()?.clone(),
+            db,
             args,
+            valid_from,
             now: now_ms(),
         }))
     }
@@ -248,21 +337,37 @@ impl Plugmem {
     /// Ranked, fused recall. Returns the structured result (its `rendered` field
     /// is the prompt-ready block; `facts`/`edges` are the structured hits).
     #[napi]
-    pub fn recall(&self, args: Option<RecallArgs>) -> Result<RecallResult> {
+    pub fn recall(&mut self, args: Option<RecallArgs>) -> Result<RecallResult> {
         let args = args.unwrap_or_default();
+        // Refuse a malformed window or instant before anything is read: these
+        // are `f64`s from JS, and casting one blindly would turn a caller's
+        // mistake into a different, plausible-looking query.
+        let range = args.window()?;
+        let as_of = args.as_of.map(|v| checked_ms(v, "asOf")).transpose()?;
+
+        // A read-only handle carries the embedder itself, because the engine
+        // cannot embed into a zero-copy mapping. Do it here so a text query
+        // reaches the vector source, then read with `&self` as usual.
+        let embedded = match self.handle_mut()? {
+            Handle::Reader {
+                embedder: Some(embedder),
+                ..
+            } => match args.query.as_deref() {
+                Some(text) => embedder.embed(&[text]).map_err(error::engine)?.pop(),
+                None => None,
+            },
+            _ => None,
+        };
+
         let tags = str_refs(&args.tags);
         let entities = str_refs(&args.entities);
-        let range = args
-            .range
-            .as_ref()
-            .and_then(|r| Some((*r.first()? as u64, *r.get(1)? as u64)));
         let q = RecallQuery {
             now: now_ms(),
             text: args.query.as_deref(),
-            vector: None,
+            vector: embedded.as_deref(),
             tags: &tags,
             entities: &entities,
-            as_of: args.as_of.map(|f| f as u64),
+            as_of,
             range,
             k: args.k.unwrap_or(0) as usize,
             token_budget: None,
@@ -271,9 +376,9 @@ impl Plugmem {
         };
         let res = match self.handle()? {
             Handle::Writer(db) => db.recall(q),
-            Handle::Reader(db) => db.recall(q),
+            Handle::Reader { db, .. } => db.recall(q),
         }
-        .map_err(to_napi_err)?;
+        .map_err(error::engine)?;
         types::to_typed(&res)
     }
 
@@ -283,7 +388,7 @@ impl Plugmem {
     pub fn forget(&self, id: u32) -> Result<bool> {
         self.writer()?
             .forget(now_ms(), FactId(id))
-            .map_err(to_napi_err)
+            .map_err(error::engine)
     }
 
     /// Upserts a typed edge `src -rel-> dst`. @throws in read-only mode.
@@ -297,7 +402,7 @@ impl Plugmem {
                 dst: &args.dst,
                 provenance: None,
             })
-            .map_err(to_napi_err)
+            .map_err(error::engine)
     }
 
     /// Closes the current typed edge `src -rel-> dst`. @throws in read-only mode.
@@ -310,7 +415,7 @@ impl Plugmem {
                 rel: &args.rel,
                 dst: &args.dst,
             })
-            .map_err(to_napi_err)
+            .map_err(error::engine)
     }
 
     /// One fact's full card by `id`, or `null` if unknown/tombstoned.
@@ -318,7 +423,7 @@ impl Plugmem {
     pub fn get(&self, id: u32) -> Result<Option<FactSnapshot>> {
         let snap = match self.handle()? {
             Handle::Writer(db) => db.get(FactId(id)),
-            Handle::Reader(db) => db.get(FactId(id)),
+            Handle::Reader { db, .. } => db.get(FactId(id)),
         };
         match snap {
             Some(snap) => Ok(Some(types::to_typed(&snap)?)),
@@ -331,17 +436,22 @@ impl Plugmem {
     pub fn stats(&self) -> Result<Stats> {
         let stats = match self.handle()? {
             Handle::Writer(db) => db.stats(),
-            Handle::Reader(db) => db.stats(),
+            Handle::Reader { db, .. } => db.stats(),
         };
         types::to_typed(&stats)
     }
 
     /// Every currently-open fact, as an array (id-free, import-ready).
+    ///
+    /// **Synchronous and unbounded**: it materializes the whole memory into one
+    /// array on the JS thread, so a large database blocks the event loop for as
+    /// long as that takes. `exportPage` is the same data in bounded pages on a
+    /// libuv thread — prefer it for anything but a small memory or a script.
     #[napi]
     pub fn export(&self) -> Result<Vec<ExportedFact>> {
         let facts = match self.handle()? {
             Handle::Writer(db) => db.export(),
-            Handle::Reader(db) => db.export(),
+            Handle::Reader { db, .. } => db.export(),
         };
         Ok(facts.into_iter().map(ExportedFact::from).collect())
     }
@@ -358,7 +468,7 @@ impl Plugmem {
     pub fn export_page(&self, cursor: Option<u32>) -> Result<AsyncTask<ExportPageTask>> {
         let source = match self.handle()? {
             Handle::Writer(db) => ExportSource::Writer(db.clone()),
-            Handle::Reader(db) => ExportSource::Reader(Arc::clone(db)),
+            Handle::Reader { db, .. } => ExportSource::Reader(Arc::clone(db)),
         };
         Ok(AsyncTask::new(ExportPageTask {
             source,
@@ -371,7 +481,7 @@ impl Plugmem {
     pub fn tags_of(&self, id: u32) -> Result<Vec<String>> {
         match self.handle()? {
             Handle::Writer(db) => Ok(db.tags_of(FactId(id))),
-            Handle::Reader(db) => Ok(db.tags_of(FactId(id))),
+            Handle::Reader { db, .. } => Ok(db.tags_of(FactId(id))),
         }
     }
 
@@ -380,9 +490,9 @@ impl Plugmem {
     pub fn verify(&self) -> Result<()> {
         match self.handle()? {
             Handle::Writer(db) => db.verify(),
-            Handle::Reader(db) => db.verify(),
+            Handle::Reader { db, .. } => db.verify(),
         }
-        .map_err(to_napi_err)
+        .map_err(error::engine)
     }
 
     /// Runs policy-driven maintenance; resolves with the before/after report.
@@ -434,12 +544,12 @@ impl Plugmem {
     #[napi]
     pub fn refresh(&mut self) -> Result<bool> {
         match self.handle_mut()? {
-            Handle::Reader(db) => Arc::get_mut(db)
+            Handle::Reader { db, .. } => Arc::get_mut(db)
                 .ok_or_else(|| {
-                    Error::from_reason("cannot refresh while an export page is running")
+                    error::coded(code::BUSY, "cannot refresh while an export page is running")
                 })?
                 .refresh()
-                .map_err(to_napi_err),
+                .map_err(error::engine),
             Handle::Writer(_) => Err(writer_only_error("refresh")),
         }
     }
@@ -468,14 +578,14 @@ impl Plugmem {
     fn writer(&self) -> Result<&Database> {
         match self.handle()? {
             Handle::Writer(db) => Ok(db),
-            Handle::Reader(_) => Err(read_only_error()),
+            Handle::Reader { .. } => Err(read_only_error()),
         }
     }
 
     /// The read-only handle, or a writer / closed error.
     fn reader(&self) -> Result<&ReadOnlyDatabase> {
         match self.handle()? {
-            Handle::Reader(db) => Ok(&**db),
+            Handle::Reader { db, .. } => Ok(&**db),
             Handle::Writer(_) => Err(writer_only_error("generation")),
         }
     }
@@ -494,14 +604,14 @@ impl Task for MaintainTask {
     type Output = plugmem_host::MaintainReport;
     type JsValue = MaintainReport;
 
-    fn compute(&mut self) -> Result<Self::Output> {
+    fn compute(&mut self) -> napi::Result<Self::Output> {
         self.db
             .maintain_with_options(self.now, self.options)
             .map_err(to_napi_err)
     }
 
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        types::to_typed(&output)
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        types::to_typed(&output).map_err(error::into_napi)
     }
 }
 
@@ -516,11 +626,11 @@ impl Task for CheckpointTask {
     type Output = ();
     type JsValue = ();
 
-    fn compute(&mut self) -> Result<Self::Output> {
+    fn compute(&mut self) -> napi::Result<Self::Output> {
         self.db.checkpoint(self.now).map_err(to_napi_err)
     }
 
-    fn resolve(&mut self, _env: Env, (): Self::Output) -> Result<Self::JsValue> {
+    fn resolve(&mut self, _env: Env, (): Self::Output) -> napi::Result<Self::JsValue> {
         Ok(())
     }
 }
@@ -529,6 +639,9 @@ impl Task for CheckpointTask {
 pub struct RememberManyTask {
     db: Database,
     args: Vec<RememberArgs>,
+    /// One pre-validated `validFrom` per input, checked before the task was
+    /// scheduled (see [`Plugmem::remember_many`]).
+    valid_from: Vec<Option<u64>>,
     now: u64,
 }
 
@@ -536,7 +649,7 @@ impl Task for RememberManyTask {
     type Output = Vec<plugmem_host::RememberOutcome>;
     type JsValue = Vec<RememberOutcome>;
 
-    fn compute(&mut self) -> Result<Self::Output> {
+    fn compute(&mut self) -> napi::Result<Self::Output> {
         let tags: Vec<Vec<&str>> = self.args.iter().map(|args| str_refs(&args.tags)).collect();
         let links: Vec<Vec<(&str, &str)>> = self
             .args
@@ -574,7 +687,7 @@ impl Task for RememberManyTask {
                 tags: &tags[i],
                 links: &links[i],
                 metadata: (!metadata[i].is_empty()).then_some(metadata[i].as_slice()),
-                valid_from: args.valid_from.map(|value| value as u64),
+                valid_from: self.valid_from[i],
                 ..RememberInput::text(self.now, &args.text)
             })
             .collect();
@@ -582,7 +695,7 @@ impl Task for RememberManyTask {
         self.db.remember_many(inputs).map_err(to_napi_err)
     }
 
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
         Ok(output.into_iter().map(RememberOutcome::from).collect())
     }
 }
@@ -602,14 +715,14 @@ impl Task for ExportPageTask {
     type Output = plugmem_host::ExportPage;
     type JsValue = ExportPage;
 
-    fn compute(&mut self) -> Result<Self::Output> {
+    fn compute(&mut self) -> napi::Result<Self::Output> {
         Ok(match &self.source {
             ExportSource::Writer(db) => db.export_page(self.cursor, EXPORT_PAGE_LIMIT),
             ExportSource::Reader(db) => db.export_page(self.cursor, EXPORT_PAGE_LIMIT),
         })
     }
 
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
         Ok(ExportPage::from(output))
     }
 }
@@ -642,14 +755,17 @@ fn do_remember(
         tags: &tags,
         links: &links,
         metadata: (!meta.is_empty()).then_some(meta.as_slice()),
-        valid_from: args.valid_from.map(|f| f as u64),
+        valid_from: args
+            .valid_from
+            .map(|value| checked_ms(value, "validFrom"))
+            .transpose()?,
         ..RememberInput::text(now_ms(), &args.text)
     };
     let outcome = match revise {
         Some(target) => db.revise(target, input),
         None => db.remember(input),
     }
-    .map_err(to_napi_err)?;
+    .map_err(error::engine)?;
     Ok(RememberOutcome::from(outcome))
 }
 
@@ -662,30 +778,47 @@ fn str_refs(v: &Option<Vec<String>>) -> Vec<&str> {
         .collect()
 }
 
-/// A host error as a thrown JS `Error` (the message is the host's own text).
-pub(crate) fn to_napi_err(e: HostError) -> Error {
-    Error::from_reason(e.to_string())
+/// A host error from inside a **libuv task**. Separate from [`error::engine`]
+/// only because [`Task`] fixes its error type to `napi::Error<Status>` and so
+/// cannot carry a custom code; both produce the same `GenericFailure` code and
+/// the same host message, which is what keeps the contract seamless.
+pub(crate) fn to_napi_err(e: plugmem_host::HostError) -> napi::Error {
+    napi::Error::from_reason(e.to_string())
 }
 
-/// A config-resolution error (bad `config.toml`, or an `[embedder]` missing a
-/// required field) as a thrown JS `Error`.
-pub(crate) fn settings_to_napi(e: SettingsError) -> Error {
-    Error::from_reason(e.to_string())
+/// A unix-millisecond instant from JS.
+///
+/// A JS number is an `f64`, and `f64 as u64` in Rust *saturates*: `-1` would
+/// become the epoch and `NaN` would become the epoch too, quietly answering a
+/// different question than the caller asked. Refuse instead, naming the field.
+pub(crate) fn checked_ms(value: f64, field: &str) -> Result<u64> {
+    if !value.is_finite() || value < 0.0 || value > u64::MAX as f64 {
+        return Err(error::invalid_arg(format!(
+            "{field} must be a finite, non-negative number of unix milliseconds, got {value}"
+        )));
+    }
+    Ok(value as u64)
 }
 
 /// The error a write verb throws on a read-only handle.
 fn read_only_error() -> Error {
-    Error::from_reason("this memory is open read-only; writes are refused")
+    error::coded(
+        code::READ_ONLY,
+        "this memory is open read-only; writes are refused",
+    )
 }
 
 /// The error a read-only-only verb (`generation`/`refresh`) throws on a writer.
 fn writer_only_error(verb: &str) -> Error {
-    Error::from_reason(format!("`{verb}` is only available in read-only mode"))
+    error::coded(
+        code::WRITER_ONLY,
+        format!("`{verb}` is only available in read-only mode"),
+    )
 }
 
 /// The error every verb throws after `close()`.
 fn closed_error() -> Error {
-    Error::from_reason("this memory is closed")
+    error::coded(code::CLOSED, "this memory is closed")
 }
 
 /// Wall-clock now in unix milliseconds (the engine keeps no clock).
@@ -779,6 +912,116 @@ model = \"dummy\"
             "unexpected message: {}",
             err.reason
         );
+    }
+
+    #[test]
+    fn an_instant_from_js_is_checked_not_cast() {
+        // `f64 as u64` saturates in Rust, so without this check `-1` and `NaN`
+        // would both become the epoch — and `asOf` is a visibility filter
+        // (`recorded_at <= as_of`), so "as of 1970" hides the whole memory and
+        // returns an empty, entirely plausible answer. Every rejection names
+        // its field and is coded, so a caller can tell "I passed nonsense"
+        // from "the engine failed".
+        for bad in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.5] {
+            let Err(err) = checked_ms(bad, "asOf") else {
+                panic!("{bad} must be refused");
+            };
+            assert_eq!(err.status, code::INVALID_ARG, "for {bad}");
+            assert!(
+                err.reason.contains("asOf"),
+                "the field is named: {}",
+                err.reason
+            );
+        }
+        assert_eq!(checked_ms(0.0, "asOf").unwrap(), 0);
+        assert_eq!(
+            checked_ms(1_700_000_000_000.0, "asOf").unwrap(),
+            1_700_000_000_000
+        );
+    }
+
+    #[test]
+    fn a_malformed_recall_window_is_refused_instead_of_vanishing() {
+        // The bug this locks out: `range: [from]` used to drop the window and
+        // with it the temporal source, silently answering without it.
+        let window = |range: Option<Vec<f64>>| {
+            RecallArgs {
+                range,
+                ..RecallArgs::default()
+            }
+            .window()
+        };
+
+        assert_eq!(window(None).unwrap(), None, "no window is not a broken one");
+        assert_eq!(window(Some(vec![10.0, 20.0])).unwrap(), Some((10, 20)));
+        assert_eq!(
+            window(Some(vec![7.0, 7.0])).unwrap(),
+            Some((7, 7)),
+            "empty is legal"
+        );
+
+        for bad in [
+            vec![],
+            vec![10.0],
+            vec![10.0, 20.0, 30.0],
+            vec![20.0, 10.0],
+            vec![-1.0, 5.0],
+        ] {
+            let Err(err) = window(Some(bad.clone())) else {
+                panic!("{bad:?} must be refused");
+            };
+            assert_eq!(err.status, code::INVALID_ARG, "for {bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_locked_database_is_refused_with_the_code_a_caller_can_retry_on() {
+        let tmp = TempDir::new("locked");
+        let path = tmp.path("mem.plugmem");
+        let _held = Plugmem::new(Some(path.clone()), None).expect("first open");
+
+        let Err(err) = Plugmem::new(Some(path), None) else {
+            panic!("a second writer must be refused");
+        };
+        assert_eq!(err.status, code::LOCKED);
+    }
+
+    #[test]
+    fn a_closed_handle_and_a_read_only_one_refuse_with_their_own_codes() {
+        let tmp = TempDir::new("codes");
+        let mut db = Plugmem::new(Some(tmp.path("mem.plugmem")), None).expect("open");
+
+        // `generation` belongs to a read-only handle only.
+        let Err(generation) = db.generation() else {
+            panic!("`generation` on a writer must be refused");
+        };
+        assert_eq!(generation.status, code::WRITER_ONLY);
+
+        db.close();
+        // `Err` only — the Ok types are napi mirrors without `Debug`.
+        let Err(stats) = db.stats() else {
+            panic!("a closed handle must refuse");
+        };
+        assert_eq!(stats.status, code::CLOSED);
+        let Err(remembered) = db.remember(RememberArgs {
+            text: "x".into(),
+            entity: None,
+            tags: None,
+            links: None,
+            metadata: None,
+            valid_from: None,
+        }) else {
+            panic!("a closed handle must refuse a write");
+        };
+        assert_eq!(remembered.status, code::CLOSED);
+    }
+
+    #[test]
+    fn the_handle_reports_the_file_it_resolved() {
+        let tmp = TempDir::new("path");
+        let path = tmp.path("mem.plugmem");
+        let db = Plugmem::new(Some(path.clone()), None).expect("open");
+        assert_eq!(db.path(), path);
     }
 
     #[test]

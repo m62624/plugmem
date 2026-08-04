@@ -13,8 +13,12 @@ export interface OpenOptions {
   dim?: number
   /**
    * Open read-only over another process's writer (requires a checkpointed
-   * database). The write verbs then throw; `generation`/`refresh` appear. A
-   * read-only handle never auto-embeds a text query — pass a vector instead.
+   * database). The write verbs then throw; `generation`/`refresh` appear.
+   *
+   * A text `recall` still reaches the vector source: the engine cannot embed
+   * on a read-only handle (replaying into it would defeat the zero-copy
+   * open), so this binding embeds the query itself before asking — the same
+   * thing the CLI and the MCP server do for their read-only paths.
    */
   readOnly?: boolean
   /**
@@ -442,6 +446,15 @@ export declare class Plugmem {
    */
   constructor(path?: string | undefined | null, options?: OpenOptions | undefined | null)
   /**
+   * The file this memory is open on.
+   *
+   * Worth having because the constructor may resolve the path rather than be
+   * given one — `PLUGMEM_DB`, then `[database].path`, then the platform data
+   * path — and `new Plugmem()` with no argument otherwise leaves the caller
+   * unable to say which file it just wrote to.
+   */
+  path(): string
+  /**
    * Stores a fact; returns its id plus similar/conflicting live facts.
    * @throws in read-only mode.
    */
@@ -476,7 +489,14 @@ export declare class Plugmem {
   get(id: number): FactSnapshot | null
   /** Engine size counters. */
   stats(): Stats
-  /** Every currently-open fact, as an array (id-free, import-ready). */
+  /**
+   * Every currently-open fact, as an array (id-free, import-ready).
+   *
+   * **Synchronous and unbounded**: it materializes the whole memory into one
+   * array on the JS thread, so a large database blocks the event loop for as
+   * long as that takes. `exportPage` is the same data in bounded pages on a
+   * libuv thread — prefer it for anything but a small memory or a script.
+   */
   export(): Array<ExportedFact>
   /**
    * Returns at most 128 inspected fact ids' open facts on a libuv worker

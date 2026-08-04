@@ -18,11 +18,12 @@
 use std::sync::Arc;
 
 use napi::bindgen_prelude::AsyncTask;
-use napi::{Env, Error, Result, Task};
+use napi::{Env, Task};
 use napi_derive::napi;
-use plugmem_host::{DbName, Description, IfMissing, Settings, WorkspaceError, WorkspaceIssue};
+use plugmem_host::{DbName, Description, IfMissing, Settings, WorkspaceIssue};
 
-use crate::db::{Plugmem, now_ms, settings_to_napi};
+use crate::db::{Plugmem, now_ms};
+use crate::error::{self, Result, code};
 use crate::types::{DbEntry, ReindexReport, WorkspaceProblem};
 
 /// Options for [`Workspace::new`].
@@ -83,14 +84,14 @@ impl Workspace {
     pub fn new(root: String, options: Option<WorkspaceOptions>) -> Result<Self> {
         let options = options.unwrap_or_default();
         let mut settings = Settings::load(options.config.as_deref().map(std::path::Path::new))
-            .map_err(settings_to_napi)?;
+            .map_err(error::settings)?;
 
         if let Some(dim) = options.dim {
             let dim = dim as usize;
             if let Some(e) = &settings.embedder
                 && e.dim() != dim
             {
-                return Err(Error::from_reason(format!(
+                return Err(error::invalid_arg(format!(
                     "dim option {dim} disagrees with the configured embedder dimension {}",
                     e.dim()
                 )));
@@ -110,7 +111,7 @@ impl Workspace {
 
         let inner = settings
             .open_workspace(std::path::Path::new(&root))
-            .map_err(to_napi_err)?;
+            .map_err(error::workspace)?;
         Ok(Self {
             inner: Some(Arc::new(inner)),
         })
@@ -135,11 +136,12 @@ impl Workspace {
         } else {
             IfMissing::Fail
         };
-        let handle = self
-            .workspace()?
+        let workspace = self.workspace()?;
+        let path = workspace.layout().path_of(&name);
+        let handle = workspace
             .get(&name, now_ms(), missing)
-            .map_err(to_napi_err)?;
-        Ok(Plugmem::from_database(handle))
+            .map_err(error::workspace)?;
+        Ok(Plugmem::from_database(handle, path))
     }
 
     /// Every memory in the directory, sorted by name.
@@ -152,7 +154,7 @@ impl Workspace {
             .workspace()?
             .layout()
             .list()
-            .map_err(to_napi_err)?
+            .map_err(error::workspace)?
             .iter()
             .map(DbName::to_string)
             .collect())
@@ -164,7 +166,7 @@ impl Workspace {
         Ok(self
             .workspace()?
             .entries()
-            .map_err(to_napi_err)?
+            .map_err(error::workspace)?
             .iter()
             .map(entry)
             .collect())
@@ -180,7 +182,7 @@ impl Workspace {
         Ok(self
             .workspace()?
             .find(&query, k.unwrap_or(8) as usize, now_ms())
-            .map_err(to_napi_err)?
+            .map_err(error::workspace)?
             .iter()
             .map(entry)
             .collect())
@@ -212,7 +214,7 @@ impl Workspace {
                     owner: args.owner.as_deref(),
                 },
             )
-            .map_err(to_napi_err)
+            .map_err(error::workspace)
     }
 
     /// Labels a memory archived, keeping its description. Returns whether
@@ -224,7 +226,7 @@ impl Workspace {
         let name = parse_name(&db)?;
         self.workspace()?
             .archive(&name, now_ms())
-            .map_err(to_napi_err)
+            .map_err(error::workspace)
     }
 
     /// Rebuilds the registry from the memories' own descriptions.
@@ -295,7 +297,10 @@ impl Workspace {
 
     fn shared_ref(&self) -> Result<&Arc<plugmem_host::Workspace>> {
         self.inner.as_ref().ok_or_else(|| {
-            Error::from_reason("workspace is closed (close() was called on this instance)")
+            error::coded(
+                code::CLOSED,
+                "workspace is closed (close() was called on this instance)",
+            )
         })
     }
 }
@@ -310,11 +315,14 @@ impl Task for ReindexTask {
     type Output = plugmem_host::ReindexReport;
     type JsValue = ReindexReport;
 
-    fn compute(&mut self) -> Result<Self::Output> {
-        self.workspace.reindex(self.now).map_err(to_napi_err)
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        self.workspace
+            .reindex(self.now)
+            .map_err(error::workspace)
+            .map_err(error::into_napi)
     }
 
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
         Ok(ReindexReport {
             indexed: output.indexed.iter().map(DbName::to_string).collect(),
             undescribed: output.undescribed.iter().map(DbName::to_string).collect(),
@@ -333,11 +341,14 @@ impl Task for VerifyTask {
     type Output = Vec<WorkspaceIssue>;
     type JsValue = Vec<WorkspaceProblem>;
 
-    fn compute(&mut self) -> Result<Self::Output> {
-        self.workspace.verify(self.now).map_err(to_napi_err)
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        self.workspace
+            .verify(self.now)
+            .map_err(error::workspace)
+            .map_err(error::into_napi)
     }
 
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
         Ok(output.iter().map(problem).collect())
     }
 }
@@ -381,7 +392,7 @@ fn problem(issue: &WorkspaceIssue) -> WorkspaceProblem {
 
 /// Validates a memory name, naming what was wrong with it.
 fn parse_name(s: &str) -> Result<DbName> {
-    DbName::parse(s).map_err(to_napi_err)
+    DbName::parse(s).map_err(error::invalid_name)
 }
 
 /// A pool ceiling from JS, range-checked before it becomes a count of open
@@ -390,7 +401,7 @@ fn parse_name(s: &str) -> Result<DbName> {
 fn checked_max_open(n: u32) -> Result<usize> {
     let ceiling = plugmem_host::MAX_OPEN_CEILING;
     if n == 0 || n as usize > ceiling {
-        return Err(Error::from_reason(format!(
+        return Err(error::invalid_arg(format!(
             "maxOpen must be between 1 and {ceiling} (one open memory costs several file descriptors)"
         )));
     }
@@ -401,14 +412,9 @@ fn checked_max_open(n: u32) -> Result<usize> {
 /// non-finite value has to be refused rather than cast.
 fn checked_timeout(ms: f64) -> Result<u64> {
     if !ms.is_finite() || ms < 0.0 || ms > u64::MAX as f64 {
-        return Err(Error::from_reason(
+        return Err(error::invalid_arg(
             "idleTimeoutMs must be a non-negative number of milliseconds (0 disables the sweep)",
         ));
     }
     Ok(ms as u64)
-}
-
-/// A workspace error as a thrown JS `Error` (the message is the host's own).
-fn to_napi_err(e: WorkspaceError) -> Error {
-    Error::from_reason(e.to_string())
 }

@@ -108,7 +108,10 @@ provider's HTTP call runs outside the engine lock. Without one, there is no
 embedder and vector recall is skipped (lexical, tag, graph and time recall still
 answer). The optional `dim` open option sets the embedding size when there is no
 config; if the config configured an embedder, its dimension governs and `dim`
-must agree. A `{ readOnly: true }` handle never auto-embeds — pass a vector.
+must agree. A `{ readOnly: true }` handle cannot auto-embed inside the engine —
+embedding into a zero-copy mapping is what read-only exists to avoid — so this
+binding embeds the query itself before the read, exactly as the CLI and the MCP
+server do. A text `recall` therefore reaches the vector source in both modes.
 
 ## The verbs
 
@@ -122,6 +125,37 @@ engine logic is entirely the host's.
 `recall`, `get`, `tagsOf`, `stats`, `export`, `exportPage(cursor?)`, `verify`,
 plus `generation()` (the pinned snapshot generation) and `refresh()` (advance
 to the writer's latest checkpoint); the write verbs throw.
+**Both**: `path()` — the file the handle resolved to, which is the only way to
+learn it when the constructor was given no path.
+
+### Errors
+
+Every failure plugmem itself decides carries a stable `code`, so a program
+branches on it instead of on wording:
+
+```js
+try {
+  db = new Plugmem("agent.plugmem");
+} catch (err) {
+  if (err.code === "PLUGMEM_LOCKED") retryLater();
+  else throw err;
+}
+```
+
+`PLUGMEM_LOCKED`, `PLUGMEM_NEEDS_CHECKPOINT`, `PLUGMEM_CONFIG` and
+`PLUGMEM_OPEN` come from opening; `PLUGMEM_INVALID_ARG` and
+`PLUGMEM_INVALID_NAME` from an argument that was refused; `PLUGMEM_CLOSED`,
+`PLUGMEM_READ_ONLY`, `PLUGMEM_WRITER_ONLY` and `PLUGMEM_BUSY` from calling a
+verb the handle cannot serve. A failure *inside* the engine keeps napi's
+`GenericFailure` and the host's message — napi-rs fixes the error type of an
+async task, so a code there could not be delivered on `maintain` or
+`checkpoint`, and one that appeared only on the synchronous half would mean
+different things on different verbs.
+
+An argument that shapes an answer is refused rather than dropped: `range` must
+be exactly `[from, to]`, and `range`, `asOf` and `validFrom` must each be a
+finite, non-negative instant. Silently ignoring one produced an answer computed
+without it — indistinguishable from a correct one.
 
 ### What the host has and this does not
 

@@ -21,6 +21,10 @@ Async `rememberMany`, `exportPage`, `maintain`, and `checkpoint` use napi-rs asy
 
 Keep TypeScript-visible field names and optionality stable. The typed objects in `types.rs` are deliberately separate from core structs so Rust lifetimes and borrowed inputs do not leak into JavaScript. Convert `HostError` into napi errors with useful context; never expose internal debug formatting as the API contract.
 
+`src/error.rs` owns the thrown-error contract and is the single place to change it. Every failure the wrapper decides carries a stable `PLUGMEM_*` `code`; an engine failure inside a verb carries `GenericFailure` and the host's message on **both** the sync and the async path, because napi-rs' `Task` fixes its error type and a code that appeared only on synchronous verbs would make `code` mean different things on different verbs. Do not code engine failures on one path only.
+
+An argument that shapes an answer must be refused, never dropped. `range` is exactly `[from, to]`; `range`, `asOf` and `validFrom` are checked with `checked_ms` rather than cast, because `f64 as u64` saturates in Rust and would silently turn a caller's mistake into a different, plausible query. Validate on the JS thread — before an `AsyncTask` is constructed — so a refusal throws where the caller stands instead of rejecting a promise.
+
 `serde-json` is used to reuse JSON-shaped argument/result paths where appropriate. Validate user input at the boundary, especially ids, dimensions, metadata, tags, links, and read-only restrictions.
 
 This crate is published to npm, not crates.io. Do not add platform-specific assumptions to the Rust wrapper; native package selection is handled by the npm package layout.
@@ -29,8 +33,9 @@ This crate is published to npm, not crates.io. Do not add platform-specific assu
 
 ```bash
 cargo test -p plugmem-napi
+npm run build --prefix crates/plugmem-napi   # regenerates index.js / index.d.ts
 npm test --prefix crates/plugmem-napi
-npm run build --prefix crates/plugmem-napi
+npm run typecheck --prefix crates/plugmem-napi
 ```
 
-The JavaScript tests cover smoke operations, verbs, metadata, config, and read-only behavior. When changing an exported class/method/type, update the npm package declarations and JS tests together. Keep Node runtime requirements aligned with the configured Node-API version.
+The JavaScript tests cover smoke operations, verbs, metadata, config, read-only behavior, the argument/error contract (`contract.test.mjs`) and read-only query embedding (`readonly-embedding.test.mjs`). A test that needs an embedder must mock it **in a worker thread**: `recall` is a synchronous native call, so while it waits on the embedder it owns the JS thread and a mock server on the same event loop can never answer it — the test would wait on itself. When changing an exported class/method/type, update the npm package declarations and JS tests together. Keep Node runtime requirements aligned with the configured Node-API version.

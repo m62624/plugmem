@@ -46,8 +46,14 @@ type PageFact = ExportPage["facts"][number];
 assertType<Exact<PageFact, ExportedFact>>(true);
 
 // A path is optional; options are optional; both may be omitted entirely.
+// `path()` is how a caller learns which file that resolved to.
 const defaulted = new Plugmem();
+const resolvedPath: string = defaulted.path();
 defaulted.close();
+
+// A recall window is a pair of instants; the binding refuses any other shape at
+// runtime, and the type says `number[]` because napi has no fixed-length arrays.
+const windowed: RecallResult = db.recall({ range: [0, Date.now()], asOf: Date.now() });
 
 // ── many memories: opt-in ───────────────────────────────────────────────────
 
@@ -89,6 +95,8 @@ export const used = {
   tags,
   exportedPage,
   exportedPageAfter,
+  resolvedPath,
+  windowed,
   chat,
   names,
   entries,
