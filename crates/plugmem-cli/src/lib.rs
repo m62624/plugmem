@@ -358,8 +358,20 @@ fn execute(
             links,
             meta,
             valid_from,
+            vector,
         } => {
-            let outcome = do_remember(db, now, text, entity, tags, links, meta, *valid_from, None)?;
+            let outcome = do_remember(
+                db,
+                now,
+                text,
+                entity,
+                tags,
+                links,
+                meta,
+                *valid_from,
+                vector,
+                None,
+            )?;
             render_remember(&outcome, json, out);
             Ok(0)
         }
@@ -371,6 +383,7 @@ fn execute(
             links,
             meta,
             valid_from,
+            vector,
         } => {
             let outcome = do_remember(
                 db,
@@ -381,6 +394,7 @@ fn execute(
                 links,
                 meta,
                 *valid_from,
+                vector,
                 Some(FactId(*id)),
             )?;
             render_remember(&outcome, json, out);
@@ -868,11 +882,18 @@ fn embed_recall_query(
     cmd: &Command,
 ) -> Result<Option<Vec<f32>>, CliError> {
     let Command::Recall {
-        query: Some(text), ..
+        query: Some(text),
+        vector,
+        ..
     } = cmd
     else {
         return Ok(None);
     };
+    // An explicit `--vector` replaces the embedder, so there is nothing to
+    // embed and no call to make.
+    if !vector.is_empty() {
+        return Ok(None);
+    }
     let Some(embedder) = settings.embedder.as_mut() else {
         return Ok(None);
     };
@@ -898,6 +919,7 @@ fn with_recall_query<R>(
         range,
         k,
         closed,
+        vector,
     } = cmd
     else {
         unreachable!("with_recall_query called on a non-recall command");
@@ -905,13 +927,15 @@ fn with_recall_query<R>(
     let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
     let ent_refs: Vec<&str> = entities.iter().map(String::as_str).collect();
     let range_pair = range.as_ref().map(|v| (v[0], v[1]));
-    // `override_vector` is set only on the read-only path, where the CLI has
-    // already embedded the text query; the read-write path leaves it `None` and
-    // the host embeds inside `recall`.
+    // Precedence, matching the host: an explicit `--vector` wins outright and
+    // nothing is sent to the embedder. Otherwise `override_vector` carries the
+    // text the CLI embedded for the read-only path; on the read-write path both
+    // are `None` and the host embeds inside `recall`.
+    let explicit = (!vector.is_empty()).then_some(vector.as_slice());
     let q = RecallQuery {
         now,
         text: query.as_deref(),
-        vector: override_vector,
+        vector: explicit.or(override_vector),
         tags: &tag_refs,
         entities: &ent_refs,
         as_of: *as_of,
@@ -1240,6 +1264,7 @@ fn do_remember(
     links: &[String],
     meta: &[String],
     valid_from: Option<u64>,
+    vector: &[f32],
     revise: Option<FactId>,
 ) -> Result<RememberOutcome, CliError> {
     let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
@@ -1262,6 +1287,10 @@ fn do_remember(
         links: &link_refs,
         metadata: (!meta_refs.is_empty()).then_some(meta_refs.as_slice()),
         valid_from,
+        // An explicit `--vector` is authoritative: the host embeds only when
+        // this is `None`, so passing one skips the provider entirely. The
+        // engine checks the length against `dim`.
+        vector: (!vector.is_empty()).then_some(vector),
         ..RememberInput::text(now, text)
     };
     match revise {
@@ -1359,6 +1388,7 @@ mod tests {
             range: None,
             k: 0,
             closed: false,
+            vector: Vec::new(),
         }
     }
 
@@ -1606,6 +1636,7 @@ mod tests {
             links: Vec::new(),
             meta: Vec::new(),
             valid_from: None,
+            vector: Vec::new(),
         }
     }
 
@@ -1617,6 +1648,7 @@ mod tests {
             links: Vec::new(),
             meta: meta.iter().map(|m| (*m).into()).collect(),
             valid_from: None,
+            vector: Vec::new(),
         }
     }
 
@@ -1673,6 +1705,7 @@ mod tests {
             range: None,
             k: 0,
             closed: false,
+            vector: Vec::new(),
         };
         let (code, out) = run_cmd(&db, &recall, false, 2_000);
         assert_eq!(code, 0);
@@ -1696,6 +1729,7 @@ mod tests {
             range: None,
             k: 0,
             closed: false,
+            vector: Vec::new(),
         };
         let (code, out) = run_cmd(&db, &recall, false, 1_000);
         assert_eq!(code, 0);
@@ -1728,6 +1762,7 @@ mod tests {
             links: Vec::new(),
             meta: Vec::new(),
             valid_from: None,
+            vector: Vec::new(),
         };
         let (code, out) = run_cmd(&db, &revise, false, 2_000);
         assert_eq!(code, 0);
@@ -1828,6 +1863,7 @@ mod tests {
             links: vec!["not-a-pair".into()],
             meta: Vec::new(),
             valid_from: None,
+            vector: Vec::new(),
         };
         let mut buf = Vec::new();
         let err = execute(&db, &cmd, false, 1_000, &mut buf).unwrap_err();
@@ -1851,6 +1887,7 @@ mod tests {
             links: Vec::new(),
             meta: Vec::new(),
             valid_from: None,
+            vector: Vec::new(),
         };
         run_cmd(&db, &revise, false, 2_000);
 
@@ -1862,6 +1899,7 @@ mod tests {
             range: None,
             k: 0,
             closed: false,
+            vector: Vec::new(),
         };
         let (_, out) = run_cmd(&db, &as_of, false, 3_000);
         assert!(out.contains("Moscow"), "as-of 1500 → Moscow: {out}");
@@ -1890,6 +1928,7 @@ mod tests {
             links: Vec::new(),
             meta: Vec::new(),
             valid_from: None,
+            vector: Vec::new(),
         };
         let (_, out) = run_cmd(&db, &revise, true, 1_500);
         assert!(serde_json::from_str::<serde_json::Value>(out.trim()).is_ok());
@@ -1942,6 +1981,7 @@ mod tests {
             range: Some(vec![0, 10_000]),
             k: 4,
             closed: true,
+            vector: Vec::new(),
         };
         let (_, out) = run_cmd(&db, &recall, true, 4_000);
         assert!(serde_json::from_str::<serde_json::Value>(out.trim()).is_ok());
@@ -1983,6 +2023,7 @@ mod tests {
             links: Vec::new(),
             meta: Vec::new(),
             valid_from: None,
+            vector: Vec::new(),
         };
         run_cmd(&db, &revise, false, 2_000);
         // the successor records `revises`; its card names the predecessor
@@ -2156,6 +2197,7 @@ mod tests {
             range: None,
             k: 1,
             closed: false,
+            vector: Vec::new(),
         };
         assert_eq!(execute_ro(&ro, &recall, None, false, &mut out), 0);
         let text = String::from_utf8(out).unwrap();
@@ -2211,6 +2253,7 @@ mod tests {
                 links: vec!["bad".into()],
                 meta: Vec::new(),
                 valid_from: None,
+                vector: Vec::new(),
             },
         };
         let mut buf = Vec::new();
@@ -2253,6 +2296,7 @@ mod tests {
                 links: Vec::new(),
                 meta: vec!["uri=s3://b/x".into(), "src=chat".into()],
                 valid_from: Some(500),
+                vector: Vec::new(),
             },
             false,
             1_000,
@@ -2273,6 +2317,7 @@ mod tests {
                 links: Vec::new(),
                 meta: Vec::new(),
                 valid_from: None,
+                vector: Vec::new(),
             },
             false,
             1_200,
@@ -2431,6 +2476,7 @@ mod tests {
                 links: Vec::new(),
                 meta: Vec::new(),
                 valid_from: None,
+                vector: Vec::new(),
             },
         };
         assert_eq!(run_parsed(remember, &mut Vec::new()), 0);
@@ -2504,6 +2550,7 @@ mod tests {
                 range: None,
                 k: 0,
                 closed: false,
+                vector: Vec::new(),
             },
         };
         let mut buf = Vec::new();

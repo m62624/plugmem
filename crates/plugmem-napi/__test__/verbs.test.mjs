@@ -11,18 +11,18 @@ const require = createRequire(import.meta.url);
 const { Plugmem } = require("../index.js");
 
 /** A fresh Plugmem over a throwaway db file, cleaned up after `fn`. */
-function withDb(fn) {
+async function withDb(fn) {
   const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-"));
   try {
-    fn(new Plugmem(join(dir, "m.plugmem")));
+    await fn(new Plugmem(join(dir, "m.plugmem")));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-test("remember returns an id, recall finds it, get reads it", () => {
-  withDb((db) => {
-    const out = db.remember({
+test("remember returns an id, recall finds it, get reads it", async () => {
+  await withDb(async (db) => {
+    const out = await db.remember({
       text: "prefers tokio",
       entity: "user",
       tags: ["pref"],
@@ -30,7 +30,7 @@ test("remember returns an id, recall finds it, get reads it", () => {
     });
     assert.equal(out.id, 0);
 
-    const res = db.recall({ query: "tokio" });
+    const res = await db.recall({ query: "tokio" });
     assert.ok(Array.isArray(res.facts));
     assert.match(res.rendered, /tokio/);
 
@@ -40,10 +40,10 @@ test("remember returns an id, recall finds it, get reads it", () => {
   });
 });
 
-test("revise closes a fact and opens its successor", () => {
-  withDb((db) => {
-    assert.equal(db.remember({ text: "prefers tokio" }).id, 0);
-    const rv = db.revise(0, { text: "prefers async-std" });
+test("revise closes a fact and opens its successor", async () => {
+  await withDb(async (db) => {
+    assert.equal((await db.remember({ text: "prefers tokio" })).id, 0);
+    const rv = await db.revise(0, { text: "prefers async-std" });
     assert.equal(rv.id, 1);
   });
 });
@@ -85,7 +85,7 @@ test("exportPage is bounded, pull-driven and releases the lock between pages", a
 
     // The native read guard is gone when the Promise resolves. A write between
     // pulls therefore progresses instead of forming a callback/read-lock cycle.
-    assert.equal(db.remember({ text: "written between pages" }).id, 260);
+    assert.equal((await db.remember({ text: "written between pages" })).id, 260);
 
     const second = await db.exportPage(first.nextCursor);
     const third = await db.exportPage(second.nextCursor);
@@ -119,21 +119,21 @@ test("async tasks retain their host handle after close", async () => {
   }
 });
 
-test("forget tombstones a live fact and reports freshness", () => {
-  withDb((db) => {
-    db.remember({ text: "the sky is blue", entity: "sky" });
-    assert.equal(db.forget(0), true);
-    assert.equal(db.forget(0), false); // already gone
+test("forget tombstones a live fact and reports freshness", async () => {
+  await withDb(async (db) => {
+    await db.remember({ text: "the sky is blue", entity: "sky" });
+    assert.equal(await db.forget(0), true);
+    assert.equal(await db.forget(0), false); // already gone
   });
 });
 
-test("link upserts and unlink closes a typed edge", () => {
-  withDb((db) => {
-    assert.doesNotThrow(() => db.link({ src: "user", rel: "works_at", dst: "acme" }));
+test("link upserts and unlink closes a typed edge", async () => {
+  await withDb(async (db) => {
+    await assert.doesNotReject(() => db.link({ src: "user", rel: "works_at", dst: "acme" }));
     assert.equal(db.stats().edges, 1);
     assert.equal(db.stats().edgeVersions, 1);
-    assert.equal(db.unlink({ src: "user", rel: "works_at", dst: "acme" }), true);
-    assert.equal(db.unlink({ src: "user", rel: "works_at", dst: "acme" }), false);
+    assert.equal(await db.unlink({ src: "user", rel: "works_at", dst: "acme" }), true);
+    assert.equal(await db.unlink({ src: "user", rel: "works_at", dst: "acme" }), false);
     assert.equal(db.stats().edges, 0);
     assert.equal(db.stats().edgeVersions, 1);
   });
@@ -143,16 +143,16 @@ test("stats / export / maintain / checkpoint / verify", async () => {
   const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-"));
   try {
     const db = new Plugmem(join(dir, "m.plugmem"));
-    db.remember({ text: "one", entity: "a" });
-    db.remember({ text: "two", entity: "b" });
+    await db.remember({ text: "one", entity: "a" });
+    await db.remember({ text: "two", entity: "b" });
 
     assert.equal(db.stats().facts, 2);
-    assert.equal(db.export().length, 2);
+    assert.equal((await db.export()).length, 2);
     // maintain / checkpoint are async (libuv worker): they return Promises.
     const report = await db.maintain();
     assert.equal(typeof report.purged, "number");
     await assert.doesNotReject(db.checkpoint());
-    assert.doesNotThrow(() => db.verify());
+    await assert.doesNotReject(() => db.verify());
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -162,11 +162,11 @@ test("maintain takes an explicit mode and full repacks the edges", async () => {
   const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-"));
   try {
     const db = new Plugmem(join(dir, "m.plugmem"));
-    db.remember({ text: "anchor", entity: "hub" });
+    await db.remember({ text: "anchor", entity: "hub" });
     for (let round = 0; round < 4; round += 1) {
       for (let target = 0; target < 8; target += 1) {
-        db.link({ src: "hub", rel: "assigned_to", dst: `t-${target}` });
-        db.unlink({ src: "hub", rel: "assigned_to", dst: `t-${target}` });
+        await db.link({ src: "hub", rel: "assigned_to", dst: `t-${target}` });
+        await db.unlink({ src: "hub", rel: "assigned_to", dst: `t-${target}` });
       }
     }
     const versions = db.stats().edgeVersions;
@@ -181,7 +181,7 @@ test("maintain takes an explicit mode and full repacks the edges", async () => {
     assert.equal(full.edgeVersionsBefore, versions);
     // History is never dropped by any mode.
     assert.equal(db.stats().edgeVersions, versions);
-    assert.doesNotThrow(() => db.verify());
+    await assert.doesNotReject(() => db.verify());
 
     // An unknown mode is rejected at the boundary, before any work starts.
     assert.throws(() => db.maintain("nonsense"), /MaintainMode/);
@@ -194,11 +194,11 @@ test("typed outputs are fully populated (serde round-trip + camelCase)", async (
   const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-"));
   try {
     const db = new Plugmem(join(dir, "m.plugmem"));
-    const out = db.remember({ text: "prefers tokio", entity: "user" });
+    const out = await db.remember({ text: "prefers tokio", entity: "user" });
     assert.equal(typeof out.id, "number");
     assert.ok(Array.isArray(out.similar));
 
-    const res = db.recall({ query: "tokio" });
+    const res = await db.recall({ query: "tokio" });
     assert.equal(typeof res.truncated, "boolean");
     assert.equal(typeof res.rendered, "string");
     const f = res.facts[0];
@@ -230,7 +230,7 @@ test("maintain/checkpoint are async and don't block the event loop", async () =>
   const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-"));
   try {
     const db = new Plugmem(join(dir, "m.plugmem"));
-    db.remember({ text: "one" });
+    await db.remember({ text: "one" });
 
     const p = db.maintain();
     assert.ok(p instanceof Promise);
@@ -247,8 +247,8 @@ test("maintain/checkpoint are async and don't block the event loop", async () =>
   }
 });
 
-test("a missing required arg throws, not crashes", () => {
-  withDb((db) => {
+test("a missing required arg throws, not crashes", async () => {
+  await withDb(async (db) => {
     // `text` is required by the RememberArgs interface; napi rejects the call.
     assert.throws(() => db.remember({}));
   });

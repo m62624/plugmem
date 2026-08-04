@@ -310,6 +310,14 @@ snapshot_every_ops = 1024
 maintain_every_forgets = 100
 ```
 
+`plugmem_remember`, `plugmem_revise` and `plugmem_recall` also take an optional
+`vector`: a precomputed embedding (an array of numbers whose length equals
+`dim`) that **replaces** the configured embedder for that call — nothing is sent
+to the provider. Arguments that narrow an answer are validated rather than
+guessed: `range` must be exactly `[from, to]`, and `as_of` / `valid_from` must
+each be a whole non-negative unix-millisecond number. A malformed one is a tool
+error, not an answer quietly computed without it.
+
 The embedder unlocks the **vector** recall source; with `kind = "none"` (the
 default) recall still answers from lexical, tag, graph and temporal evidence.
 One OpenAI-compatible client covers Ollama, OpenAI, LM Studio, vLLM and

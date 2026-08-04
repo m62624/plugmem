@@ -123,8 +123,8 @@ engine keeps no clock, so `now` comes from the system clock at each call.
 
 | command | what it does |
 |---|---|
-| `remember <TEXT> [--entity E] [--tag T]… [--link REL:ENTITY]… [--meta KEY=VALUE]… [--valid-from TS]` | store a fact; prints its id and any similar/conflicting facts. `--meta` is repeatable (opaque key→value, e.g. a URI; last value wins per key) |
-| `recall [QUERY] [--tag T]… [--entity E]… [--as-of TS] [--range FROM TO] [-k N] [--closed]` | ranked, token-budgeted block; sources compose. Each line is `- [fN] text …` — `N` is the fact's id (see below) |
+| `remember <TEXT> [--entity E] [--tag T]… [--link REL:ENTITY]… [--meta KEY=VALUE]… [--valid-from TS] [--vector F32,…]` | store a fact; prints its id and any similar/conflicting facts. `--meta` is repeatable (opaque key→value, e.g. a URI; last value wins per key) |
+| `recall [QUERY] [--tag T]… [--entity E]… [--as-of TS] [--range FROM TO] [-k N] [--closed] [--vector F32,…]` | ranked, token-budgeted block; sources compose. Each line is `- [fN] text …` — `N` is the fact's id (see below) |
 | `revise <ID> <TEXT> [same flags as remember]` | close the old fact, record the successor |
 | `forget <ID>` | tombstone a fact (purged physically at the next `maintain`) |
 | `link <SRC> <REL> <DST>` | upsert a typed edge between entities |
@@ -138,6 +138,13 @@ engine keeps no clock, so `now` comes from the system clock at each call.
 | `recover <DST>` | salvage a content-corrupt database into a clean `DST`; the source (`--db`) is left untouched |
 | `export` | dump the currently-open facts as JSONL (one per line) to stdout |
 | `import <FILE> [--batch N]` | load facts from a JSONL file (as written by `export`), streamed in batches — one embed round-trip and one fsync per batch |
+
+`--vector` takes a comma-separated embedding (`--vector 0.1,-0.2,…`, or
+`--vector "$(cat vec.txt)"` for a real one). Given, it **replaces** the
+configured embedder for that call — nothing is sent to the provider — and its
+length must equal `[engine].dim`. Omit it and the engine embeds the text itself,
+which is what you want unless the vector already exists or your model is not an
+OpenAI-shaped HTTP endpoint.
 
 **Fact ids.** A fact's id is how you address it in `forget`, `revise`, and
 `show`. `remember` prints it on store (`remembered fact 3`), and `recall`

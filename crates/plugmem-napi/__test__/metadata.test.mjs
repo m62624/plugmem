@@ -10,19 +10,19 @@ import { join } from "node:path";
 const require = createRequire(import.meta.url);
 const { Plugmem } = require("../index.js");
 
-function withDb(fn) {
+async function withDb(fn) {
   const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-meta-"));
   try {
-    fn(new Plugmem(join(dir, "m.plugmem")));
+    await fn(new Plugmem(join(dir, "m.plugmem")));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-test("metadata round-trips through remember, get and export", () => {
-  withDb((db) => {
+test("metadata round-trips through remember, get and export", async () => {
+  await withDb(async (db) => {
     const meta = { uri: "s3://b/x", mime: "application/pdf", page: "3" };
-    const out = db.remember({ text: "a scanned contract", metadata: meta });
+    const out = await db.remember({ text: "a scanned contract", metadata: meta });
     assert.equal(out.id, 0);
 
     // get returns the same map, with keys in one canonical (ascending) order —
@@ -32,11 +32,11 @@ test("metadata round-trips through remember, get and export", () => {
     assert.deepEqual(Object.keys(card.metadata), ["mime", "page", "uri"]);
 
     // A fact without metadata gets an empty object, not undefined.
-    db.remember({ text: "no metadata" });
+    await db.remember({ text: "no metadata" });
     assert.deepEqual(db.get(1).metadata, {});
 
     // export carries it too.
-    const exported = db.export();
+    const exported = await db.export();
     const withMeta = exported.find((f) => Object.keys(f.metadata).length > 0);
     assert.deepEqual(withMeta.metadata, meta);
     db.close();

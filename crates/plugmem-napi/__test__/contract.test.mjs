@@ -18,11 +18,11 @@ const require = createRequire(import.meta.url);
 const { Plugmem } = require("../index.js");
 
 /** A throwaway memory, closed and removed afterwards. */
-function withDb(fn) {
+async function withDb(fn) {
   const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-contract-"));
   const db = new Plugmem(join(dir, "m.plugmem"));
   try {
-    return fn(db, join(dir, "m.plugmem"));
+    return await fn(db, join(dir, "m.plugmem"));
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
@@ -39,16 +39,16 @@ function thrown(fn) {
   assert.fail("the call was supposed to throw");
 }
 
-test("a malformed recall window is refused, not silently widened", () => {
-  withDb((db) => {
-    db.remember({ text: "the invoice was paid", entity: "acme" });
+test("a malformed recall window is refused, not silently widened", async () => {
+  await withDb(async (db) => {
+    await db.remember({ text: "the invoice was paid", entity: "acme" });
 
     // A well-formed window still reaches the temporal source. Asked with no
     // text, that source is the only one running, so what comes back is exactly
     // what the window covers.
     const now = Date.now();
-    assert.equal(db.recall({ range: [0, now + 1000] }).facts.length, 1);
-    assert.equal(db.recall({ range: [0, 1] }).facts.length, 0);
+    assert.equal((await db.recall({ range: [0, now + 1000] })).facts.length, 1);
+    assert.equal((await db.recall({ range: [0, 1] })).facts.length, 0);
 
     // Every one of these used to mean "no window at all": the call answered
     // over the whole memory while looking like it had filtered.
@@ -60,8 +60,8 @@ test("a malformed recall window is refused, not silently widened", () => {
   });
 });
 
-test("an instant that is not an instant is refused", () => {
-  withDb((db) => {
+test("an instant that is not an instant is refused", async () => {
+  await withDb(async (db) => {
     for (const asOf of [-1, NaN, Infinity, -Infinity]) {
       const err = thrown(() => db.recall({ query: "x", asOf }));
       assert.equal(err.code, "PLUGMEM_INVALID_ARG", `asOf ${asOf}`);
@@ -75,13 +75,13 @@ test("an instant that is not an instant is refused", () => {
 
     // A good value is still accepted, and reaches the fact.
     const at = 1_700_000_000_000;
-    const { id } = db.remember({ text: "backdated", validFrom: at });
+    const { id } = await db.remember({ text: "backdated", validFrom: at });
     assert.equal(db.get(id).record.validFrom, at);
   });
 });
 
-test("rememberMany refuses a bad instant synchronously, not as a rejected promise", () => {
-  withDb((db) => {
+test("rememberMany refuses a bad instant synchronously, not as a rejected promise", async () => {
+  await withDb(async (db) => {
     // The throw has to happen where the caller stands. If this returned a
     // promise, the `catch` below would never run and the test would fail.
     const err = thrown(() =>
@@ -111,7 +111,7 @@ test("every refusal carries a code a program can branch on", async () => {
     assert.equal(thrown(() => db.refresh()).code, "PLUGMEM_WRITER_ONLY");
 
     // Write verbs on a read-only handle.
-    db.remember({ text: "published" });
+    await db.remember({ text: "published" });
     await db.checkpoint();
     db.close();
     const ro = new Plugmem(path, { readOnly: true });
@@ -127,8 +127,8 @@ test("every refusal carries a code a program can branch on", async () => {
   }
 });
 
-test("the handle says which file it opened", () => {
-  withDb((db, path) => {
+test("the handle says which file it opened", async () => {
+  await withDb(async (db, path) => {
     assert.equal(db.path(), path);
   });
 });

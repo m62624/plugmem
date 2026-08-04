@@ -129,8 +129,8 @@ MANDATORY.
 
   | Verb | Shape |
   |------|-------|
-  | `remember` | `remember "<text>" [--entity E] [--tag T]… [--link REL:ENTITY]… [--meta K=V]… [--valid-from MS]` |
-  | `recall` | `recall ["<query>"] [--tag T]… [--entity E]… [--as-of MS] [--range FROM TO] [-k N] [--closed]` |
+  | `remember` | `remember "<text>" [--entity E] [--tag T]… [--link REL:ENTITY]… [--meta K=V]… [--valid-from MS] [--vector F32,…]` |
+  | `recall` | `recall ["<query>"] [--tag T]… [--entity E]… [--as-of MS] [--range FROM TO] [-k N] [--closed] [--vector F32,…]` |
   | `revise` | `revise <id> "<text>" [same flags as remember]` |
   | `forget` | `forget <id>` |
   | `link` | `link <src> <rel> <dst>` |
@@ -141,6 +141,10 @@ MANDATORY.
 
   Add `--json` to any read verb for machine output; `plugmem-cli --version`
   reports the engine version (used in Step 0c).
+
+  `--vector` is for embeddings you already have: given one, nothing is sent to
+  the configured embedder and its length must equal `dim`. You will rarely need
+  it — omit it and the engine embeds the text itself.
 
   **Never run `repl`.** It is an interactive session: it reads commands from
   stdin until end-of-input, so an agent that starts it **hangs** — the command
@@ -175,6 +179,13 @@ MANDATORY.
   `plugmem_generation` / `plugmem_refresh` and refuses the write verbs.
   (`scrub`, `recover` and `import` are CLI-only — there is no MCP tool for
   them.) Each tool takes `format:"json"` (default) or `"human"`.
+
+  Arguments that narrow an answer are checked, not guessed: `range` must be
+  exactly `[from, to]` and `as_of` / `valid_from` must each be a whole,
+  non-negative unix-millisecond number. A malformed one is a tool error rather
+  than an answer computed without it. `plugmem_remember`, `plugmem_revise` and
+  `plugmem_recall` also take an optional `vector` — a precomputed embedding
+  that replaces the configured embedder for that call.
 
 - **Neither →** plugmem is not installed here. Say so; do not fabricate
   memories. Install: https://github.com/m62624/plugmem

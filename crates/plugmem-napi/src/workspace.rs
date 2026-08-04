@@ -20,7 +20,7 @@ use std::sync::Arc;
 use napi::bindgen_prelude::AsyncTask;
 use napi::{Env, Task};
 use napi_derive::napi;
-use plugmem_host::{DbName, Description, IfMissing, Settings, WorkspaceIssue};
+use plugmem_host::{DbName, Description, IfMissing, Settings, WorkspaceError, WorkspaceIssue};
 
 use crate::db::{Plugmem, now_ms};
 use crate::error::{self, Result, code};
@@ -128,48 +128,41 @@ impl Workspace {
     ///
     /// @throws if the name is not a usable memory name, if it does not exist and
     /// `create` is false, or if another process holds it.
-    #[napi]
-    pub fn open(&self, db: String, create: Option<bool>) -> Result<Plugmem> {
+    /// **Async**: a first open replays the memory's journal and maps its
+    /// snapshot, and making room in the pool closes another memory — file work
+    /// that the one thread running JavaScript must not be holding.
+    #[napi(ts_return_type = "Promise<Plugmem>")]
+    pub fn open(&self, db: String, create: Option<bool>) -> Result<AsyncTask<OpenTask>> {
         let name = parse_name(&db)?;
-        let missing = if create.unwrap_or(true) {
-            IfMissing::Create
-        } else {
-            IfMissing::Fail
-        };
-        let workspace = self.workspace()?;
-        let path = workspace.layout().path_of(&name);
-        let handle = workspace
-            .get(&name, now_ms(), missing)
-            .map_err(error::workspace)?;
-        Ok(Plugmem::from_database(handle, path))
+        Ok(AsyncTask::new(OpenTask {
+            workspace: self.shared()?,
+            missing: if create.unwrap_or(true) {
+                IfMissing::Create
+            } else {
+                IfMissing::Fail
+            },
+            name,
+            now: now_ms(),
+        }))
     }
 
     /// Every memory in the directory, sorted by name.
     ///
     /// Reads the filesystem, not the registry: a memory that exists but was
     /// never described still appears.
-    #[napi]
-    pub fn list(&self) -> Result<Vec<String>> {
-        Ok(self
-            .workspace()?
-            .layout()
-            .list()
-            .map_err(error::workspace)?
-            .iter()
-            .map(DbName::to_string)
-            .collect())
+    /// **Async**: it reads the directory.
+    #[napi(ts_return_type = "Promise<string[]>")]
+    pub fn list(&self) -> Result<AsyncTask<RegistryTask>> {
+        self.registry_task(Registry::List)
     }
 
     /// Every described memory, sorted by name.
-    #[napi]
-    pub fn entries(&self) -> Result<Vec<DbEntry>> {
-        Ok(self
-            .workspace()?
-            .entries()
-            .map_err(error::workspace)?
-            .iter()
-            .map(entry)
-            .collect())
+    ///
+    /// **Async**: the registry is itself a memory, so this opens and reads a
+    /// database.
+    #[napi(ts_return_type = "Promise<DbEntry[]>")]
+    pub fn entries(&self) -> Result<AsyncTask<RegistryTask>> {
+        self.registry_task(Registry::Entries)
     }
 
     /// The memories whose descriptions best match `query`, best first.
@@ -177,15 +170,14 @@ impl Workspace {
     /// This is the answer to "I do not know the name": ask in words, get names
     /// back, then open by name. A person's name works too — an owner is a graph
     /// edge, and the graph source reaches it.
-    #[napi]
-    pub fn find(&self, query: String, k: Option<u32>) -> Result<Vec<DbEntry>> {
-        Ok(self
-            .workspace()?
-            .find(&query, k.unwrap_or(8) as usize, now_ms())
-            .map_err(error::workspace)?
-            .iter()
-            .map(entry)
-            .collect())
+    /// **Async**: this is a full recall against the registry memory — the same
+    /// hybrid retrieval any other recall runs.
+    #[napi(ts_return_type = "Promise<DbEntry[]>")]
+    pub fn find(&self, query: String, k: Option<u32>) -> Result<AsyncTask<RegistryTask>> {
+        self.registry_task(Registry::Find {
+            query,
+            k: k.unwrap_or(8) as usize,
+        })
     }
 
     /// Records what a memory is for — in the memory itself and in the registry,
@@ -194,39 +186,23 @@ impl Workspace {
     ///
     /// Called again for the same memory this revises rather than duplicating,
     /// so the history of what it used to be for is kept.
-    #[napi]
-    pub fn describe(&self, db: String, args: DescribeArgs) -> Result<()> {
+    /// **Async**: it writes twice — into the memory itself and into the
+    /// registry — and each write syncs a journal.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn describe(&self, db: String, args: DescribeArgs) -> Result<AsyncTask<RegistryTask>> {
         let name = parse_name(&db)?;
-        let tags: Vec<&str> = args
-            .tags
-            .as_deref()
-            .unwrap_or(&[])
-            .iter()
-            .map(String::as_str)
-            .collect();
-        self.workspace()?
-            .describe(
-                &name,
-                now_ms(),
-                Description {
-                    text: &args.description,
-                    tags: &tags,
-                    owner: args.owner.as_deref(),
-                },
-            )
-            .map_err(error::workspace)
+        self.registry_task(Registry::Describe { name, args })
     }
 
     /// Labels a memory archived, keeping its description. Returns whether
     /// anything changed. Archiving does not close, move or delete anything.
     ///
     /// @throws if the memory has no registry record to archive.
-    #[napi]
-    pub fn archive(&self, db: String) -> Result<bool> {
+    /// **Async**: a registry write.
+    #[napi(ts_return_type = "Promise<boolean>")]
+    pub fn archive(&self, db: String) -> Result<AsyncTask<RegistryTask>> {
         let name = parse_name(&db)?;
-        self.workspace()?
-            .archive(&name, now_ms())
-            .map_err(error::workspace)
+        self.registry_task(Registry::Archive { name })
     }
 
     /// Rebuilds the registry from the memories' own descriptions.
@@ -285,6 +261,15 @@ impl Workspace {
 
     // ── internals ─────────────────────────────────────────────────────────
 
+    /// The libuv task behind everything that touches the registry.
+    fn registry_task(&self, what: Registry) -> Result<AsyncTask<RegistryTask>> {
+        Ok(AsyncTask::new(RegistryTask {
+            workspace: self.shared()?,
+            what,
+            now: now_ms(),
+        }))
+    }
+
     /// The open workspace, or a "closed" error.
     fn workspace(&self) -> Result<&plugmem_host::Workspace> {
         Ok(self.shared_ref()?.as_ref())
@@ -301,6 +286,132 @@ impl Workspace {
                 code::CLOSED,
                 "workspace is closed (close() was called on this instance)",
             )
+        })
+    }
+}
+
+/// Opening a named memory, off the JS thread.
+pub struct OpenTask {
+    workspace: Arc<plugmem_host::Workspace>,
+    name: DbName,
+    missing: IfMissing,
+    now: u64,
+}
+
+impl Task for OpenTask {
+    type Output = (plugmem_host::Database, std::path::PathBuf);
+    type JsValue = Plugmem;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        let path = self.workspace.layout().path_of(&self.name);
+        let db = self
+            .workspace
+            .get(&self.name, self.now, self.missing)
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        Ok((db, path))
+    }
+
+    fn resolve(&mut self, _env: Env, (db, path): Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(Plugmem::from_database(db, path))
+    }
+}
+
+/// One thing to ask the registry.
+enum Registry {
+    List,
+    Entries,
+    Find { query: String, k: usize },
+    Describe { name: DbName, args: DescribeArgs },
+    Archive { name: DbName },
+}
+
+/// What a registry call resolves with.
+pub enum RegistryOutput {
+    Names(Vec<String>),
+    Entries(Vec<DbEntry>),
+    Changed(bool),
+    Done,
+}
+
+/// The libuv-thread body of the registry verbs.
+///
+/// One task for all of them because the reason is the same in every case: the
+/// registry is itself a plugmem memory, so listing, searching, describing and
+/// archiving all open, read or write a database.
+pub struct RegistryTask {
+    workspace: Arc<plugmem_host::Workspace>,
+    what: Registry,
+    now: u64,
+}
+
+impl Task for RegistryTask {
+    type Output = RegistryOutput;
+    type JsValue = napi::bindgen_prelude::Either4<Vec<String>, Vec<DbEntry>, bool, ()>;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        let failed = |e: WorkspaceError| napi::Error::from_reason(e.to_string());
+        match &self.what {
+            Registry::List => Ok(RegistryOutput::Names(
+                self.workspace
+                    .layout()
+                    .list()
+                    .map_err(failed)?
+                    .iter()
+                    .map(DbName::to_string)
+                    .collect(),
+            )),
+            Registry::Entries => Ok(RegistryOutput::Entries(
+                self.workspace
+                    .entries()
+                    .map_err(failed)?
+                    .iter()
+                    .map(entry)
+                    .collect(),
+            )),
+            Registry::Find { query, k } => Ok(RegistryOutput::Entries(
+                self.workspace
+                    .find(query, *k, self.now)
+                    .map_err(failed)?
+                    .iter()
+                    .map(entry)
+                    .collect(),
+            )),
+            Registry::Describe { name, args } => {
+                let tags: Vec<&str> = args
+                    .tags
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(String::as_str)
+                    .collect();
+                self.workspace
+                    .describe(
+                        name,
+                        self.now,
+                        Description {
+                            text: &args.description,
+                            tags: &tags,
+                            owner: args.owner.as_deref(),
+                        },
+                    )
+                    .map_err(failed)?;
+                Ok(RegistryOutput::Done)
+            }
+            Registry::Archive { name } => self
+                .workspace
+                .archive(name, self.now)
+                .map(RegistryOutput::Changed)
+                .map_err(failed),
+        }
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        use napi::bindgen_prelude::Either4;
+        Ok(match output {
+            RegistryOutput::Names(names) => Either4::A(names),
+            RegistryOutput::Entries(entries) => Either4::B(entries),
+            RegistryOutput::Changed(changed) => Either4::C(changed),
+            RegistryOutput::Done => Either4::D(()),
         })
     }
 }

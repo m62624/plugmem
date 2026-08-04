@@ -26,14 +26,14 @@ async function withWorkspace(fn, options) {
 
 test("a named memory is the same class as a path-opened one", async () => {
   await withWorkspace(async (ws) => {
-    const chat = ws.open("chat-42");
+    const chat = await ws.open("chat-42");
     assert.ok(chat instanceof Plugmem);
 
     // Every verb of a single memory works on a named one, because it is the
     // same class — no second implementation to drift.
-    const out = chat.remember({ text: "prefers tokio", entity: "user" });
+    const out = await chat.remember({ text: "prefers tokio", entity: "user" });
     assert.equal(out.id, 0);
-    assert.match(chat.recall({ query: "tokio" }).rendered, /tokio/);
+    assert.match((await chat.recall({ query: "tokio" })).rendered, /tokio/);
     assert.equal(chat.stats().facts, 1);
     await chat.checkpoint();
     chat.close();
@@ -42,14 +42,14 @@ test("a named memory is the same class as a path-opened one", async () => {
 
 test("memories in one workspace do not see each other", async () => {
   await withWorkspace(async (ws) => {
-    ws.open("chat-42").remember({ text: "the sky is blue" });
-    ws.open("chat-43").remember({ text: "the sky is red" });
+    await (await ws.open("chat-42")).remember({ text: "the sky is blue" });
+    await (await ws.open("chat-43")).remember({ text: "the sky is red" });
 
     // The same query, the same fact id in each, and each answers only for
     // itself. Ids are per memory, which is why they stay plain numbers.
-    assert.match(ws.open("chat-42").recall({ query: "sky" }).rendered, /blue/);
-    assert.doesNotMatch(ws.open("chat-42").recall({ query: "sky" }).rendered, /is red/);
-    assert.deepEqual(ws.list(), ["chat-42", "chat-43"]);
+    assert.match((await (await ws.open("chat-42")).recall({ query: "sky" })).rendered, /blue/);
+    assert.doesNotMatch((await (await ws.open("chat-42")).recall({ query: "sky" })).rendered, /is red/);
+    assert.deepEqual(await ws.list(), ["chat-42", "chat-43"]);
   });
 });
 
@@ -57,12 +57,12 @@ test("a first write creates the memory; a read of an unknown name does not", asy
   await withWorkspace(async (ws, dir) => {
     // create defaults to true — that is what lets a new conversation get a
     // memory with no registration step.
-    ws.open("chat-42").remember({ text: "a fact" });
+    await (await ws.open("chat-42")).remember({ text: "a fact" });
     assert.ok(existsSync(join(dir, "db", "chat-42.plugmem.journal")));
 
     // Asked not to create, an unused name throws instead of quietly answering
     // nothing: such a name is a typo far more often than a new memory.
-    assert.throws(() => ws.open("typo", false), /no database named typo/);
+    await assert.rejects(() => ws.open("typo", false), /no database named typo/);
     assert.ok(!existsSync(join(dir, "db", "typo.plugmem.journal")));
   });
 });
@@ -79,22 +79,22 @@ test("a name is not a path and cannot become one", async () => {
 
 test("describe, find and archive round-trip through the registry", async () => {
   await withWorkspace(async (ws) => {
-    ws.describe("chat-42", {
+    await ws.describe("chat-42", {
       description: "release planning and engine performance",
       tags: ["kind:chat"],
       owner: "ann",
     });
-    ws.describe("recipes", {
+    await ws.describe("recipes", {
       description: "dinner ideas and shopping lists",
       owner: "bob",
     });
 
     // By description...
-    assert.equal(ws.find("release planning")[0].db, "chat-42");
+    assert.equal((await ws.find("release planning"))[0].db, "chat-42");
     // ...and by owner, which lives in a graph edge rather than in the text.
-    assert.equal(ws.find("bob")[0].db, "recipes");
+    assert.equal((await ws.find("bob"))[0].db, "recipes");
 
-    const [entry] = ws.entries().filter((e) => e.db === "chat-42");
+    const [entry] = (await ws.entries()).filter((e) => e.db === "chat-42");
     assert.equal(entry.description, "release planning and engine performance");
     assert.deepEqual(entry.tags, ["kind:chat"]);
     assert.equal(entry.owner, "ann");
@@ -102,29 +102,29 @@ test("describe, find and archive round-trip through the registry", async () => {
 
     // Archiving is a label and is idempotent; it does not close or move
     // anything.
-    assert.equal(ws.archive("chat-42"), true);
-    assert.equal(ws.archive("chat-42"), false);
-    assert.equal(ws.entries().find((e) => e.db === "chat-42").archived, true);
-    assert.throws(() => ws.archive("nope"), /no database named nope/);
+    assert.equal(await ws.archive("chat-42"), true);
+    assert.equal(await ws.archive("chat-42"), false);
+    assert.equal((await ws.entries()).find((e) => e.db === "chat-42").archived, true);
+    await assert.rejects(() => ws.archive("nope"), /no database named nope/);
 
     // Describing twice revises rather than duplicating.
-    ws.describe("recipes", { description: "only dinner now" });
-    assert.equal(ws.entries().filter((e) => e.db === "recipes").length, 1);
-    assert.equal(ws.entries().find((e) => e.db === "recipes").description, "only dinner now");
+    await ws.describe("recipes", { description: "only dinner now" });
+    assert.equal((await ws.entries()).filter((e) => e.db === "recipes").length, 1);
+    assert.equal((await ws.entries()).find((e) => e.db === "recipes").description, "only dinner now");
   });
 });
 
 test("verify agrees, then reindex rebuilds a registry that was deleted", async () => {
   await withWorkspace(async (ws, dir) => {
-    ws.describe("chat-42", { description: "release planning", tags: ["kind:chat"] });
+    await ws.describe("chat-42", { description: "release planning", tags: ["kind:chat"] });
     assert.deepEqual(await ws.verify(), []);
 
     // A memory nobody described is reported, not hidden — it works, it just
     // cannot be found by a description. The handle is closed: one this test
     // still held would be a *live writer*, and the checks below would see a
     // busy memory rather than an undescribed one.
-    const scratch = ws.open("scratch");
-    scratch.remember({ text: "a fact" });
+    const scratch = await ws.open("scratch");
+    await scratch.remember({ text: "a fact" });
     scratch.close();
     const issues = await ws.verify();
     assert.equal(issues.length, 1);
@@ -139,13 +139,13 @@ test("verify agrees, then reindex rebuilds a registry that was deleted", async (
     for (const f of readdirSync(dir)) {
       if (f.startsWith("registry.plugmem")) rmSync(join(dir, f));
     }
-    assert.deepEqual(rebuilt.entries(), []);
+    assert.deepEqual(await rebuilt.entries(), []);
 
     const report = await rebuilt.reindex();
     assert.deepEqual(report.indexed, ["chat-42"]);
     assert.deepEqual(report.undescribed, ["scratch"]);
     assert.deepEqual(report.busy, []);
-    const back = rebuilt.entries().find((e) => e.db === "chat-42");
+    const back = (await rebuilt.entries()).find((e) => e.db === "chat-42");
     assert.equal(back.description, "release planning");
     assert.deepEqual(back.tags, ["kind:chat"]);
     rebuilt.close();
@@ -154,9 +154,9 @@ test("verify agrees, then reindex rebuilds a registry that was deleted", async (
 
 test("opening the same name twice is one pooled memory, not two", async () => {
   await withWorkspace(async (ws) => {
-    const first = ws.open("chat-42");
-    first.remember({ text: "written through the first handle" });
-    const second = ws.open("chat-42");
+    const first = await ws.open("chat-42");
+    await first.remember({ text: "written through the first handle" });
+    const second = await ws.open("chat-42");
 
     // Two JS objects, one memory behind them: `open` is a pool lookup, so the
     // second sees the first's write immediately and no second file lock is
@@ -173,8 +173,8 @@ test("the pool bounds what is open, and closeIdle releases the rest", async () =
   await withWorkspace(
     async (ws) => {
       for (const db of ["a", "b", "c"]) {
-        const handle = ws.open(db);
-        handle.remember({ text: `i am ${db}` });
+        const handle = await ws.open(db);
+        await handle.remember({ text: `i am ${db}` });
         handle.close();
       }
       // Two at a time, so the third pushed one out.
@@ -189,8 +189,8 @@ test("the pool bounds what is open, and closeIdle releases the rest", async () =
 
   await withWorkspace(
     async (ws) => {
-      const a = ws.open("a");
-      a.remember({ text: "x" });
+      const a = await ws.open("a");
+      await a.remember({ text: "x" });
       a.close();
       assert.equal(ws.openCount(), 1);
       // Everything is idle the instant nothing is using it, so a 1 ms window
@@ -220,8 +220,8 @@ test("a closed workspace throws, and a handle it gave out survives it", async ()
   const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-ws-"));
   try {
     const ws = new Workspace(dir);
-    const chat = ws.open("chat-42");
-    chat.remember({ text: "still mine" });
+    const chat = await ws.open("chat-42");
+    await chat.remember({ text: "still mine" });
 
     ws.close();
     assert.throws(() => ws.list(), /workspace is closed/);
@@ -241,7 +241,7 @@ test("a single memory is untouched by any of this", async () => {
   try {
     // The default: a path, and no workspace anywhere near it.
     const db = new Plugmem(join(dir, "m.plugmem"));
-    db.remember({ text: "a plain single memory" });
+    await db.remember({ text: "a plain single memory" });
     assert.equal(db.stats().facts, 1);
     db.close();
 

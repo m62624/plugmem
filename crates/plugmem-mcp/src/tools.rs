@@ -495,9 +495,15 @@ fn workspace_find_def() -> Value {
 fn recall_ro(reader: &ReaderShared, id: Value, args: Option<&Value>) -> Value {
     let format = format_arg(args);
     let query = arg_str(args, "query").map(String::from);
-    // Embed the query text into an owned vector, if we can (embedder Mutex only).
-    let vector = match query.as_deref() {
-        Some(text) => {
+    let explicit = match arg_vector(args) {
+        Ok(vector) => vector,
+        Err(message) => return rpc::tool_result(id, message, true),
+    };
+    // An explicit `vector` replaces the embedder outright; otherwise embed the
+    // query text into an owned vector, if we can (embedder Mutex only).
+    let vector = match (explicit, query.as_deref()) {
+        (Some(vector), _) => Some(vector),
+        (None, Some(text)) => {
             let mut embedder = reader.embedder.lock().expect("embedder lock");
             match embedder.as_mut() {
                 Some(e) => match e.embed(&[text]) {
@@ -507,7 +513,7 @@ fn recall_ro(reader: &ReaderShared, id: Value, args: Option<&Value>) -> Value {
                 None => None,
             }
         }
-        None => None,
+        (None, None) => None,
     };
     let tags = arg_str_vec(args, "tags");
     let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
@@ -563,9 +569,9 @@ fn remember(db: &Database, id: Value, args: Option<&Value>, revise: Option<FactI
         .collect();
     let meta = arg_meta(args);
     let meta_refs: Vec<(&str, &str)> = meta.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    let valid_from = match arg_ms(args, "valid_from") {
-        Ok(valid_from) => valid_from,
-        Err(message) => return rpc::tool_result(id, message, true),
+    let (valid_from, vector) = match (arg_ms(args, "valid_from"), arg_vector(args)) {
+        (Ok(valid_from), Ok(vector)) => (valid_from, vector),
+        (Err(message), _) | (_, Err(message)) => return rpc::tool_result(id, message, true),
     };
     let input = RememberInput {
         entity: arg_str(args, "entity"),
@@ -573,6 +579,10 @@ fn remember(db: &Database, id: Value, args: Option<&Value>, revise: Option<FactI
         links: &link_refs,
         metadata: (!meta_refs.is_empty()).then_some(meta_refs.as_slice()),
         valid_from,
+        // Authoritative when given: the host embeds only when this is `None`,
+        // so a caller's own vector skips the provider. The engine checks its
+        // length against `dim`.
+        vector: vector.as_deref(),
         ..RememberInput::text(now_ms(), text)
     };
     let res = match revise {
@@ -674,10 +684,16 @@ fn recall(db: &Database, id: Value, args: Option<&Value>) -> Value {
         (Ok(range), Ok(as_of)) => (range, as_of),
         (Err(message), _) | (_, Err(message)) => return rpc::tool_result(id, message, true),
     };
+    // Given, this replaces the embedder; left `None`, the host embeds the text
+    // inside `recall` (outside its lock) exactly as before.
+    let vector = match arg_vector(args) {
+        Ok(vector) => vector,
+        Err(message) => return rpc::tool_result(id, message, true),
+    };
     let q = RecallQuery {
         now: now_ms(),
         text: arg_str(args, "query"),
-        vector: None,
+        vector: vector.as_deref(),
         tags: &tag_refs,
         entities: &ent_refs,
         as_of,
@@ -739,6 +755,7 @@ fn remember_like(name: &str, description: &str, with_id: bool) -> Value {
             "description": messages::ARG_METADATA
         },
         "valid_from": { "type": "integer", "minimum": 0, "description": messages::ARG_VALID_FROM },
+        "vector": vector_prop(),
         "format": format_prop()
     });
     let mut required = vec![json!("text")];
@@ -750,6 +767,16 @@ fn remember_like(name: &str, description: &str, with_id: bool) -> Value {
         "name": name,
         "description": description,
         "inputSchema": { "type": "object", "properties": props, "required": required }
+    })
+}
+
+/// The `vector` property, shared by every tool that accepts a precomputed
+/// embedding.
+fn vector_prop() -> Value {
+    json!({
+        "type": "array",
+        "items": { "type": "number" },
+        "description": messages::ARG_VECTOR
     })
 }
 
@@ -773,6 +800,7 @@ fn recall_def() -> Value {
                 },
                 "k": { "type": "integer", "minimum": 0, "description": messages::ARG_K },
                 "closed": { "type": "boolean", "description": messages::ARG_CLOSED },
+                "vector": vector_prop(),
                 "format": format_prop()
             }
         }
@@ -1025,6 +1053,36 @@ fn arg_meta(args: Option<&Value>) -> Vec<(String, String)> {
 }
 
 /// The `range` argument as `[from, to)`, accepting a `[from, to]` array.
+/// A precomputed embedding argument.
+///
+/// Absent is fine; present but not an array of finite numbers is an error, for
+/// the same reason as [`arg_range`] — a vector the server could not read used
+/// to mean "embed the text instead", so the caller's own model was silently
+/// swapped for the configured one.
+fn arg_vector(args: Option<&Value>) -> Result<Option<Vec<f32>>, String> {
+    let Some(value) = args.and_then(|a| a.get("vector")) else {
+        return Ok(None);
+    };
+    let malformed = || Err("vector must be an array of numbers".to_string());
+    let Some(items) = value.as_array() else {
+        return malformed();
+    };
+    if items.is_empty() {
+        return Err("vector must not be empty (omit it to use the embedder)".to_string());
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(number) = item.as_f64() else {
+            return malformed();
+        };
+        if !number.is_finite() {
+            return Err("vector must contain only finite numbers".to_string());
+        }
+        out.push(number as f32);
+    }
+    Ok(Some(out))
+}
+
 /// A unix-millisecond argument that is allowed to be absent but not malformed.
 ///
 /// Same reasoning as [`arg_range`]: `as_of` and `valid_from` change *which*

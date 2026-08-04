@@ -51,7 +51,7 @@ import { Plugmem } from "plugmem";
 
 const db = new Plugmem("agent.plugmem");          // or { readOnly: true }
 
-const out = db.remember({
+const out = await db.remember({
   text: "prefers tokio",
   entity: "user",
   tags: ["pref"],
@@ -61,15 +61,15 @@ const out = db.remember({
 out.id;                       // number
 out.similar;                  // Similar[] — the engine surfaces conflicts, you decide
 
-const res = db.recall({ query: "runtime?", k: 5 });
+const res = await db.recall({ query: "runtime?", k: 5 });
 res.rendered;                 // the prompt-ready block
 res.facts;                    // RecalledFact[] — { id, score, entity, recordedAt, … }
 
 const card = db.get(out.id);
 card.metadata;                // Record<string,string> — keys sorted, {} when none
 
-db.revise(out.id, { text: "prefers async-std" });
-db.link({ src: "user", rel: "works_at", dst: "acme" });
+await db.revise(out.id, { text: "prefers async-std" });
+await db.link({ src: "user", rel: "works_at", dst: "acme" });
 db.unlink({ src: "user", rel: "works_at", dst: "acme" }); // closes the current edge
 
 await db.checkpoint();        // async (see below)
@@ -187,12 +187,12 @@ const ws = new Workspace("/srv/memories", { maxOpen: 16, idleTimeoutMs: 60_000 }
 
 // `open` hands back the same `Plugmem` class, so a named memory has exactly the
 // verbs a path-opened one has. A first write to an unused name creates it.
-ws.open("chat-42").remember({ text: "prefers tokio" });
+await (await ws.open("chat-42")).remember({ text: "prefers tokio" });
 
 // Do not know the name? Ask what each memory is for. Owners are searchable too,
 // even though an owner is a graph edge rather than text.
-ws.describe("chat-42", { description: "release planning", owner: "ann" });
-const hits: DbEntry[] = ws.find("release planning");   // → [{ db: "chat-42", … }]
+await ws.describe("chat-42", { description: "release planning", owner: "ann" });
+const hits: DbEntry[] = await ws.find("release planning"); // → [{ db: "chat-42", … }]
 ```
 
 A name is `[a-z0-9][a-z0-9_-]*` and **cannot represent a path**, so it resolves
@@ -211,6 +211,11 @@ searches across them and no entity links between them, so a fact filed in the
 wrong one is unreachable from the other rather than merely misplaced. And **who
 may reach which memory is not this package's responsibility** — the name comes
 from your code, so put the policy there.
+
+Every `Workspace` verb that touches a database returns a promise — `open`,
+`list`, `entries`, `find`, `describe`, `archive`, `reindex`, `verify` — because
+the registry is itself a plugmem memory and a named memory is a real file being
+opened. `closeIdle()` and `openCount()` stay synchronous.
 
 `reindex()` and `verify()` return promises: they open and read every memory in
 the directory, which is not work for the main thread.
@@ -250,10 +255,40 @@ a no-op report when there is nothing to purge, reindex or optimize.
 version; the heavier ones buy bytes and index freshness. `"full"` is the only
 one that repacks the edge arenas, which a relink-heavy workload fragments.
 
-Small single-record and read verbs stay synchronous for a direct API. A single
-write can still wait for the configured durability policy, and a configured
-embedder can perform a remote request; use `rememberMany` when that work should
-run away from the event loop.
+### What is async, and why
+
+`remember`, `revise`, `recall`, `rememberMany`, `exportPage`, `maintain` and
+`checkpoint` return promises. Everything else — `get`, `stats`, `tagsOf`,
+`forget`, `link`, `unlink`, `verify`, `export`, `path`, `generation`,
+`refresh` — is synchronous.
+
+The line is drawn at blocking work. Node runs all JavaScript on **one** thread,
+so a native call that waits on an embedder's HTTP round trip or on an fsync
+freezes every timer, socket and callback in the process for as long as it takes.
+The verbs above can do exactly that — with an `[embedder]` configured,
+`remember` and a text `recall` each cost a request to the provider — so they run
+on a libuv worker and hand JavaScript a promise. The rest touch only mapped
+memory and return in microseconds, where a promise would be pure ceremony.
+
+Arguments are still checked on your thread: a refused one **throws** at the call
+site rather than rejecting later, so a mistake in your code and a failure in the
+engine never arrive the same way.
+
+### Bringing your own embedding
+
+`remember`, `revise`, `rememberMany` and `recall` all take an optional
+`vector` — a precomputed embedding whose length must equal the configured `dim`:
+
+```typescript
+const own = await myEmbedder(text);          // your model, your pipeline
+await db.remember({ text, vector: own });    // nothing is sent to `[embedder]`
+const res = await db.recall({ query: text, vector: own });
+```
+
+Given one, it **replaces** the embedder for that call — the engine embeds only
+when the field is absent. Use it for vectors you already have, for a model that
+is not an OpenAI-shaped HTTP endpoint, or for a deterministic test with no
+network. The CLI (`--vector`) and the MCP tools (`vector`) take the same thing.
 
 `close()` releases the file and its lock; every verb afterwards throws, and it is
 idempotent (the handle is also released on garbage collection, but `close()`

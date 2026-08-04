@@ -89,6 +89,14 @@ pub(crate) enum Command {
         /// Validity start (unix millis); defaults to now.
         #[arg(long = "valid-from", value_name = "TS")]
         valid_from: Option<u64>,
+        /// A precomputed embedding, comma-separated (`0.1,-0.2,…`). Its length
+        /// must equal the configured `dim`. Given, it **replaces** the
+        /// embedder: nothing is sent to the provider. This is the route for
+        /// vectors you already have, or for a model that is not an
+        /// OpenAI-shaped HTTP endpoint. Large ones come from a file:
+        /// `--vector "$(cat vec.txt)"`.
+        #[arg(long, value_name = "F32,…", value_delimiter = ',', num_args = 1..)]
+        vector: Vec<f32>,
     },
     /// Retrieve a ranked, token-budgeted block; sources compose. Each line is
     /// `- [fN] text …`, where `N` is the fact's id — pass it to `forget`,
@@ -115,6 +123,11 @@ pub(crate) enum Command {
         /// Include closed revisions (whole chains).
         #[arg(long)]
         closed: bool,
+        /// A precomputed query embedding, comma-separated. Given, it
+        /// **replaces** the embedder for this query — nothing is sent to the
+        /// provider — and its length must equal the configured `dim`.
+        #[arg(long, value_name = "F32,…", value_delimiter = ',', num_args = 1..)]
+        vector: Vec<f32>,
     },
     /// Supersede a fact: close the old one, record the successor.
     Revise {
@@ -132,6 +145,14 @@ pub(crate) enum Command {
         meta: Vec<String>,
         #[arg(long = "valid-from", value_name = "TS")]
         valid_from: Option<u64>,
+        /// A precomputed embedding, comma-separated (`0.1,-0.2,…`). Its length
+        /// must equal the configured `dim`. Given, it **replaces** the
+        /// embedder: nothing is sent to the provider. This is the route for
+        /// vectors you already have, or for a model that is not an
+        /// OpenAI-shaped HTTP endpoint. Large ones come from a file:
+        /// `--vector "$(cat vec.txt)"`.
+        #[arg(long, value_name = "F32,…", value_delimiter = ',', num_args = 1..)]
+        vector: Vec<f32>,
     },
     /// Tombstone a fact (physically purged at the next `maintain`).
     Forget {

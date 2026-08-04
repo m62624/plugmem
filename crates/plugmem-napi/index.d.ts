@@ -57,6 +57,15 @@ export interface RememberArgs {
   metadata?: Record<string, string>
   /** Validity start, unix milliseconds (default: the fact's record time). */
   validFrom?: number
+  /**
+   * A precomputed embedding. Its length must equal the configured `dim`.
+   *
+   * Given, it **replaces** the embedder: nothing is sent to the provider.
+   * That is the host's own precedence — it embeds only when this is absent —
+   * and it is the route for a vector you already have, or for a model that
+   * is not an OpenAI-shaped HTTP endpoint.
+   */
+  vector?: Array<number>
 }
 /**
  * Arguments for [`Plugmem::recall`] — every field optional; lexical/tag/graph/
@@ -77,6 +86,15 @@ export interface RecallArgs {
   k?: number
   /** Include closed revisions (default false). */
   closed?: boolean
+  /**
+   * A precomputed embedding. Its length must equal the configured `dim`.
+   *
+   * Given, it **replaces** the embedder: nothing is sent to the provider.
+   * That is the host's own precedence — it embeds only when this is absent —
+   * and it is the route for a vector you already have, or for a model that
+   * is not an OpenAI-shaped HTTP endpoint.
+   */
+  vector?: Array<number>
 }
 /** Arguments for [`Plugmem::link`]. */
 export interface LinkArgs {
@@ -455,10 +473,19 @@ export declare class Plugmem {
    */
   path(): string
   /**
-   * Stores a fact; returns its id plus similar/conflicting live facts.
-   * @throws in read-only mode.
+   * Stores a fact and resolves with its id plus similar/conflicting live
+   * facts.
+   *
+   * **Async** (returns a `Promise`): with an `[embedder]` configured this
+   * makes an HTTP call to the provider, and a write waits for the journal's
+   * durability policy. Both are blocking work, and Node has exactly one
+   * thread that runs JavaScript — doing them on it would freeze every timer,
+   * socket and callback in the process for the whole round trip. It runs on
+   * a libuv worker instead. Arguments are still checked synchronously, so a
+   * refused one throws here rather than rejecting later.
+   * @throws synchronously in read-only mode.
    */
-  remember(args: RememberArgs): RememberOutcome
+  remember(args: RememberArgs): Promise<RememberOutcome>
   /**
    * Stores a batch of facts and resolves with one outcome per input.
    *
@@ -467,37 +494,56 @@ export declare class Plugmem {
    */
   rememberMany(args: Array<RememberArgs>): Promise<RememberOutcome[]>
   /**
-   * Closes fact `id` and records `args` as its successor; returns the outcome.
-   * @throws in read-only mode.
+   * Closes fact `id`, records `args` as its successor, and resolves with the
+   * outcome. **Async** for the same reasons as
+   * [`remember`](Plugmem::remember).
+   * @throws synchronously in read-only mode.
    */
-  revise(id: number, args: RememberArgs): RememberOutcome
+  revise(id: number, args: RememberArgs): Promise<RememberOutcome>
   /**
-   * Ranked, fused recall. Returns the structured result (its `rendered` field
-   * is the prompt-ready block; `facts`/`edges` are the structured hits).
+   * Ranked, fused recall. Resolves with the structured result (its `rendered`
+   * field is the prompt-ready block; `facts`/`edges` are the structured hits).
+   *
+   * **Async** (returns a `Promise`): a text query with an `[embedder]`
+   * configured costs an HTTP round trip, and blocking the one thread that
+   * runs JavaScript for it would stall the whole process. The query shape is
+   * still validated synchronously.
    */
-  recall(args?: RecallArgs | undefined | null): RecallResult
+  recall(args?: RecallArgs | undefined | null): Promise<RecallResult>
   /**
-   * Tombstones fact `id` (physically purged at the next `maintain`). Returns
-   * whether it was a live fact. @throws in read-only mode.
+   * Tombstones fact `id` (physically purged at the next `maintain`) and
+   * resolves with whether it was a live fact.
+   *
+   * **Async**: every write syncs the journal, and the host's post-write
+   * policy can fire a whole maintenance pass or a reshard from here — work
+   * proportional to the database, which the JS thread must not be holding.
+   * @throws synchronously in read-only mode.
    */
-  forget(id: number): boolean
-  /** Upserts a typed edge `src -rel-> dst`. @throws in read-only mode. */
-  link(args: LinkArgs): void
-  /** Closes the current typed edge `src -rel-> dst`. @throws in read-only mode. */
-  unlink(args: LinkArgs): boolean
+  forget(id: number): Promise<boolean>
+  /**
+   * Upserts a typed edge `src -rel-> dst`. **Async** for the same reason as
+   * [`forget`](Plugmem::forget). @throws synchronously in read-only mode.
+   */
+  link(args: LinkArgs): Promise<void>
+  /**
+   * Closes the current typed edge `src -rel-> dst`, resolving with whether
+   * one was open. **Async** for the same reason as
+   * [`forget`](Plugmem::forget). @throws synchronously in read-only mode.
+   */
+  unlink(args: LinkArgs): Promise<boolean>
   /** One fact's full card by `id`, or `null` if unknown/tombstoned. */
   get(id: number): FactSnapshot | null
   /** Engine size counters. */
   stats(): Stats
   /**
-   * Every currently-open fact, as an array (id-free, import-ready).
+   * Every currently-open fact, as one array (id-free, import-ready).
    *
-   * **Synchronous and unbounded**: it materializes the whole memory into one
-   * array on the JS thread, so a large database blocks the event loop for as
-   * long as that takes. `exportPage` is the same data in bounded pages on a
-   * libuv thread — prefer it for anything but a small memory or a script.
+   * **Async, but still unbounded**: the scan is off the JS thread, yet the
+   * whole memory is materialized into a single array before it resolves, so
+   * the peak memory is the whole export. `exportPage` is the same data in
+   * bounded pages — prefer it for anything but a small memory or a script.
    */
-  export(): Array<ExportedFact>
+  export(): Promise<ExportedFact[]>
   /**
    * Returns at most 128 inspected fact ids' open facts on a libuv worker
    * thread. A sparse page can be empty and still carry `nextCursor`.
@@ -511,8 +557,14 @@ export declare class Plugmem {
   exportPage(cursor?: number | undefined | null): Promise<ExportPage>
   /** One fact's tags, or an empty array for an unknown or tombstoned id. */
   tagsOf(id: number): Array<string>
-  /** Content-integrity check; throws on the first inconsistency found. */
-  verify(): void
+  /**
+   * Content-integrity check; rejects on the first inconsistency found.
+   *
+   * **Async**: this is a full sweep — every fact's text and metadata, the
+   * vector mapping, and both directions of every edge. On a large memory
+   * that is seconds of work, and it belongs on a worker.
+   */
+  verify(): Promise<void>
   /**
    * Runs policy-driven maintenance; resolves with the before/after report.
    * **Async** (returns a `Promise`): the pass may do disk I/O (compaction,
@@ -571,25 +623,36 @@ export declare class Workspace {
    *
    * @throws if the name is not a usable memory name, if it does not exist and
    * `create` is false, or if another process holds it.
+   * **Async**: a first open replays the memory's journal and maps its
+   * snapshot, and making room in the pool closes another memory — file work
+   * that the one thread running JavaScript must not be holding.
    */
-  open(db: string, create?: boolean | undefined | null): Plugmem
+  open(db: string, create?: boolean | undefined | null): Promise<Plugmem>
   /**
    * Every memory in the directory, sorted by name.
    *
    * Reads the filesystem, not the registry: a memory that exists but was
    * never described still appears.
+   * **Async**: it reads the directory.
    */
-  list(): Array<string>
-  /** Every described memory, sorted by name. */
-  entries(): Array<DbEntry>
+  list(): Promise<string[]>
+  /**
+   * Every described memory, sorted by name.
+   *
+   * **Async**: the registry is itself a memory, so this opens and reads a
+   * database.
+   */
+  entries(): Promise<DbEntry[]>
   /**
    * The memories whose descriptions best match `query`, best first.
    *
    * This is the answer to "I do not know the name": ask in words, get names
    * back, then open by name. A person's name works too — an owner is a graph
    * edge, and the graph source reaches it.
+   * **Async**: this is a full recall against the registry memory — the same
+   * hybrid retrieval any other recall runs.
    */
-  find(query: string, k?: number | undefined | null): Array<DbEntry>
+  find(query: string, k?: number | undefined | null): Promise<DbEntry[]>
   /**
    * Records what a memory is for — in the memory itself and in the registry,
    * so the registry can always be rebuilt from the memories. Creates the
@@ -597,15 +660,18 @@ export declare class Workspace {
    *
    * Called again for the same memory this revises rather than duplicating,
    * so the history of what it used to be for is kept.
+   * **Async**: it writes twice — into the memory itself and into the
+   * registry — and each write syncs a journal.
    */
-  describe(db: string, args: DescribeArgs): void
+  describe(db: string, args: DescribeArgs): Promise<void>
   /**
    * Labels a memory archived, keeping its description. Returns whether
    * anything changed. Archiving does not close, move or delete anything.
    *
    * @throws if the memory has no registry record to archive.
+   * **Async**: a registry write.
    */
-  archive(db: string): boolean
+  archive(db: string): Promise<boolean>
   /**
    * Rebuilds the registry from the memories' own descriptions.
    *

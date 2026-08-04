@@ -15,13 +15,15 @@ The wrapper has two internal modes:
 - writer: owns `plugmem_host::Database`;
 - reader: owns `ReadOnlyDatabase` and must reject write operations.
 
-Async `rememberMany`, `exportPage`, `maintain`, and `checkpoint` use napi-rs async tasks/libuv. Preserve the rule that the task owns the necessary database handle and that errors cross the boundary as JS exceptions/promises rather than panics. Paged export is pull-based and item-bounded; do not replace it with an unbounded threadsafe-function callback queue or wait for JavaScript while holding the host read lock.
+`remember`, `revise`, `recall`, `rememberMany`, `exportPage`, `maintain`, and `checkpoint` use napi-rs async tasks/libuv. The rule for which verbs are async is *blocking work*, not verb size: with an `[embedder]` configured, `remember`/`revise`/`recall` each cost an HTTP round trip, and Node has one thread for all JavaScript — running that on it stalls the whole process. Verbs that only touch mapped memory stay synchronous. Do not move a verb across that line without the same reasoning. Preserve the rule that the task owns the necessary database handle and that errors cross the boundary as JS exceptions/promises rather than panics. Paged export is pull-based and item-bounded; do not replace it with an unbounded threadsafe-function callback queue or wait for JavaScript while holding the host read lock.
 
 ## Type and error rules
 
 Keep TypeScript-visible field names and optionality stable. The typed objects in `types.rs` are deliberately separate from core structs so Rust lifetimes and borrowed inputs do not leak into JavaScript. Convert `HostError` into napi errors with useful context; never expose internal debug formatting as the API contract.
 
 `src/error.rs` owns the thrown-error contract and is the single place to change it. Every failure the wrapper decides carries a stable `PLUGMEM_*` `code`; an engine failure inside a verb carries `GenericFailure` and the host's message on **both** the sync and the async path, because napi-rs' `Task` fixes its error type and a code that appeared only on synchronous verbs would make `code` mean different things on different verbs. Do not code engine failures on one path only.
+
+Every verb that reaches the engine's vector layer accepts an optional caller-supplied `vector`, which replaces the embedder for that call — the host embeds only when the field is absent. The length rule belongs to the engine (`dim`); validate only that the numbers are finite and the array is non-empty. The CLI (`--vector`) and MCP (`vector`) expose the same thing; keep the three in step.
 
 An argument that shapes an answer must be refused, never dropped. `range` is exactly `[from, to]`; `range`, `asOf` and `validFrom` are checked with `checked_ms` rather than cast, because `f64 as u64` saturates in Rust and would silently turn a caller's mistake into a different, plausible query. Validate on the JS thread — before an `AsyncTask` is constructed — so a refusal throws where the caller stands instead of rejecting a promise.
 

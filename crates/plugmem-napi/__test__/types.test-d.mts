@@ -27,9 +27,24 @@ function assertType<T extends true>(_: T): void {}
 // ── one memory: the default ─────────────────────────────────────────────────
 
 const db = new Plugmem("memory.plugmem", { dim: 0 });
-const id: number = db.remember({ text: "prefers tokio", entity: "user" }).id;
-const recalled: RecallResult = db.recall({ query: "tokio", k: 8 });
+// `remember`, `revise` and `recall` are promises: with an `[embedder]`
+// configured each can make an HTTP call, and blocking the one thread that runs
+// JavaScript for that would stall the whole process.
+const remembered: Promise<RememberOutcome> = db.remember({
+  text: "prefers tokio",
+  entity: "user",
+});
+const revised: Promise<RememberOutcome> = db.revise(0, { text: "prefers smol" });
+const recalledLater: Promise<RecallResult> = db.recall({ query: "tokio", k: 8 });
+const recalled: RecallResult = await recalledLater;
+const id: number = (await remembered).id;
 const rendered: string = recalled.rendered;
+
+// A precomputed embedding is accepted wherever the engine takes one, and
+// replaces the embedder for that call.
+const own: number[] = [0.1, -0.2];
+const withOwnVector: Promise<RecallResult> = db.recall({ query: "tokio", vector: own });
+const storedWithVector: Promise<RememberOutcome> = db.remember({ text: "x", vector: own });
 const stats: Stats = db.stats();
 assertType<Exact<typeof stats.facts, number>>(true);
 
@@ -40,6 +55,11 @@ const rememberedMany: Promise<RememberOutcome[]> = db.rememberMany([
   { text: "batch", tags: ["example"] },
 ]);
 const tags: string[] = db.tagsOf(id);
+const exported: Promise<ExportedFact[]> = db.export();
+const verified: Promise<void> = db.verify();
+const forgotten: Promise<boolean> = db.forget(id);
+const linked: Promise<void> = db.link({ src: "a", rel: "r", dst: "b" });
+const unlinked: Promise<boolean> = db.unlink({ src: "a", rel: "r", dst: "b" });
 const exportedPage: Promise<ExportPage> = db.exportPage();
 const exportedPageAfter: Promise<ExportPage> = db.exportPage(128);
 type PageFact = ExportPage["facts"][number];
@@ -53,7 +73,7 @@ defaulted.close();
 
 // A recall window is a pair of instants; the binding refuses any other shape at
 // runtime, and the type says `number[]` because napi has no fixed-length arrays.
-const windowed: RecallResult = db.recall({ range: [0, Date.now()], asOf: Date.now() });
+const windowed: Promise<RecallResult> = db.recall({ range: [0, Date.now()], asOf: Date.now() });
 
 // ── many memories: opt-in ───────────────────────────────────────────────────
 
@@ -61,21 +81,21 @@ const ws = new Workspace("/srv/memories", { maxOpen: 8, idleTimeoutMs: 60_000 })
 
 // `open` hands back the same class, so a named memory has the same verbs. This
 // is the assertion that would catch the binding drifting into a second type.
-const chat: Plugmem = ws.open("chat-42");
-assertType<Exact<ReturnType<Workspace["open"]>, Plugmem>>(true);
+const chat: Promise<Plugmem> = ws.open("chat-42");
+assertType<Exact<ReturnType<Workspace["open"]>, Promise<Plugmem>>>(true);
 
-const names: string[] = ws.list();
-const entries: DbEntry[] = ws.entries();
-const hits: DbEntry[] = ws.find("release planning", 4);
+const names: Promise<string[]> = ws.list();
+const entries: Promise<DbEntry[]> = ws.entries();
+const hits: Promise<DbEntry[]> = ws.find("release planning", 4);
 assertType<Exact<DbEntry["archived"], boolean>>(true);
 assertType<Exact<DbEntry["owner"], string | undefined>>(true);
 
-ws.describe("chat-42", {
+const described: Promise<void> = ws.describe("chat-42", {
   description: "release planning",
   tags: ["kind:chat"],
   owner: "ann",
 });
-const archived: boolean = ws.archive("chat-42");
+const archived: Promise<boolean> = ws.archive("chat-42");
 const rebuilt: Promise<ReindexReport> = ws.reindex();
 const problems: Promise<WorkspaceProblem[]> = ws.verify();
 const closed: number = ws.closeIdle();
@@ -83,7 +103,7 @@ const open: number = ws.openCount();
 
 // `create` is optional and boolean; the second argument is not a path or an
 // options bag, which is exactly the confusion a name-shaped API invites.
-const strict: Plugmem = ws.open("chat-42", false);
+const strict: Promise<Plugmem> = ws.open("chat-42", false);
 
 // Everything above is referenced so `noUnusedLocals` keeps this file honest.
 export const used = {
@@ -95,12 +115,21 @@ export const used = {
   tags,
   exportedPage,
   exportedPageAfter,
+  exported,
+  verified,
+  forgotten,
+  linked,
+  unlinked,
+  revised,
+  withOwnVector,
+  storedWithVector,
   resolvedPath,
   windowed,
   chat,
   names,
   entries,
   hits,
+  described,
   archived,
   rebuilt,
   problems,
