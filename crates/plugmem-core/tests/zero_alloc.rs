@@ -5,41 +5,49 @@
 //! Own test binary: it swaps the global allocator for a counting wrapper.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::cell::Cell;
 
 use plugmem_core::tokenizer::Tokenizer;
 use plugmem_core::{
     Config, MemStorage, Memory, RecallQuery, RecallResult, RecallScratch, RememberInput, Storage,
 };
 
-static ALLOCS: AtomicU64 = AtomicU64::new(0);
-/// Total bytes requested from the allocator — the measure that tells a whole
-/// pool copy apart from small metadata (the overlay-open gate below).
-static ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    /// The counters are **per thread**, and that is the whole point: a gate
+    /// measures the allocations of the code it wraps, which all happen on the
+    /// calling thread. A process-global counter would also fold in whatever
+    /// libtest's harness threads do at that exact moment — spawning the next
+    /// test thread, capturing output, reporting a result — and the gates would
+    /// fail at random on a busy machine.
+    ///
+    /// `const` init is load-bearing: it makes the access allocation-free and
+    /// destructor-free, which is what allows reading it from inside the global
+    /// allocator without recursing back into it.
+    static ALLOCS: Cell<u64> = const { Cell::new(0) };
+    /// Total bytes requested from the allocator — the measure that tells a whole
+    /// pool copy apart from small metadata (the overlay-open gate below).
+    static ALLOC_BYTES: Cell<u64> = const { Cell::new(0) };
+}
 
-/// The counter is process-global, so the gates must not run
-/// concurrently: each test holds this lock for its whole body.
-static SERIAL: Mutex<()> = Mutex::new(());
-
-fn serial() -> MutexGuard<'static, ()> {
-    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+/// Records one allocation of `bytes`. `try_with` keeps a late allocation
+/// during thread teardown from panicking inside the allocator.
+fn record(bytes: usize) {
+    let _ = ALLOCS.try_with(|c| c.set(c.get() + 1));
+    let _ = ALLOC_BYTES.try_with(|c| c.set(c.get() + bytes as u64));
 }
 
 struct Counting;
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
-        ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+        record(layout.size());
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
-        ALLOC_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
+        record(new_size);
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 }
@@ -48,21 +56,20 @@ unsafe impl GlobalAlloc for Counting {
 static COUNTING: Counting = Counting;
 
 fn allocs<R>(f: impl FnOnce() -> R) -> (u64, R) {
-    let before = ALLOCS.load(Ordering::Relaxed);
+    let before = ALLOCS.with(Cell::get);
     let result = f();
-    (ALLOCS.load(Ordering::Relaxed) - before, result)
+    (ALLOCS.with(Cell::get) - before, result)
 }
 
 /// Bytes requested from the allocator while `f` runs.
 fn alloc_bytes<R>(f: impl FnOnce() -> R) -> (u64, R) {
-    let before = ALLOC_BYTES.load(Ordering::Relaxed);
+    let before = ALLOC_BYTES.with(Cell::get);
     let result = f();
-    (ALLOC_BYTES.load(Ordering::Relaxed) - before, result)
+    (ALLOC_BYTES.with(Cell::get) - before, result)
 }
 
 #[test]
 fn tokenizer_generic_unicode_path_allocates_nothing_after_warmup() {
-    let _serial = serial();
     let mut tokenizer = Tokenizer::new();
     let input = "Hello МИР-42 café Straße नमस्ते";
 
@@ -99,7 +106,6 @@ fn tokenizer_generic_unicode_path_allocates_nothing_after_warmup() {
 
 #[test]
 fn recall_and_get_allocate_nothing_after_warmup() {
-    let _serial = serial();
     let dim = 32usize;
     let mut cfg = Config::default();
     cfg.dim = dim;
@@ -175,7 +181,6 @@ fn recall_and_get_allocate_nothing_after_warmup() {
 
 #[test]
 fn graph_regime_recall_allocates_nothing_after_warmup() {
-    let _serial = serial();
     // The same invariant above the HNSW threshold: graph search + the
     // flat-tail scan run entirely on the engine scratches.
     let dim = 16usize;
@@ -241,7 +246,6 @@ fn overlay_open_does_not_clone_the_base_pools() {
     // The RAM-win proof: opening a snapshot with
     // `from_bytes_overlay` borrows its byte pools, so it allocates only the
     // small owned metadata — nowhere near the whole image the owned open copies.
-    let _serial = serial();
     let cfg = Config::default();
 
     // A snapshot whose byte pools dominate: many facts, each with real text.
