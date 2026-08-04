@@ -109,7 +109,7 @@ test("a read-only handle embeds the query itself, like the CLI and MCP do", asyn
   await withEmbedder(async (base, seen) => {
     await withConfig(base, async ({ config, path }) => {
       // A writer with the same config: the engine embeds on `remember`.
-      const w = new Plugmem(path, { config });
+      const w = await Plugmem.open(path, { config });
       await w.remember({ text: "the deployment finished at noon" });
       await w.checkpoint();
       w.close();
@@ -119,7 +119,7 @@ test("a read-only handle embeds the query itself, like the CLI and MCP do", asyn
 
       // Read-only over the published snapshot. The engine cannot embed here,
       // so if the binding does not, this query never reaches the embedder.
-      const ro = new Plugmem(path, { config, readOnly: true });
+      const ro = await Plugmem.open(path, { config, readOnly: true });
       const res = await ro.recall({ query: "deployment" });
 
       assert.equal(
@@ -136,13 +136,13 @@ test("a read-only handle embeds the query itself, like the CLI and MCP do", asyn
 test("a read-only recall with no text embeds nothing", async () => {
   await withEmbedder(async (base, seen) => {
     await withConfig(base, async ({ config, path }) => {
-      const w = new Plugmem(path, { config });
+      const w = await Plugmem.open(path, { config });
       await w.remember({ text: "a fact", tags: ["t"] });
       await w.checkpoint();
       w.close();
 
       const afterWrite = Atomics.load(seen, 0);
-      const ro = new Plugmem(path, { config, readOnly: true });
+      const ro = await Plugmem.open(path, { config, readOnly: true });
       // Tags only: there is no query to embed, so no call must be made.
       await ro.recall({ tags: ["t"] });
       assert.equal(Atomics.load(seen, 0), afterWrite, "no text, no embedder call");
@@ -156,7 +156,7 @@ test("a caller's own vector replaces the embedder entirely", async () => {
     await withConfig(base, async ({ config, path }) => {
       const own = Array.from({ length: DIM }, (_, j) => Math.sin(30 + j));
 
-      const w = new Plugmem(path, { config });
+      const w = await Plugmem.open(path, { config });
       const before = Atomics.load(seen, 0);
       // Given a vector, `remember` must not call the provider at all — the
       // host embeds only when the field is absent.
@@ -169,7 +169,7 @@ test("a caller's own vector replaces the embedder entirely", async () => {
       await w.checkpoint();
       w.close();
 
-      const ro = new Plugmem(path, { config, readOnly: true });
+      const ro = await Plugmem.open(path, { config, readOnly: true });
       const res = await ro.recall({ query: "stored", vector: own });
       assert.equal(Atomics.load(seen, 0), before, "read-only recall did not embed");
       assert.equal(res.facts.length, 1);
@@ -181,7 +181,7 @@ test("a caller's own vector replaces the embedder entirely", async () => {
 test("a vector that is not a vector is refused before anything runs", async () => {
   await withEmbedder(async (base) => {
     await withConfig(base, async ({ config, path }) => {
-      const db = new Plugmem(path, { config });
+      const db = await Plugmem.open(path, { config });
       try {
         for (const vector of [[], [0.1, NaN], [Infinity]]) {
           // Synchronous: the check runs before the task is scheduled, so this
@@ -204,7 +204,7 @@ test("a vector that is not a vector is refused before anything runs", async () =
 test("an unreachable embedder surfaces as a thrown error, not a silent miss", async () => {
   await withEmbedder(async (base) => {
     await withConfig(base, async ({ config, path }) => {
-      const w = new Plugmem(path, { config });
+      const w = await Plugmem.open(path, { config });
       await w.remember({ text: "stored while the embedder was up" });
       await w.checkpoint();
       w.close();
@@ -218,7 +218,7 @@ test("an unreachable embedder surfaces as a thrown error, not a silent miss", as
         `[engine]\ndim = ${DIM}\n[embedder]\nkind = "openai"\nurl = "http://127.0.0.1:1/v1"\nmodel = "test"\n`,
       );
       try {
-        const ro = new Plugmem(path, { config: broken, readOnly: true });
+        const ro = await Plugmem.open(path, { config: broken, readOnly: true });
         // A rejected promise, not a throw: the embedder call happens on the
         // libuv worker now, which is the whole point of the verb being async.
         await assert.rejects(() => ro.recall({ query: "stored" }), /embedder/);

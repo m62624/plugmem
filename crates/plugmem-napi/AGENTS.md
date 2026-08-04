@@ -8,7 +8,7 @@
 
 ## Public boundary
 
-The `Plugmem` constructor accepts a path and optional open options, including read-only mode and config. Methods cover remember, remember-many, revise, recall, forget, link, get, tags, collected and paged export, verify, maintain, checkpoint, generation, refresh, and close.
+`Plugmem` has **no JavaScript constructor**: it is opened with the static, asynchronous `Plugmem.open(path?, options?)`. A constructor must evaluate to its object immediately, so it cannot hand the open — the exclusive lock, the journal replay, the snapshot mapping — to a worker thread; a static method returning a promise can. `Workspace` keeps its constructor, which only reads `config.toml` and builds a struct; every database it touches opens lazily through its (async) verbs. Do not reintroduce a synchronous open. Methods cover remember, remember-many, revise, recall, forget, link, get, tags, collected and paged export, verify, maintain, checkpoint, generation, refresh, and close.
 
 The wrapper has two internal modes:
 
@@ -21,7 +21,7 @@ The wrapper has two internal modes:
 
 Keep TypeScript-visible field names and optionality stable. The typed objects in `types.rs` are deliberately separate from core structs so Rust lifetimes and borrowed inputs do not leak into JavaScript. Convert `HostError` into napi errors with useful context; never expose internal debug formatting as the API contract.
 
-`src/error.rs` owns the thrown-error contract and is the single place to change it. Every failure the wrapper decides carries a stable `PLUGMEM_*` `code`; an engine failure inside a verb carries `GenericFailure` and the host's message on **both** the sync and the async path, because napi-rs' `Task` fixes its error type and a code that appeared only on synchronous verbs would make `code` mean different things on different verbs. Do not code engine failures on one path only.
+`src/error.rs` owns the thrown-error contract and is the single place to change it. Every failure carries a stable `PLUGMEM_*` `code`, on a synchronous throw and on a promise rejection alike. The async half takes a trick: napi-rs' `Task` fixes its error type to `napi::Error<Status>`, whose status is a closed enum, so a task carries its failure inside its `Output` (`error::Produced`) and `resolve` — which runs on the JS thread and has an `Env` — rebuilds it as a real JS `Error` with `code` via `error::to_js`. napi's rejection path returns that stored object verbatim. **Every fallible `Task::resolve` must go through `error::to_js`**; a new task that skips it silently drops the code for that verb.
 
 Every verb that reaches the engine's vector layer accepts an optional caller-supplied `vector`, which replaces the embedder for that call — the host embeds only when the field is absent. The length rule belongs to the engine (`dim`); validate only that the numbers are finite and the array is non-empty. The CLI (`--vector`) and MCP (`vector`) expose the same thing; keep the three in step.
 

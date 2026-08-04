@@ -26,7 +26,7 @@ function assertType<T extends true>(_: T): void {}
 
 // ── one memory: the default ─────────────────────────────────────────────────
 
-const db = new Plugmem("memory.plugmem", { dim: 0 });
+const db = await Plugmem.open("memory.plugmem", { dim: 0 });
 // `remember`, `revise` and `recall` are promises: with an `[embedder]`
 // configured each can make an HTTP call, and blocking the one thread that runs
 // JavaScript for that would stall the whole process.
@@ -67,7 +67,9 @@ assertType<Exact<PageFact, ExportedFact>>(true);
 
 // A path is optional; options are optional; both may be omitted entirely.
 // `path()` is how a caller learns which file that resolved to.
-const defaulted = new Plugmem();
+// `open` is static and asynchronous: a constructor cannot return a promise, and
+// opening replays a journal and maps a snapshot.
+const defaulted = await Plugmem.open();
 const resolvedPath: string = defaulted.path();
 defaulted.close();
 

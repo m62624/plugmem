@@ -14,7 +14,7 @@ const { Plugmem } = require("../index.js");
 async function withDb(fn) {
   const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-"));
   try {
-    await fn(new Plugmem(join(dir, "m.plugmem")));
+    await fn(await Plugmem.open(join(dir, "m.plugmem")));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -51,7 +51,7 @@ test("revise closes a fact and opens its successor", async () => {
 test("rememberMany and tagsOf cover the host batch/read verbs", async () => {
   const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-"));
   try {
-    const db = new Plugmem(join(dir, "m.plugmem"));
+    const db = await Plugmem.open(join(dir, "m.plugmem"));
     const promise = db.rememberMany([
       { text: "batch one", tags: ["batch", "one"], metadata: { source: "test" } },
       { text: "batch two", tags: ["batch", "two"] },
@@ -74,7 +74,7 @@ test("rememberMany and tagsOf cover the host batch/read verbs", async () => {
 test("exportPage is bounded, pull-driven and releases the lock between pages", async () => {
   const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-"));
   try {
-    const db = new Plugmem(join(dir, "m.plugmem"));
+    const db = await Plugmem.open(join(dir, "m.plugmem"));
     await db.rememberMany(
       Array.from({ length: 260 }, (_, i) => ({ text: `page fact ${i}` })),
     );
@@ -104,13 +104,13 @@ test("exportPage is bounded, pull-driven and releases the lock between pages", a
 test("async tasks retain their host handle after close", async () => {
   const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-"));
   try {
-    const db = new Plugmem(join(dir, "m.plugmem"));
+    const db = await Plugmem.open(join(dir, "m.plugmem"));
     const pending = db.rememberMany([{ text: "survives close" }]);
     db.close();
     assert.deepEqual((await pending).map(({ id }) => id), [0]);
     assert.throws(() => db.stats(), /closed/);
 
-    const reopened = new Plugmem(join(dir, "m.plugmem"));
+    const reopened = await Plugmem.open(join(dir, "m.plugmem"));
     const page = reopened.exportPage();
     reopened.close();
     assert.deepEqual((await page).facts.map(({ text }) => text), ["survives close"]);
@@ -142,7 +142,7 @@ test("link upserts and unlink closes a typed edge", async () => {
 test("stats / export / maintain / checkpoint / verify", async () => {
   const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-"));
   try {
-    const db = new Plugmem(join(dir, "m.plugmem"));
+    const db = await Plugmem.open(join(dir, "m.plugmem"));
     await db.remember({ text: "one", entity: "a" });
     await db.remember({ text: "two", entity: "b" });
 
@@ -161,7 +161,7 @@ test("stats / export / maintain / checkpoint / verify", async () => {
 test("maintain takes an explicit mode and full repacks the edges", async () => {
   const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-"));
   try {
-    const db = new Plugmem(join(dir, "m.plugmem"));
+    const db = await Plugmem.open(join(dir, "m.plugmem"));
     await db.remember({ text: "anchor", entity: "hub" });
     for (let round = 0; round < 4; round += 1) {
       for (let target = 0; target < 8; target += 1) {
@@ -193,7 +193,7 @@ test("maintain takes an explicit mode and full repacks the edges", async () => {
 test("typed outputs are fully populated (serde round-trip + camelCase)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-"));
   try {
-    const db = new Plugmem(join(dir, "m.plugmem"));
+    const db = await Plugmem.open(join(dir, "m.plugmem"));
     const out = await db.remember({ text: "prefers tokio", entity: "user" });
     assert.equal(typeof out.id, "number");
     assert.ok(Array.isArray(out.similar));
@@ -229,7 +229,7 @@ test("typed outputs are fully populated (serde round-trip + camelCase)", async (
 test("maintain/checkpoint are async and don't block the event loop", async () => {
   const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-"));
   try {
-    const db = new Plugmem(join(dir, "m.plugmem"));
+    const db = await Plugmem.open(join(dir, "m.plugmem"));
     await db.remember({ text: "one" });
 
     const p = db.maintain();

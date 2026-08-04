@@ -20,7 +20,7 @@ const { Plugmem } = require("../index.js");
 /** A throwaway memory, closed and removed afterwards. */
 async function withDb(fn) {
   const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-contract-"));
-  const db = new Plugmem(join(dir, "m.plugmem"));
+  const db = await Plugmem.open(join(dir, "m.plugmem"));
   try {
     return await fn(db, join(dir, "m.plugmem"));
   } finally {
@@ -95,14 +95,17 @@ test("rememberMany refuses a bad instant synchronously, not as a rejected promis
 test("every refusal carries a code a program can branch on", async () => {
   const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-codes-"));
   const path = join(dir, "m.plugmem");
-  const db = new Plugmem(path);
+  const db = await Plugmem.open(path);
   try {
     // Another writer on the same file: the one code a service actually retries.
-    assert.equal(thrown(() => new Plugmem(path)).code, "PLUGMEM_LOCKED");
+    // `open` is a promise, so this arrives as a *rejection* — and the code
+    // still rides on it, which is the property that makes the contract seamless.
+    await assert.rejects(() => Plugmem.open(path), (err) => err.code === "PLUGMEM_LOCKED");
 
-    // A config path that is not there.
+    // A config path that is not there. Read before any work is scheduled, so
+    // this one throws synchronously — and carries the same kind of code.
     assert.equal(
-      thrown(() => new Plugmem(join(dir, "other.plugmem"), { config: join(dir, "nope.toml") })).code,
+      thrown(() => Plugmem.open(join(dir, "other.plugmem"), { config: join(dir, "nope.toml") })).code,
       "PLUGMEM_CONFIG",
     );
 
@@ -110,11 +113,17 @@ test("every refusal carries a code a program can branch on", async () => {
     assert.equal(thrown(() => db.generation()).code, "PLUGMEM_WRITER_ONLY");
     assert.equal(thrown(() => db.refresh()).code, "PLUGMEM_WRITER_ONLY");
 
+    // An engine failure is named too, and is not mistakable for a caller's.
+    await assert.rejects(
+      () => db.remember({ text: "x", vector: [1, 2, 3] }),
+      (err) => err.code === "PLUGMEM_ENGINE",
+    );
+
     // Write verbs on a read-only handle.
     await db.remember({ text: "published" });
     await db.checkpoint();
     db.close();
-    const ro = new Plugmem(path, { readOnly: true });
+    const ro = await Plugmem.open(path, { readOnly: true });
     assert.equal(thrown(() => ro.remember({ text: "x" })).code, "PLUGMEM_READ_ONLY");
     assert.equal(thrown(() => ro.forget(0)).code, "PLUGMEM_READ_ONLY");
     ro.close();
@@ -125,6 +134,21 @@ test("every refusal carries a code a program can branch on", async () => {
     db.close();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("a code rides on a rejection, not just a throw", async () => {
+  await withDb(async (db) => {
+    // Same contract on both halves of the API: the engine's own failure is
+    // named on a promise exactly as it would be on a synchronous verb. This is
+    // what `error::to_js` buys — napi's own error type could not carry it.
+    await assert.rejects(
+      () => db.verify().then(() => db.remember({ text: "x", vector: [1] })),
+      (err) => err.code === "PLUGMEM_ENGINE" && /dim/.test(err.message),
+    );
+
+    // And a refusal the wrapper decides still throws where the caller stands.
+    assert.equal(thrown(() => db.remember({ text: "x", vector: [] })).code, "PLUGMEM_INVALID_ARG");
+  });
 });
 
 test("the handle says which file it opened", async () => {

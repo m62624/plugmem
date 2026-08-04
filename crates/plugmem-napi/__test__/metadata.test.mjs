@@ -13,7 +13,7 @@ const { Plugmem } = require("../index.js");
 async function withDb(fn) {
   const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-meta-"));
   try {
-    await fn(new Plugmem(join(dir, "m.plugmem")));
+    await fn(await Plugmem.open(join(dir, "m.plugmem")));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -456,13 +456,24 @@ export declare function skillVersion(): string
  */
 export declare class Plugmem {
   /**
-   * Opens (or creates) the memory at `path`. If omitted, path resolution is
-   * `PLUGMEM_DB` > `[database].path` > the platform data path.
+   * Opens (or creates) the memory at `path` and resolves with the handle. If
+   * `path` is omitted, resolution is `PLUGMEM_DB` > `[database].path` > the
+   * platform data path — and [`path()`](Plugmem::path) reports what that was.
    *
-   * @throws if the file is locked by another writer, if `readOnly` is set on a
-   * database with no published snapshot, or on a config/IO error.
+   * **A static method, not a constructor, and that is the point.** Opening
+   * takes the file's exclusive lock, replays the journal and maps the
+   * snapshot — work proportional to what is on disk. A JavaScript
+   * constructor must evaluate to its object immediately, so `new` has no way
+   * to hand that to a worker: it would run on the one thread that executes
+   * JavaScript and freeze the process for the length of the replay. A static
+   * method can return a `Promise`, so it does.
+   *
+   * @throws synchronously on a config error (the file is read before any
+   * work is scheduled); rejects if another writer holds the lock
+   * (`PLUGMEM_LOCKED`), if `readOnly` is set on a database with no published
+   * snapshot (`PLUGMEM_NEEDS_CHECKPOINT`), or on an IO error.
    */
-  constructor(path?: string | undefined | null, options?: OpenOptions | undefined | null)
+  static open(path?: string | undefined | null, options?: OpenOptions | undefined | null): Promise<Plugmem>
   /**
    * The file this memory is open on.
    *

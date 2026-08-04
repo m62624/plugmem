@@ -20,10 +20,10 @@ use std::sync::Arc;
 use napi::bindgen_prelude::AsyncTask;
 use napi::{Env, Task};
 use napi_derive::napi;
-use plugmem_host::{DbName, Description, IfMissing, Settings, WorkspaceError, WorkspaceIssue};
+use plugmem_host::{DbName, Description, IfMissing, Settings, WorkspaceIssue};
 
 use crate::db::{Plugmem, now_ms};
-use crate::error::{self, Result, code};
+use crate::error::{self, Produced, Result, code};
 use crate::types::{DbEntry, ReindexReport, WorkspaceProblem};
 
 /// Options for [`Workspace::new`].
@@ -299,19 +299,20 @@ pub struct OpenTask {
 }
 
 impl Task for OpenTask {
-    type Output = (plugmem_host::Database, std::path::PathBuf);
+    type Output = Produced<(plugmem_host::Database, std::path::PathBuf)>;
     type JsValue = Plugmem;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
         let path = self.workspace.layout().path_of(&self.name);
-        let db = self
+        Ok(self
             .workspace
             .get(&self.name, self.now, self.missing)
-            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
-        Ok((db, path))
+            .map(|db| (db, path))
+            .map_err(error::workspace))
     }
 
-    fn resolve(&mut self, _env: Env, (db, path): Self::Output) -> napi::Result<Self::JsValue> {
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        let (db, path) = output.map_err(|e| error::to_js(env, e))?;
         Ok(Plugmem::from_database(db, path))
     }
 }
@@ -345,11 +346,28 @@ pub struct RegistryTask {
 }
 
 impl Task for RegistryTask {
-    type Output = RegistryOutput;
+    type Output = Produced<RegistryOutput>;
     type JsValue = napi::bindgen_prelude::Either4<Vec<String>, Vec<DbEntry>, bool, ()>;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        let failed = |e: WorkspaceError| napi::Error::from_reason(e.to_string());
+        Ok(self.run())
+    }
+
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        use napi::bindgen_prelude::Either4;
+        Ok(match output.map_err(|e| error::to_js(env, e))? {
+            RegistryOutput::Names(names) => Either4::A(names),
+            RegistryOutput::Entries(entries) => Either4::B(entries),
+            RegistryOutput::Changed(changed) => Either4::C(changed),
+            RegistryOutput::Done => Either4::D(()),
+        })
+    }
+}
+
+impl RegistryTask {
+    /// The registry work itself, with its error still coded.
+    fn run(&mut self) -> Produced<RegistryOutput> {
+        let failed = error::workspace;
         match &self.what {
             Registry::List => Ok(RegistryOutput::Names(
                 self.workspace
@@ -404,16 +422,6 @@ impl Task for RegistryTask {
                 .map_err(failed),
         }
     }
-
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        use napi::bindgen_prelude::Either4;
-        Ok(match output {
-            RegistryOutput::Names(names) => Either4::A(names),
-            RegistryOutput::Entries(entries) => Either4::B(entries),
-            RegistryOutput::Changed(changed) => Either4::C(changed),
-            RegistryOutput::Done => Either4::D(()),
-        })
-    }
 }
 
 /// The libuv-thread body of [`Workspace::reindex`].
@@ -423,17 +431,15 @@ pub struct ReindexTask {
 }
 
 impl Task for ReindexTask {
-    type Output = plugmem_host::ReindexReport;
+    type Output = Produced<plugmem_host::ReindexReport>;
     type JsValue = ReindexReport;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        self.workspace
-            .reindex(self.now)
-            .map_err(error::workspace)
-            .map_err(error::into_napi)
+        Ok(self.workspace.reindex(self.now).map_err(error::workspace))
     }
 
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        let output = output.map_err(|e| error::to_js(env, e))?;
         Ok(ReindexReport {
             indexed: output.indexed.iter().map(DbName::to_string).collect(),
             undescribed: output.undescribed.iter().map(DbName::to_string).collect(),
@@ -449,18 +455,19 @@ pub struct VerifyTask {
 }
 
 impl Task for VerifyTask {
-    type Output = Vec<WorkspaceIssue>;
+    type Output = Produced<Vec<WorkspaceIssue>>;
     type JsValue = Vec<WorkspaceProblem>;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        self.workspace
-            .verify(self.now)
-            .map_err(error::workspace)
-            .map_err(error::into_napi)
+        Ok(self.workspace.verify(self.now).map_err(error::workspace))
     }
 
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        Ok(output.iter().map(problem).collect())
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output
+            .map_err(|e| error::to_js(env, e))?
+            .iter()
+            .map(problem)
+            .collect())
     }
 }
 

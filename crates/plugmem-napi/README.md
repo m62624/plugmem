@@ -44,12 +44,14 @@ the CLI.**
 ## Usage (TypeScript)
 
 Every argument and result is typed — napi generates `index.d.ts`, so a TS host
-gets full autocomplete and checking:
+gets full autocomplete and checking. A memory is opened with the static
+`Plugmem.open`, not `new`: opening replays a journal and maps a snapshot, and a
+JavaScript constructor has no way to hand that to a worker thread.
 
 ```typescript
 import { Plugmem } from "plugmem";
 
-const db = new Plugmem("agent.plugmem");          // or { readOnly: true }
+const db = await Plugmem.open("agent.plugmem");    // or { readOnly: true }
 
 const out = await db.remember({
   text: "prefers tokio",
@@ -86,7 +88,7 @@ data directory. See the [full settings reference](https://github.com/m62624/plug
 for all fields and OS-specific paths.
 
 ```typescript
-const db = new Plugmem(undefined, { config: "./plugmem.toml" });
+const db = await Plugmem.open(undefined, { config: "./plugmem.toml" });
 ```
 
 ```toml
@@ -135,7 +137,7 @@ branches on it instead of on wording:
 
 ```js
 try {
-  db = new Plugmem("agent.plugmem");
+  db = await Plugmem.open("agent.plugmem");
 } catch (err) {
   if (err.code === "PLUGMEM_LOCKED") retryLater();
   else throw err;
@@ -146,11 +148,11 @@ try {
 `PLUGMEM_OPEN` come from opening; `PLUGMEM_INVALID_ARG` and
 `PLUGMEM_INVALID_NAME` from an argument that was refused; `PLUGMEM_CLOSED`,
 `PLUGMEM_READ_ONLY`, `PLUGMEM_WRITER_ONLY` and `PLUGMEM_BUSY` from calling a
-verb the handle cannot serve. A failure *inside* the engine keeps napi's
-`GenericFailure` and the host's message — napi-rs fixes the error type of an
-async task, so a code there could not be delivered on `maintain` or
-`checkpoint`, and one that appeared only on the synchronous half would mean
-different things on different verbs.
+verb the handle cannot serve; `PLUGMEM_ENGINE` from the engine itself, carrying
+the host's own message.
+
+The code is there whether the verb threw or the promise rejected — the two are
+the same contract, so nothing has to be handled twice.
 
 An argument that shapes an answer is refused rather than dropped: `range` must
 be exactly `[from, to]`, and `range`, `asOf` and `validFrom` must each be a
@@ -175,7 +177,7 @@ when it already owns the input records.
 
 ## Many memories in one directory (optional)
 
-**Default: one memory, one file.** `new Plugmem(path)` and nothing here applies.
+**Default: one memory, one file.** `Plugmem.open(path)` and nothing here applies.
 
 A process that serves many independent memories — one per conversation, per
 tenant, per project — can point at a directory and address them by name:

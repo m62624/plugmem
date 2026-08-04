@@ -26,7 +26,7 @@ test("a config file opens the writer; lexical recall works with no embedder", as
   await withDir(async (dir) => {
     const cfg = join(dir, "config.toml");
     writeFileSync(cfg, "[engine]\ndim = 0\n");
-    const db = new Plugmem(join(dir, "m.plugmem"), { config: cfg });
+    const db = await Plugmem.open(join(dir, "m.plugmem"), { config: cfg });
     await db.remember({ text: "prefers native addons" });
     const res = await db.recall({ query: "native" });
     assert.match(res.rendered, /native/);
@@ -41,8 +41,10 @@ test("a dim option disagreeing with the config embedder throws", async () => {
       cfg,
       '[engine]\ndim = 8\n[embedder]\nkind = "openai"\nurl = "http://127.0.0.1:1/v1/embeddings"\nmodel = "dummy"\n',
     );
+    // The dim conflict is decided before any work is scheduled: a synchronous
+    // throw, not a rejection.
     assert.throws(
-      () => new Plugmem(join(dir, "m.plugmem"), { dim: 16, config: cfg }),
+      () => Plugmem.open(join(dir, "m.plugmem"), { dim: 16, config: cfg }),
       /disagrees/,
     );
   });
@@ -50,8 +52,6 @@ test("a dim option disagreeing with the config embedder throws", async () => {
 
 test("an explicit but missing config path throws", async () => {
   await withDir(async (dir) => {
-    assert.throws(
-      () => new Plugmem(join(dir, "m.plugmem"), { config: join(dir, "nope.toml") }),
-    );
+    assert.throws(() => Plugmem.open(join(dir, "m.plugmem"), { config: join(dir, "nope.toml") }));
   });
 });

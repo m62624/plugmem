@@ -240,7 +240,7 @@ test("a single memory is untouched by any of this", async () => {
   const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-single-"));
   try {
     // The default: a path, and no workspace anywhere near it.
-    const db = new Plugmem(join(dir, "m.plugmem"));
+    const db = await Plugmem.open(join(dir, "m.plugmem"));
     await db.remember({ text: "a plain single memory" });
     assert.equal(db.stats().facts, 1);
     db.close();

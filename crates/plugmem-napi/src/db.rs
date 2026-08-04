@@ -28,7 +28,7 @@ use plugmem_host::{
     RememberInput, Settings, UnlinkInput,
 };
 
-use crate::error::{self, Error, Result, code};
+use crate::error::{self, Error, Produced, Result, code};
 use crate::types::{
     self, ExportPage, ExportedFact, FactSnapshot, MaintainMode, MaintainReport, RecallResult,
     RememberOutcome, Stats,
@@ -170,7 +170,10 @@ pub struct LinkArgs {
 /// The open handle behind a [`Plugmem`]: a read-write writer, or a read-only
 /// observer of another process's writer. The reader is reference-counted so an
 /// async export task can outlive the JS object that scheduled it.
-enum Handle {
+///
+/// `pub` only because it is what [`OpenTask`] computes; it is not re-exported
+/// and never reaches JavaScript.
+pub enum Handle {
     Writer(Database),
     Reader {
         db: Arc<ReadOnlyDatabase>,
@@ -196,22 +199,38 @@ enum Handle {
 pub struct Plugmem {
     /// `None` once `close()`d — every verb then throws "memory is closed".
     handle: Option<Handle>,
-    /// The file this handle resolved to. Kept because the constructor may
-    /// resolve it from `PLUGMEM_DB`, the config or the platform default, and a
-    /// caller that passed no path otherwise has no way to learn which file it
-    /// just opened.
+    /// The file this handle resolved to. Kept because `open` may resolve it
+    /// from `PLUGMEM_DB`, the config or the platform default, and a caller that
+    /// passed no path otherwise has no way to learn which file it just opened.
     path: PathBuf,
 }
 
 #[napi]
 impl Plugmem {
-    /// Opens (or creates) the memory at `path`. If omitted, path resolution is
-    /// `PLUGMEM_DB` > `[database].path` > the platform data path.
+    /// Opens (or creates) the memory at `path` and resolves with the handle. If
+    /// `path` is omitted, resolution is `PLUGMEM_DB` > `[database].path` > the
+    /// platform data path — and [`path()`](Plugmem::path) reports what that was.
     ///
-    /// @throws if the file is locked by another writer, if `readOnly` is set on a
-    /// database with no published snapshot, or on a config/IO error.
-    #[napi(constructor)]
-    pub fn new(path: Option<String>, options: Option<OpenOptions>) -> Result<Self> {
+    /// **A static method, not a constructor, and that is the point.** Opening
+    /// takes the file's exclusive lock, replays the journal and maps the
+    /// snapshot — work proportional to what is on disk. A JavaScript
+    /// constructor must evaluate to its object immediately, so `new` has no way
+    /// to hand that to a worker: it would run on the one thread that executes
+    /// JavaScript and freeze the process for the length of the replay. A static
+    /// method can return a `Promise`, so it does.
+    ///
+    /// @throws synchronously on a config error (the file is read before any
+    /// work is scheduled); rejects if another writer holds the lock
+    /// (`PLUGMEM_LOCKED`), if `readOnly` is set on a database with no published
+    /// snapshot (`PLUGMEM_NEEDS_CHECKPOINT`), or on an IO error.
+    #[napi(ts_return_type = "Promise<Plugmem>")]
+    pub fn open(path: Option<String>, options: Option<OpenOptions>) -> Result<AsyncTask<OpenTask>> {
+        Ok(AsyncTask::new(Self::open_task(path, options)?))
+    }
+
+    /// The checked, not-yet-scheduled half of [`open`](Plugmem::open). Separate
+    /// so a native test can run the open body without a Node runtime.
+    fn open_task(path: Option<String>, options: Option<OpenOptions>) -> Result<OpenTask> {
         let options = options.unwrap_or_default();
 
         // Resolve settings exactly like the CLI and MCP server: an explicit
@@ -258,26 +277,13 @@ impl Plugmem {
             settings.config.dim = dim;
         }
 
-        let handle = if options.read_only.unwrap_or(false) {
-            // A read-only handle observes another writer's snapshot. The engine
-            // cannot embed inside it, so the embedder is kept out here and the
-            // query is embedded before the read — the same arrangement the CLI
-            // and the MCP server use for their read-only paths, so a text
-            // `recall` reaches the vector source on every surface.
-            let embedder = settings.embedder.take().map(|e| Arc::new(Mutex::new(e)));
-            let ro = Database::open_readonly(&path, settings.config).map_err(error::open)?;
-            Handle::Reader {
-                db: Arc::new(ro),
-                embedder,
-            }
-        } else {
-            // The writer takes the embedder and maintenance policy from settings.
-            let db = settings.open(&path).map_err(error::open)?;
-            Handle::Writer(db)
-        };
-        Ok(Self {
-            handle: Some(handle),
+        // Everything above is cheap and synchronous — reading `config.toml`,
+        // resolving the path, checking the dimension — so a caller's mistake
+        // throws where they stand. The open itself goes to a worker.
+        Ok(OpenTask {
+            settings: Some(settings),
             path,
+            read_only: options.read_only.unwrap_or(false),
         })
     }
 
@@ -652,17 +658,20 @@ pub struct MaintainTask {
 }
 
 impl Task for MaintainTask {
-    type Output = plugmem_host::MaintainReport;
+    type Output = Produced<plugmem_host::MaintainReport>;
     type JsValue = MaintainReport;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        self.db
+        Ok(self
+            .db
             .maintain_with_options(self.now, self.options)
-            .map_err(to_napi_err)
+            .map_err(error::engine))
     }
 
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        types::to_typed(&output).map_err(error::into_napi)
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        output
+            .and_then(|report| types::to_typed(&report))
+            .map_err(|e| error::to_js(env, e))
     }
 }
 
@@ -674,15 +683,15 @@ pub struct CheckpointTask {
 }
 
 impl Task for CheckpointTask {
-    type Output = ();
+    type Output = Produced<()>;
     type JsValue = ();
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        self.db.checkpoint(self.now).map_err(to_napi_err)
+        Ok(self.db.checkpoint(self.now).map_err(error::engine))
     }
 
-    fn resolve(&mut self, _env: Env, (): Self::Output) -> napi::Result<Self::JsValue> {
-        Ok(())
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        output.map_err(|e| error::to_js(env, e))
     }
 }
 
@@ -699,7 +708,7 @@ pub struct RememberManyTask {
 }
 
 impl Task for RememberManyTask {
-    type Output = Vec<plugmem_host::RememberOutcome>;
+    type Output = Produced<Vec<plugmem_host::RememberOutcome>>;
     type JsValue = Vec<RememberOutcome>;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
@@ -746,11 +755,15 @@ impl Task for RememberManyTask {
             })
             .collect();
 
-        self.db.remember_many(inputs).map_err(to_napi_err)
+        Ok(self.db.remember_many(inputs).map_err(error::engine))
     }
 
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        Ok(output.into_iter().map(RememberOutcome::from).collect())
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output
+            .map_err(|e| error::to_js(env, e))?
+            .into_iter()
+            .map(RememberOutcome::from)
+            .collect())
     }
 }
 
@@ -781,6 +794,65 @@ impl Task for ExportPageTask {
     }
 }
 
+/// The libuv-thread body of [`Plugmem::open`].
+///
+/// Everything expensive about opening lives here: taking the file's exclusive
+/// lock, replaying the journal, mapping the snapshot and building the page
+/// directory. `resolve` runs back on the JS thread and does nothing but wrap
+/// the finished handle, which is why a `Promise` costs the caller nothing.
+pub struct OpenTask {
+    /// `Option` only so `compute` can take it by value: `Settings` owns a boxed
+    /// embedder and is not `Clone`, and a task runs exactly once.
+    settings: Option<Settings>,
+    path: PathBuf,
+    read_only: bool,
+}
+
+impl Task for OpenTask {
+    type Output = Produced<Handle>;
+    type JsValue = Plugmem;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        Ok(self.run())
+    }
+
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(Plugmem {
+            handle: Some(output.map_err(|e| error::to_js(env, e))?),
+            path: std::mem::take(&mut self.path),
+        })
+    }
+}
+
+impl OpenTask {
+    /// The open itself. Its error is coded even though [`Task`] cannot carry
+    /// the code to JavaScript, because a native test can and does assert on it.
+    fn run(&mut self) -> Result<Handle> {
+        let settings = self
+            .settings
+            .take()
+            .ok_or_else(|| error::coded(code::OPEN, "open was already run"))?;
+        if self.read_only {
+            // A read-only handle observes another writer's snapshot. The engine
+            // cannot embed inside it, so the embedder is kept out here and the
+            // query is embedded before the read — the same arrangement the CLI
+            // and the MCP server use for their read-only paths, so a text
+            // `recall` reaches the vector source on every surface.
+            let mut settings = settings;
+            let embedder = settings.embedder.take().map(|e| Arc::new(Mutex::new(e)));
+            let ro = Database::open_readonly(&self.path, settings.config).map_err(error::open)?;
+            Ok(Handle::Reader {
+                db: Arc::new(ro),
+                embedder,
+            })
+        } else {
+            // The writer takes the embedder and maintenance policy from settings.
+            let db = settings.open(&self.path).map_err(error::open)?;
+            Ok(Handle::Writer(db))
+        }
+    }
+}
+
 /// The libuv-thread body of [`Plugmem::remember`] and [`Plugmem::revise`].
 ///
 /// Owns its arguments outright: the task outlives the call that scheduled it,
@@ -798,7 +870,7 @@ pub struct RememberTask {
 }
 
 impl Task for RememberTask {
-    type Output = plugmem_host::RememberOutcome;
+    type Output = Produced<plugmem_host::RememberOutcome>;
     type JsValue = RememberOutcome;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
@@ -831,15 +903,17 @@ impl Task for RememberTask {
             vector: self.vector.as_deref(),
             ..RememberInput::text(self.now, &self.args.text)
         };
-        match self.revise {
+        Ok(match self.revise {
             Some(target) => self.db.revise(target, input),
             None => self.db.remember(input),
         }
-        .map_err(to_napi_err)
+        .map_err(error::engine))
     }
 
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        Ok(RememberOutcome::from(output))
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(RememberOutcome::from(
+            output.map_err(|e| error::to_js(env, e))?,
+        ))
     }
 }
 
@@ -870,16 +944,16 @@ pub struct WriteTask {
 }
 
 impl Task for WriteTask {
-    type Output = WriteOutput;
+    type Output = Produced<WriteOutput>;
     type JsValue = napi::bindgen_prelude::Either<bool, ()>;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        match &self.what {
+        Ok(match &self.what {
             Write::Forget(id) => self
                 .db
                 .forget(self.now, *id)
                 .map(WriteOutput::Changed)
-                .map_err(to_napi_err),
+                .map_err(error::engine),
             Write::Link(args) => self
                 .db
                 .link(LinkInput {
@@ -890,7 +964,7 @@ impl Task for WriteTask {
                     provenance: None,
                 })
                 .map(|()| WriteOutput::Done)
-                .map_err(to_napi_err),
+                .map_err(error::engine),
             Write::Unlink(args) => self
                 .db
                 .unlink(UnlinkInput {
@@ -900,12 +974,12 @@ impl Task for WriteTask {
                     dst: &args.dst,
                 })
                 .map(WriteOutput::Changed)
-                .map_err(to_napi_err),
-        }
+                .map_err(error::engine),
+        })
     }
 
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        Ok(match output {
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(match output.map_err(|e| error::to_js(env, e))? {
             WriteOutput::Changed(changed) => napi::bindgen_prelude::Either::A(changed),
             WriteOutput::Done => napi::bindgen_prelude::Either::B(()),
         })
@@ -932,28 +1006,28 @@ pub struct ReadTask {
 }
 
 impl Task for ReadTask {
-    type Output = ReadOutput;
+    type Output = Produced<ReadOutput>;
     type JsValue = napi::bindgen_prelude::Either<Vec<ExportedFact>, ()>;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        match (&self.what, &self.source) {
+        Ok(match (&self.what, &self.source) {
             (Read::Verify, RecallSource::Writer(db)) => db
                 .verify()
                 .map(|()| ReadOutput::Verified)
-                .map_err(to_napi_err),
+                .map_err(error::engine),
             (Read::Verify, RecallSource::Reader { db, .. }) => db
                 .verify()
                 .map(|()| ReadOutput::Verified)
-                .map_err(to_napi_err),
+                .map_err(error::engine),
             (Read::Export, RecallSource::Writer(db)) => Ok(ReadOutput::Exported(db.export())),
             (Read::Export, RecallSource::Reader { db, .. }) => {
                 Ok(ReadOutput::Exported(db.export()))
             }
-        }
+        })
     }
 
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        Ok(match output {
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(match output.map_err(|e| error::to_js(env, e))? {
             ReadOutput::Verified => napi::bindgen_prelude::Either::B(()),
             ReadOutput::Exported(facts) => napi::bindgen_prelude::Either::A(
                 facts.into_iter().map(ExportedFact::from).collect(),
@@ -984,7 +1058,7 @@ pub struct RecallTask {
 }
 
 impl Task for RecallTask {
-    type Output = plugmem_host::RecallResult;
+    type Output = Produced<plugmem_host::RecallResult>;
     type JsValue = RecallResult;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
@@ -1003,7 +1077,10 @@ impl Task for RecallTask {
             ) => match self.args.query.as_deref() {
                 Some(text) => {
                     let mut embedder = embedder.lock().expect("embedder lock");
-                    embedder.embed(&[text]).map_err(to_napi_err)?.pop()
+                    match embedder.embed(&[text]) {
+                        Ok(mut vectors) => vectors.pop(),
+                        Err(e) => return Ok(Err(error::engine(e))),
+                    }
                 }
                 None => None,
             },
@@ -1025,15 +1102,16 @@ impl Task for RecallTask {
             include_closed: self.args.closed.unwrap_or(false),
             ef: None,
         };
-        match &self.source {
+        Ok(match &self.source {
             RecallSource::Writer(db) => db.recall(q),
             RecallSource::Reader { db, .. } => db.recall(q),
         }
-        .map_err(to_napi_err)
+        .map_err(error::engine))
     }
 
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        types::to_typed(&output).map_err(error::into_napi)
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        let result = output.and_then(|res| types::to_typed(&res));
+        result.map_err(|e| error::to_js(env, e))
     }
 }
 
@@ -1044,14 +1122,6 @@ fn str_refs(v: &Option<Vec<String>>) -> Vec<&str> {
         .iter()
         .map(String::as_str)
         .collect()
-}
-
-/// A host error from inside a **libuv task**. Separate from [`error::engine`]
-/// only because [`Task`] fixes its error type to `napi::Error<Status>` and so
-/// cannot carry a custom code; both produce the same `GenericFailure` code and
-/// the same host message, which is what keeps the contract seamless.
-pub(crate) fn to_napi_err(e: plugmem_host::HostError) -> napi::Error {
-    napi::Error::from_reason(e.to_string())
 }
 
 /// A precomputed embedding from JS, as the engine wants it.
@@ -1158,6 +1228,19 @@ mod tests {
         }
     }
 
+    /// Opens the way `Plugmem.open` does, minus the promise: the checks run,
+    /// then the task body runs inline. This is the whole open, so a native test
+    /// still exercises config resolution, the lock, and the coded errors that
+    /// JavaScript sees on a rejection.
+    fn open_blocking(path: Option<String>, options: Option<OpenOptions>) -> Result<Plugmem> {
+        let mut task = Plugmem::open_task(path, options)?;
+        let handle = task.run()?;
+        Ok(Plugmem {
+            handle: Some(handle),
+            path: std::mem::take(&mut task.path),
+        })
+    }
+
     /// A config whose `[embedder]` builds against dimension 8. The embedder is
     /// constructed but never contacted (no verb embeds here), so no network.
     const EMBEDDER_DIM8: &str = "\
@@ -1174,7 +1257,7 @@ model = \"dummy\"
         let tmp = TempDir::new("agree");
         let cfg = tmp.write("config.toml", EMBEDDER_DIM8);
         // `dim: 8` agrees with the config's embedder → the writer opens.
-        let db = Plugmem::new(
+        let db = open_blocking(
             Some(tmp.path("mem.plugmem")),
             Some(OpenOptions {
                 dim: Some(8),
@@ -1190,7 +1273,7 @@ model = \"dummy\"
         let tmp = TempDir::new("conflict");
         let cfg = tmp.write("config.toml", EMBEDDER_DIM8);
         // `dim: 16` contradicts the config's 8-dim embedder → refused up front.
-        let Err(err) = Plugmem::new(
+        let Err(err) = open_blocking(
             Some(tmp.path("mem.plugmem")),
             Some(OpenOptions {
                 dim: Some(16),
@@ -1293,9 +1376,9 @@ model = \"dummy\"
     fn a_locked_database_is_refused_with_the_code_a_caller_can_retry_on() {
         let tmp = TempDir::new("locked");
         let path = tmp.path("mem.plugmem");
-        let _held = Plugmem::new(Some(path.clone()), None).expect("first open");
+        let _held = open_blocking(Some(path.clone()), None).expect("first open");
 
-        let Err(err) = Plugmem::new(Some(path), None) else {
+        let Err(err) = open_blocking(Some(path), None) else {
             panic!("a second writer must be refused");
         };
         assert_eq!(err.status, code::LOCKED);
@@ -1304,7 +1387,7 @@ model = \"dummy\"
     #[test]
     fn a_closed_handle_and_a_read_only_one_refuse_with_their_own_codes() {
         let tmp = TempDir::new("codes");
-        let mut db = Plugmem::new(Some(tmp.path("mem.plugmem")), None).expect("open");
+        let mut db = open_blocking(Some(tmp.path("mem.plugmem")), None).expect("open");
 
         // `generation` belongs to a read-only handle only.
         let Err(generation) = db.generation() else {
@@ -1336,14 +1419,14 @@ model = \"dummy\"
     fn the_handle_reports_the_file_it_resolved() {
         let tmp = TempDir::new("path");
         let path = tmp.path("mem.plugmem");
-        let db = Plugmem::new(Some(path.clone()), None).expect("open");
+        let db = open_blocking(Some(path.clone()), None).expect("open");
         assert_eq!(db.path(), path);
     }
 
     #[test]
     fn missing_config_path_throws() {
         let tmp = TempDir::new("missing");
-        let Err(err) = Plugmem::new(
+        let Err(err) = open_blocking(
             Some(tmp.path("mem.plugmem")),
             Some(OpenOptions {
                 dim: None,

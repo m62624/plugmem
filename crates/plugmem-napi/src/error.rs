@@ -5,20 +5,19 @@
 //! an `Error` carrying a stable `code`, so a caller branches on
 //! `err.code === 'PLUGMEM_LOCKED'` instead of matching on prose.
 //!
-//! A failure the **engine** reports from inside a verb keeps napi's default
-//! `GenericFailure` code and the host's own message. That is deliberate, not an
-//! oversight: napi-rs' [`napi::Task`] fixes its error type to
-//! `napi::Error<Status>`, so an async pass (`maintain`, `checkpoint`,
-//! `rememberMany`, `reindex`, `verify`) physically cannot deliver a custom code.
-//! Coding the synchronous half alone would make `code` mean one thing on
-//! `remember` and another on `checkpoint` — a contract with an invisible seam is
-//! worse than a narrower one that always holds. So the rule is:
+//! The contract holds across the async boundary too, which takes one trick.
+//! napi-rs' [`napi::Task`] fixes its error type to `napi::Error<Status>`, whose
+//! status is a closed enum — a custom code cannot ride on it. But the promise
+//! rejection path calls `JsError::into_value`, and that returns a *stored* JS
+//! value verbatim when the value is a real `Error` object. So a task carries its
+//! failure in its `Output` (the libuv thread has no `Env` and must not touch
+//! JavaScript), and rebuilds it as a genuine JS `Error` with a `code` in
+//! `resolve`, which runs back on the JS thread. See [`to_js`].
 //!
-//! > `code` names why plugmem refused. An engine failure inside a verb is
-//! > `GenericFailure` on every verb, sync or async.
+//! The result is one rule with no seam in it:
 //!
-//! The open path is fully covered even so: a lock conflict, a missing snapshot
-//! and a bad config are all decided while opening, which is always synchronous.
+//! > every failure plugmem decides carries a `code`, whether the verb was
+//! > synchronous or resolved a promise.
 
 use napi::Error as NapiError;
 use plugmem_host::{HostError, SettingsError, WorkspaceError};
@@ -55,13 +54,13 @@ pub mod code {
     /// The handle cannot do this right now because another operation on it is
     /// still running.
     pub const BUSY: &str = "PLUGMEM_BUSY";
-}
-
-/// napi's own code for an unclassified failure. Taken from napi rather than
-/// spelled out, so the engine-error code can never drift from what the async
-/// path (which cannot carry a custom one) produces.
-fn generic_failure() -> String {
-    napi::Status::GenericFailure.as_ref().to_string()
+    /// The engine reported a failure — IO, a capacity limit, a rejected input
+    /// it alone can judge (a vector that disagrees with `dim`). The message is
+    /// the host's own.
+    pub const ENGINE: &str = "PLUGMEM_ENGINE";
+    /// A bug in this binding: a result it could not shape into its typed
+    /// mirror. Not a caller mistake and not the engine's fault.
+    pub const INTERNAL: &str = "PLUGMEM_INTERNAL";
 }
 
 /// An error with one of the [`code`] values.
@@ -74,15 +73,15 @@ pub fn invalid_arg(message: impl Into<String>) -> Error {
     coded(code::INVALID_ARG, message)
 }
 
-/// An engine failure from inside a verb: the host's message, and the same code
-/// the async path produces (see the module note).
+/// An engine failure from inside a verb: the host's own message, under the one
+/// code that says "this was not your call, it was the engine".
 pub fn engine(e: HostError) -> Error {
-    Error::new(generic_failure(), e.to_string())
+    coded(code::ENGINE, e.to_string())
 }
 
 /// A workspace failure from inside a verb, coded like [`engine`].
 pub fn workspace(e: WorkspaceError) -> Error {
-    Error::new(generic_failure(), e.to_string())
+    coded(code::ENGINE, e.to_string())
 }
 
 /// A failure while opening a database — always synchronous, so the caller gets
@@ -103,21 +102,45 @@ pub fn settings(e: SettingsError) -> Error {
     coded(code::CONFIG, e.to_string())
 }
 
-/// A result this wrapper could not shape into its typed mirror. Not a caller
-/// mistake and not the engine's fault — a bug here — so it carries no code of
-/// its own and reads like any other unclassified failure.
+/// A result this wrapper could not shape into its typed mirror — a bug here.
 pub fn internal(message: impl Into<String>) -> Error {
-    Error::new(generic_failure(), message.into())
+    coded(code::INTERNAL, message)
 }
 
-/// Hand an error to a [`napi::Task`] boundary, which cannot carry a custom code.
-///
-/// Only ever called with errors that are already `GenericFailure` — engine and
-/// internal ones — so nothing is lost; a coded refusal is raised synchronously,
-/// before any task is scheduled.
+/// Hand an error to a [`napi::Task`] boundary that has no `Env` — the libuv
+/// thread. The code is preserved in the task's own `Output` and reattached by
+/// [`to_js`]; this is only for the paths where there is nothing to reattach to.
 pub fn into_napi(e: Error) -> napi::Error {
     napi::Error::from_reason(e.reason)
 }
+
+/// Rebuild a coded error as a real JavaScript `Error` carrying `code`.
+///
+/// Called from a task's `resolve`, on the JS thread, because it needs an `Env`
+/// to make JS values. Returning the result as `Err` rejects the promise with
+/// *this* object: napi stores it and `JsError::into_value` hands it back
+/// untouched once it confirms the value is an `Error` (napi `error.rs`,
+/// `impl_object_methods!`). That is what lets a custom code survive a boundary
+/// whose own error type has no room for one.
+///
+/// If any of the JS calls fail — an environment shutting down — the message
+/// still gets through, uncoded. A missing code is worse than a lost failure.
+pub fn to_js(env: napi::Env, e: Error) -> napi::Error {
+    let Ok(mut object) = env.create_error(napi::Error::from_reason(e.reason.clone())) else {
+        return into_napi(e);
+    };
+    if object
+        .set_named_property("code", e.status.as_str())
+        .is_err()
+    {
+        return into_napi(e);
+    }
+    napi::Error::from(object.into_unknown())
+}
+
+/// What a libuv task produces: the value, or a coded failure for [`to_js`] to
+/// turn into a JS `Error` once the JS thread is back.
+pub type Produced<T> = std::result::Result<T, Error>;
 
 /// A memory name the workspace refused.
 pub fn invalid_name(e: WorkspaceError) -> Error {
@@ -150,23 +173,18 @@ mod tests {
     }
 
     #[test]
-    fn engine_failures_use_the_code_the_async_path_cannot_avoid() {
-        // The whole point of the rule in the module note: an engine failure has
-        // the same code whether it surfaced from a sync verb or from a libuv
-        // pass, and that code is whatever napi itself would have produced.
-        let failure = || HostError::Embed("no route to host".into());
-        let sync = engine(failure());
-        // What a libuv task produces for the very same failure (`db::to_napi_err`).
-        let asynchronous = napi::Error::from_reason(failure().to_string());
-        assert_eq!(sync.status, asynchronous.status.as_ref());
-        assert_eq!(sync.reason, asynchronous.reason);
-        assert!(sync.reason.contains("no route to host"));
+    fn an_engine_failure_is_named_and_keeps_the_host_message() {
+        let failed = engine(HostError::Embed("no route to host".into()));
+        assert_eq!(failed.status, code::ENGINE);
+        assert!(failed.reason.contains("no route to host"));
+        // Distinguishable from a caller mistake, which is the whole point.
+        assert_ne!(failed.status, code::INVALID_ARG);
     }
 
     #[test]
     fn refused_arguments_are_distinguishable_from_engine_failures() {
         let refused = invalid_arg("asOf must be a finite, non-negative number");
         assert_eq!(refused.status, code::INVALID_ARG);
-        assert_ne!(refused.status, generic_failure());
+        assert_ne!(refused.status, code::ENGINE);
     }
 }

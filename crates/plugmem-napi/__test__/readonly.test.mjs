@@ -24,13 +24,13 @@ async function withDir(fn) {
 test("read-only observes a writer's checkpointed snapshot", async () => {
   await withDir(async (path) => {
     // Writer stores + checkpoints (clears the journal) + closes (drops the lock).
-    const w = new Plugmem(path);
+    const w = await Plugmem.open(path);
     await w.remember({ text: "the sky is blue", entity: "sky", tags: ["color"] });
     await w.checkpoint(); // async — must finish before close/reopen
     w.close();
 
     // Read-only open over the published snapshot.
-    const ro = new Plugmem(path, { readOnly: true });
+    const ro = await Plugmem.open(path, { readOnly: true });
 
     // Read verbs answer.
     assert.ok(Array.isArray((await ro.recall({ query: "sky" })).facts));
@@ -61,8 +61,8 @@ test("read-only observes a writer's checkpointed snapshot", async () => {
 });
 
 test("generation/refresh are read-only-only; verbs throw after close", async () => {
-  await withDir((path) => {
-    const w = new Plugmem(path);
+  await withDir(async (path) => {
+    const w = await Plugmem.open(path);
     assert.throws(() => w.generation(), /read-only mode/);
     assert.throws(() => w.refresh(), /read-only mode/);
 
