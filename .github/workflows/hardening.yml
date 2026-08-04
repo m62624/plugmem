@@ -83,6 +83,8 @@ jobs:
   #     deterministic leak-growth test still run.
   #   - PLUGMEM_LEAK_ROUNDS keeps the leak-growth churn bounded so the run stays
   #     minutes, not tens of minutes, under the interpreter.
+  #   - the run is a CURATED subset of tests/host.rs, not the whole file (see
+  #     the step below for the selection rule and the drift guard).
   valgrind:
     name: valgrind (host mmap + leak-growth)
     if: >-
@@ -103,7 +105,47 @@ jobs:
       - name: cargo-valgrind
         run: cargo install cargo-valgrind --locked
       - name: memcheck — host mmap/generation + leak-growth tests
-        run: cargo valgrind test -p plugmem-host --test host
+        run: |
+          set -euo pipefail
+          # memcheck only has something to say about tests that map a snapshot,
+          # rotate or reclaim a generation, or churn readers and fds — that is
+          # the machinery MIRI structurally cannot reach. The rest of host.rs is
+          # engine semantics (embedder mock servers, export paging, metadata
+          # ordering, error typing): running those under a ~100x interpreter
+          # buys no memory-safety signal and would cost most of the job. So the
+          # audit runs this curated list, not the whole file.
+          tests=(
+            # generation lifecycle: map, rotate, reclaim, pin.
+            checkpoint_advances_the_generation_and_reclaims_the_old
+            gc_reclaims_unpinned_generations_and_a_pin_keeps_one
+            refresh_advances_a_reader_to_a_new_generation
+            scrub_pins_its_generation_and_coexists_with_the_writer
+            maintain_compacts_disk_first_and_the_engine_stays_live
+            # the leak verdict itself: bounded rounds of readers + checkpoints.
+            readers_and_checkpoints_do_not_leak_across_rounds
+            # concurrent mappings of one image, and reader/writer coexistence.
+            many_readers_share_one_snapshot
+            a_reader_opens_alongside_a_live_writer
+            open_readonly_matches_read_write
+            open_readonly_refuses_a_dirty_journal
+            open_readonly_does_not_block_the_writer
+            # the borrowed-pool overlay: the mapping outlives the open call.
+            overlay_writes_survive_repeated_snapshots_and_reopen
+            a_re_mapped_snapshot_is_canonical_against_an_owned_replay
+            an_overlay_open_residents_far_less_than_the_image
+          )
+          cargo valgrind test -p plugmem-host --test host \
+            -- --exact "${tests[@]}" 2>&1 | tee memcheck.log
+          # A libtest filter that matches nothing is silently skipped, so a
+          # renamed test would quietly drop out of the audit and the job would
+          # still be green. Compare what ran against what was asked for.
+          ran="$(sed -n 's/^test result: ok\. \([0-9]\+\) passed.*/\1/p' memcheck.log)"
+          if [ "${ran:-0}" -ne "${#tests[@]}" ]; then
+            echo "::error::memcheck ran ${ran:-0} of ${#tests[@]} curated tests —" \
+                 "a test was renamed or removed; update the list in this workflow"
+            exit 1
+          fi
+          echo "memcheck covered all ${#tests[@]} curated mmap/leak tests"
 
   # Aggregate gate: a single job the release orchestrator (and any branch
   # protection) can require. Fails if either audit failed or was cancelled;

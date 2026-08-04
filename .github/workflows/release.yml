@@ -341,6 +341,33 @@ jobs:
         run: npx napi version
       - name: Move each addon into its platform package
         run: npx napi artifacts --dir artifacts
+      - name: The meta package must carry its loader
+        # v0.3.0 shipped a meta `plugmem` containing only package.json and
+        # README: `index.js`/`index.d.ts` were gitignored and nothing in this
+        # job regenerates them, so `files` pointed at absent paths and
+        # `require('plugmem')` could not resolve. They are committed now, but
+        # "the tarball actually contains the loader" is the property that
+        # matters, so assert it on the real `npm pack` file list rather than
+        # trusting the checkout. npm always includes package.json and README
+        # regardless of `files`, which is exactly why a broken package still
+        # looks plausible on npmjs.org.
+        run: |
+          set -euo pipefail
+          npm pack --dry-run --json > /tmp/meta-pack.json
+          node -e '
+            // npm 12 reports an object keyed by package name; npm 10/11 an
+            // array. Accept both so a runner npm bump cannot silently defeat
+            // this gate.
+            const report = require("/tmp/meta-pack.json");
+            const [entry] = Array.isArray(report) ? report : Object.values(report);
+            const shipped = (entry?.files ?? []).map((f) => f.path);
+            const missing = ["index.js", "index.d.ts"].filter((f) => !shipped.includes(f));
+            if (missing.length) {
+              console.error(`::error::the meta npm package would ship without ${missing.join(" and ")} — the loader IS the package`);
+              process.exit(1);
+            }
+            console.log(`meta package contents: ${shipped.join(", ")}`);
+          '
       - name: Publish platform packages + meta (skip versions already published)
         # `napi prepublish` wires the meta's optionalDependencies and publishes
         # each platform package; then the meta itself.
