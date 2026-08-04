@@ -6,7 +6,9 @@ use plugmem_core::tokenizer::{MAX_TOKEN_BYTES, Tokenizer, TokenizerPolicy};
 #[cfg(not(target_family = "wasm"))]
 use proptest::prelude::*;
 #[cfg(not(target_family = "wasm"))]
-use proptest::test_runner::{Config as ProptestConfig, TestCaseError, TestRunner};
+use proptest::test_runner::{
+    Config as ProptestConfig, FileFailurePersistence, RngSeed, TestCaseError, TestRng, TestRunner,
+};
 
 fn tokens(text: &str) -> Vec<String> {
     let mut tk = Tokenizer::new();
@@ -448,17 +450,60 @@ fn assert_canonical_tokens(text: &str) -> Result<(), TestCaseError> {
     Ok(())
 }
 
+/// A runner for the stress searches below, seeded so the search repeats.
+///
+/// Proptest's default is [`RngSeed::Random`]: a fresh OS-entropy seed on every
+/// run. For a search over the whole Unicode space that is a slot machine — each
+/// CI job explores a different slice, so a red build says nothing about the
+/// commit that turned it red, and the counterexample cannot be reproduced
+/// afterwards because the seed that produced it is gone. Pairing that with
+/// `failure_persistence: None`, as this file used to, threw away the input too.
+///
+/// So the seed is pinned. The search is just as large, but it is the *same*
+/// large search every time: green stays green, red means *this* commit, and a
+/// failure reproduces verbatim on any machine and any OS. Widening the search
+/// is still worth doing — it just belongs on a schedule rather than in front of
+/// a release, so the nightly job passes `PROPTEST_RNG_SEED` explicitly and the
+/// branch below hands it through. Whatever that job finds arrives with the seed
+/// that found it.
+#[cfg(not(target_family = "wasm"))]
+fn stress_runner(cases: u32) -> TestRunner {
+    let defaults = ProptestConfig::default();
+    let config = ProptestConfig {
+        // `cases` is this property's own budget for the release path. An
+        // explicit `PROPTEST_CASES` outranks it: that is the scheduled explorer
+        // asking to search wider, and a struct literal would silently ignore
+        // it — leaving the tokenizer, the very thing worth exploring, pinned at
+        // its small budget on the one job built to go deep.
+        cases: if std::env::var_os("PROPTEST_CASES").is_some() {
+            defaults.cases
+        } else {
+            cases
+        },
+        max_shrink_iters: 4096,
+        // These searches drive a bare `TestRunner`, so proptest cannot infer a
+        // source file and its default `SourceParallel` persistence degrades to
+        // a warning on every run — which is why this file used to switch
+        // persistence off entirely. Naming the file restores the thing that
+        // actually mattered: a counterexample is written down, replayed first
+        // on the next run, and can be committed as a permanent regression case.
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(
+            ".proptest-regressions/tokenizer-stress.txt",
+        ))),
+        ..defaults
+    };
+    if matches!(config.rng_seed, RngSeed::Random) {
+        let algorithm = config.rng_algorithm;
+        return TestRunner::new_with_rng(config, TestRng::deterministic_rng(algorithm));
+    }
+    // An explicit seed is the scheduled explorer asking for new ground.
+    TestRunner::new(config)
+}
+
 #[cfg(not(target_family = "wasm"))]
 #[test]
 fn unicode_stress_tokens_are_canonical() {
-    let config = ProptestConfig {
-        cases: 2048,
-        max_shrink_iters: 4096,
-        failure_persistence: None,
-        ..ProptestConfig::default()
-    };
-    let mut runner = TestRunner::new(config);
-    runner
+    stress_runner(2048)
         .run(&stress_text(), |text| assert_canonical_tokens(&text))
         .expect("Unicode stress properties failed");
 }
@@ -466,14 +511,7 @@ fn unicode_stress_tokens_are_canonical() {
 #[cfg(not(target_family = "wasm"))]
 #[test]
 fn full_unicode_scalar_texts_are_canonical() {
-    let config = ProptestConfig {
-        cases: 512,
-        max_shrink_iters: 4096,
-        failure_persistence: None,
-        ..ProptestConfig::default()
-    };
-    let mut runner = TestRunner::new(config);
-    runner
+    stress_runner(512)
         .run(&full_unicode_text(), |text| assert_canonical_tokens(&text))
         .expect("full Unicode property failed");
 }
@@ -481,14 +519,7 @@ fn full_unicode_scalar_texts_are_canonical() {
 #[cfg(not(target_family = "wasm"))]
 #[test]
 fn mixed_script_policy_runs_are_canonical() {
-    let config = ProptestConfig {
-        cases: 512,
-        max_shrink_iters: 4096,
-        failure_persistence: None,
-        ..ProptestConfig::default()
-    };
-    let mut runner = TestRunner::new(config);
-    runner
+    stress_runner(512)
         .run(&mixed_policy_text(), |text| assert_canonical_tokens(&text))
         .expect("mixed script policy property failed");
 }

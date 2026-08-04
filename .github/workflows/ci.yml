@@ -38,6 +38,20 @@ concurrency:
 env:
   WASMTIME_VERSION: "v41.0.3"
   WASMER_VERSION: "v7.2.0"
+  # Property tests search, they do not assert. Proptest seeds each search from
+  # OS entropy by default, so the ~26 `proptest!` properties across this matrix
+  # explored a different slice of their input space in every job of every run —
+  # several hundred fresh searches per push. A latent bug anywhere in that space
+  # then surfaced as a red build on an unrelated commit (docs-only pushes have
+  # gone red this way), with no way to reproduce it: the seed died with the job.
+  #
+  # Pinning the seed makes CI answer a question about the commit instead of
+  # about the dice. The searches are unchanged in size — they are simply the
+  # same searches every time, on every OS, and reproducible locally with the
+  # same variable. New ground is covered by property-search.yml, on a schedule,
+  # where a find is reported with the seed that produced it rather than
+  # blocking a release.
+  PROPTEST_RNG_SEED: "20250804"
 
 jobs:
   # --- formatting ------------------------------------------------------------
