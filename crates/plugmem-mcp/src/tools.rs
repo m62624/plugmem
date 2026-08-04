@@ -495,9 +495,15 @@ fn workspace_find_def() -> Value {
 fn recall_ro(reader: &ReaderShared, id: Value, args: Option<&Value>) -> Value {
     let format = format_arg(args);
     let query = arg_str(args, "query").map(String::from);
-    // Embed the query text into an owned vector, if we can (embedder Mutex only).
-    let vector = match query.as_deref() {
-        Some(text) => {
+    let explicit = match arg_vector(args) {
+        Ok(vector) => vector,
+        Err(message) => return rpc::tool_result(id, message, true),
+    };
+    // An explicit `vector` replaces the embedder outright; otherwise embed the
+    // query text into an owned vector, if we can (embedder Mutex only).
+    let vector = match (explicit, query.as_deref()) {
+        (Some(vector), _) => Some(vector),
+        (None, Some(text)) => {
             let mut embedder = reader.embedder.lock().expect("embedder lock");
             match embedder.as_mut() {
                 Some(e) => match e.embed(&[text]) {
@@ -507,20 +513,24 @@ fn recall_ro(reader: &ReaderShared, id: Value, args: Option<&Value>) -> Value {
                 None => None,
             }
         }
-        None => None,
+        (None, None) => None,
     };
     let tags = arg_str_vec(args, "tags");
     let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
     let entities = arg_str_vec(args, "entities");
     let ent_refs: Vec<&str> = entities.iter().map(String::as_str).collect();
+    let (range, as_of) = match (arg_range(args), arg_ms(args, "as_of")) {
+        (Ok(range), Ok(as_of)) => (range, as_of),
+        (Err(message), _) | (_, Err(message)) => return rpc::tool_result(id, message, true),
+    };
     let q = RecallQuery {
         now: now_ms(),
         text: query.as_deref(),
         vector: vector.as_deref(),
         tags: &tag_refs,
         entities: &ent_refs,
-        as_of: arg_u64(args, "as_of"),
-        range: arg_range(args),
+        as_of,
+        range,
         k: arg_u64(args, "k").unwrap_or(0) as usize,
         token_budget: None,
         include_closed: arg_bool(args, "closed"),
@@ -559,12 +569,20 @@ fn remember(db: &Database, id: Value, args: Option<&Value>, revise: Option<FactI
         .collect();
     let meta = arg_meta(args);
     let meta_refs: Vec<(&str, &str)> = meta.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let (valid_from, vector) = match (arg_ms(args, "valid_from"), arg_vector(args)) {
+        (Ok(valid_from), Ok(vector)) => (valid_from, vector),
+        (Err(message), _) | (_, Err(message)) => return rpc::tool_result(id, message, true),
+    };
     let input = RememberInput {
         entity: arg_str(args, "entity"),
         tags: &tag_refs,
         links: &link_refs,
         metadata: (!meta_refs.is_empty()).then_some(meta_refs.as_slice()),
-        valid_from: arg_u64(args, "valid_from"),
+        valid_from,
+        // Authoritative when given: the host embeds only when this is `None`,
+        // so a caller's own vector skips the provider. The engine checks its
+        // length against `dim`.
+        vector: vector.as_deref(),
         ..RememberInput::text(now_ms(), text)
     };
     let res = match revise {
@@ -662,14 +680,24 @@ fn recall(db: &Database, id: Value, args: Option<&Value>) -> Value {
     let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
     let entities = arg_str_vec(args, "entities");
     let ent_refs: Vec<&str> = entities.iter().map(String::as_str).collect();
+    let (range, as_of) = match (arg_range(args), arg_ms(args, "as_of")) {
+        (Ok(range), Ok(as_of)) => (range, as_of),
+        (Err(message), _) | (_, Err(message)) => return rpc::tool_result(id, message, true),
+    };
+    // Given, this replaces the embedder; left `None`, the host embeds the text
+    // inside `recall` (outside its lock) exactly as before.
+    let vector = match arg_vector(args) {
+        Ok(vector) => vector,
+        Err(message) => return rpc::tool_result(id, message, true),
+    };
     let q = RecallQuery {
         now: now_ms(),
         text: arg_str(args, "query"),
-        vector: None,
+        vector: vector.as_deref(),
         tags: &tag_refs,
         entities: &ent_refs,
-        as_of: arg_u64(args, "as_of"),
-        range: arg_range(args),
+        as_of,
+        range,
         k: arg_u64(args, "k").unwrap_or(0) as usize,
         token_budget: None,
         include_closed: arg_bool(args, "closed"),
@@ -727,6 +755,7 @@ fn remember_like(name: &str, description: &str, with_id: bool) -> Value {
             "description": messages::ARG_METADATA
         },
         "valid_from": { "type": "integer", "minimum": 0, "description": messages::ARG_VALID_FROM },
+        "vector": vector_prop(),
         "format": format_prop()
     });
     let mut required = vec![json!("text")];
@@ -738,6 +767,16 @@ fn remember_like(name: &str, description: &str, with_id: bool) -> Value {
         "name": name,
         "description": description,
         "inputSchema": { "type": "object", "properties": props, "required": required }
+    })
+}
+
+/// The `vector` property, shared by every tool that accepts a precomputed
+/// embedding.
+fn vector_prop() -> Value {
+    json!({
+        "type": "array",
+        "items": { "type": "number" },
+        "description": messages::ARG_VECTOR
     })
 }
 
@@ -761,6 +800,7 @@ fn recall_def() -> Value {
                 },
                 "k": { "type": "integer", "minimum": 0, "description": messages::ARG_K },
                 "closed": { "type": "boolean", "description": messages::ARG_CLOSED },
+                "vector": vector_prop(),
                 "format": format_prop()
             }
         }
@@ -1013,11 +1053,78 @@ fn arg_meta(args: Option<&Value>) -> Vec<(String, String)> {
 }
 
 /// The `range` argument as `[from, to)`, accepting a `[from, to]` array.
-fn arg_range(args: Option<&Value>) -> Option<(u64, u64)> {
-    let arr = args
-        .and_then(|a| a.get("range"))
-        .and_then(Value::as_array)?;
-    Some((arr.first()?.as_u64()?, arr.get(1)?.as_u64()?))
+/// A precomputed embedding argument.
+///
+/// Absent is fine; present but not an array of finite numbers is an error, for
+/// the same reason as [`arg_range`] — a vector the server could not read used
+/// to mean "embed the text instead", so the caller's own model was silently
+/// swapped for the configured one.
+fn arg_vector(args: Option<&Value>) -> Result<Option<Vec<f32>>, String> {
+    let Some(value) = args.and_then(|a| a.get("vector")) else {
+        return Ok(None);
+    };
+    let malformed = || Err("vector must be an array of numbers".to_string());
+    let Some(items) = value.as_array() else {
+        return malformed();
+    };
+    if items.is_empty() {
+        return Err("vector must not be empty (omit it to use the embedder)".to_string());
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(number) = item.as_f64() else {
+            return malformed();
+        };
+        if !number.is_finite() {
+            return Err("vector must contain only finite numbers".to_string());
+        }
+        out.push(number as f32);
+    }
+    Ok(Some(out))
+}
+
+/// A unix-millisecond argument that is allowed to be absent but not malformed.
+///
+/// Same reasoning as [`arg_range`]: `as_of` and `valid_from` change *which*
+/// facts come back, so a present-but-unusable value has to be reported.
+/// `as_of` is the visibility filter (`recorded_at <= as_of`), so dropping it
+/// answers about the present while the caller believes they asked about a past
+/// instant — an entirely plausible wrong answer.
+fn arg_ms(args: Option<&Value>, key: &str) -> Result<Option<u64>, String> {
+    let Some(value) = args.and_then(|a| a.get(key)) else {
+        return Ok(None);
+    };
+    value
+        .as_u64()
+        .map(Some)
+        .ok_or_else(|| format!("{key} must be a whole, non-negative number of unix milliseconds"))
+}
+
+/// The `range` argument as `[from, to)` in unix milliseconds.
+///
+/// `Err` names what was wrong instead of dropping the window: a `range` that is
+/// not two whole non-negative numbers used to fall through to `None`, taking
+/// the engine's temporal source with it, so the call answered as if no window
+/// had been asked for. A malformed argument has to be visible — a plausible
+/// wrong answer is worse than an error.
+fn arg_range(args: Option<&Value>) -> Result<Option<(u64, u64)>, String> {
+    let Some(value) = args.and_then(|a| a.get("range")) else {
+        return Ok(None);
+    };
+    let malformed = || Err("range must be exactly [from, to] in unix milliseconds".to_string());
+    let Some(arr) = value.as_array() else {
+        return malformed();
+    };
+    let [from, to] = arr.as_slice() else {
+        return malformed();
+    };
+    let (Some(from), Some(to)) = (from.as_u64(), to.as_u64()) else {
+        return malformed();
+    };
+    if from > to {
+        return Err(format!("range start {from} is after its end {to}"));
+    }
+    Ok(Some((from, to)))
 }
 
 // ── Rendering ─────────────────────────────────────────────────────────────
@@ -1133,12 +1240,43 @@ mod tests {
                 ("uri".to_string(), "s3://b/x".to_string()),
             ]
         );
-        assert_eq!(arg_range(a), Some((10, 20)));
-        assert_eq!(arg_range(None), None);
+        assert_eq!(arg_range(a), Ok(Some((10, 20))));
+        assert_eq!(arg_range(None), Ok(None));
         assert_eq!(format_arg(a), "json");
         assert_eq!(format_arg(Some(&json!({"format": "human"}))), "human");
         assert_eq!(id_arg(Some(&json!({"id": 3}))), 3);
         assert_eq!(id_arg(None), 0);
+    }
+
+    #[test]
+    fn a_narrowing_argument_is_never_dropped_for_being_malformed() {
+        // The failure this guards: a `range` or an `as_of` the extractor could
+        // not read used to fall through to `None`, so the tool answered without
+        // the temporal source (`range`) or as of now instead of the instant
+        // asked for (`as_of`). Every shape below must be an error.
+        for bad in [
+            json!({ "range": [10] }),
+            json!({ "range": [10, 20, 30] }),
+            json!({ "range": [20, 10] }),
+            json!({ "range": [-1, 20] }),
+            json!({ "range": [1.5, 20] }),
+            json!({ "range": "10..20" }),
+        ] {
+            assert!(arg_range(Some(&bad)).is_err(), "{bad}");
+        }
+
+        for bad in [
+            json!({ "as_of": -1 }),
+            json!({ "as_of": 1.5 }),
+            json!({ "as_of": "now" }),
+        ] {
+            assert!(arg_ms(Some(&bad), "as_of").is_err(), "{bad}");
+        }
+
+        // Absent stays absent — an omitted filter is not a malformed one.
+        assert_eq!(arg_ms(Some(&json!({})), "as_of"), Ok(None));
+        assert_eq!(arg_ms(None, "as_of"), Ok(None));
+        assert_eq!(arg_ms(Some(&json!({ "as_of": 7 })), "as_of"), Ok(Some(7)));
     }
 
     #[test]

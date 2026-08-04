@@ -118,6 +118,14 @@ pub const ARG_METADATA: &str = "Opaque metadata as a flat object of string value
 (e.g. { \"uri\": \"s3://…\", \"mime\": \"application/pdf\" }). The engine never \
 interprets it — a place for a pointer to the real payload in another store, or \
 side attributes. Optional.";
+/// The `vector` argument of `plugmem_remember` / `plugmem_revise` /
+/// `plugmem_recall`.
+pub const ARG_VECTOR: &str = "A precomputed embedding as an array of numbers. \
+Its length must equal the configured `dim`. Given, it REPLACES the embedder: \
+nothing is sent to the provider. Use it when the vector already exists, or when \
+the model is not an OpenAI-shaped HTTP endpoint. Omit it and a configured \
+embedder produces one from the text.";
+
 pub const ARG_VALID_FROM: &str =
     "Validity start, unix milliseconds (the truth axis). Defaults to now.";
 pub const ARG_QUERY: &str = "Free-text query for the lexical/semantic sources. Optional — a recall \

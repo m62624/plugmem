@@ -24,24 +24,24 @@ async function withDir(fn) {
 test("read-only observes a writer's checkpointed snapshot", async () => {
   await withDir(async (path) => {
     // Writer stores + checkpoints (clears the journal) + closes (drops the lock).
-    const w = new Plugmem(path);
-    w.remember({ text: "the sky is blue", entity: "sky", tags: ["color"] });
+    const w = await Plugmem.open(path);
+    await w.remember({ text: "the sky is blue", entity: "sky", tags: ["color"] });
     await w.checkpoint(); // async — must finish before close/reopen
     w.close();
 
     // Read-only open over the published snapshot.
-    const ro = new Plugmem(path, { readOnly: true });
+    const ro = await Plugmem.open(path, { readOnly: true });
 
     // Read verbs answer.
-    assert.ok(Array.isArray(ro.recall({ query: "sky" }).facts));
+    assert.ok(Array.isArray((await ro.recall({ query: "sky" })).facts));
     assert.match(ro.get(0).text, /sky/);
     assert.deepEqual(ro.tagsOf(0), ["color"]);
     assert.equal(ro.stats().facts, 1);
-    assert.equal(ro.export().length, 1);
+    assert.equal((await ro.export()).length, 1);
     const page = await ro.exportPage();
     assert.deepEqual(page.facts.map(({ text }) => text), ["the sky is blue"]);
     assert.equal(page.nextCursor, undefined);
-    assert.doesNotThrow(() => ro.verify());
+    await assert.doesNotReject(() => ro.verify());
 
     // Freshness verbs work; nothing newer to adopt.
     assert.equal(typeof ro.generation(), "number");
@@ -61,8 +61,8 @@ test("read-only observes a writer's checkpointed snapshot", async () => {
 });
 
 test("generation/refresh are read-only-only; verbs throw after close", async () => {
-  await withDir((path) => {
-    const w = new Plugmem(path);
+  await withDir(async (path) => {
+    const w = await Plugmem.open(path);
     assert.throws(() => w.generation(), /read-only mode/);
     assert.throws(() => w.refresh(), /read-only mode/);
 

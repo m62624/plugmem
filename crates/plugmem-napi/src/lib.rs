@@ -10,6 +10,8 @@ use napi_derive::napi;
 
 /// The `Plugmem` class — the napi mirror of `plugmem-host`'s `Database`.
 mod db;
+/// The thrown-error contract: which failures carry a `code`, and which do not.
+mod error;
 /// Typed result mirrors, so verbs return precise TypeScript interfaces.
 mod types;
 /// The `Workspace` class — many memories in one directory, addressed by name.

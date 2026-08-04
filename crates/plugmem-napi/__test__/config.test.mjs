@@ -13,45 +13,45 @@ const require = createRequire(import.meta.url);
 const { Plugmem } = require("../index.js");
 
 /** Run `fn(dir)` in a throwaway directory, cleaned up afterwards. */
-function withDir(fn) {
+async function withDir(fn) {
   const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-cfg-"));
   try {
-    fn(dir);
+    await fn(dir);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-test("a config file opens the writer; lexical recall works with no embedder", () => {
-  withDir((dir) => {
+test("a config file opens the writer; lexical recall works with no embedder", async () => {
+  await withDir(async (dir) => {
     const cfg = join(dir, "config.toml");
     writeFileSync(cfg, "[engine]\ndim = 0\n");
-    const db = new Plugmem(join(dir, "m.plugmem"), { config: cfg });
-    db.remember({ text: "prefers native addons" });
-    const res = db.recall({ query: "native" });
+    const db = await Plugmem.open(join(dir, "m.plugmem"), { config: cfg });
+    await db.remember({ text: "prefers native addons" });
+    const res = await db.recall({ query: "native" });
     assert.match(res.rendered, /native/);
     db.close();
   });
 });
 
-test("a dim option disagreeing with the config embedder throws", () => {
-  withDir((dir) => {
+test("a dim option disagreeing with the config embedder throws", async () => {
+  await withDir(async (dir) => {
     const cfg = join(dir, "config.toml");
     writeFileSync(
       cfg,
       '[engine]\ndim = 8\n[embedder]\nkind = "openai"\nurl = "http://127.0.0.1:1/v1/embeddings"\nmodel = "dummy"\n',
     );
+    // The dim conflict is decided before any work is scheduled: a synchronous
+    // throw, not a rejection.
     assert.throws(
-      () => new Plugmem(join(dir, "m.plugmem"), { dim: 16, config: cfg }),
+      () => Plugmem.open(join(dir, "m.plugmem"), { dim: 16, config: cfg }),
       /disagrees/,
     );
   });
 });
 
-test("an explicit but missing config path throws", () => {
-  withDir((dir) => {
-    assert.throws(
-      () => new Plugmem(join(dir, "m.plugmem"), { config: join(dir, "nope.toml") }),
-    );
+test("an explicit but missing config path throws", async () => {
+  await withDir(async (dir) => {
+    assert.throws(() => Plugmem.open(join(dir, "m.plugmem"), { config: join(dir, "nope.toml") }));
   });
 });

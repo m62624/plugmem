@@ -8,18 +8,24 @@
 
 ## Public boundary
 
-The `Plugmem` constructor accepts a path and optional open options, including read-only mode and config. Methods cover remember, remember-many, revise, recall, forget, link, get, tags, collected and paged export, verify, maintain, checkpoint, generation, refresh, and close.
+`Plugmem` has **no JavaScript constructor**: it is opened with the static, asynchronous `Plugmem.open(path?, options?)`. A constructor must evaluate to its object immediately, so it cannot hand the open — the exclusive lock, the journal replay, the snapshot mapping — to a worker thread; a static method returning a promise can. `Workspace` keeps its constructor, which only reads `config.toml` and builds a struct; every database it touches opens lazily through its (async) verbs. Do not reintroduce a synchronous open. Methods cover remember, remember-many, revise, recall, forget, link, get, tags, collected and paged export, verify, maintain, checkpoint, generation, refresh, and close.
 
 The wrapper has two internal modes:
 
 - writer: owns `plugmem_host::Database`;
 - reader: owns `ReadOnlyDatabase` and must reject write operations.
 
-Async `rememberMany`, `exportPage`, `maintain`, and `checkpoint` use napi-rs async tasks/libuv. Preserve the rule that the task owns the necessary database handle and that errors cross the boundary as JS exceptions/promises rather than panics. Paged export is pull-based and item-bounded; do not replace it with an unbounded threadsafe-function callback queue or wait for JavaScript while holding the host read lock.
+`remember`, `revise`, `recall`, `rememberMany`, `exportPage`, `maintain`, and `checkpoint` use napi-rs async tasks/libuv. The rule for which verbs are async is *blocking work*, not verb size: with an `[embedder]` configured, `remember`/`revise`/`recall` each cost an HTTP round trip, and Node has one thread for all JavaScript — running that on it stalls the whole process. Verbs that only touch mapped memory stay synchronous. Do not move a verb across that line without the same reasoning. Preserve the rule that the task owns the necessary database handle and that errors cross the boundary as JS exceptions/promises rather than panics. Paged export is pull-based and item-bounded; do not replace it with an unbounded threadsafe-function callback queue or wait for JavaScript while holding the host read lock.
 
 ## Type and error rules
 
 Keep TypeScript-visible field names and optionality stable. The typed objects in `types.rs` are deliberately separate from core structs so Rust lifetimes and borrowed inputs do not leak into JavaScript. Convert `HostError` into napi errors with useful context; never expose internal debug formatting as the API contract.
+
+`src/error.rs` owns the thrown-error contract and is the single place to change it. Every failure carries a stable `PLUGMEM_*` `code`, on a synchronous throw and on a promise rejection alike. The async half takes a trick: napi-rs' `Task` fixes its error type to `napi::Error<Status>`, whose status is a closed enum, so a task carries its failure inside its `Output` (`error::Produced`) and `resolve` — which runs on the JS thread and has an `Env` — rebuilds it as a real JS `Error` with `code` via `error::to_js`. napi's rejection path returns that stored object verbatim. **Every fallible `Task::resolve` must go through `error::to_js`**; a new task that skips it silently drops the code for that verb.
+
+Every verb that reaches the engine's vector layer accepts an optional caller-supplied `vector`, which replaces the embedder for that call — the host embeds only when the field is absent. The length rule belongs to the engine (`dim`); validate only that the numbers are finite and the array is non-empty. The CLI (`--vector`) and MCP (`vector`) expose the same thing; keep the three in step.
+
+An argument that shapes an answer must be refused, never dropped. `range` is exactly `[from, to]`; `range`, `asOf` and `validFrom` are checked with `checked_ms` rather than cast, because `f64 as u64` saturates in Rust and would silently turn a caller's mistake into a different, plausible query. Validate on the JS thread — before an `AsyncTask` is constructed — so a refusal throws where the caller stands instead of rejecting a promise.
 
 `serde-json` is used to reuse JSON-shaped argument/result paths where appropriate. Validate user input at the boundary, especially ids, dimensions, metadata, tags, links, and read-only restrictions.
 
@@ -29,8 +35,9 @@ This crate is published to npm, not crates.io. Do not add platform-specific assu
 
 ```bash
 cargo test -p plugmem-napi
+npm run build --prefix crates/plugmem-napi   # regenerates index.js / index.d.ts
 npm test --prefix crates/plugmem-napi
-npm run build --prefix crates/plugmem-napi
+npm run typecheck --prefix crates/plugmem-napi
 ```
 
-The JavaScript tests cover smoke operations, verbs, metadata, config, and read-only behavior. When changing an exported class/method/type, update the npm package declarations and JS tests together. Keep Node runtime requirements aligned with the configured Node-API version.
+The JavaScript tests cover smoke operations, verbs, metadata, config, read-only behavior, the argument/error contract (`contract.test.mjs`) and read-only query embedding (`readonly-embedding.test.mjs`). A test that needs an embedder must mock it **in a worker thread**: `recall` is a synchronous native call, so while it waits on the embedder it owns the JS thread and a mock server on the same event loop can never answer it — the test would wait on itself. When changing an exported class/method/type, update the npm package declarations and JS tests together. Keep Node runtime requirements aligned with the configured Node-API version.
