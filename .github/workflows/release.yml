@@ -296,7 +296,7 @@ jobs:
         # invoke it through `npx`; a bare `napi` is not on PATH (see ci.yml).
         run: npx napi build --platform --release --target ${{ matrix.target }} ${{ matrix.zig && '--zig' || '' }}
       - name: Upload the built addon
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: napi-${{ matrix.target }}
           path: crates/plugmem-napi/*.node
@@ -332,7 +332,7 @@ jobs:
       - name: Install dependencies (@napi-rs/cli)
         run: npm ci
       - name: Download every platform addon
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: crates/plugmem-napi/artifacts
           pattern: napi-*
