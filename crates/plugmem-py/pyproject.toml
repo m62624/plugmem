@@ -84,6 +84,11 @@ Documentation = "https://github.com/m62624/plugmem/blob/main/crates/plugmem-py/R
 # the extension instead of beside it.
 python-source = "python"
 module-name = "plugmem._plugmem"
+# The release job copies the repository licence into this crate before every
+# build. Cargo's source-package file list does not otherwise carry that copied
+# file into maturin's sdist, while the PEP 639 metadata requires it to exist at
+# the root of the archive.
+include = [{ path = "LICENSE", format = "sdist" }]
 # `extension-module` tells PyO3 not to link libpython, which is required for a
 # wheel and wrong for `cargo test` — hence here and not in Cargo.toml.
 features = ["pyo3/extension-module"]
