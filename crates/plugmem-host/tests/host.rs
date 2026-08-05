@@ -833,14 +833,13 @@ fn readers_and_checkpoints_do_not_leak_across_rounds() {
     db.remember(RememberInput::text(1, "seed fact")).unwrap();
     db.checkpoint(2).unwrap();
 
-    // Keep the debug CI workload bounded while retaining a larger optimized
-    // run. The test is deterministic and checks a per-round delta, so twenty
-    // rounds are enough to expose a linear pin/fd leak; the valgrind job can
-    // still override this explicitly.
+    // Enough rounds to make any linear leak obvious; overridable so the
+    // valgrind job (≈100x slower) can run fewer — a leak still shows as growing
+    // fds and as per-allocation loss under memcheck regardless of count.
     let rounds: u64 = std::env::var("PLUGMEM_LEAK_ROUNDS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(if cfg!(debug_assertions) { 20 } else { 200 });
+        .unwrap_or(200);
     let churn = |db: &Database| {
         for r in 0..rounds {
             let now = 100 + r;
@@ -1430,26 +1429,12 @@ fn an_overlay_open_residents_far_less_than_the_image() {
             "at vero eos et accusamus et iusto odio dignissimos ducimus qui \
              blanditiis praesentium voluptatum deleniti atque corrupti quos",
         ];
-        // Batch the writes so this storage-size probe does not spend its time
-        // repeating the per-call policy/locking overhead 20,000 times. The
-        // batch size keeps the temporary text and journal buffers bounded.
-        for start in (0..20_000u64).step_by(512) {
-            let end = (start + 512).min(20_000);
-            let texts: Vec<String> = (start..end)
-                .map(|i| {
-                    // Repeat a template so the text is long (the blob heap
-                    // dominates) without adding distinct terms (the posting
-                    // lists stay compact).
-                    let t = templates[(i % 4) as usize];
-                    format!("{t} {t} {t} {t}")
-                })
-                .collect();
-            let inputs = texts
-                .iter()
-                .enumerate()
-                .map(|(offset, text)| RememberInput::text(start + offset as u64 + 1, text))
-                .collect();
-            db.remember_many(inputs).unwrap();
+        for i in 0..20_000u64 {
+            // Repeat a template so the text is long (the blob heap dominates)
+            // without adding distinct terms (the posting lists stay compact).
+            let t = templates[(i % 4) as usize];
+            let text = format!("{t} {t} {t} {t}");
+            db.remember(RememberInput::text(i + 1, &text)).unwrap();
         }
         db.checkpoint(20_000_000).unwrap();
     }
