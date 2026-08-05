@@ -145,5 +145,12 @@ def test_every_error_code_matches_the_node_binding() -> None:
         assert f'"{code}"' in source, f"{code} is not a code the Node binding defines"
 
 
-def test_the_version_and_the_skill_marker_agree() -> None:
-    assert plugmem.version() == plugmem.skill_version()
+def test_the_skill_ships_and_carries_a_version() -> None:
+    # Deliberately not `version() == skill_version()`. The skill's marker is
+    # bumped with the feature that changes the skill; the crate version is
+    # bumped afterwards, by its own release commit. Requiring them to agree
+    # would make every feature branch red until the release, which is a rule
+    # this repository does not have.
+    assert len(plugmem.skill_version().split(".")) == 3
+    assert "# plugmem" in plugmem.skill()
+    assert plugmem.skill_full().count("wasm-strip") == 2

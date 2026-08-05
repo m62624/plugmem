@@ -196,7 +196,8 @@ is a question this answers, and it is the reason to `unlink` rather than to
 forget the fact that stated the relationship.
 
 How far the walk goes is `--graph-depth N` on the recall (`graph_depth` over
-MCP, `graphDepth` in Node), defaulting to `[recall].graph_depth`. Reach for it when *this* question wants a different net than the
+MCP, `graphDepth` in Node, `graph_depth` in Python), defaulting to
+`[recall].graph_depth`. Reach for it when *this* question wants a different net than the
 memory's usual one: `--graph-depth 3` for "everything around ann",
 `--graph-depth 0` for "ann's own facts and nothing her neighbours know".
 
@@ -218,10 +219,10 @@ has no citation.
 
 ## Run it — verify the engine first (CLI / MCP)
 
-This whole section is CUT from the in-process npm (napi) distribution of this
-skill: that package ships the skill and the engine from the same release and
-calls the engine directly in the Node process, so there is no separate binary
-to find and no version skew to check. For the CLI and MCP surfaces — where the
+This whole section is CUT from the in-process library distributions of this
+skill — the npm (napi) package and the PyPI (PyO3) one: each ships the skill
+and the engine from the same release and calls the engine in your own process,
+so there is no separate binary to find and no version skew to check. For the CLI and MCP surfaces — where the
 skill and the engine are installed independently — the ceremony below is
 MANDATORY.
 
@@ -388,7 +389,7 @@ comparison line:
 plugmem version check: skill <marker> vs engine <reported> → OK | MISMATCH
 ```
 
-<!-- skill-version: 0.6.0 -->
+<!-- skill-version: 0.7.0 -->
 
 If they differ in ANY way: **stop**, warn the user that skill and engine
 describe different functionality, and proceed only on their explicit

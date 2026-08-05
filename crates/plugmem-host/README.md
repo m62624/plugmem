@@ -14,8 +14,10 @@ graph `link`/`unlink`, backed by durable storage. It re-exports the engine, so
 
 **No embedding model is required.** Of the four recall sources, only the vector
 one needs an embedder; text, graph and time work with nothing but the database.
-Configure `[embedder]` to add matching by meaning, or leave it out and match on
-words, entities and time.
+Unlike the CLI and the MCP server, a Rust caller has two ways to supply one —
+an `[embedder]` section in `config.toml`, or `DatabaseBuilder::embedder` — and
+a third option, passing a vector per call, which needs neither. See
+[Embedding is optional](#what-you-get) below.
 
 ## Which crate do I need?
 
