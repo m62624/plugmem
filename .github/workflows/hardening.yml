@@ -127,7 +127,8 @@ jobs:
             many_readers_share_one_snapshot
             a_reader_opens_alongside_a_live_writer
             open_readonly_matches_read_write
-            open_readonly_refuses_a_dirty_journal
+            open_readonly_refuses_a_database_with_nothing_published
+            a_reader_opens_over_a_dirty_journal_and_sees_the_published_state
             open_readonly_does_not_block_the_writer
             # the borrowed-pool overlay: the mapping outlives the open call.
             overlay_writes_survive_repeated_snapshots_and_reopen
