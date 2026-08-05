@@ -119,6 +119,7 @@ are for narrower needs.
 | A memory from a **terminal or shell script** | [`plugmem-cli`](crates/plugmem-cli) (`plugmem`) | One local database, no server; `plugmem repl` keeps the engine open for host speed. |
 | A memory for an **agent, local-first app, or non-Rust program** | [`plugmem-mcp`](crates/plugmem-mcp) | Long-lived stdio JSON-RPC; language-independent. **Don't** front your own Rust with it — embed `host` instead. |
 | A memory in **JavaScript / TypeScript** (Node) | [`plugmem-napi`](crates/plugmem-napi) | The engine as a native Node addon (napi-rs), in-process and typed for TS. On npm as `plugmem`. |
+| A memory in **Python** | [`plugmem-py`](crates/plugmem-py) | The engine as a CPython extension (PyO3), in-process and typed. Every call releases the GIL. On PyPI as `plugmem`. |
 
 Rust programs use the library (`host`, or `core` for specialists) — embedded
 in-process, like linking SQLite. Other languages and agents come in through
@@ -146,6 +147,7 @@ a backup, copy the database files.
 | [`plugmem-host`](crates/plugmem-host) | OS glue: files, locking, mmap read-only, embedder clients (`std`) |
 | [`plugmem-cli`](crates/plugmem-cli) | command-line surface, one-shot + interactive `repl` |
 | [`plugmem-napi`](crates/plugmem-napi) | native Node.js addon (napi-rs), on npm as `plugmem` |
+| [`plugmem-py`](crates/plugmem-py) | CPython extension module (PyO3), on PyPI as `plugmem` |
 | [`plugmem-mcp`](crates/plugmem-mcp) | MCP server (stdio JSON-RPC) for agents |
 | `plugmem-testgen` | deterministic corpus generator for tests and benches |
 
@@ -155,12 +157,19 @@ Recall is not a vector lookup — it fuses four sources with
 [reciprocal-rank fusion](https://dl.acm.org/doi/10.1145/1571941.1572114) and a
 recency boost (tags filter; they are not a source):
 
-| Source | Algorithm | What it finds |
-|---|---|---|
-| **Lexical** | [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) (Robertson idf) over a Unicode ([UAX #29](https://unicode.org/reports/tr29/)) tokenizer | exact terms / keyword overlap |
-| **Semantic** | int8-quantized cosine — a flat two-phase scan below a threshold, an [HNSW](https://arxiv.org/abs/1603.09320) graph above | meaning / nearest neighbours |
-| **Graph** | entity graph with current typed edges on the hot path; `as_of` queries use edge history | relational knowledge |
-| **Temporal** | range scans over a `recorded_at`-ordered index; bitemporal validity | "what was true *then*", time windows |
+| Source | Algorithm | What it finds | Needs an embedder |
+|---|---|---|---|
+| **Lexical** | [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) (Robertson idf) over a Unicode ([UAX #29](https://unicode.org/reports/tr29/)) tokenizer | exact terms / keyword overlap | no |
+| **Graph** | entity graph with current typed edges on the hot path; `as_of` queries use edge history | relational knowledge | no |
+| **Temporal** | range scans over a `recorded_at`-ordered index; bitemporal validity | "what was true *then*", time windows | no |
+| **Semantic** | int8-quantized cosine — a flat two-phase scan below a threshold, an [HNSW](https://arxiv.org/abs/1603.09320) graph above | meaning / nearest neighbours | **yes** |
+
+**Three of the four need no model at all**, so plugmem is usable with no API
+key, no network and no per-query cost. What an embedder adds is matching by
+meaning: without one, recall matches on words, so a fact reading "the user
+prefers tokio" answers a query for `tokio` but not one for `which runtime?` —
+anchor on the entity, or add an embedder, and it does. Configure one in
+`[embedder]`; delete the section and everything else keeps working.
 
 ## Many memories in one directory (optional)
 

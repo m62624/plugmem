@@ -15,6 +15,11 @@ engine open across commands for host speed. No memory logic lives here.
 
 The installed binary is **`plugmem-cli`**.
 
+**No embedding model is required.** Of the four recall sources, only the vector
+one needs an embedder; text, graph and time work with nothing but the database.
+Configure `[embedder]` to add matching by meaning, or leave it out and match on
+words, entities and time.
+
 ## Install
 
 Prebuilt for **Linux, Windows and macOS (x64 & arm64)** on every tagged release.

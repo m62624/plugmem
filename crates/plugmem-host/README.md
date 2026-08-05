@@ -12,6 +12,11 @@ this one crate a Rust program gets `remember / recall / revise / forget` plus
 graph `link`/`unlink`, backed by durable storage. It re-exports the engine, so
 **this one crate is all a Rust program needs.**
 
+**No embedding model is required.** Of the four recall sources, only the vector
+one needs an embedder; text, graph and time work with nothing but the database.
+Configure `[embedder]` to add matching by meaning, or leave it out and match on
+words, entities and time.
+
 ## Which crate do I need?
 
 **Writing Rust and just want a working memory? This is the crate — it has

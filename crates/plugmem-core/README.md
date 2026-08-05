@@ -38,6 +38,12 @@ timestamps arrive as parameters, and embeddings are computed by the caller
 — which is what lets the same engine run natively, in `wasm32v1-none`, or
 anywhere else Rust compiles.
 
+**No embedding model is required.** Of the four recall sources, only the vector
+one needs embeddings; text, graph and time work with nothing but the engine.
+This crate never calls a provider in any case — it has no I/O — so a vector is
+something the caller supplies or omits, and omitting it costs the fourth source
+and nothing else.
+
 ## Which crate do I need?
 
 **Most Rust programs want [`plugmem-host`](https://docs.rs/plugmem-host/latest),
