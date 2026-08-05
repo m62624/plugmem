@@ -471,6 +471,19 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+          # Makes a re-run idempotent, which is the property `publish-napi`
+          # already relies on and this job had no equivalent of. Eleven files
+          # (ten wheels and an sdist) go up in one call; a network blip on the
+          # seventh leaves six uploaded, and without this a re-run dies on
+          # "File already exists" for those six — turning a transient failure
+          # into a version burnt on PyPI while crates.io and npm, which publish
+          # in parallel, already succeeded.
+          #
+          # It skips only files whose *exact* version already exists, so it can
+          # never mask a genuine attempt to overwrite a release: PyPI versions
+          # are immutable, and a real re-publish of changed content needs a new
+          # version regardless.
+          skip-existing: true
 
   # Assemble the per-platform packages and publish over OIDC trusted publishing
   # (no NPM_TOKEN), in parallel with `publish-crates` and only after `dist`.
