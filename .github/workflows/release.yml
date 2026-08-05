@@ -345,9 +345,11 @@ jobs:
   #     free-threaded interpreter, so the same crate simply yields a
   #     version-specific `cp314t` wheel.
   #
-  # Six platforms x two = 12 wheels. musl is deliberately absent, exactly as it
-  # is from cargo-dist and napi: it exists nowhere else in this repository, and
-  # a wheel-only exception would be the wrapper divergence AGENTS.md forbids.
+  # Six abi3 wheels plus four free-threaded ones (see the matrix note) — ten,
+  # and every GIL-bearing CPython on every supported platform is covered by the
+  # six. musl is deliberately absent, exactly as it is from cargo-dist and
+  # napi: it exists nowhere else in this repository, and a wheel-only exception
+  # would be the wrapper divergence AGENTS.md forbids.
   py-build:
     name: python wheels (${{ matrix.target }})
     needs: [prepare, tag]
@@ -355,12 +357,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: x86_64-unknown-linux-gnu, host: ubuntu-24.04, manylinux: auto }
-          - { target: aarch64-unknown-linux-gnu, host: ubuntu-24.04, manylinux: auto }
-          - { target: x86_64-apple-darwin, host: macos-26-intel, manylinux: "off" }
-          - { target: aarch64-apple-darwin, host: macos-26, manylinux: "off" }
-          - { target: x86_64-pc-windows-msvc, host: windows-2025, manylinux: "off" }
-          - { target: aarch64-pc-windows-msvc, host: windows-2025, manylinux: "off" }
+          # `freethreaded` is false exactly where the runner cannot provide a
+          # 3.14t interpreter *for the target*. The abi3 wheel needs no
+          # interpreter at all — the stable ABI is a compile-time contract — so
+          # it is built everywhere. A version-specific `cp314t` wheel is not:
+          # maturin has to inspect a matching interpreter, and on these two
+          # targets the only one available is the host's, which is the wrong
+          # architecture. Attempting it would fail at tag time, which is the
+          # worst possible moment to discover a matrix entry is wrong.
+          - { target: x86_64-unknown-linux-gnu, host: ubuntu-24.04, manylinux: auto, freethreaded: true }
+          - { target: aarch64-unknown-linux-gnu, host: ubuntu-24.04, manylinux: auto, freethreaded: false }
+          - { target: x86_64-apple-darwin, host: macos-26-intel, manylinux: "off", freethreaded: true }
+          - { target: aarch64-apple-darwin, host: macos-26, manylinux: "off", freethreaded: true }
+          - { target: x86_64-pc-windows-msvc, host: windows-2025, manylinux: "off", freethreaded: true }
+          - { target: aarch64-pc-windows-msvc, host: windows-2025, manylinux: "off", freethreaded: false }
     runs-on: ${{ matrix.host }}
     steps:
       - uses: actions/checkout@v7
@@ -382,11 +392,12 @@ jobs:
           args: --release --out dist
           sccache: "true"
       - name: A free-threaded interpreter for the second wheel
-        if: ${{ !startsWith(matrix.target, 'aarch64-unknown-linux') }}
-        uses: actions/setup-python@v6
+        if: ${{ matrix.freethreaded }}
+        uses: actions/setup-python@v7
         with:
           python-version: "3.14t"
       - name: Build the free-threaded wheel (3.14t has no stable ABI)
+        if: ${{ matrix.freethreaded }}
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}

@@ -134,7 +134,7 @@ jobs:
       # for, and it differs per OS. Asking for one explicitly keeps the matrix
       # full on all three: narrowing it to skip the crate would mean the
       # binding is linted on Linux only.
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           # The floor `abi3-py310` targets, so the workspace builds against the
           # same interpreter the shipped wheel is built against.
@@ -451,7 +451,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "crates/plugmem-py"
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           # The floor `abi3-py310` targets. Building on it proves the wheel we
           # ship is the wheel we test, rather than one that happens to work on
