@@ -330,7 +330,9 @@ read-only consumers query it in parallel.
 use plugmem_host::{Config, Database, RecallQuery};
 
 // Many readers over one checkpointed file — zero-copy, shared page cache.
-// (A read-only open requires an empty journal: snapshot/checkpoint first.)
+// (A read-only open needs a published generation: checkpoint once, first. It
+// then reads that generation and ignores any later journal, so a reader sees
+// the memory as of the last checkpoint.)
 let ro = Database::open_readonly("agent.plugmem", Config::default())?;
 let out = ro.recall(RecallQuery::text(1_784_000_100_000, "which runtime?"))?;
 println!("{}", out.rendered);

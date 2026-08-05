@@ -1054,17 +1054,17 @@ fn open_readonly_matches_read_write() {
 }
 
 #[test]
-fn open_readonly_refuses_a_dirty_journal() {
-    let tmp = TempDir::new("ro-dirty");
+fn open_readonly_refuses_a_database_with_nothing_published() {
+    let tmp = TempDir::new("ro-unpublished");
     {
         let (db, _) = Database::builder(cfg())
-            .snapshot_every_ops(0) // never auto-snapshot: keep the journal dirty
+            .snapshot_every_ops(0) // never auto-snapshot: nothing gets published
             .open(tmp.db())
             .unwrap();
         db.remember(RememberInput::text(1, "uncheckpointed"))
             .unwrap();
     }
-    // A non-empty journal is a typed refusal with the base path.
+    // Nothing to map: a typed refusal carrying the base path.
     match Database::open_readonly(tmp.db(), cfg()) {
         Err(HostError::NeedsCheckpoint { path }) => assert_eq!(path, tmp.db()),
         other => panic!("expected NeedsCheckpoint, got {other:?}"),
@@ -1076,6 +1076,37 @@ fn open_readonly_refuses_a_dirty_journal() {
     }
     let ro = Database::open_readonly(tmp.db(), cfg()).unwrap();
     assert_eq!(ro.stats().facts, 1);
+}
+
+#[test]
+fn a_reader_opens_over_a_dirty_journal_and_sees_the_published_state() {
+    // The companion to the test above, and the one that says which of the two
+    // conditions actually gates a read-only open. A published generation is
+    // required; a clean journal is *not*. The reader maps the generation and
+    // never reads the journal at all, which is what snapshot isolation means
+    // here: "as of the last checkpoint", not "refuse until you checkpoint".
+    let tmp = TempDir::new("ro-dirty-journal");
+    let (db, _) = Database::builder(cfg())
+        .snapshot_every_ops(0) // no auto-snapshot: the journal stays dirty
+        .open(tmp.db())
+        .unwrap();
+    db.remember(RememberInput::text(1, "before the checkpoint"))
+        .unwrap();
+    db.checkpoint(2).unwrap();
+    db.remember(RememberInput::text(3, "after the checkpoint"))
+        .unwrap();
+
+    let ro = Database::open_readonly(tmp.db(), cfg()).expect("a dirty journal does not close this");
+    assert_eq!(
+        ro.stats().facts,
+        1,
+        "the reader sees the published generation, not the journal's tail"
+    );
+
+    // And it catches up the moment the writer publishes.
+    db.checkpoint(4).unwrap();
+    let ro = Database::open_readonly(tmp.db(), cfg()).unwrap();
+    assert_eq!(ro.stats().facts, 2);
 }
 
 #[test]
@@ -1516,6 +1547,40 @@ fn scrub_catches_a_flipped_section_byte_on_disk() {
         other => panic!("expected a Corrupt scrub error, got {other:?}"),
     }
     assert!(cur.next().is_none(), "the scrub is fused after an error");
+}
+
+#[test]
+fn a_writer_scrubs_without_checkpointing_first() {
+    let tmp = TempDir::new("scrub-writer");
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    seed_checkpointed(&db);
+
+    // Write past the checkpoint. The database now has a published generation
+    // *and* a journal, which is the state the whole test is about.
+    db.remember(RememberInput::text(9_000, "written after the checkpoint"))
+        .unwrap();
+
+    // The scrub checks the published container as it stands: the journal
+    // belongs to the generation the writer has not published yet.
+    let file_len = std::fs::metadata(snapshot_file(&tmp.db())).unwrap().len();
+    let mut last = None;
+    for step in db.scrub().unwrap() {
+        last = Some(step.expect("a clean image scrubs Ok from the writer too"));
+    }
+    let last = last.expect("at least one slice");
+    assert_eq!(last.total_bytes, file_len);
+    assert_eq!(last.done_bytes, file_len, "the scan reached EOF");
+}
+
+#[test]
+fn a_writer_with_nothing_published_cannot_scrub_yet() {
+    let tmp = TempDir::new("scrub-writer-fresh");
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    db.remember(RememberInput::text(1_000, "never checkpointed"))
+        .unwrap();
+
+    // Not a refusal about the journal — there is simply no generation to check.
+    assert!(matches!(db.scrub(), Err(HostError::NeedsCheckpoint { .. })));
 }
 
 #[test]

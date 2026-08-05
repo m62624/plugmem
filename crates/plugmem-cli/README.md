@@ -291,8 +291,10 @@ not write), so only the read verbs run — `recall`, `show`, `stats`, `export`,
 **These two verbs exist only in `--read-only`.** A normal (writer) `repl` and
 every one-shot command already see the newest data — read-your-writes, or a
 fresh open per command — so refreshing there is meaningless and is not offered.
-`--read-only` requires a checkpointed database (an un-checkpointed writer is
-refused): run `checkpoint` in the writing process first.
+`--read-only` needs a published snapshot to map, so a database that has never
+been checkpointed is refused: run `checkpoint` in the writing process first.
+After that the writer may keep writing — a read-only session simply answers as
+of the checkpoint it pinned, until you `refresh`.
 
 ```text
 $ plugmem-cli repl --read-only        # in a second terminal, while a writer runs

@@ -219,6 +219,26 @@ impl From<plugmem_host::ExportedFact> for ExportedFact {
     }
 }
 
+/// One exported edge — the shape `exportEdges` streams, and the same fields the
+/// CLI's JSONL dump writes for an edge.
+///
+/// Edges are not part of a fact's dump: a fact names its tags and metadata, but
+/// an edge is a statement *between* two entities and outlives any single fact.
+/// That is why a complete backup is the two streams together.
+#[napi(object)]
+#[derive(serde::Deserialize)]
+pub struct ExportedEdge {
+    /// Source entity name.
+    pub src: String,
+    /// The relation, verbatim.
+    pub rel: String,
+    /// Destination entity name.
+    pub dst: String,
+    /// The fact this edge follows from, if it was recorded with one. Absent
+    /// rather than a sentinel, so "no provenance" cannot be mistaken for fact 0.
+    pub provenance: Option<f64>,
+}
+
 /// One bounded page returned by `exportPage`.
 #[napi(object)]
 pub struct ExportPage {

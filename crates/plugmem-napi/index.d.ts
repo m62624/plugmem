@@ -263,6 +263,27 @@ export interface ExportedFact {
   /** Validity start (unix ms; preserved on import). */
   validFrom: number
 }
+/**
+ * One exported edge — the shape `exportEdges` streams, and the same fields the
+ * CLI's JSONL dump writes for an edge.
+ *
+ * Edges are not part of a fact's dump: a fact names its tags and metadata, but
+ * an edge is a statement *between* two entities and outlives any single fact.
+ * That is why a complete backup is the two streams together.
+ */
+export interface ExportedEdge {
+  /** Source entity name. */
+  src: string
+  /** The relation, verbatim. */
+  rel: string
+  /** Destination entity name. */
+  dst: string
+  /**
+   * The fact this edge follows from, if it was recorded with one. Absent
+   * rather than a sentinel, so "no provenance" cannot be mistaken for fact 0.
+   */
+  provenance?: number
+}
 /** One bounded page returned by `exportPage`. */
 export interface ExportPage {
   /** Open facts in fact-id order; never longer than the native page bound. */
@@ -594,6 +615,24 @@ export declare class Plugmem {
    * mutate it during a snapshot-style backup; a read-only handle is stable.
    */
   exportPage(cursor?: number | undefined | null): Promise<ExportPage>
+  /**
+   * Streams every current edge to `onBatch`, in batches, and resolves with
+   * the number streamed.
+   *
+   * **The other half of a backup.** `export`/`exportPage` dump facts; an edge
+   * is a statement between two entities and belongs to no single fact, so a
+   * dump of facts alone silently loses the graph.
+   *
+   * **Async and bounded.** The walk runs on a libuv worker; batches reach
+   * `onBatch` on the JS thread through a threadsafe function with a queue of
+   * four. When the callback is slower than the walk, the *worker* waits — the
+   * event loop never does, and peak memory is four batches whatever the
+   * database's size.
+   *
+   * `onBatch` throwing is not caught here: it surfaces as an uncaught error,
+   * as it would from any callback Node invokes on your behalf.
+   */
+  exportEdges(onBatch: (edges: ExportedEdge[]) => void): Promise<number>
   /** One fact's tags, or an empty array for an unknown or tombstoned id. */
   tagsOf(id: number): Array<string>
   /**

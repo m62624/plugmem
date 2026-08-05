@@ -21,7 +21,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use napi::bindgen_prelude::AsyncTask;
-use napi::{Env, Task};
+use napi::threadsafe_function::{
+    ErrorStrategy, ThreadsafeFunction, ThreadsafeFunctionCallMode as CallMode,
+};
+use napi::{Env, JsFunction, Task};
 use napi_derive::napi;
 use plugmem_host::{
     Database, Embedder, FactId, LinkInput, MaintenanceOptions, ReadOnlyDatabase, RecallQuery,
@@ -30,14 +33,31 @@ use plugmem_host::{
 
 use crate::error::{self, Error, Produced, Result, code};
 use crate::types::{
-    self, ExportPage, ExportedFact, FactSnapshot, MaintainMode, MaintainReport, RecallResult,
-    RememberOutcome, Stats,
+    self, ExportPage, ExportedEdge, ExportedFact, FactSnapshot, MaintainMode, MaintainReport,
+    RecallResult, RememberOutcome, Stats,
 };
 
 /// Keep one native→JS transfer bounded. This matches the workspace's existing
 /// conservative batch grain (CLI import) without exposing a tuning knob that
 /// would let callers accidentally reconstruct an unbounded export.
 const EXPORT_PAGE_LIMIT: NonZeroUsize = NonZeroUsize::new(128).unwrap();
+
+/// Edges handed to the JS callback per `exportEdges` batch.
+///
+/// The same reasoning as [`EXPORT_PAGE_LIMIT`], for the other direction of the
+/// boundary. One call per *edge* would make a million-edge dump a million
+/// thread-boundary crossings and a million callback invocations on the event
+/// loop — not a block, but a saturation. One call per batch makes it a thousand.
+const EXPORT_EDGE_BATCH: usize = 1024;
+
+/// Batches allowed in flight before the worker waits on the consumer.
+///
+/// This is the whole of `exportEdges`' memory bound: at most this many batches
+/// exist at once, whatever the database's size. The queue being *full* is not a
+/// failure — it is the callback being slower than the walk, and the worker
+/// blocking is the correct response (see [`CallMode::Blocking`] at the call
+/// site: it blocks the libuv worker, never the JS thread).
+const EXPORT_EDGE_QUEUE: usize = 4;
 
 /// Options for [`Plugmem::new`].
 #[napi(object)]
@@ -503,6 +523,43 @@ impl Plugmem {
         }))
     }
 
+    /// Streams every current edge to `onBatch`, in batches, and resolves with
+    /// the number streamed.
+    ///
+    /// **The other half of a backup.** `export`/`exportPage` dump facts; an edge
+    /// is a statement between two entities and belongs to no single fact, so a
+    /// dump of facts alone silently loses the graph.
+    ///
+    /// **Async and bounded.** The walk runs on a libuv worker; batches reach
+    /// `onBatch` on the JS thread through a threadsafe function with a queue of
+    /// four. When the callback is slower than the walk, the *worker* waits — the
+    /// event loop never does, and peak memory is four batches whatever the
+    /// database's size.
+    ///
+    /// `onBatch` throwing is not caught here: it surfaces as an uncaught error,
+    /// as it would from any callback Node invokes on your behalf.
+    #[napi(ts_return_type = "Promise<number>")]
+    pub fn export_edges(
+        &self,
+        #[napi(ts_arg_type = "(edges: ExportedEdge[]) => void")] on_batch: JsFunction,
+    ) -> Result<AsyncTask<ExportEdgesTask>> {
+        let source = match self.handle()? {
+            Handle::Writer(db) => ExportSource::Writer(db.clone()),
+            Handle::Reader { db, .. } => ExportSource::Reader(Arc::clone(db)),
+        };
+        // Created here, on the JS thread, because it needs the function value;
+        // it is `Send`, which is what lets the worker call back into JS at all.
+        // `Fatal`: the callback takes the batch alone, with no node-style error
+        // argument, because this call cannot fail *at* the callback.
+        let sink: ThreadsafeFunction<Vec<ExportedEdge>, ErrorStrategy::Fatal> = on_batch
+            .create_threadsafe_function(EXPORT_EDGE_QUEUE, |ctx| Ok(vec![ctx.value]))
+            .map_err(|e| error::internal(format!("cannot bridge the callback to a worker: {e}")))?;
+        Ok(AsyncTask::new(ExportEdgesTask {
+            source,
+            sink: Some(sink),
+        }))
+    }
+
     /// One fact's tags, or an empty array for an unknown or tombstoned id.
     #[napi]
     pub fn tags_of(&self, id: u32) -> Result<Vec<String>> {
@@ -807,6 +864,71 @@ impl Task for ExportPageTask {
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
         Ok(ExportPage::from(output))
+    }
+}
+
+/// The libuv-thread body of [`Plugmem::export_edges`].
+pub struct ExportEdgesTask {
+    source: ExportSource,
+    /// `Option` only so `compute` can take it by value: the sink must be
+    /// **dropped** when the walk ends, and dropping it is what releases the
+    /// threadsafe function's hold on the event loop. Left alive, the process
+    /// would not exit.
+    sink: Option<ThreadsafeFunction<Vec<ExportedEdge>, ErrorStrategy::Fatal>>,
+}
+
+impl ExportEdgesTask {
+    /// Walks the edges, handing the callback one batch at a time.
+    ///
+    /// The host's visitor is per-edge; batching happens here, in Rust, so the
+    /// per-edge cost stays a `push` and only the batch crosses to JavaScript.
+    fn run(&mut self) -> usize {
+        let Some(sink) = self.sink.take() else {
+            return 0;
+        };
+        let mut batch: Vec<ExportedEdge> = Vec::with_capacity(EXPORT_EDGE_BATCH);
+        let mut total = 0usize;
+        let mut visit = |src: &str, rel: &str, dst: &str, provenance: FactId| {
+            batch.push(ExportedEdge {
+                src: src.to_string(),
+                rel: rel.to_string(),
+                dst: dst.to_string(),
+                // Absent rather than the sentinel: `FactId::NONE` is `u32::MAX`,
+                // which would arrive in JS as a plausible-looking id.
+                provenance: (provenance != FactId::NONE).then(|| f64::from(provenance.0)),
+            });
+            total += 1;
+            if batch.len() == EXPORT_EDGE_BATCH {
+                // Blocking: when the queue is full this parks *this* worker
+                // until the JS side drains one. That is the backpressure.
+                sink.call(std::mem::take(&mut batch), CallMode::Blocking);
+                batch = Vec::with_capacity(EXPORT_EDGE_BATCH);
+            }
+        };
+        match &self.source {
+            ExportSource::Writer(db) => db.export_edges_each(&mut visit),
+            ExportSource::Reader(db) => db.export_edges_each(&mut visit),
+        }
+        if !batch.is_empty() {
+            sink.call(batch, CallMode::Blocking);
+        }
+        // Explicit, because it is load-bearing rather than housekeeping: this
+        // is the release that lets Node exit.
+        drop(sink);
+        total
+    }
+}
+
+impl Task for ExportEdgesTask {
+    type Output = usize;
+    type JsValue = f64;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        Ok(self.run())
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output as f64)
     }
 }
 
