@@ -27,23 +27,46 @@ keywords = ["plugmem", "python", "memory", "llm", "search"]
 # carries it until April 2027 and the flag costs nothing.
 requires-python = ">=3.10"
 # Every entry below is checked against the official `trove-classifiers` list.
-# Three that would have passed that check are deliberately absent:
+# Each is a fact stated somewhere else in this repository, not a label picked
+# to look good in a search filter.
 #
-#   * `Development Status :: …` — the project states no maturity anywhere, in
-#     any README, spec or manifest. Picking one here would invent a claim.
+#   * `3 - Alpha` because every README opens with "Experimental … expect rough
+#     edges, broken behavior, or mistakes". That is a maturity claim and this
+#     is where it belongs. Not `4 - Beta`, which would imply a confidence in
+#     stability the project does not claim; not `2 - Pre-Alpha`, which would
+#     imply it might not work, and it does.
+#   * the three operating systems because those are exactly the platforms
+#     wheels are built for. `OS Independent` would be false — these are
+#     compiled binaries.
+#   * `Free Threading` because the release builds `cp314t` wheels alongside the
+#     abi3 ones.
+#
+# Two that would have passed the check are deliberately absent:
+#
 #   * `License :: OSI Approved :: MIT License` — PEP 639 says a build backend
 #     MUST NOT add a license classifier next to an SPDX `license` field and MAY
 #     error on one. The SPDX expression above is the license statement.
 #   * `Topic :: Database :: Database Engines/Servers` — the parent topic is
 #     right, that leaf is not: "no server, no daemon" is the product.
+#
+# Per-version classifiers (`Python :: 3.10` … `3.14`) are also absent, and that
+# is not an omission: `requires-python` already states the floor, and the abi3
+# wheel works on versions released after this list would have been written.
+# A fixed list could only ever understate what ships.
 classifiers = [
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: Free Threading",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Rust",
     "Topic :: Database",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Text Processing :: Indexing",
     "Typing :: Typed",
 ]
 # The version is the workspace version, read out of Cargo.toml by maturin.
