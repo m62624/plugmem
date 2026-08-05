@@ -127,6 +127,18 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      # `--workspace` includes plugmem-py, and PyO3 links libpython for
+      # anything that is not the extension module itself — the rlib these jobs
+      # lint and test, and the `stub_gen` binary. Runners ship an interpreter,
+      # but not always with the development layout PyO3's build script looks
+      # for, and it differs per OS. Asking for one explicitly keeps the matrix
+      # full on all three: narrowing it to skip the crate would mean the
+      # binding is linted on Linux only.
+      - uses: actions/setup-python@v6
+        with:
+          # The floor `abi3-py310` targets, so the workspace builds against the
+          # same interpreter the shipped wheel is built against.
+          python-version: "3.10"
       # The bench-charts dev tool (plotters → font-kit) needs system
       # fontconfig at build time on Linux; the shipped crates do not.
       # macOS/Windows resolve system fonts without it.
