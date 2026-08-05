@@ -93,6 +93,34 @@ test("exportEdges streams every edge, in batches, with provenance", async () => 
   });
 });
 
+test("exportEdges has delivered every batch by the time it resolves", async () => {
+  // The property the whole callback design rests on, and the one that failed
+  // silently: a threadsafe-function call only *queues* work for the JS thread,
+  // so without a delivery receipt per batch the promise could resolve with the
+  // callback not yet run. The symptom is an accumulator that is complete on one
+  // run and empty on the next — worst at small sizes, where the walk finishes
+  // before the event loop gets a turn.
+  //
+  // Read the accumulator immediately after the `await`, with no tick in
+  // between. That is the assertion; a `setImmediate` here would hide the bug.
+  await withDir("edges-delivery", async (dir) => {
+    for (const n of [1, 2, 100, 3000]) {
+      const db = await Plugmem.open(join(dir, `m${n}.plugmem`));
+      for (let i = 0; i < n; i++) {
+        await db.link({ src: `s${i}`, rel: "r", dst: `d${i}` });
+      }
+      const seen = [];
+      const total = await db.exportEdges((batch) => seen.push(...batch));
+      assert.equal(
+        seen.length,
+        total,
+        `${n} edges: resolved with ${seen.length} of ${total} delivered`,
+      );
+      db.close();
+    }
+  });
+});
+
 test("exportEdges works on a read-only handle and reports an empty graph", async () => {
   await withDir("edges-ro", async (dir) => {
     const base = join(dir, "m.plugmem");

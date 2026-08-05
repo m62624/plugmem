@@ -3,13 +3,18 @@
 //!
 //! Every method wraps the identically-named host verb — the engine logic is
 //! 100% `plugmem-host`; this layer only marshals arguments and results across
-//! the Node boundary. `recover` is deliberately CLI-only alongside `import`
-//! and `scrub` — salvage is a path-level operation on the host's own disk. Inputs are typed `#[napi(object)]` structs so napi emits
-//! precise TypeScript interfaces (autocomplete in a TS host like Pi); results
-//! come back as the typed mirrors in [`crate::types`]. A failure becomes a
-//! thrown JS `Error` carrying a `code` — see [`crate::error`] for what is coded
-//! and why the engine's own failures are not; the clock is the system clock,
-//! read per call (the engine keeps none), exactly as the MCP server does.
+//! the Node boundary, and its surface is host's whole surface (see the
+//! wrapper-parity rule in the repository's `AGENTS.md`). The one thing here
+//! that host does not have is `import`: JSONL is a format the CLI defines, not
+//! an engine verb, so it belongs to the CLI or to JavaScript, not to this
+//! layer's Rust.
+//!
+//! Inputs are typed `#[napi(object)]` structs so napi emits precise TypeScript
+//! interfaces (autocomplete in a TS host like Pi); results come back as the
+//! typed mirrors in [`crate::types`]. A failure becomes a thrown JS `Error`
+//! carrying a `code` — see [`crate::error`] for what is coded and why the
+//! engine's own failures are not; the clock is the system clock, read per call
+//! (the engine keeps none), exactly as the MCP server does.
 //!
 //! Opened `readOnly`, the instance observes another process's writer over a
 //! shared snapshot: the read verbs answer, the write verbs throw, and the two
@@ -544,6 +549,13 @@ impl Plugmem {
     /// event loop never does, and peak memory is four batches whatever the
     /// database's size.
     ///
+    /// **When the promise resolves, every batch has been delivered.** Worth
+    /// saying because a threadsafe-function call only queues work for the JS
+    /// thread, so the natural implementation resolves early and hands you a
+    /// half-filled accumulator on some runs and a full one on others. Each
+    /// batch is acknowledged from the JS thread and the worker waits for the
+    /// receipts, so reading your results straight after the `await` is correct.
+    ///
     /// `onBatch` throwing is not caught here: it surfaces as an uncaught error,
     /// as it would from any callback Node invokes on your behalf.
     #[napi(ts_return_type = "Promise<number>")]
@@ -1037,6 +1049,35 @@ impl ExportEdgesTask {
         let Some(sink) = self.sink.take() else {
             return 0;
         };
+        // Delivery receipts. A threadsafe-function call only *queues* work for
+        // the JS thread, so without these the promise could resolve while
+        // batches were still in the queue — the caller would `await` the
+        // export and find their accumulator half-filled, differently on every
+        // run. `call_with_return_value`'s callback runs on the JS thread after
+        // the user's function has returned, so one receipt per batch, counted
+        // here, is what makes "resolved" mean "delivered".
+        let (ack, receipts) = std::sync::mpsc::channel::<()>();
+        let mut awaiting = 0usize;
+        let send = |sink: &ThreadsafeFunction<Vec<ExportedEdge>, ErrorStrategy::Fatal>,
+                    batch: Vec<ExportedEdge>,
+                    awaiting: &mut usize| {
+            let receipt = ack.clone();
+            // Blocking: when the queue is full this parks *this* worker until
+            // the JS side drains one. That is the backpressure, and it is why
+            // peak memory is the queue rather than the graph.
+            let status = sink.call_with_return_value(
+                batch,
+                CallMode::Blocking,
+                move |_: napi::JsUnknown| {
+                    let _ = receipt.send(());
+                    Ok(())
+                },
+            );
+            if status == napi::Status::Ok {
+                *awaiting += 1;
+            }
+        };
+
         let mut batch: Vec<ExportedEdge> = Vec::with_capacity(EXPORT_EDGE_BATCH);
         let mut total = 0usize;
         let mut visit = |src: &str, rel: &str, dst: &str, provenance: FactId| {
@@ -1050,9 +1091,7 @@ impl ExportEdgesTask {
             });
             total += 1;
             if batch.len() == EXPORT_EDGE_BATCH {
-                // Blocking: when the queue is full this parks *this* worker
-                // until the JS side drains one. That is the backpressure.
-                sink.call(std::mem::take(&mut batch), CallMode::Blocking);
+                send(&sink, std::mem::take(&mut batch), &mut awaiting);
                 batch = Vec::with_capacity(EXPORT_EDGE_BATCH);
             }
         };
@@ -1061,7 +1100,18 @@ impl ExportEdgesTask {
             ExportSource::Reader(db) => db.export_edges_each(&mut visit),
         }
         if !batch.is_empty() {
-            sink.call(batch, CallMode::Blocking);
+            send(&sink, batch, &mut awaiting);
+        }
+
+        // Dropping our own sender is what lets the wait end if the environment
+        // tears down and the queued callbacks are dropped unrun: every clone
+        // goes with them, and `recv` reports the disconnect instead of parking
+        // this worker forever.
+        drop(ack);
+        for _ in 0..awaiting {
+            if receipts.recv().is_err() {
+                break;
+            }
         }
         // Explicit, because it is load-bearing rather than housekeeping: this
         // is the release that lets Node exit.

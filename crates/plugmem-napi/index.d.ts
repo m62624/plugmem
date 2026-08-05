@@ -713,6 +713,13 @@ export declare class Plugmem {
    * event loop never does, and peak memory is four batches whatever the
    * database's size.
    *
+   * **When the promise resolves, every batch has been delivered.** Worth
+   * saying because a threadsafe-function call only queues work for the JS
+   * thread, so the natural implementation resolves early and hands you a
+   * half-filled accumulator on some runs and a full one on others. Each
+   * batch is acknowledged from the JS thread and the worker waits for the
+   * receipts, so reading your results straight after the `await` is correct.
+   *
    * `onBatch` throwing is not caught here: it surfaces as an uncaught error,
    * as it would from any callback Node invokes on your behalf.
    */
