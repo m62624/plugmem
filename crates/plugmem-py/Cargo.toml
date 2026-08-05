@@ -1,0 +1,37 @@
+[package]
+name = "plugmem-py"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Python extension module (PyO3) for the plugmem engine: plugmem-host exposed in-process to CPython; published to PyPI as `plugmem`."
+# Published to PyPI (via maturin), not to crates.io.
+publish = false
+
+[lib]
+# The import name must match the `#[pymodule]` function, and the module is
+# `plugmem._plugmem` (see pyproject.toml `module-name`): the extension sits
+# *inside* the pure-Python package so `py.typed`, the `.pyi` and the small
+# amount of Python sugar can live next to it.
+name = "_plugmem"
+# cdylib: the extension module CPython loads. rlib: so native `cargo test` can
+# exercise the pure wrapper logic without a Python interpreter, exactly as
+# plugmem-napi does.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The engine, embedded as-is (mmap, MVCC, locking, embedder). `config` is the
+# shared settings loader — the same one the CLI, MCP and napi read, which is
+# what keeps `config.toml` one mechanism rather than four.
+plugmem-host = { workspace = true, features = ["config"] }
+pyo3 = { workspace = true }
+
+[lints]
+workspace = true
+
+# A Python extension shipped to PyPI, not a cargo-dist binary — excluded from
+# releases.
+[package.metadata.dist]
+dist = false

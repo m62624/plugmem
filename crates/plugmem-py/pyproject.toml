@@ -1,0 +1,77 @@
+# The PyPI package built from this crate. `maturin` compiles the Rust
+# extension, drops it into the pure-Python package under `python/`, and ships
+# both in one wheel.
+[build-system]
+requires = ["maturin>=1.14,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "plugmem"
+# The npm package's line with the language swapped, so the two third-party
+# indexes describe the same product in the same words.
+description = "Python bindings for plugmem: an embedded bitemporal memory and retrieval engine for local-first applications and agents (remember / recall / revise / forget over one local database)."
+readme = "README.md"
+license = "MIT"
+# The license *text* is not listed here on purpose: PEP 639 requires the paths
+# to sit inside the project directory, and the repository has one LICENSE at
+# its root. The release job copies it in before building, so the wheel carries
+# it without a second copy in the tree that could drift from the original.
+authors = [{ name = "Mansur Azatbek", email = "mansur62624@gmail.com" }]
+# The published crates' own vocabulary, in `plugmem-cli`'s shape
+# (`["plugmem", "cli", "memory", "llm", "search"]`) with the surface swapped.
+# Not a fresh list: a package that describes itself in words the rest of the
+# project never uses is a package nobody finds twice.
+keywords = ["plugmem", "python", "memory", "llm", "search"]
+# 3.10 is the floor because `abi3-py310` makes one wheel serve every version
+# from here on. It reaches end of life in October 2026, but Ubuntu 22.04 LTS
+# carries it until April 2027 and the flag costs nothing.
+requires-python = ">=3.10"
+# Every entry below is checked against the official `trove-classifiers` list.
+# Three that would have passed that check are deliberately absent:
+#
+#   * `Development Status :: …` — the project states no maturity anywhere, in
+#     any README, spec or manifest. Picking one here would invent a claim.
+#   * `License :: OSI Approved :: MIT License` — PEP 639 says a build backend
+#     MUST NOT add a license classifier next to an SPDX `license` field and MAY
+#     error on one. The SPDX expression above is the license statement.
+#   * `Topic :: Database :: Database Engines/Servers` — the parent topic is
+#     right, that leaf is not: "no server, no daemon" is the product.
+classifiers = [
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+# The version is the workspace version, read out of Cargo.toml by maturin.
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/m62624/plugmem"
+Repository = "https://github.com/m62624/plugmem"
+Documentation = "https://github.com/m62624/plugmem/blob/main/crates/plugmem-py/README.md"
+
+[tool.maturin]
+# Mixed layout: the compiled module is `plugmem._plugmem`, nested inside the
+# pure-Python `plugmem` package under `python/`. That is what lets `py.typed`,
+# the generated `.pyi` and the handful of Python-level generators ship next to
+# the extension instead of beside it.
+python-source = "python"
+module-name = "plugmem._plugmem"
+# `extension-module` tells PyO3 not to link libpython, which is required for a
+# wheel and wrong for `cargo test` — hence here and not in Cargo.toml.
+features = ["pyo3/extension-module"]
+# One wheel per platform for every CPython 3.10+ with a GIL. The free-threaded
+# builds cannot use it (PEP 703 changed the object layout) and get their own
+# wheels until `abi3t` lands in 3.15.
+compatibility = "manylinux2014"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+files = ["python", "tests"]

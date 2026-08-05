@@ -1,0 +1,13 @@
+# Built by maturin; the wheel is a release artifact, not a tracked file.
+/dist/
+
+# `maturin develop` drops the compiled extension straight into the source
+# package so an editable install can import it. It is a build output that
+# happens to live next to source — never tracked.
+/python/plugmem/*.so
+/python/plugmem/*.pyd
+/python/plugmem/*.dylib
+
+__pycache__/
+*.py[cod]
+.pytest_cache/

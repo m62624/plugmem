@@ -7,6 +7,7 @@ members = [
     "crates/plugmem-cli",
     "crates/plugmem-mcp",
     "crates/plugmem-napi",
+    "crates/plugmem-py",
     "crates/plugmem-testgen",
     "tools/bench-matrix",
     "tools/bench-charts",
@@ -79,6 +80,21 @@ toml = { version = "0.8", default-features = false, features = ["parse"] }
 napi = { version = "2.16", default-features = false, features = ["napi8"] }
 napi-derive = "2.16"
 napi-build = "2.1"
+
+# Python extension module (plugmem-py): PyO3 over plugmem-host.
+#
+# `abi3-py310` is what makes one wheel per platform cover every GIL build of
+# Python from 3.10 on: it restricts the binding to CPython's stable ABI, which
+# does not change between versions. It costs nothing here because this crate
+# touches no CPython API directly — everything goes through PyO3.
+#
+# `experimental-inspect` is what `maturin generate-stubs` reads to emit the
+# `.pyi`, so the stubs come from the same macros as the binding instead of
+# being written by hand and drifting.
+#
+# No `pyo3-async-runtimes`: the engine is CPU-bound and has no runtime to
+# bridge. Concurrency is `Python::detach` plus the caller's own threads.
+pyo3 = { version = "0.29.1", features = ["abi3-py310", "experimental-inspect"] }
 
 # Dev dependencies
 proptest = "1.11.0"
