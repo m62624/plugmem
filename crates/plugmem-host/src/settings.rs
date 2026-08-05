@@ -3,14 +3,23 @@
 //! TOML file plus the environment, with precedence **flag/env > config file >
 //! default**.
 //!
-//! This is the loader the CLI and the MCP server share so they agree on config
-//! semantics. It is deliberately small: it reads four shared sections —
-//! `[database]` (the optional database path), `[engine]` (size-bearing
-//! [`Config`] fields), `[embedder]` (an OpenAI-compatible provider), and
-//! `[maintenance]` (snapshot/maintain thresholds). Keys a
-//! specific wrapper owns — the CLI's `[maintenance].batch_size`, the server's
-//! `[server].workers` — are **not** parsed here; a wrapper reads them from the
-//! same table via [`read_config`].
+//! This is the loader every wrapper shares, so they agree on config semantics
+//! and — more to the point — so a knob added once is a knob every surface
+//! offers. It reads six shared sections: `[database]` (the optional database
+//! path), `[engine]` (the size-bearing [`Config`] fields a database is built
+//! with), `[recall]` (what comes back for a query, and in what order),
+//! `[index]` (how the vector index is built), `[embedder]` (an
+//! OpenAI-compatible provider), and `[maintenance]` (snapshot/maintain
+//! thresholds and the fsync policy).
+//!
+//! Keys a specific wrapper owns — the CLI's `[maintenance].batch_size`, the
+//! server's `[server].workers` — are **not** parsed here; a wrapper reads them
+//! from the same table via [`read_config`]. They are still in the catalogue,
+//! because that is what tells [`crate::settings_help`] they are not typos.
+//!
+//! Anything else is reported through [`Settings::warnings`] rather than
+//! ignored: a misspelled key changes no behaviour, and saying nothing about it
+//! is how someone ends up believing they tuned something.
 //!
 //! Library users who build a [`Config`] in code do not need this module (and,
 //! with the feature off, do not pull the `toml` parser).
@@ -31,6 +40,31 @@ const ENV_EMBEDDER: &str = "PLUGMEM_EMBEDDER";
 // them with the public documentation catalogue, so adding a parser key without
 // adding its help entry fails loudly.
 pub(crate) const ENGINE_SETTING_KEYS: &[&str] = &["dim", "max_bytes", "max_text", "max_blob"];
+/// `[recall]` — what comes back for a query, and in what order.
+///
+/// A separate section from `[engine]` because it answers a different question.
+/// `[engine]` is about how big things may get; these decide *answers*, and
+/// folding twenty of them into one section would bury the four that govern
+/// size. Every one of them may differ from what the file was written with:
+/// reopening with new weights is how a caller changes the ranking.
+pub(crate) const RECALL_SETTING_KEYS: &[&str] = &[
+    "bm25_k1",
+    "bm25_b",
+    "rrf_k",
+    "w_bm25",
+    "w_vec",
+    "w_graph",
+    "w_time",
+    "w_recency",
+    "half_life_days",
+    "graph_depth",
+    "graph_decay",
+    "hnsw_ef_search",
+    "similar_cos",
+    "similar_jaccard",
+];
+/// `[index]` — how the vector index is built, and when it stops being flat.
+pub(crate) const INDEX_SETTING_KEYS: &[&str] = &["hnsw_ef_construction", "flat_to_hnsw"];
 pub(crate) const DATABASE_SETTING_KEYS: &[&str] = &["path"];
 pub(crate) const WORKSPACE_SETTING_KEYS: &[&str] = &["dir", "max_open", "idle_timeout_ms"];
 pub(crate) const EMBEDDER_SETTING_KEYS: &[&str] = &["kind", "url", "model", "api_key_env"];
@@ -152,6 +186,19 @@ impl Settings {
             if let Some(t) = table.get("engine").and_then(toml::Value::as_table) {
                 apply_engine(&mut config, t)?;
             }
+            if let Some(t) = table.get("recall").and_then(toml::Value::as_table) {
+                apply_recall(&mut config, t)?;
+            }
+            if let Some(t) = table.get("index").and_then(toml::Value::as_table) {
+                apply_index(&mut config, t)?;
+            }
+            // Ranges are the engine's to judge, and it already knows them: a
+            // weight must be finite and non-negative, `similar_cos` must be a
+            // cosine. Validating here rather than per-key keeps one definition
+            // of "valid" instead of a second copy that can drift from it.
+            config
+                .validate()
+                .map_err(|e| SettingsError::config(format!("config.toml: {e}")))?;
             if let Some(t) = table.get("embedder").and_then(toml::Value::as_table) {
                 embedder.merge(t);
             }
@@ -361,9 +408,32 @@ fn read_config_text(flag: Option<&Path>) -> Result<Option<String>, SettingsError
     }
 }
 
-/// Applies the `[engine]` table onto a [`Config`] (the size-bearing fields;
-/// tuning parameters keep their defaults). A non-integer or negative value is
-/// a usage error.
+/// A non-negative integer from `[section].key`, or `None` when absent.
+fn setting_uint(t: &toml::Table, section: &str, key: &str) -> Result<Option<i64>, SettingsError> {
+    let Some(v) = t.get(key) else {
+        return Ok(None);
+    };
+    v.as_integer().filter(|n| *n >= 0).map(Some).ok_or_else(|| {
+        SettingsError::config(format!("[{section}].{key} must be a non-negative integer"))
+    })
+}
+
+/// A number from `[section].key` as `f32`, or `None` when absent.
+///
+/// An integer is accepted for a float key: `w_vec = 1` is what anyone writes,
+/// and refusing it over the missing decimal point would be pedantry.
+fn setting_f32(t: &toml::Table, section: &str, key: &str) -> Result<Option<f32>, SettingsError> {
+    let Some(v) = t.get(key) else {
+        return Ok(None);
+    };
+    v.as_float()
+        .or_else(|| v.as_integer().map(|n| n as f64))
+        .map(|n| Some(n as f32))
+        .ok_or_else(|| SettingsError::config(format!("[{section}].{key} must be a number")))
+}
+
+/// Applies the `[engine]` table onto a [`Config`]: the size-bearing fields,
+/// the ones a database is *built* with. See [`ENGINE_SETTING_KEYS`].
 fn apply_engine(cfg: &mut Config, t: &toml::Table) -> Result<(), SettingsError> {
     let fields: [(&str, &mut usize); ENGINE_SETTING_KEYS.len()] = [
         (ENGINE_SETTING_KEYS[0], &mut cfg.dim),
@@ -372,10 +442,57 @@ fn apply_engine(cfg: &mut Config, t: &toml::Table) -> Result<(), SettingsError> 
         (ENGINE_SETTING_KEYS[3], &mut cfg.max_blob),
     ];
     for (key, slot) in fields {
-        if let Some(v) = t.get(key) {
-            let n = v.as_integer().filter(|n| *n >= 0).ok_or_else(|| {
-                SettingsError::config(format!("[engine].{key} must be a non-negative integer"))
-            })?;
+        if let Some(n) = setting_uint(t, "engine", key)? {
+            *slot = n as usize;
+        }
+    }
+    Ok(())
+}
+
+/// Applies the `[recall]` table onto a [`Config`]. See
+/// [`RECALL_SETTING_KEYS`] for why these are their own section.
+fn apply_recall(cfg: &mut Config, t: &toml::Table) -> Result<(), SettingsError> {
+    let floats: [(&str, &mut f32); 10] = [
+        (RECALL_SETTING_KEYS[0], &mut cfg.bm25_k1),
+        (RECALL_SETTING_KEYS[1], &mut cfg.bm25_b),
+        (RECALL_SETTING_KEYS[3], &mut cfg.w_bm25),
+        (RECALL_SETTING_KEYS[4], &mut cfg.w_vec),
+        (RECALL_SETTING_KEYS[5], &mut cfg.w_graph),
+        (RECALL_SETTING_KEYS[6], &mut cfg.w_time),
+        (RECALL_SETTING_KEYS[7], &mut cfg.w_recency),
+        (RECALL_SETTING_KEYS[10], &mut cfg.graph_decay),
+        (RECALL_SETTING_KEYS[12], &mut cfg.similar_cos),
+        (RECALL_SETTING_KEYS[13], &mut cfg.similar_jaccard),
+    ];
+    for (key, slot) in floats {
+        if let Some(v) = setting_f32(t, "recall", key)? {
+            *slot = v;
+        }
+    }
+    let uints: [(&str, &mut u32); 3] = [
+        (RECALL_SETTING_KEYS[2], &mut cfg.rrf_k),
+        (RECALL_SETTING_KEYS[8], &mut cfg.half_life_days),
+        (RECALL_SETTING_KEYS[9], &mut cfg.graph_depth),
+    ];
+    for (key, slot) in uints {
+        if let Some(n) = setting_uint(t, "recall", key)? {
+            *slot = n as u32;
+        }
+    }
+    if let Some(n) = setting_uint(t, "recall", RECALL_SETTING_KEYS[11])? {
+        cfg.hnsw_ef_search = n as usize;
+    }
+    Ok(())
+}
+
+/// Applies the `[index]` table onto a [`Config`].
+fn apply_index(cfg: &mut Config, t: &toml::Table) -> Result<(), SettingsError> {
+    let fields: [(&str, &mut usize); INDEX_SETTING_KEYS.len()] = [
+        (INDEX_SETTING_KEYS[0], &mut cfg.hnsw_ef_construction),
+        (INDEX_SETTING_KEYS[1], &mut cfg.flat_to_hnsw),
+    ];
+    for (key, slot) in fields {
+        if let Some(n) = setting_uint(t, "index", key)? {
             *slot = n as usize;
         }
     }
@@ -783,12 +900,106 @@ mod tests {
     }
 
     #[test]
+    fn every_tuning_key_actually_reaches_the_config() {
+        // The test the missing one would have caught. Documenting a key and
+        // parsing it are two different acts, and for the whole of 0.5.0 the
+        // catalogue could have promised a knob that went nowhere: nothing
+        // compared a *value* written in the file against the `Config` that came
+        // out. Each key here is set to something no default equals, then read
+        // back off the resolved config.
+        let cfg = Config::default();
+        let table = toml_of(&[
+            "[recall]",
+            "bm25_k1 = 2.5",
+            "bm25_b = 0.25",
+            "rrf_k = 17",
+            "w_bm25 = 3.0",
+            "w_vec = 4.0",
+            "w_graph = 5.0",
+            "w_time = 6.0",
+            "w_recency = 0.75",
+            "half_life_days = 7",
+            "graph_depth = 4",
+            "graph_decay = 0.125",
+            "hnsw_ef_search = 111",
+            "similar_cos = 0.31",
+            "similar_jaccard = 0.32",
+            "[index]",
+            "hnsw_ef_construction = 222",
+            "flat_to_hnsw = 333",
+        ]);
+        let s = Settings::from_table(Some(&table)).unwrap();
+
+        assert_eq!(s.config.bm25_k1, 2.5);
+        assert_eq!(s.config.bm25_b, 0.25);
+        assert_eq!(s.config.rrf_k, 17);
+        assert_eq!(s.config.w_bm25, 3.0);
+        assert_eq!(s.config.w_vec, 4.0);
+        assert_eq!(s.config.w_graph, 5.0);
+        assert_eq!(s.config.w_time, 6.0);
+        assert_eq!(s.config.w_recency, 0.75);
+        assert_eq!(s.config.half_life_days, 7);
+        assert_eq!(s.config.graph_depth, 4);
+        assert_eq!(s.config.graph_decay, 0.125);
+        assert_eq!(s.config.hnsw_ef_search, 111);
+        assert_eq!(s.config.similar_cos, 0.31);
+        assert_eq!(s.config.similar_jaccard, 0.32);
+        assert_eq!(s.config.hnsw_ef_construction, 222);
+        assert_eq!(s.config.flat_to_hnsw, 333);
+
+        // Every value above differs from its default, so the assertions cannot
+        // pass on a parser that read nothing at all.
+        assert_ne!(s.config.bm25_k1, cfg.bm25_k1);
+        assert_ne!(s.config.flat_to_hnsw, cfg.flat_to_hnsw);
+        assert!(s.warnings.is_empty(), "{:?}", s.warnings);
+    }
+
+    #[test]
+    fn an_integer_is_accepted_where_a_float_is_meant() {
+        // `w_vec = 1` is what a person writes. Refusing it over the missing
+        // decimal point would be pedantry, and the failure would be a warning
+        // about a key that is spelled perfectly.
+        let table = toml_of(&["[recall]", "w_vec = 2", "graph_decay = 1"]);
+        let s = Settings::from_table(Some(&table)).unwrap();
+        assert_eq!(s.config.w_vec, 2.0);
+        assert_eq!(s.config.graph_decay, 1.0);
+    }
+
+    #[test]
+    fn a_tuning_value_out_of_range_is_refused_by_name() {
+        // The range belongs to the engine, and it names the field it rejected;
+        // this only has to carry that through instead of inventing a second,
+        // drifting copy of what "valid" means.
+        for line in ["graph_decay = 2.0", "similar_cos = -1.0", "w_vec = -0.5"] {
+            let table = toml_of(&["[recall]", line]);
+            let Err(SettingsError::Config(message)) = Settings::from_table(Some(&table)) else {
+                panic!("{line} must be refused");
+            };
+            let field = line.split(' ').next().unwrap();
+            assert!(
+                message.contains(field),
+                "the message must name the offending field: {message}"
+            );
+        }
+
+        // A wrong *type* is caught before the engine sees it, and names the
+        // section too, since the same key name can live in more than one.
+        let table = toml_of(&["[recall]", r#"w_vec = "lots""#]);
+        let Err(SettingsError::Config(message)) = Settings::from_table(Some(&table)) else {
+            panic!("a string weight must be refused");
+        };
+        assert!(message.contains("[recall].w_vec"), "{message}");
+    }
+
+    #[test]
     fn every_host_setting_is_documented() {
         let docs = crate::settings_help::settings_help().docs();
         for (section, keys) in [
             ("database", DATABASE_SETTING_KEYS),
             ("workspace", WORKSPACE_SETTING_KEYS),
             ("engine", ENGINE_SETTING_KEYS),
+            ("recall", RECALL_SETTING_KEYS),
+            ("index", INDEX_SETTING_KEYS),
             ("embedder", EMBEDDER_SETTING_KEYS),
             ("maintenance", MAINTENANCE_SETTING_KEYS),
         ] {
