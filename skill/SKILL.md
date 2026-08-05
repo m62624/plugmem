@@ -111,6 +111,35 @@ Query them separately:
 - **`recall --closed`** — include closed revision chains (with their intervals),
   not just the currently-live facts.
 
+This is the behaviour that makes plugmem different from a store that would just
+overwrite the fact, so it is worth seeing once:
+
+```
+remember "kim lives in Moscow" --entity kim     # → fact 0
+# ... time passes; note the instant, then correct the record ...
+revise 0 "kim lives in Berlin" --entity kim     # → fact 1
+
+recall --entity kim
+- [f1] kim: kim lives in Berlin (2026-08; active)
+
+recall --entity kim --as-of <the instant between them>
+- [f0] kim: kim lives in Moscow (2026-08 → 2026-08; closed)
+
+recall --entity kim --closed
+- [f0] kim: kim lives in Moscow (2026-08 → 2026-08; closed)
+- [f1] kim: kim lives in Berlin (2026-08; active)
+```
+
+`revise` **closed** the first fact's interval instead of deleting it, which is
+why the middle query has something to answer with. `forget` would have destroyed
+that answer — which is exactly when to prefer one over the other.
+
+One trap worth knowing: `--as-of` moves **both** clocks. A fact answers only if
+it was valid at that instant *and* had already been recorded by then. So an
+`--as-of` earlier than a fact's `recorded_at` sees nothing — the memory
+genuinely knew nothing then, and answering with today's knowledge would be the
+wrong answer to "what did I hold".
+
 ## Sizing the block you paste
 
 The `rendered` block is what goes into your prompt, so its size is your
@@ -123,6 +152,51 @@ context budget, not the engine's.
   `hnsw_ef_search`). Higher is more accurate and slower. It does nothing until
   the database is past the flat-search threshold, so reach for it only on a
   large memory whose vector answers look thin.
+
+## The entity graph — and it moves with time too
+
+Facts are joined by **typed edges between entities**: `ann —hires→ bob`. That is
+not decoration. When a recall anchors on an entity, the graph source walks its
+edges and pulls in the neighbours' facts, so asking about `ann` answers with
+what is known about `bob` as well:
+
+```
+remember "ann hired bob in march" --entity ann      # → fact 0
+link ann hires bob --provenance 0
+remember "bob owns the billing service" --entity bob
+
+recall --entity ann
+- [f0] ann: ann hired bob in march (2026-08; active)
+- [f1] bob: bob owns the billing service (2026-08; active)
+- links: ann —hires→ bob
+```
+
+Fact 1 never mentions ann. It came back because the edge led there — that is the
+whole point of linking, and why reusing the same entity spelling matters.
+
+**Edges are temporal in the same way facts are.** `unlink` closes a relationship
+rather than deleting it, so current recall stops using it while `--as-of` still
+walks the graph *as it stood then*:
+
+```
+unlink ann hires bob
+
+recall --entity ann
+- [f0] ann: ann hired bob in march (2026-08; active)
+
+recall --entity ann --as-of <an instant before the unlink>
+- [f0] ann: ann hired bob in march (2026-08; active)
+- [f1] bob: bob owns the billing service (2026-08; active)
+- links: ann —hires→ bob
+```
+
+So the two axes are not a fact-only feature: "who reported to whom last spring"
+is a question this answers, and it is the reason to `unlink` rather than to
+forget the fact that stated the relationship.
+
+How far the walk goes is `[recall].graph_depth` (default 2 hops, ceiling 4).
+There is no per-call flag for it: it is a property of how the memory should be
+read, not of one question.
 
 ## Saying *why* an edge exists
 

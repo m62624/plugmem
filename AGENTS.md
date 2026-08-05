@@ -107,10 +107,6 @@ MCP adapter/server. It exposes memory operations through the host API and should
 
 Node.js N-API bindings. A boundary layer only: its surface equals `plugmem-host`'s (see the wrapper-parity rule below), the engine logic stays in host, and FFI overhead is measured separately from core and host performance.
 
-### `crates/plugmem-py`
-
-Python bindings (PyO3), published to PyPI as `plugmem`. The same boundary layer as `plugmem-napi` and under the same parity rule: synchronous methods that release the GIL around every host call, so a caller's threads (or `asyncio.to_thread`) get real parallelism.
-
 ### `crates/plugmem-testgen`
 
 Utilities for generating deterministic test data and scenarios. It is not part of the production storage path.
@@ -174,7 +170,7 @@ For a targeted package or example, prefer a focused command first, then run the 
 
 ## Wrapper parity
 
-A wrapper (`plugmem-napi`, `plugmem-py`) exposes the whole of `plugmem-host`'s surface.
+A language binding — today `plugmem-napi`, and whatever follows it — exposes the whole of `plugmem-host`'s surface.
 
 - An omission is allowed only when the construct is **unrepresentable** in the target
   language, never because it is awkward to write. "A resumable iterator is inconvenient
