@@ -18,14 +18,14 @@
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use napi::bindgen_prelude::AsyncTask;
 use napi::{Env, Task};
 use napi_derive::napi;
 use plugmem_host::{
     Database, Embedder, FactId, LinkInput, MaintenanceOptions, ReadOnlyDatabase, RecallQuery,
-    RememberInput, Settings, UnlinkInput,
+    RememberInput, Settings, SharedEmbedder, UnlinkInput,
 };
 
 use crate::error::{self, Error, Produced, Result, code};
@@ -183,12 +183,12 @@ pub enum Handle {
         /// it would mutate a mapping opened zero-copy — so the query is embedded
         /// out here and passed in as a vector.
         ///
-        /// Shared and locked because `recall` runs on a libuv worker: the task
-        /// outlives the call that scheduled it, and [`Embedder::embed`] needs
-        /// `&mut self`. The lock is held for the HTTP round trip only, never
-        /// across an engine read — the same arrangement the MCP server uses for
-        /// its worker pool.
-        embedder: Option<Arc<Mutex<Box<dyn Embedder>>>>,
+        /// [`SharedEmbedder`] is the host's own sharing primitive: a refcount,
+        /// no lock. It is what a `recall` on a libuv worker needs, because the
+        /// task outlives the call that scheduled it, and it is all it needs,
+        /// because [`Embedder::embed`] takes `&self`. Several recalls may sit
+        /// in the provider at once.
+        embedder: Option<SharedEmbedder>,
     },
 }
 
@@ -839,7 +839,7 @@ impl OpenTask {
             // and the MCP server use for their read-only paths, so a text
             // `recall` reaches the vector source on every surface.
             let mut settings = settings;
-            let embedder = settings.embedder.take().map(|e| Arc::new(Mutex::new(e)));
+            let embedder = settings.embedder.take().map(SharedEmbedder::new);
             let ro = Database::open_readonly(&self.path, settings.config).map_err(error::open)?;
             Ok(Handle::Reader {
                 db: Arc::new(ro),
@@ -1042,7 +1042,7 @@ enum RecallSource {
     Writer(Database),
     Reader {
         db: Arc<ReadOnlyDatabase>,
-        embedder: Option<Arc<Mutex<Box<dyn Embedder>>>>,
+        embedder: Option<SharedEmbedder>,
     },
 }
 
@@ -1075,13 +1075,10 @@ impl Task for RecallTask {
                     ..
                 },
             ) => match self.args.query.as_deref() {
-                Some(text) => {
-                    let mut embedder = embedder.lock().expect("embedder lock");
-                    match embedder.embed(&[text]) {
-                        Ok(mut vectors) => vectors.pop(),
-                        Err(e) => return Ok(Err(error::engine(e))),
-                    }
-                }
+                Some(text) => match embedder.embed(&[text]) {
+                    Ok(mut vectors) => vectors.pop(),
+                    Err(e) => return Ok(Err(error::engine(e))),
+                },
                 None => None,
             },
             _ => None,

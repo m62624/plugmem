@@ -408,6 +408,15 @@ protocol. The dimension is configured explicitly (no startup probe);
 a server answering with a different one is a typed error. Tests run
 against a local mock — no network in CI.
 
+`embed` takes **`&self`**, and the trait requires `Send + Sync`, because an
+embedder is a client of a remote service rather than a piece of mutable state.
+That is what lets every caller share one instance with no lock in front of it:
+`SharedEmbedder` is a plain refcount, a `Database` holds its embedder unlocked,
+and concurrent verbs sit in the provider at the same time instead of queueing
+behind one HTTP request. An implementation that does need mutable state (a
+cache, a rate-limit budget) brings its own interior mutability, which is the
+only place that knows what may overlap.
+
 ## Feature flags
 
 - `serde` — `Serialize`/`Deserialize` on the public data types

@@ -38,9 +38,9 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 #[cfg(feature = "counters")]
-use std::sync::MutexGuard;
-use std::sync::{Arc, Mutex};
+use std::sync::{Mutex, MutexGuard};
 #[cfg(not(feature = "counters"))]
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
@@ -384,7 +384,7 @@ impl DatabaseBuilder {
                     ops: 0,
                     forgets: 0,
                 }),
-                embedder: self.embedder.map(Mutex::new),
+                embedder: self.embedder,
                 cfg: self.cfg,
                 snapshot_every_ops: self.snapshot_every_ops,
                 snapshot_journal_bytes: self.snapshot_journal_bytes,
@@ -408,7 +408,11 @@ type StateLock = Mutex<State>;
 
 struct Inner {
     state: StateLock,
-    embedder: Option<Mutex<Box<dyn Embedder>>>,
+    /// Unlocked: [`Embedder::embed`] takes `&self`, so several verbs may be
+    /// inside the provider at once. That is the point — the round trip is the
+    /// slow part of a write, and a lock here would queue every concurrent
+    /// caller behind one HTTP request.
+    embedder: Option<Box<dyn Embedder>>,
     /// Kept to rebuild the overlay engine after a re-map on snapshot.
     cfg: Config,
     snapshot_every_ops: u64,
@@ -506,7 +510,6 @@ impl Database {
         let Some(embedder) = &self.inner.embedder else {
             return Ok(None);
         };
-        let mut embedder = embedder.lock().unwrap_or_else(|e| e.into_inner());
         if embedder.dim() == 0 {
             return Ok(None);
         }
@@ -524,7 +527,6 @@ impl Database {
         let Some(embedder) = &self.inner.embedder else {
             return Ok(None);
         };
-        let mut embedder = embedder.lock().unwrap_or_else(|e| e.into_inner());
         if embedder.dim() == 0 {
             return Ok(None);
         }

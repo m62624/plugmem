@@ -9,7 +9,7 @@
 //! call. A [`HostError`] becomes a tool-level error (`isError`) so the model
 //! reads it; missing `params` is the JSON-RPC `-32602`.
 
-use std::sync::{Mutex, RwLock};
+use std::sync::RwLock;
 
 use plugmem_host::{
     Database, DbEntry, DbName, Embedder, FactId, HostError, IfMissing, LinkInput, MaintenanceMode,
@@ -27,11 +27,12 @@ use crate::{messages, rpc};
 ///
 /// The snapshot is behind a `RwLock`: read verbs take the read guard and run
 /// concurrently; `refresh` (rare) takes the write guard to re-map. The embedder
-/// is behind its own `Mutex`, so embeds serialize (as in the host) without
-/// holding the snapshot lock during the HTTP call.
+/// carries no lock at all — [`Embedder::embed`] takes `&self`, so the whole
+/// worker pool can be inside the provider at once, and the HTTP call never
+/// touches the snapshot lock.
 pub struct ReaderShared {
     db: RwLock<ReadOnlyDatabase>,
-    embedder: Mutex<Option<Box<dyn Embedder>>>,
+    embedder: Option<Box<dyn Embedder>>,
 }
 
 impl ReaderShared {
@@ -39,7 +40,7 @@ impl ReaderShared {
     pub fn new(db: ReadOnlyDatabase, embedder: Option<Box<dyn Embedder>>) -> Self {
         Self {
             db: RwLock::new(db),
-            embedder: Mutex::new(embedder),
+            embedder,
         }
     }
 }
@@ -500,19 +501,18 @@ fn recall_ro(reader: &ReaderShared, id: Value, args: Option<&Value>) -> Value {
         Err(message) => return rpc::tool_result(id, message, true),
     };
     // An explicit `vector` replaces the embedder outright; otherwise embed the
-    // query text into an owned vector, if we can (embedder Mutex only).
+    // query text into an owned vector, if we can. No lock is taken: several
+    // workers may be waiting on the provider at the same time, which is the
+    // whole reason the pool has more than one.
     let vector = match (explicit, query.as_deref()) {
         (Some(vector), _) => Some(vector),
-        (None, Some(text)) => {
-            let mut embedder = reader.embedder.lock().expect("embedder lock");
-            match embedder.as_mut() {
-                Some(e) => match e.embed(&[text]) {
-                    Ok(mut v) => v.pop(),
-                    Err(e) => return tool_error(id, &e),
-                },
-                None => None,
-            }
-        }
+        (None, Some(text)) => match reader.embedder.as_ref() {
+            Some(e) => match e.embed(&[text]) {
+                Ok(mut v) => v.pop(),
+                Err(e) => return tool_error(id, &e),
+            },
+            None => None,
+        },
         (None, None) => None,
     };
     let tags = arg_str_vec(args, "tags");

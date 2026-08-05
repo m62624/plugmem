@@ -894,7 +894,7 @@ fn embed_recall_query(
     if !vector.is_empty() {
         return Ok(None);
     }
-    let Some(embedder) = settings.embedder.as_mut() else {
+    let Some(embedder) = settings.embedder.as_ref() else {
         return Ok(None);
     };
     let mut vectors = embedder.embed(&[text.as_str()]).map_err(CliError::Host)?;
@@ -1374,7 +1374,7 @@ mod tests {
         fn dim(&self) -> usize {
             3
         }
-        fn embed(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>, HostError> {
+        fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, HostError> {
             Ok(texts.iter().map(|_| vec![0.1, 0.2, 0.3]).collect())
         }
     }

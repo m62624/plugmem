@@ -349,7 +349,7 @@ impl Embedder for CountingEmbedder {
         self.dim
     }
 
-    fn embed(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>, HostError> {
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, HostError> {
         use std::sync::atomic::Ordering;
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.texts.fetch_add(texts.len(), Ordering::SeqCst);
@@ -583,12 +583,12 @@ fn export_pages_are_bounded_and_advance_across_closed_and_tombstoned_ids() {
 #[test]
 fn embedder_transport_and_shape_errors_are_typed() {
     // A refused connection is a typed Embed error.
-    let mut refused = OpenAiCompatEmbedder::new("http://127.0.0.1:1/v1", "m", 4);
+    let refused = OpenAiCompatEmbedder::new("http://127.0.0.1:1/v1", "m", 4);
     assert!(matches!(refused.embed(&["x"]), Err(HostError::Embed(_))));
 
     // A server sending the wrong dimension is a typed Embed error.
     let (url, server) = spawn_mock_embedder(4, 1);
-    let mut wrong = OpenAiCompatEmbedder::new(&url, "m", 5);
+    let wrong = OpenAiCompatEmbedder::new(&url, "m", 5);
     assert!(matches!(wrong.embed(&["abc"]), Err(HostError::Embed(_))));
     server.join().unwrap();
 
@@ -902,17 +902,17 @@ fn a_corrupt_manifest_is_rejected_on_open() {
 #[test]
 fn embedder_edge_cases() {
     // NullEmbedder's contract, called directly.
-    let mut null = NullEmbedder;
+    let null = NullEmbedder;
     assert_eq!(null.dim(), 0);
     assert_eq!(null.embed(&["a", "b"]).unwrap(), vec![Vec::<f32>::new(); 2]);
 
     // Empty input short-circuits without a network call.
-    let mut e = OpenAiCompatEmbedder::new("http://127.0.0.1:1/v1", "m", 4);
+    let e = OpenAiCompatEmbedder::new("http://127.0.0.1:1/v1", "m", 4);
     assert!(e.embed(&[]).unwrap().is_empty());
 
     // The api-key path sends and succeeds against the mock.
     let (url, server) = spawn_mock_embedder(4, 1);
-    let mut keyed = OpenAiCompatEmbedder::new(&url, "m", 4).with_api_key("sk-test");
+    let keyed = OpenAiCompatEmbedder::new(&url, "m", 4).with_api_key("sk-test");
     assert_eq!(keyed.embed(&["abc"]).unwrap()[0].len(), 4);
     server.join().unwrap();
 
@@ -927,7 +927,7 @@ fn embedder_edge_cases() {
         "not json at all",                                             // body parse
     ] {
         let (url, server) = spawn_canned(payload.to_string());
-        let mut e = OpenAiCompatEmbedder::new(&url, "m", 4);
+        let e = OpenAiCompatEmbedder::new(&url, "m", 4);
         assert!(
             matches!(e.embed(&["abc"]), Err(HostError::Embed(_))),
             "payload {payload:?} must be a typed error"
