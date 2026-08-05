@@ -259,22 +259,49 @@ one that repacks the edge arenas, which a relink-heavy workload fragments.
 
 ### What is async, and why
 
-`remember`, `revise`, `recall`, `rememberMany`, `exportPage`, `maintain` and
-`checkpoint` return promises. Everything else — `get`, `stats`, `tagsOf`,
-`forget`, `link`, `unlink`, `verify`, `export`, `path`, `generation`,
-`refresh` — is synchronous.
+Promises: `Plugmem.open`, `remember`, `rememberMany`, `revise`, `recall`,
+`forget`, `link`, `unlink`, `export`, `exportPage`, `verify`, `maintain`,
+`checkpoint`, and every `Workspace` verb except `closeIdle`, `openCount` and
+`close`.
+
+Synchronous: `path`, `get`, `stats`, `tagsOf`, `generation`, `refresh`, `close`.
 
 The line is drawn at blocking work. Node runs all JavaScript on **one** thread,
 so a native call that waits on an embedder's HTTP round trip or on an fsync
 freezes every timer, socket and callback in the process for as long as it takes.
 The verbs above can do exactly that — with an `[embedder]` configured,
 `remember` and a text `recall` each cost a request to the provider — so they run
-on a libuv worker and hand JavaScript a promise. The rest touch only mapped
-memory and return in microseconds, where a promise would be pure ceremony.
+on a libuv worker and hand JavaScript a promise. The synchronous ones touch only
+mapped memory and return in microseconds, where a promise would be pure ceremony.
 
 Arguments are still checked on your thread: a refused one **throws** at the call
 site rather than rejecting later, so a mistake in your code and a failure in the
 engine never arrive the same way.
+
+### Two costs a promise does not hide
+
+**The worker pool is shared, and it has four threads by default.** libuv runs
+`fs`, `dns.lookup`, `zlib` and `crypto.pbkdf2` on the same pool this addon uses.
+The event loop stays free either way, but four concurrent plugmem tasks fill the
+default pool, and everything else queues behind them. Measured on one machine,
+a 4 MiB `fs.readFile` in the same process:
+
+| | `fs.readFile` |
+|---|---|
+| idle pool | 1.7 ms |
+| 4 plugmem tasks in flight | 29 577 ms |
+| the same, `UV_THREADPOOL_SIZE=8` | 1.4 ms |
+
+plugmem's tasks are unusually long — `maintain('full')` is minutes on a large
+memory — so raise `UV_THREADPOOL_SIZE` if the process does anything else with
+libuv while maintenance runs.
+
+**`export()` builds its whole result on your thread.** The scan is on a worker,
+but every fact becomes a JavaScript object in the promise's resolution, and that
+part is main-thread work by definition. On 100 000 facts it holds the thread for
+about 244 ms of the call's 289 ms. `exportPage()` over the same memory holds it
+for **0 ms**, in 128-fact pages. Use `export()` for a small memory or a script;
+use `exportPage()` anywhere a stall would be noticed.
 
 ### Bringing your own embedding
 

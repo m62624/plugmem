@@ -6,13 +6,15 @@
 // vector. This binding used to do neither, so a text `recall` on a read-only
 // handle silently had no vector source at all. These tests hold the parity.
 //
-// **The mock embedder must live off this thread.** `recall` is a synchronous
-// native call: while it waits on the embedder's HTTP round trip it owns the JS
-// thread, so a server on this event loop could never answer it and the test
-// would wait on itself forever. The server therefore runs in a worker, and the
-// request count comes back through a `SharedArrayBuffer` — memory the blocked
-// main thread can still read the moment it is unblocked. No network leaves the
-// machine and no real embedder is involved, so this runs anywhere CI does.
+// The mock embedder runs in a worker thread. That used to be mandatory: `recall`
+// was a synchronous native call that owned the JS thread across the embedder's
+// round trip, so a server on this event loop could never answer it. It is not
+// mandatory any more — the round trip happens inside a libuv task, and
+// `event-loop.test.mjs` proves a same-thread mock answers fine — but the worker
+// costs nothing and keeps this file testing the read-only path rather than the
+// scheduling. The request count comes back through a `SharedArrayBuffer`. No
+// network leaves the machine and no real embedder is involved, so this runs
+// anywhere CI does.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";

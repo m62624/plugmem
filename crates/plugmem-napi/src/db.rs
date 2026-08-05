@@ -455,10 +455,14 @@ impl Plugmem {
 
     /// Every currently-open fact, as one array (id-free, import-ready).
     ///
-    /// **Async, but still unbounded**: the scan is off the JS thread, yet the
-    /// whole memory is materialized into a single array before it resolves, so
-    /// the peak memory is the whole export. `exportPage` is the same data in
-    /// bounded pages — prefer it for anything but a small memory or a script.
+    /// **Async, but still unbounded, in two ways.** The scan runs on a worker,
+    /// yet the whole memory is materialized into a single array before it
+    /// resolves, so peak memory is the whole export. And `resolve` runs on the
+    /// JS thread by definition, so building one JavaScript object per fact
+    /// stalls it: measured at ~244 ms of a 289 ms call over 100 000 facts,
+    /// against 0 ms for the same data through `exportPage`. A promise hides
+    /// neither cost. Prefer `exportPage` for anything but a small memory or a
+    /// script.
     #[napi(ts_return_type = "Promise<ExportedFact[]>")]
     pub fn export(&self) -> Result<AsyncTask<ReadTask>> {
         Ok(AsyncTask::new(ReadTask {
