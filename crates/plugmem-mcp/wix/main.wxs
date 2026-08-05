@@ -69,7 +69,7 @@
 
         <Package Id='*'
             Keywords='Installer'
-            Description='plugmem MCP server (stdio JSON-RPC).'
+            Description='plugmem MCP server (stdio JSON-RPC) exposing embedded memory to agents and other programs.'
             Manufacturer='Mansur Azatbek'
             InstallerVersion='450'
             Languages='1033'
