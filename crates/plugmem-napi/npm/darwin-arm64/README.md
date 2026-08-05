@@ -2,7 +2,7 @@
 
 The prebuilt **aarch64-apple-darwin** (macOS arm64 (Apple Silicon)) native addon for
 [`plugmem`](https://www.npmjs.com/package/plugmem) — an embedded long-term
-memory engine for LLM agents (remember / recall / revise / forget over one
+memory engine for local-first applications and agents (remember / recall / revise / forget over one
 local file).
 
 ## Don't install this directly

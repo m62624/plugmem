@@ -7,12 +7,12 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 use plugmem_host::MaintenanceMode;
 
-/// `plugmem` — a temporal memory for LLM agents in a single file.
+/// `plugmem` — bitemporal memory and hybrid retrieval in a single file.
 #[derive(Parser)]
 #[command(
     name = "plugmem-cli",
     version,
-    about = "Temporal memory for LLM agents — remember, recall, revise, forget over one file.",
+    about = "Bitemporal memory for local-first applications and agents — remember, recall, revise, forget over one file.",
     long_about = LONG_ABOUT,
     after_help = AFTER_HELP,
     disable_help_subcommand = true,

@@ -9,7 +9,8 @@
 server over the plugmem [temporal-memory engine](https://docs.rs/plugmem-core/latest)
 — a thin, long-lived shell around
 [`plugmem-host`](https://docs.rs/plugmem-host/latest) that exposes a memory to
-**AI agents and any non-Rust program** as MCP tools over stdio JSON-RPC. The
+**AI agents, local-first applications and any non-Rust program** as MCP tools
+over stdio JSON-RPC. The
 engine stays resident for the process's lifetime, so every call is host speed.
 
 The installed binary is **`plugmem-mcp`**.

@@ -5,8 +5,9 @@
 > Claude models, in roughly equal measure. Expect non-professional design
 > choices, rough edges, broken behavior, or mistakes. Use it at your own risk.
 
-A memory database for LLM agents, embedded in your Node process. It stores short
-facts and answers a query with a ranked block of text ready to put in a prompt.
+An embeddable bitemporal memory database for local-first applications and
+agents, embedded in your Node process. It stores short facts and answers a
+query with ranked facts and edges plus an optional bounded rendered block.
 
 One file on disk, no server, no daemon. It links into your process the way
 SQLite does: the engine is [`plugmem-host`](https://docs.rs/plugmem-host/latest)
@@ -597,8 +598,8 @@ data.
 
 ## What it is not for
 
-plugmem is for a local agent's memory: one process, one file, no service to
-operate. Its design centre is around 100 000 active facts on one machine, and
+plugmem is for local-first application and agent memory: one process, one file,
+no service to operate. Its design centre is around 100 000 active facts on one machine, and
 the benchmarks track 1M-operation profiles to show how the same engine behaves
 under heavier local load.
 

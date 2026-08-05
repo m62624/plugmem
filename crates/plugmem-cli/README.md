@@ -170,7 +170,7 @@ database — run `checkpoint` (or `maintain`) first if the journal is dirty.
 plugmem-cli remember "prefers tokio with pinned versions" --entity user --tag pref \
     --meta source=chat --meta uri=s3://bucket/note.txt
 
-# Recall — a ranked block ready to paste into a prompt:
+# Recall — a ranked block bounded for a prompt or another context consumer:
 plugmem-cli recall "which runtime"
 
 # Bitemporal: correct a fact, then ask what was true earlier.

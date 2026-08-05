@@ -5,12 +5,13 @@ the topic spec wins.
 
 ## What it is
 
-**plugmem** is an embedded long-term-memory engine for LLM agents. The core is a
-pure library with no server and no I/O assumptions (the SQLite model); everything
-else is a thin wrapper in one workspace. The store is data-agnostic (it holds
-opaque bytes), but the API is shaped for an agent: the verbs
-`remember / recall / revise / forget`, built-in bitemporality, an entity graph,
-and a compact rendered block for the prompt.
+**plugmem** is an embedded bitemporal memory and retrieval engine for
+local-first applications and agents. The core is a pure library with no server
+and no I/O assumptions (the SQLite model); everything else is a thin wrapper in
+one workspace. The store is data-agnostic (it holds opaque bytes), and the API
+offers `remember / recall / revise / forget`, built-in bitemporality, an entity
+graph, structured ranked results, and an optional compact rendered block for
+prompt or other bounded-context consumers.
 
 The same engine ships three ways:
 

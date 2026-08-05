@@ -5,10 +5,11 @@
 > Claude models, in roughly equal measure. Expect non-professional design
 > choices, rough edges, broken behavior, or mistakes. Use it at your own risk.
 
-`plugmem-core` is an embedded **temporal-memory engine for LLM agents** — a
-library that runs inside the process. An agent talks to
-it in four verbs — `remember / recall / revise / forget` — and it answers
-with a ranked, token-budgeted context block ready to paste into a prompt.
+`plugmem-core` is an embedded **bitemporal memory and retrieval engine for
+local-first applications and agents** — a library that runs inside the process.
+Callers use `remember / recall / revise / forget`; recall returns ranked facts
+and edges plus an optional rendered block constrained by a token budget. That
+block is useful for prompts, but it is not the only consumer of the result.
 It keeps a whole database in one snapshot file plus an append-only
 journal; storage is flat byte arenas, so the memory image *is* the file
 format (loading is a bounds-check plus adopt, replay is deterministic to
@@ -284,7 +285,7 @@ fusion](https://dl.acm.org/doi/10.1145/1571941.1572114) (Cormack, Clarke
 & Buettcher) — rank-based, so the sources need no score calibration —
 plus an exponential recency boost. Selection is greedy under `k` and a
 token budget, and the result includes both structured facts and a
-rendered block ready to paste into a prompt.
+bounded rendered block for prompts and other context-limited consumers.
 
 ## Algorithms and optimizations
 

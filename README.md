@@ -24,17 +24,18 @@
 
 ## What plugmem is
 
-An embeddable **memory database for local LLM agents** — you link it into your
-program like SQLite, in-process and single-file. plugmem stores short
+An embeddable **memory database for local-first applications and agents** — you
+link it into your program like SQLite, in-process and single-file. plugmem stores short
 **facts** — with a subject entity, tags, optional metadata, an optional
 embedding and two time axes — and answers a query with a ranked,
-token-budgeted block ready to paste into a prompt. It runs in-process from one
-snapshot file plus an append-only journal — no server, no daemon, one machine.
+token-budgeted result with structured facts and edges plus an optional bounded
+rendered block. It runs in-process from one snapshot file plus an append-only
+journal — no server, no daemon, one machine.
 The core is `no_std`, so the same engine runs natively and in WebAssembly.
 
-It is meant for a local agent on your own device or inside your own project —
-one process, one file — not a multi-tenant service fielding queries from many
-users.
+It is meant for a local-first application or agent on your own device or inside
+your own project — one process, one file — not a multi-tenant service fielding
+queries from many users.
 
 It is **not** a vector database. A vector is one of four recall sources —
 lexical (BM25), vector, entity graph and time — fused with reciprocal-rank
@@ -53,8 +54,9 @@ fusion; tags act as filters. What the engine does:
 - **conflicts surfaced, not resolved.** `remember` returns the live facts a new
   one may duplicate or contradict. The engine never merges on its own; the
   caller revises, forgets, or keeps both.
-- **a block, not a result set.** Recall selects greedily under a token budget
-  and renders text ready to paste into a prompt.
+- **bounded ranked context.** Recall returns structured facts and edges and can
+  render text constrained by a token budget; prompt-ready rendering is one
+  consumer of the result.
 - **`no_std + alloc` core.** Single-threaded, zero-allocation recall after
   warm-up, one file, no server; built and tested on `wasm32v1-none` and a real
   32-bit wasm runtime in CI.
@@ -87,8 +89,8 @@ interval at March 1st, so a query as of March 5th finds neither — the old fact
 was no longer true, and the new one was not yet known. That is not a gap in the
 model, it is the honest answer for that instant.
 
-**Where it fits — and where it doesn't.** plugmem is for local agent memory and
-embedded systems: one process, one file, no service to operate. Its interactive
+**Where it fits — and where it doesn't.** plugmem is for local-first applications,
+agent memory and embedded systems: one process, one file, no service to operate. Its interactive
 design center is about 100k active facts on one machine; the benchmark suite also
 tracks 1M-operation profiles to show how the same file-backed engine scales
 under heavier local workloads. These numbers are measured operating points, not

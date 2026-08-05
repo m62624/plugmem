@@ -33,9 +33,10 @@ pub use db::recover;
 const SKILL_MD: &str = include_str!("../../../skill/SKILL.md");
 
 /// Version-free pointer to the skill (the version lives in [`version`]).
-const ABOUT: &str = "plugmem is an embedded long-term memory engine for LLM agents: \
-remember / recall / revise / forget over one local snapshot-plus-journal file, with \
-hybrid retrieval (BM25, optional embedding vectors, an entity graph, time). You'll get \
+const ABOUT: &str = "plugmem is an embedded bitemporal memory and retrieval engine for \
+local-first applications and agents: remember / recall / revise / forget over one local \
+snapshot-plus-journal file, with hybrid retrieval (BM25, optional embedding vectors, an \
+entity graph, time) and bounded rendered context. You'll get \
 markedly better results with the matching `plugmem` skill loaded — see `skill()` and \
 load the one matching `version()`: https://github.com/m62624/plugmem";
 

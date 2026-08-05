@@ -69,7 +69,7 @@
 
         <Package Id='*'
             Keywords='Installer'
-            Description='plugmem command-line interface — temporal memory for LLM agents over one file.'
+            Description='plugmem command-line interface — bitemporal memory and hybrid retrieval over one local file.'
             Manufacturer='Mansur Azatbek'
             InstallerVersion='450'
             Languages='1033'
