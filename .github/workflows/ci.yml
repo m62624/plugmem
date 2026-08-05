@@ -533,4 +533,4 @@ jobs:
           echo "  dist-plan        = ${{ needs.dist-plan.result }}"
           exit 1
       - name: All required jobs passed
-        run: echo "format + lint/test (3 OSes × feature matrix), no_std, wasm suite (wasmtime+wasmer), cross-target equivalence, skill, napi npm and dist-plan are green."
+        run: echo "format + lint/test, no_std, wasm suite, cross-target equivalence, skill, napi npm and dist-plan are green."
