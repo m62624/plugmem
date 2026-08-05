@@ -43,12 +43,19 @@ const db = await Plugmem.open("agent.plugmem");
 await db.remember({ text: "the user prefers tokio", entity: "user", tags: ["pref"] });
 await db.remember({ text: "the release ships on friday", entity: "release" });
 
-const res = await db.recall({ query: "which runtime?", k: 5 });
+const res = await db.recall({ query: "tokio", k: 5 });
 console.log(res.rendered);   // paste this into the prompt
-// - [f0] user: the user prefers tokio (2026-08; active)
+// - [f0] user: the user prefers tokio (2026-08; active) #pref
 
 db.close();
 ```
+
+The query is `"tokio"` and not `"which runtime?"` for a reason worth knowing up
+front: with no embedder configured, recall matches on **words**, and "runtime"
+appears nowhere in that fact, so the more natural question returns nothing.
+Reach it through the graph instead with `entities: ["user"]`, or configure an
+[embedder](#configuration-and-embeddings) and the meaning matches too. Only one
+of the four sources needs a model — see [How recall works](#how-recall-works).
 
 `Plugmem.open` is a static method, not a constructor, because opening replays a
 journal and maps a snapshot — work proportional to the file — and a JavaScript
@@ -139,12 +146,12 @@ Not a vector lookup. Four sources run and are fused by
 [reciprocal-rank fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf)
 with a recency boost; tags filter and are not a source:
 
-| Source | What it finds |
-|---|---|
-| **Lexical** — [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) over a Unicode ([UAX #29](https://unicode.org/reports/tr29/)) tokenizer | exact terms, keyword overlap |
-| **Semantic** — int8-quantized cosine, a flat scan below a threshold and an [HNSW](https://arxiv.org/abs/1603.09320) graph above | meaning, nearest neighbours |
-| **Graph** — typed edges walked from the query's anchor entities | relational knowledge |
-| **Temporal** — range scans over the `recordedAt` index, plus the validity test | "what was true then", time windows |
+| Source | What it finds | Needs an embedder |
+|---|---|---|
+| **Lexical** — [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) over a Unicode ([UAX #29](https://unicode.org/reports/tr29/)) tokenizer | exact terms, keyword overlap | no |
+| **Graph** — typed edges walked from the query's anchor entities | relational knowledge | no |
+| **Temporal** — range scans over the `recordedAt` index, plus the validity test | "what was true then", time windows | no |
+| **Semantic** — int8-quantized cosine, a flat scan below a threshold and an [HNSW](https://arxiv.org/abs/1603.09320) graph above | meaning, nearest neighbours | **yes** |
 
 The sources compose. A query with no `query` string still answers from tags,
 entities and time. **Without an embedder the system is complete** — the other
@@ -612,11 +619,12 @@ search. For those, use a dedicated system — [Qdrant](https://qdrant.tech),
 
 ## Other ways in
 
-The same engine ships four ways. This package is the Node one.
+The same engine ships five ways. This package is the Node one.
 
 | You are | Use |
 |---|---|
 | writing JavaScript / TypeScript for Node | **this package** |
+| writing Python | [`plugmem`](https://pypi.org/project/plugmem/) on PyPI |
 | writing Rust | [`plugmem-host`](https://docs.rs/plugmem-host/latest) — the engine in your process |
 | an agent, or another language | [`plugmem-mcp`](https://docs.rs/plugmem-mcp/latest) — a stdio JSON-RPC sidecar |
 | a person at a terminal | [`plugmem-cli`](https://docs.rs/plugmem-cli/latest) |

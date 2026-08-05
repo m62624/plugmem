@@ -1,0 +1,20 @@
+# Built by maturin; the wheel is a release artifact, not a tracked file.
+/dist/
+
+# `maturin develop` drops the compiled extension straight into the source
+# package so an editable install can import it. It is a build output that
+# happens to live next to source — never tracked.
+/python/plugmem/*.so
+/python/plugmem/*.pyd
+/python/plugmem/*.dylib
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Copied in by the release job so the wheel carries it (PEP 639 wants the
+# path inside the project); the original lives at the repository root.
+/LICENSE
+
+# The CI job builds into a local virtualenv (maturin develop needs one).
+/.venv/

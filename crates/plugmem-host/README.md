@@ -12,6 +12,13 @@ this one crate a Rust program gets `remember / recall / revise / forget` plus
 graph `link`/`unlink`, backed by durable storage. It re-exports the engine, so
 **this one crate is all a Rust program needs.**
 
+**No embedding model is required.** Of the four recall sources, only the vector
+one needs an embedder; text, graph and time work with nothing but the database.
+Unlike the CLI and the MCP server, a Rust caller has two ways to supply one —
+an `[embedder]` section in `config.toml`, or `DatabaseBuilder::embedder` — and
+a third option, passing a vector per call, which needs neither. See
+[Embedding is optional](#what-you-get) below.
+
 ## Which crate do I need?
 
 **Writing Rust and just want a working memory? This is the crate — it has
@@ -24,7 +31,8 @@ everything.** The others are for narrower needs.
 | Just the **flat byte-pool containers** | [`plugmem-arena`](https://docs.rs/plugmem-arena/latest) (`no_std`) | The storage substrate, engine-agnostic. |
 | A memory from a **terminal or shell script** | [`plugmem-cli`](https://docs.rs/plugmem-cli/latest) (`plugmem`) | One local database, no server; `plugmem repl` keeps the engine open for host speed. |
 | A memory for an **agent, local-first app, or non-Rust program** | [`plugmem-mcp`](https://docs.rs/plugmem-mcp/latest) | Long-lived stdio JSON-RPC; language-independent. In Rust, embed this crate instead. |
-| A memory in **JavaScript / TypeScript** (Node) | [`plugmem-napi`](https://docs.rs/plugmem-napi/latest) | The engine as a native Node addon (napi-rs), in-process; on npm as `plugmem`. |
+| A memory in **JavaScript / TypeScript** (Node) | [`plugmem-napi`](https://github.com/m62624/plugmem/tree/main/crates/plugmem-napi) | The engine as a native Node addon (napi-rs), in-process; on npm as `plugmem`. |
+| A memory in **Python** | [`plugmem-py`](https://github.com/m62624/plugmem/tree/main/crates/plugmem-py) | The engine as a CPython extension (PyO3), in-process; on PyPI as `plugmem`. |
 
 ## Configuration
 
@@ -32,7 +40,7 @@ The shared `config.toml` loader and platform-aware database paths are documented
 in the [full settings reference](https://github.com/m62624/plugmem/blob/main/crates/plugmem-host/SETTINGS.md).
 [`plugmem-cli`](https://docs.rs/plugmem-cli/latest),
 [`plugmem-mcp`](https://docs.rs/plugmem-mcp/latest) and
-[`plugmem-napi`](https://docs.rs/plugmem-napi/latest) use the same settings
+[`plugmem-napi`](https://github.com/m62624/plugmem/tree/main/crates/plugmem-napi) use the same settings
 catalogue and database-path precedence; only their explicit override syntax
 differs.
 

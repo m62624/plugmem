@@ -330,6 +330,161 @@ jobs:
           path: crates/plugmem-napi/*.node
           if-no-files-found: error
 
+  # Build the Python wheels, one job per platform, mirroring `napi-build` above:
+  # same six targets, same runners, one artifact each. `pip install plugmem` and
+  # `npm i plugmem` therefore cover exactly the platforms the CLI does.
+  #
+  # Two wheels come out of each job, and the second is not a duplicate:
+  #
+  #   * the abi3 wheel (`cp310-abi3`) is one binary for every CPython 3.10+
+  #     that has a GIL, because the stable ABI does not change between versions.
+  #     It needs no `-i`: the `abi3-py310` feature in Cargo.toml decides it.
+  #   * the free-threaded build (PEP 703) changed the object layout, so
+  #     `python3.14t` is a different binary interface with no stable ABI of its
+  #     own until `abi3t` in 3.15. PyO3 warns and ignores `abi3` when it sees a
+  #     free-threaded interpreter, so the same crate simply yields a
+  #     version-specific `cp314t` wheel.
+  #
+  # Six abi3 wheels plus four free-threaded ones (see the matrix note) — ten,
+  # and every GIL-bearing CPython on every supported platform is covered by the
+  # six. musl is deliberately absent, exactly as it is from cargo-dist and
+  # napi: it exists nowhere else in this repository, and a wheel-only exception
+  # would be the wrapper divergence AGENTS.md forbids.
+  py-build:
+    name: python wheels (${{ matrix.target }})
+    needs: [prepare, tag]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `freethreaded` is false exactly where the runner cannot provide a
+          # 3.14t interpreter *for the target*. The abi3 wheel needs no
+          # interpreter at all — the stable ABI is a compile-time contract — so
+          # it is built everywhere. A version-specific `cp314t` wheel is not:
+          # maturin has to inspect a matching interpreter, and on these two
+          # targets the only one available is the host's, which is the wrong
+          # architecture. Attempting it would fail at tag time, which is the
+          # worst possible moment to discover a matrix entry is wrong.
+          - { target: x86_64-unknown-linux-gnu, host: ubuntu-24.04, manylinux: auto, freethreaded: true }
+          - { target: aarch64-unknown-linux-gnu, host: ubuntu-24.04, manylinux: auto, freethreaded: false }
+          - { target: x86_64-apple-darwin, host: macos-26-intel, manylinux: "off", freethreaded: true }
+          - { target: aarch64-apple-darwin, host: macos-26, manylinux: "off", freethreaded: true }
+          - { target: x86_64-pc-windows-msvc, host: windows-2025, manylinux: "off", freethreaded: true }
+          - { target: aarch64-pc-windows-msvc, host: windows-2025, manylinux: "off", freethreaded: false }
+    runs-on: ${{ matrix.host }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - name: The wheel carries the licence
+        # `pyproject.toml` deliberately does not list a licence file: PEP 639
+        # requires the path to sit inside the project directory, and this
+        # repository has one LICENSE at its root. Copying it in at build time
+        # ships it without a second copy in the tree that could drift.
+        shell: bash
+        run: cp LICENSE crates/plugmem-py/LICENSE
+      - name: Build the abi3 wheel (every CPython 3.10+ with a GIL)
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          working-directory: crates/plugmem-py
+          args: --release --out dist
+          sccache: "true"
+      - name: A free-threaded interpreter for the second wheel
+        if: ${{ matrix.freethreaded }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14t"
+      - name: Build the free-threaded wheel (3.14t has no stable ABI)
+        if: ${{ matrix.freethreaded }}
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          working-directory: crates/plugmem-py
+          args: --release --out dist -i python3.14t
+          sccache: "true"
+      - name: Upload the built wheels
+        uses: actions/upload-artifact@v7
+        with:
+          name: py-${{ matrix.target }}
+          path: crates/plugmem-py/dist/*.whl
+          if-no-files-found: error
+
+  # The source distribution, built once: it is platform-independent by
+  # definition. Shipped even though every supported platform has a wheel,
+  # because it is what lets an unusual platform build from source at all — and
+  # because without it `pip install` on musl says "no matching distribution"
+  # instead of failing with a reason.
+  py-sdist:
+    name: python sdist
+    needs: [prepare, tag]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - shell: bash
+        run: cp LICENSE crates/plugmem-py/LICENSE
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          working-directory: crates/plugmem-py
+          args: --out dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: py-sdist
+          path: crates/plugmem-py/dist/*.tar.gz
+          if-no-files-found: error
+
+  # Publish every wheel and the sdist over OIDC trusted publishing, in parallel
+  # with the other publish jobs and only after `dist`.
+  #
+  # No token at all, and no one-time bootstrap either — this is where PyPI
+  # differs from both npm and crates.io. Those two configure a trusted publisher
+  # on a *package page*, which cannot exist before the first publish, hence the
+  # manual first release documented on `publish-napi` below. PyPI has *pending*
+  # publishers: the trusted publisher is configured against a project name that
+  # does not exist yet, and the first publish creates the project and converts
+  # it. The one caveat is that a pending publisher does not reserve the name.
+  publish-py:
+    name: Publish to PyPI (trusted publishing)
+    needs: [prepare, tag, dist, py-build, py-sdist]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      # The whole of the authentication: GitHub's OIDC identity is what PyPI
+      # verifies. There is no PYPI_API_TOKEN secret to leak or rotate.
+      id-token: write
+    steps:
+      - name: Collect every wheel and the sdist
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: py-*
+          merge-multiple: true
+      - name: Publish
+        # Not `uv publish`, which maturin's own template reaches for: that one
+        # authenticates with a token. This action is the one that speaks
+        # trusted publishing, and it attaches PEP 740 attestations by default.
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          # Makes a re-run idempotent, which is the property `publish-napi`
+          # already relies on and this job had no equivalent of. Eleven files
+          # (ten wheels and an sdist) go up in one call; a network blip on the
+          # seventh leaves six uploaded, and without this a re-run dies on
+          # "File already exists" for those six — turning a transient failure
+          # into a version burnt on PyPI while crates.io and npm, which publish
+          # in parallel, already succeeded.
+          #
+          # It skips only files whose *exact* version already exists, so it can
+          # never mask a genuine attempt to overwrite a release: PyPI versions
+          # are immutable, and a real re-publish of changed content needs a new
+          # version regardless.
+          skip-existing: true
+
   # Assemble the per-platform packages and publish over OIDC trusted publishing
   # (no NPM_TOKEN), in parallel with `publish-crates` and only after `dist`.
   # NOTE: OIDC trusted publishing is configured *per package* on npmjs.org — the

@@ -10,6 +10,11 @@
 #     separate process; tarpaulin's ptrace engine cannot attribute a
 #     subprocess's executed lines back to source, so their src/ would always
 #     read ~0% despite being covered. Excluding them keeps the number honest.
+#   * crates/plugmem-py/* — the same argument as plugmem-napi one line down:
+#     the `#[pyclass]`/`#[pyfunction]` surface only runs inside a CPython
+#     process (exercised by pytest against a built wheel), which tarpaulin
+#     cannot attribute; the pure wrapper logic is covered by this crate's own
+#     cargo tests through its rlib.
 #   * crates/plugmem-napi/* — the `#[napi]` surface only runs when loaded as a
 #     `.node` addon inside a Node process (exercised by the JS smoke/verb tests
 #     in __test__/), which tarpaulin cannot attribute; the pure wrapper logic
@@ -49,13 +54,23 @@ timeout = "300s"
 # skill-version gate) is covered by its own cargo tests; the `#[napi]` verbs
 # are covered by the Node tests in `__test__/`, neither attributable by
 # tarpaulin anyway (see `exclude-files` below).
-exclude = ["plugmem-napi"]
+#
+# plugmem-py is excluded for a *different* reason, worth keeping separate so
+# neither is loosened by accident. It links fine — libpython is present on any
+# runner — so this is not a link failure like napi's. It is that instrumenting
+# it buys nothing: the `#[pyclass]`/`#[pyfunction]` surface only executes
+# inside a CPython process (pytest against a built wheel), which tarpaulin
+# cannot attribute, and the crate also carries a `stub_gen` binary that is a
+# code generator rather than shipped code. Its pure wrapper logic is covered by
+# its own cargo tests through the rlib, in the `check` matrix.
+exclude = ["plugmem-napi", "plugmem-py"]
 out = ["Html", "Lcov", "Stdout"]
 output-dir = "coverage"
 exclude-files = [
     "crates/plugmem-cli/src/main.rs",
     "crates/plugmem-mcp/*",
     "crates/plugmem-napi/*",
+    "crates/plugmem-py/*",
     "crates/*/tests/*",
     # The cross-runtime reproduction stand and its runner: measurement
     # tooling, not the library under test. The stand is exercised by

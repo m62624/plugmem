@@ -107,6 +107,25 @@ MCP adapter/server. It exposes memory operations through the host API and should
 
 Node.js N-API bindings. A boundary layer only: its surface equals `plugmem-host`'s (see the wrapper-parity rule below), the engine logic stays in host, and FFI overhead is measured separately from core and host performance.
 
+### `crates/plugmem-py`
+
+Python bindings (PyO3), published to PyPI as `plugmem`. A boundary layer only,
+under the same rule as `plugmem-napi` — with one addition that matters: its
+reference is **napi's surface, not host's**. napi narrowed host in three places
+deliberately (one `export_page` and no `export_each`, one `maintain(mode)` and
+no `maintain_with_options`, `scrub(budget)` and no `scrub_with_budget`), so a
+binding that re-derived those choices from host would disagree with the one
+that already shipped. `tests/test_parity.py` reads napi's generated
+`index.d.ts` and its `error.rs` and fails in both directions.
+
+Every verb releases the GIL around the host call (`Python::detach`); there is
+no async layer, because releasing the GIL is what makes `asyncio.to_thread`
+and a thread pool work. Locks here guard the handle slot, not the engine —
+host synchronizes itself, but several Python threads share one wrapper object.
+
+`python/plugmem/_plugmem.pyi` is generated and committed, gated on `git diff`
+and on `mypy --strict`, exactly as `index.d.ts` is gated for the Node binding.
+
 ### `crates/plugmem-testgen`
 
 Utilities for generating deterministic test data and scenarios. It is not part of the production storage path.

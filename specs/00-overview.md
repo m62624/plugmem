@@ -13,13 +13,15 @@ offers `remember / recall / revise / forget`, built-in bitemporality, an entity
 graph, structured ranked results, and an optional compact rendered block for
 prompt or other bounded-context consumers.
 
-The same engine ships three ways:
+The same engine ships four ways:
 
 1. **Binaries** (the `plugmem-cli` CLI, the `plugmem-mcp` server) — installed via
    cargo-dist (shell/PowerShell/`.msi`/Homebrew + `cargo binstall`).
 2. **Rust API** (crates.io) — embed the library directly.
 3. **npm package** (`plugmem`) — a native Node.js addon (napi-rs) that embeds the
    host in-process, with TypeScript types.
+4. **PyPI package** (`plugmem`) — a CPython extension module (PyO3) that embeds
+   the host in-process, with generated type stubs.
 
 The core is `no_std`, so it also builds and runs on WebAssembly; wasm is a
 portability target for the core (and the way the snapshot format is proven
@@ -57,6 +59,7 @@ Violating any of these is grounds to stop a review.
 | `plugmem-cli` | std | The `plugmem-cli` binary: commands over core + host. |
 | `plugmem-mcp` | std | The MCP server (stdio JSON-RPC) over core + host; the skill is embedded via `include_str!`. |
 | `plugmem-napi` | std | The native Node addon (napi-rs) over host; the `Plugmem` class mirrors `Database`; the npm package is `plugmem`. `publish = false` (ships to npm, not crates.io). |
+| `plugmem-py` | std | The CPython extension (PyO3) over host; its surface mirrors `plugmem-napi` rather than host directly (see `07-wrappers.md`); the PyPI package is `plugmem`. `publish = false` (ships to PyPI, not crates.io). |
 | `plugmem-testgen` | std | Internal: a deterministic corpus generator for tests and benches. `publish = false`. |
 
 Edition 2024, MIT. All crate versions are one number, inherited from
