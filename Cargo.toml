@@ -94,7 +94,16 @@ napi-build = "2.1"
 #
 # No `pyo3-async-runtimes`: the engine is CPU-bound and has no runtime to
 # bridge. Concurrency is `Python::detach` plus the caller's own threads.
-pyo3 = { version = "0.29.1", features = ["abi3-py310", "experimental-inspect"] }
+pyo3 = { version = "0.29.1", features = ["abi3-py310"] }
+# Type stubs (`.pyi`) for the Python binding, which is what gives an IDE
+# completion and a type checker something to check against a compiled module.
+#
+# Not PyO3's own `experimental-inspect` + `maturin generate-stubs`: measured on
+# this crate at PyO3 0.29.1, that pair emits a stub containing nothing but
+# `def __getattr__(name: str) -> Incomplete`, with the feature verifiably
+# enabled. This crate reads the same macros the binding is written with and
+# emits real signatures.
+pyo3-stub-gen = { version = "0.23.0", default-features = false }
 
 # Dev dependencies
 proptest = "1.11.0"

@@ -18,6 +18,7 @@
 //! the event loop.
 
 use pyo3::prelude::*;
+use pyo3_stub_gen::derive::gen_stub_pyfunction;
 
 /// The `Plugmem` class — the Python mirror of `plugmem-host`'s `Database`.
 mod db;
@@ -45,12 +46,14 @@ load the one matching `version()`: https://github.com/m62624/plugmem";
 
 /// The engine/package version (the workspace version; the PyPI package tracks
 /// it release-for-release).
+#[gen_stub_pyfunction(module = "plugmem._plugmem")]
 #[pyfunction]
 fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
 /// A short, version-free description pointing the caller at the skill.
+#[gen_stub_pyfunction(module = "plugmem._plugmem")]
 #[pyfunction]
 fn about() -> String {
     ABOUT.to_string()
@@ -60,12 +63,14 @@ fn about() -> String {
 /// CLI/MCP "Run it" appendix removed (an embedding application has one
 /// transport and always ships skill and engine from the same release, so that
 /// ceremony never applies).
+#[gen_stub_pyfunction(module = "plugmem._plugmem")]
 #[pyfunction]
 fn skill() -> String {
     strip_excluded(SKILL_MD)
 }
 
 /// The canonical, unstripped `SKILL.md` (what CLI/MCP consumers read).
+#[gen_stub_pyfunction(module = "plugmem._plugmem")]
 #[pyfunction]
 fn skill_full() -> String {
     SKILL_MD.to_string()
@@ -74,6 +79,7 @@ fn skill_full() -> String {
 /// The `<!-- skill-version: X.Y.Z -->` marker value from the canonical skill
 /// (read from the raw text, so the marker living inside the stripped block is
 /// still visible here).
+#[gen_stub_pyfunction(module = "plugmem._plugmem")]
 #[pyfunction]
 fn skill_version() -> String {
     skill_version_of(SKILL_MD).unwrap_or_default()
@@ -81,6 +87,7 @@ fn skill_version() -> String {
 
 /// Return the complete `config.toml` settings catalogue without opening a
 /// database.
+#[gen_stub_pyfunction(module = "plugmem._plugmem")]
 #[pyfunction]
 fn settings_help() -> types::SettingsHelpResult {
     types::SettingsHelpResult::collect()
@@ -192,3 +199,7 @@ mod tests {
         assert_eq!(version().split('.').count(), 3);
     }
 }
+
+// Collects the type information the `gen_stub_*` macros registered, so the
+// `stub_gen` binary can write `python/plugmem/__init__.pyi`.
+pyo3_stub_gen::define_stub_info_gatherer!(stub_info);

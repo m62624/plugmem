@@ -27,6 +27,15 @@ crate-type = ["cdylib", "rlib"]
 # what keeps `config.toml` one mechanism rather than four.
 plugmem-host = { workspace = true, features = ["config"] }
 pyo3 = { workspace = true }
+pyo3-stub-gen = { workspace = true }
+
+[[bin]]
+# Regenerates `python/plugmem/__init__.pyi`. A binary rather than a build
+# script because it has to *load* the registered type information, which only
+# exists once the library is linked. CI runs it and fails on a diff, exactly
+# as it does for the Node binding's `index.d.ts`.
+name = "stub_gen"
+path = "src/bin/stub_gen.rs"
 
 [lints]
 workspace = true

@@ -25,6 +25,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use pyo3::exceptions::PyStopIteration;
 use pyo3::prelude::*;
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use crate::error::{self, Result};
 use crate::types::ScrubProgress;
@@ -39,7 +40,8 @@ use crate::types::ScrubProgress;
 ///
 /// One-shot: once it has returned `None`, or raised, it is done. Ask the
 /// database for another to scan again.
-#[pyclass(frozen, module = "plugmem")]
+#[gen_stub_pyclass]
+#[pyclass(frozen, module = "plugmem._plugmem")]
 pub struct Scrub {
     /// `None` once exhausted, failed, or closed — dropping the host cursor is
     /// what releases the pinned generation, so it is dropped eagerly rather
@@ -68,6 +70,7 @@ fn locked(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl Scrub {
     /// Hash the next budget's worth of bytes and report progress, or return

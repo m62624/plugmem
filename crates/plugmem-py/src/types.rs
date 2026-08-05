@@ -32,6 +32,7 @@ use std::collections::BTreeMap;
 
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 /// Generate a `__repr__` that prints the class name and the listed fields.
 ///
@@ -45,6 +46,7 @@ use pyo3::types::PyModule;
 /// would be reading Rust in their REPL and could not paste the output back.
 macro_rules! repr {
     ($ty:ty, $name:literal, $($field:ident),+ $(,)?) => {
+        #[gen_stub_pymethods]
         #[pymethods]
         impl $ty {
             fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
@@ -68,7 +70,8 @@ macro_rules! repr {
 }
 
 /// One similar / potentially-conflicting live fact surfaced by `remember`.
-#[pyclass(frozen, get_all, module = "plugmem")]
+#[gen_stub_pyclass]
+#[pyclass(frozen, get_all, module = "plugmem._plugmem")]
 pub struct Similar {
     /// The existing fact's id.
     pub id: u32,
@@ -95,7 +98,8 @@ impl From<plugmem_host::Similar> for Similar {
 }
 
 /// The result of `remember` / `revise`.
-#[pyclass(frozen, get_all, module = "plugmem")]
+#[gen_stub_pyclass]
+#[pyclass(frozen, get_all, module = "plugmem._plugmem")]
 pub struct RememberOutcome {
     /// The new fact's id.
     pub id: u32,
@@ -128,7 +132,8 @@ impl RememberOutcome {
 }
 
 /// One recalled fact.
-#[pyclass(frozen, get_all, module = "plugmem")]
+#[gen_stub_pyclass]
+#[pyclass(frozen, get_all, module = "plugmem._plugmem")]
 pub struct RecalledFact {
     /// The fact id.
     pub id: u32,
@@ -171,7 +176,8 @@ impl From<plugmem_host::RecalledFact> for RecalledFact {
 }
 
 /// One edge walked by the graph source.
-#[pyclass(frozen, get_all, module = "plugmem")]
+#[gen_stub_pyclass]
+#[pyclass(frozen, get_all, module = "plugmem._plugmem")]
 pub struct RecalledEdge {
     /// Source entity id.
     pub src: u32,
@@ -202,7 +208,8 @@ impl From<plugmem_host::RecalledEdge> for RecalledEdge {
 }
 
 /// A recall response: the structured hits plus the bounded rendered block.
-#[pyclass(frozen, get_all, module = "plugmem")]
+#[gen_stub_pyclass]
+#[pyclass(frozen, get_all, module = "plugmem._plugmem")]
 pub struct RecallResult {
     /// Selected facts, descending fused score.
     pub facts: Vec<Py<RecalledFact>>,
@@ -214,6 +221,7 @@ pub struct RecallResult {
     pub truncated: bool,
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl RecallResult {
     fn __repr__(&self) -> String {
@@ -256,7 +264,8 @@ impl RecallResult {
 }
 
 /// Engine size counters.
-#[pyclass(frozen, get_all, module = "plugmem")]
+#[gen_stub_pyclass]
+#[pyclass(frozen, get_all, module = "plugmem._plugmem")]
 pub struct Stats {
     /// Fact records stored (live, closed and tombstoned-awaiting-maintain).
     pub facts: usize,
@@ -333,7 +342,8 @@ impl From<plugmem_host::Stats> for Stats {
 
 /// The raw record behind a [`FactSnapshot`] — temporality and flags. (Internal
 /// pointers — the blob/vector slots and the reserved `kind` — are omitted.)
-#[pyclass(frozen, get_all, module = "plugmem")]
+#[gen_stub_pyclass]
+#[pyclass(frozen, get_all, module = "plugmem._plugmem")]
 pub struct FactRecord {
     /// The fact id.
     pub id: u32,
@@ -381,7 +391,8 @@ impl From<plugmem_host::FactRecord> for FactRecord {
 }
 
 /// One fact's full card (from `get`).
-#[pyclass(frozen, get_all, module = "plugmem")]
+#[gen_stub_pyclass]
+#[pyclass(frozen, get_all, module = "plugmem._plugmem")]
 pub struct FactSnapshot {
     /// The raw record (temporality, flags, references).
     pub record: Py<FactRecord>,
@@ -392,6 +403,7 @@ pub struct FactSnapshot {
     pub metadata: BTreeMap<String, String>,
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl FactSnapshot {
     fn __repr__(&self, py: Python<'_>) -> String {
@@ -420,7 +432,8 @@ impl FactSnapshot {
 }
 
 /// One exported fact — the id-free, import-ready shape.
-#[pyclass(frozen, get_all, module = "plugmem")]
+#[gen_stub_pyclass]
+#[pyclass(frozen, get_all, module = "plugmem._plugmem")]
 pub struct ExportedFact {
     /// The fact's id in the database it came from. Informational: an import
     /// assigns fresh ids. Present because edges name their provenance fact by
@@ -470,7 +483,8 @@ impl From<plugmem_host::ExportedFact> for ExportedFact {
 /// Edges are not part of a fact's dump: a fact names its tags and metadata, but
 /// an edge is a statement *between* two entities and outlives any single fact.
 /// That is why a complete backup is the two streams together.
-#[pyclass(frozen, get_all, module = "plugmem")]
+#[gen_stub_pyclass]
+#[pyclass(frozen, get_all, module = "plugmem._plugmem")]
 pub struct ExportedEdge {
     /// Source entity name.
     pub src: String,
@@ -485,7 +499,8 @@ pub struct ExportedEdge {
 repr!(ExportedEdge, "ExportedEdge", src, rel, dst, provenance);
 
 /// One bounded page returned by `export_page`.
-#[pyclass(frozen, get_all, module = "plugmem")]
+#[gen_stub_pyclass]
+#[pyclass(frozen, get_all, module = "plugmem._plugmem")]
 pub struct ExportPage {
     /// Open facts in fact-id order; never longer than the native page bound.
     pub facts: Vec<Py<ExportedFact>>,
@@ -493,6 +508,7 @@ pub struct ExportPage {
     pub next_cursor: Option<u32>,
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl ExportPage {
     fn __repr__(&self) -> String {
@@ -522,7 +538,8 @@ impl ExportPage {
 /// not produce intact, so a non-zero total means the recovered copy is smaller
 /// than the original claimed to be. Zeroes across the board mean the image was
 /// content-clean and this was a compaction.
-#[pyclass(frozen, get_all, module = "plugmem")]
+#[gen_stub_pyclass]
+#[pyclass(frozen, get_all, module = "plugmem._plugmem")]
 pub struct RecoverReport {
     /// Facts written to the destination — the survivors.
     pub kept: usize,
@@ -560,7 +577,8 @@ impl From<plugmem_host::RecoverReport> for RecoverReport {
 }
 
 /// How far a `Scrub` has got.
-#[pyclass(frozen, get_all, module = "plugmem")]
+#[gen_stub_pyclass]
+#[pyclass(frozen, get_all, module = "plugmem._plugmem")]
 pub struct ScrubProgress {
     /// Bytes checksummed so far; equals `total_bytes` on the last step.
     pub done_bytes: u64,
@@ -583,7 +601,8 @@ impl From<plugmem_host::ScrubProgress> for ScrubProgress {
 }
 
 /// The report of a `maintain` pass.
-#[pyclass(frozen, get_all, module = "plugmem")]
+#[gen_stub_pyclass]
+#[pyclass(frozen, get_all, module = "plugmem._plugmem")]
 pub struct MaintainReport {
     /// Tombstoned facts physically removed by this pass.
     pub purged: usize,
@@ -693,7 +712,8 @@ impl From<plugmem_host::MaintainReport> for MaintainReport {
 }
 
 /// One memory as the workspace registry knows it.
-#[pyclass(frozen, get_all, module = "plugmem")]
+#[gen_stub_pyclass]
+#[pyclass(frozen, get_all, module = "plugmem._plugmem")]
 pub struct DbEntry {
     /// The memory's name — its identity, and what `Workspace.open` takes.
     pub db: String,
@@ -709,7 +729,8 @@ pub struct DbEntry {
 repr!(DbEntry, "DbEntry", db, description, tags, archived);
 
 /// What a `Workspace.reindex()` pass did.
-#[pyclass(frozen, get_all, module = "plugmem")]
+#[gen_stub_pyclass]
+#[pyclass(frozen, get_all, module = "plugmem._plugmem")]
 pub struct ReindexReport {
     /// Memories whose own description was copied into the registry.
     pub indexed: Vec<String>,
@@ -723,7 +744,8 @@ pub struct ReindexReport {
 repr!(ReindexReport, "ReindexReport", indexed, undescribed, busy);
 
 /// Something `Workspace.verify()` found. Reported, never repaired.
-#[pyclass(frozen, get_all, module = "plugmem")]
+#[gen_stub_pyclass]
+#[pyclass(frozen, get_all, module = "plugmem._plugmem")]
 pub struct WorkspaceProblem {
     /// The memory it concerns (empty for a kind this binding does not know).
     pub db: String,
@@ -741,7 +763,8 @@ repr!(WorkspaceProblem, "WorkspaceProblem", db, issue, detail);
 /// getter hands out a copy rather than a borrow into a frozen object.
 /// `skip_from_py_object` because it only ever travels outward: nothing in this
 /// binding accepts one as an argument.
-#[pyclass(frozen, get_all, module = "plugmem", skip_from_py_object)]
+#[gen_stub_pyclass]
+#[pyclass(frozen, get_all, module = "plugmem._plugmem", skip_from_py_object)]
 #[derive(Clone)]
 pub struct SettingHelpItem {
     /// TOML section name.
@@ -760,7 +783,8 @@ pub struct SettingHelpItem {
 repr!(SettingHelpItem, "SettingHelpItem", section, key, value_type);
 
 /// Complete `config.toml` help returned by `settings_help`.
-#[pyclass(frozen, get_all, module = "plugmem")]
+#[gen_stub_pyclass]
+#[pyclass(frozen, get_all, module = "plugmem._plugmem")]
 pub struct SettingsHelpResult {
     /// Config discovery order from highest to lowest precedence.
     pub config_path_precedence: Vec<String>,
@@ -770,6 +794,7 @@ pub struct SettingsHelpResult {
     pub settings: Vec<SettingHelpItem>,
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl SettingsHelpResult {
     fn __repr__(&self) -> String {

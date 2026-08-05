@@ -33,6 +33,7 @@ use plugmem_host::{
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyMapping, PySequence};
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
 
 use crate::error::{self, Result};
 use crate::scrub::Scrub;
@@ -93,7 +94,8 @@ enum Handle {
 /// Open it with [`Plugmem::open`], call the verbs, and `close()` it to release
 /// the file. It is also a context manager, so `with Plugmem.open(path) as db:`
 /// closes it for you.
-#[pyclass(frozen, module = "plugmem")]
+#[gen_stub_pyclass]
+#[pyclass(frozen, module = "plugmem._plugmem")]
 pub struct Plugmem {
     /// `None` once closed — every verb then raises `ClosedError`.
     handle: RwLock<Option<Handle>>,
@@ -209,6 +211,7 @@ fn checked_vector(vector: Option<Vec<f32>>) -> Result<Option<Vec<f32>>> {
     Ok(Some(vector))
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl Plugmem {
     /// Open (or create) the memory at `path` and return the handle.
@@ -354,6 +357,10 @@ impl Plugmem {
     fn remember_many(
         &self,
         py: Python<'_>,
+        #[gen_stub(override_type(
+            type_repr = "collections.abc.Sequence[collections.abc.Mapping[builtins.str, typing.Any]]",
+            imports = ("collections.abc", "builtins", "typing")
+        ))]
         facts: &Bound<'_, PyAny>,
     ) -> Result<Vec<RememberOutcome>> {
         let sequence = facts
@@ -631,7 +638,15 @@ impl Plugmem {
     /// A dump is the two streams together — `export`/`export_page` for facts
     /// and this for edges. An edge is a statement *between* entities and
     /// outlives any single fact, so it is not part of a fact's record.
-    fn export_edges(&self, py: Python<'_>, on_batch: Py<PyAny>) -> Result<usize> {
+    fn export_edges(
+        &self,
+        py: Python<'_>,
+        #[gen_stub(override_type(
+            type_repr = "collections.abc.Callable[[builtins.list[ExportedEdge]], typing.Any]",
+            imports = ("collections.abc", "builtins", "typing")
+        ))]
+        on_batch: Py<PyAny>,
+    ) -> Result<usize> {
         let mut batch: Vec<(String, String, String, FactId)> =
             Vec::with_capacity(EXPORT_EDGE_BATCH);
         let mut total = 0usize;
@@ -977,6 +992,7 @@ fn apply_dim(settings: &mut Settings, dim: Option<u32>) -> Result<()> {
 ///
 /// This is not a repair for *structural* damage: a snapshot that will not parse
 /// cannot be walked, and that case is a restore from backup, not a recovery.
+#[gen_stub_pyfunction(module = "plugmem._plugmem")]
 #[pyfunction]
 #[pyo3(signature = (src, dst, *, dim=None, config=None))]
 pub fn recover(

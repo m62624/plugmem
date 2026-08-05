@@ -17,26 +17,26 @@
 //! unrelated bug.
 
 use plugmem_host::{HostError, SettingsError, WorkspaceError};
-use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
+use pyo3_stub_gen::create_exception;
 
 create_exception!(
-    plugmem,
+    plugmem._plugmem,
     PlugmemError,
     PyException,
     "Base class for every failure plugmem decides. Carries a stable `code`."
 );
 
 create_exception!(
-    plugmem,
+    plugmem._plugmem,
     LockedError,
     PlugmemError,
     "Another process holds the database's writer lock."
 );
 
 create_exception!(
-    plugmem,
+    plugmem._plugmem,
     NeedsCheckpointError,
     PlugmemError,
     "A read-only open needs a published snapshot and the writer has not \
@@ -44,56 +44,56 @@ create_exception!(
 );
 
 create_exception!(
-    plugmem,
+    plugmem._plugmem,
     ConfigError,
     PlugmemError,
     "The `config.toml` could not be read, or a section of it is invalid."
 );
 
 create_exception!(
-    plugmem,
+    plugmem._plugmem,
     OpenError,
     PlugmemError,
     "Opening failed for any other reason — IO, or an image that will not load."
 );
 
 create_exception!(
-    plugmem,
+    plugmem._plugmem,
     InvalidArgError,
     PlugmemError,
     "An argument was refused before it reached the engine."
 );
 
 create_exception!(
-    plugmem,
+    plugmem._plugmem,
     InvalidNameError,
     PlugmemError,
     "A memory name is not a usable name."
 );
 
 create_exception!(
-    plugmem,
+    plugmem._plugmem,
     ClosedError,
     PlugmemError,
     "The handle is closed — `close()` was called on it."
 );
 
 create_exception!(
-    plugmem,
+    plugmem._plugmem,
     ReadOnlyError,
     PlugmemError,
     "A write verb was called on a read-only handle."
 );
 
 create_exception!(
-    plugmem,
+    plugmem._plugmem,
     WriterOnlyError,
     PlugmemError,
     "A read-only-only verb (`generation`, `refresh`) was called on a writer."
 );
 
 create_exception!(
-    plugmem,
+    plugmem._plugmem,
     BusyError,
     PlugmemError,
     "The handle cannot do this right now because another operation on it is \
@@ -101,7 +101,7 @@ create_exception!(
 );
 
 create_exception!(
-    plugmem,
+    plugmem._plugmem,
     EngineError,
     PlugmemError,
     "The engine reported a failure — IO, a capacity limit, a rejected input it \
@@ -115,7 +115,7 @@ create_exception!(
 // `PLUGMEM_INTERNAL` is part of the cross-language contract and a caller that
 // branches on codes should not have to ask which binding it is talking to.
 create_exception!(
-    plugmem,
+    plugmem._plugmem,
     InternalError,
     PlugmemError,
     "A bug in this binding. Registered for parity with the other bindings' \

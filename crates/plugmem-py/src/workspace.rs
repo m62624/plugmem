@@ -28,6 +28,7 @@ use std::sync::RwLock;
 
 use plugmem_host::{DbName, Description, IfMissing, Settings, WorkspaceIssue};
 use pyo3::prelude::*;
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use crate::db::{Plugmem, now_ms};
 use crate::error::{self, Result};
@@ -39,12 +40,14 @@ use crate::types::{DbEntry, ReindexReport, WorkspaceProblem};
 /// The lock guards the handle slot, not the workspace: `plugmem_host::Workspace`
 /// synchronizes its own pool and registry, so what needs protecting here is only
 /// the `Option` that `close()` empties while other threads may be inside a verb.
-#[pyclass(frozen, module = "plugmem")]
+#[gen_stub_pyclass]
+#[pyclass(frozen, module = "plugmem._plugmem")]
 pub struct Workspace {
     /// `None` once closed — every method then raises `ClosedError`.
     inner: RwLock<Option<plugmem_host::Workspace>>,
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl Workspace {
     /// Open the workspace rooted at `root`. Creates nothing: the directories

@@ -418,6 +418,54 @@ jobs:
         # valid Rust and unusable TypeScript.
         run: npm run typecheck
 
+  py-wheel:
+    name: python wheel
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/plugmem-py
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "crates/plugmem-py"
+      - uses: actions/setup-python@v6
+        with:
+          # The floor `abi3-py310` targets. Building on it proves the wheel we
+          # ship is the wheel we test, rather than one that happens to work on
+          # whatever the runner defaults to.
+          python-version: "3.10"
+      - name: Install the build and check tools
+        run: pip install "maturin>=1.14,<2.0" pytest mypy
+      - name: Build and install the extension
+        run: maturin develop
+      - name: The committed stubs match the Rust surface
+        # `python/plugmem/_plugmem.pyi` is generated AND committed, because it
+        # is what gives an editor completion and a type checker something to
+        # check. Committed generated files go stale, and a stale stub is worse
+        # than none: it confidently completes a method that no longer exists.
+        # Same gate, same reasoning, as `index.d.ts` in the Node binding above.
+        run: |
+          cargo run --quiet --bin stub_gen
+          if ! git diff --exit-code -- python/plugmem/_plugmem.pyi; then
+            echo "::error::the stubs are stale — run" \
+                 "\`cargo run --bin stub_gen\` in crates/plugmem-py and commit the result"
+            exit 1
+          fi
+      - name: The stubs type-check
+        # This is the gate that makes `stub_gen`'s two post-generation fixups
+        # safe to rely on. One of them patches a defect in pyo3-stub-gen 0.23
+        # (it qualifies our own exception base as `builtins.PlugmemError`); if
+        # upstream changes shape, that patch silently stops applying and the
+        # whole exception hierarchy quietly degrades to `Any`. Checking the
+        # stub itself turns that silence into a red build.
+        run: mypy --strict python/plugmem/_plugmem.pyi python/plugmem/__init__.py
+      - name: Test through Python
+        run: pytest -q
+
   dist-plan:
     name: cargo-dist plan
     runs-on: ubuntu-latest
@@ -440,7 +488,7 @@ jobs:
   ci-pass:
     name: CI passed
     if: always()
-    needs: [format, check, fuzz, no_std, wasm-suite, wasm-equivalence, skill-lint, napi-npm, dist-plan]
+    needs: [format, check, fuzz, no_std, wasm-suite, wasm-equivalence, skill-lint, napi-npm, py-wheel, dist-plan]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any required job did not succeed
