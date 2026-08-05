@@ -290,7 +290,7 @@ fn main() {
     println!("corpus: {} sentences", texts.len());
 
     // Embed the whole corpus in batches through the real model.
-    let mut emb = OpenAiCompatEmbedder::new("http://localhost:11434/v1", "nomic-embed-text", DIM);
+    let emb = OpenAiCompatEmbedder::new("http://localhost:11434/v1", "nomic-embed-text", DIM);
     let mut vecs: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
     let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
     let t0 = Instant::now();

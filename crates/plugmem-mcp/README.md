@@ -272,10 +272,11 @@ One reader thread pulls stdin lines into a channel; a pool of worker threads
 drains it, dispatches, and writes replies under a single stdout lock (so lines
 never interleave). Each worker holds a cheap handle — a writer clones the
 `Database` (an `Arc` around the engine's `RwLock`), a reader shares one snapshot
-(its own `RwLock` for concurrent reads, a `Mutex` for the embedder) — so
-independent requests overlap, with the embedder's HTTP call outside the engine
-lock. Replies carry their JSON-RPC `id`, so a client correlates them regardless
-of completion order.
+behind its own `RwLock` for concurrent reads — so independent requests overlap.
+The embedder carries no lock at all: `Embedder::embed` takes `&self`, so the
+whole pool can be waiting on the provider at once, and the HTTP call never
+touches the engine lock. Replies carry their JSON-RPC `id`, so a client
+correlates them regardless of completion order.
 
 The pool defaults to `max(1, available_parallelism() / 2)` — half the machine's
 cores, leaving room for the agent, the OS and a local embedder rather than

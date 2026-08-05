@@ -121,6 +121,7 @@ larger limits; the capacity classes and their proofs live in `09-portability.md`
 | 08 | `08-performance.md` | budgets, counters, benches, coverage, fuzz/miri, dependency pins, CI gates |
 | 09 | `09-portability.md` | WebAssembly 2.0/3.0: memory64, capacity classes, cross-target equivalence |
 | 10 | `10-workspace.md` | the optional workspace: many memories in one directory, named and described |
+| 11 | `11-file-format.md` | the normative byte layout: on-disk files, container, section catalogue, record slots, journal |
 
 ## Design choices
 

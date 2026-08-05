@@ -4,6 +4,11 @@ Persistence is "an image of memory plus a journal of operations". The core does 
 know where the bytes live: every contact with the world goes through `Storage`. The
 native wrappers provide files; a wasm host provides callbacks.
 
+This document is the **model**: why persistence is shaped this way and what the
+rules are. The **byte layout is normative in `11-file-format.md`** — every
+offset, every section kind, every journal op. The sketches here are orientation;
+where the two disagree, 11 wins.
+
 ## Persistence model
 
 - **Snapshot** — a full image of engine state: the arena sections (see the contracts
@@ -36,9 +41,16 @@ pub trait Storage {
 The core calls `append_journal` synchronously at the end of each mutating operation.
 The fsync policy is the implementation's business (`FileStorage`: `fsync_each` /
 `fsync_snapshot_only`; default each — durability beats microseconds and the write
-volumes are tiny). Implementations: `plugmem-host::FileStorage` (two files,
-`<name>.plugmem` + `<name>.journal`), `plugmem-core::MemStorage` (tests, ephemeral
-databases), and a wasm bridge to JS callbacks (see `07-wrappers.md`).
+volumes are tiny). Implementations: `plugmem-host::FileStorage`,
+`plugmem-core::MemStorage` (tests, ephemeral databases), and a wasm bridge to JS
+callbacks (see `07-wrappers.md`).
+
+`FileStorage` is **not two files.** The path the caller passes is a 24-byte
+*manifest* naming the current snapshot generation; the image lives beside it as
+`<name>.snap.<N>`, immutable and never rewritten, with the journal and the lock
+file alongside. That is what lets a reader in another process map a stable
+image while a writer keeps working — the MVCC arrangement in `06-host.md`. The
+full on-disk layout, including the manifest's bytes, is `11-file-format.md` §1.
 
 **Locking: one database, one process.** On open `FileStorage` takes an exclusive
 advisory lock (flock/LockFileEx on a lock file beside the database) and holds it for
@@ -53,31 +65,20 @@ Everything is little-endian except the keys inside arena slots (those are BE —
 are data the format does not interpret).
 
 ```
-Header (64 B):
-  magic       u32   = 0x504C_474D ("PLGM")
-  version     u16   = 1            // the format, not the crate version
-  flags       u16   // bit 0: a vector section is present; reserved
-  section_cnt u16
-  reserved    [u8; 6]
-  config_len  u32   // length of the Config block
-  file_xxh3   u64   // hash of the whole file with this field zeroed (0 = none)
-  created_at  u64   // informational
-  engine_ver  [u8; 24] // semver string, informational
-
-Config block: a fixed binary struct (see 05-api.md: dim, quantization, per-arena
-  shards, max_*, hnsw params, rrf/recency, db_uuid — the database lineage id;
-  ENCODED_LEN = 188). Everything that changes how bytes are interpreted lives here.
-
-Section table: section_cnt x 32 B:
-  kind   u16   // enum: ArenaFactsPool, ArenaFactsMeta, Blobs, Interner, Postings,
-               // Temporal, EdgesOut, EdgesIn, Vectors, Sigs, Hnsw, Metas...
-  align  u16   // = 64
-  offset u64   // from file start, multiple of 64
-  len    u64
-  xxh3   u64   // per-section hash
-
-Sections: contiguous, each 64-aligned.
+[header 64][config][pad][table: n x 32][pad][section][pad]...
 ```
+
+The header carries the magic, format version, flags, section count, config-block
+length, the file hash and two informational fields. The config block is a fixed
+188-byte struct holding everything that changes how the following bytes are
+*interpreted* (dim, per-arena shards, max_*, hnsw params, rrf/recency, and
+`db_uuid`, the database lineage id). Each section-table entry carries a kind, the
+alignment, the offset, the length and a per-section hash.
+
+**The field offsets are in `11-file-format.md` §2**, along with the complete
+section catalogue: the kinds are stable numbers 1..59 with retired ranges left as
+gaps, and most structures contribute a small `meta`/`index` section plus a large
+`pool` section, the small one first.
 
 The container hash covers the **whole file with the hash field zeroed** (so `flags`
 and everything else is under the checksum, not just value-validation). The layout is
@@ -130,24 +131,24 @@ A snapshot can come from anywhere (a wasm host, a foreign file). The loader cont
 An entry:
 
 ```
-[len u32][xxh3_32 u32][op u8][payload ...]   // len = 1 + payload
+[len u32][check u32][op u8][payload ...]   // len = 1 + payload
 ```
 
-Ops (payload is a compact binary format, strings as length-prefixed UTF-8):
+`check` is the low 32 bits of xxh3-64 over `[op][payload]`. Six ops: Remember,
+Revise, Forget, Link, Maintain, Unlink. Payloads are a compact binary format,
+strings length-prefixed UTF-8 — the field order per op is in
+`11-file-format.md` §9.
 
-| op | payload |
-|---|---|
-| 1 Remember | now, valid_from?, entity?, text, tags[], links[], metadata[], vector? (already i8-quantized — quantization happens before the journal, for determinism), assigned FactId |
-| 2 Revise | now, target FactId, + the Remember fields, assigned FactId |
-| 3 Forget | now, FactId |
-| 4 Link | now, src entity, rel, dst entity, provenance? |
-| 5 Maintain | now (a marker: replay after it knows a purge happened) |
+**The embedding is journaled as raw f32, before quantization.** Replay
+re-quantizes with the same pure function and reproduces every vector slot byte
+for byte; journaling the quantized form instead would tie the journal to the
+quantizer's version. Metadata is likewise journaled as remembered and
+re-canonicalized on replay.
 
 Replay is strictly sequential; the ids in entries are authoritative (assigned at
-execution), so replay is deterministic and idempotent on re-applying the tail
-(entries with id ≤ the current max are skipped). A torn tail entry (a crash
-mid-write) truncates the journal at the last valid entry with a warning in the load
-report; a torn **non**-tail entry is `Corrupt`.
+execution), so replay is deterministic. A torn tail entry (a crash mid-write)
+truncates the journal at the last valid entry with a warning in the load report;
+a torn **non**-tail entry is `Corrupt`.
 
 ## Read-only mmap (zero-copy)
 

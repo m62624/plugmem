@@ -239,18 +239,34 @@ plus auto after N ops; MCP — when idle; wasm — the host decides).
 ## The Embedder layer (`plugmem-host`, std)
 
 ```rust
-pub trait Embedder {
+pub trait Embedder: Send + Sync {
     fn dim(&self) -> usize;
     /// Batch is in the signature on purpose: providers are far cheaper batched.
-    fn embed(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError>;
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, HostError>;
 }
 ```
 
+**`&self`, not `&mut self`, and that is the whole contract.** An embedder is a
+client of a remote service, not a piece of mutable state, so the trait does not
+demand exclusive access. It used to, and the cost was structural: a `&mut self`
+method reachable only through an exclusive borrow forced every sharer to put a
+`Mutex` in front of it, and that mutex spanned the HTTP round trip, so concurrent
+callers queued one request at a time. With `&self` the sharer is a plain
+refcount (`SharedEmbedder`) and the provider sees the concurrency it was built
+for.
+
+An implementation that genuinely needs mutable state — a cache, a rate-limit
+budget — brings its own interior mutability. That is the right place for it:
+only that implementation knows what may overlap and what must not, so it can
+guard the few bytes that need guarding instead of the whole call.
+
 Implementations: `OpenAiCompatEmbedder` (`/v1/embeddings` — also covers Ollama via its
-compatible endpoint) and `NullEmbedder` (dim 0). The HTTP client is `ureq`; errors
-flow through the host's `HostError`. A built-in local embedder is a v1.1 item behind a
-`local-embed` feature (target: a quantized `multilingual-e5-small`, CPU or GPU by
-choice) — the core is untouched, the Embedder contract is ready.
+compatible endpoint) and `NullEmbedder` (dim 0). Neither needs a guard: an
+`OpenAiCompatEmbedder` holds a `ureq::Agent`, itself a `Send + Sync`
+connection-pool handle. The HTTP client is `ureq`; errors flow through the host's
+`HostError`. A built-in local embedder is a v1.1 item behind a `local-embed`
+feature (target: a quantized `multilingual-e5-small`, CPU or GPU by choice) — the
+core is untouched, the Embedder contract is ready.
 
 The wrapper calls `embed` before `remember`/`recall` (if an embedder is configured) and
 puts the vector in the input; the core does not know about Embedder. On wasm the JS
