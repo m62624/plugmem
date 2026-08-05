@@ -1,7 +1,7 @@
 ---
 name: plugmem
 description: >-
-  Persistent long-term memory for an agent, embedded in one local file — no
+  Persistent long-term memory for an agent, embedded in one local database — no
   server, no cloud. Use it to REMEMBER durable facts about the user, the
   project or past decisions (one fact = one statement, with optional entity,
   tags and validity time), and to RECALL them later as a compact ranked block
@@ -18,8 +18,9 @@ description: >-
 
 # plugmem — long-term memory for agents
 
-plugmem is an embedded memory engine (the SQLite model: a library plus one
-snapshot file and a journal — no server). You talk to it through these main
+plugmem is an embedded memory engine (the SQLite model: a library plus a
+file-backed local database — manifest, immutable snapshots, journal and lock;
+no server). You talk to it through these main
 verbs:
 
 - **remember** — store one durable fact: short text, optional subject entity,
@@ -226,8 +227,8 @@ MANDATORY.
 
 ### Step 0a — pick your transport
 
-- **Shell available →** the **`plugmem-cli`** binary (CLI). One database file
-  per memory, addressed with `--db <file>`. The verbs and their flags:
+- **Shell available →** the **`plugmem-cli`** binary (CLI). One local database
+  per memory, addressed with `--db <path>`. The verbs and their flags:
 
   | Verb | Shape |
   |------|-------|

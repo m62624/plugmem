@@ -18,7 +18,7 @@
 //! # Ok::<(), plugmem_host::HostError>(())
 //! ```
 //!
-//! Concurrency model: one file has one owning process —
+//! Concurrency model: one local database has one owning process —
 //! a second open is refused with [`HostError::Locked`]; within the
 //! process, clone the [`Database`] handle across threads and agents;
 //! different files are fully independent. Embedding calls run outside

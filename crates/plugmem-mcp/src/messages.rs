@@ -12,7 +12,7 @@ pub const SERVER_NAME: &str = "plugmem";
 /// The `--help` blurb for the binary itself (not a model-facing tool).
 pub const ABOUT_CLI: &str = "plugmem MCP server: exposes a plugmem memory to AI agents over stdio \
 JSON-RPC. The host spawns this process and talks to it on stdin/stdout; it is not a daemon and \
-listens on no port. One process serves one memory file.";
+listens on no port. One process serves one local database.";
 
 /// Shared by every tool description: the `format` argument.
 pub const ARG_FORMAT: &str = "Output format. \"json\" (default) returns compact machine JSON; \
@@ -30,10 +30,11 @@ about the version skew before relying on the other tools.";
 /// Shared by the `plugmem_about` tool's *description* and its *returned text*,
 /// so the two never drift. Deliberately version-free (`plugmem_version` owns the
 /// number) and harness-agnostic (no product names).
-pub const ABOUT_TOOL: &str = "plugmem is a temporal-memory engine for LLM agents: it remembers \
-facts over time, then recalls the relevant ones for a prompt by fusing lexical (BM25), semantic \
-(vector), graph and temporal evidence. You are calling it over MCP, so you are an AI agent: \
-`plugmem_remember` stores a fact, `plugmem_recall` returns a ranked, prompt-ready block, and the \
+pub const ABOUT_TOOL: &str = "plugmem is a bitemporal memory and retrieval engine for local-first \
+applications and agents: it remembers facts over time, then recalls relevant ones by fusing \
+lexical (BM25), semantic (vector), graph and temporal evidence. You are calling it over MCP, so \
+you may be an AI agent: `plugmem_remember` stores a fact, `plugmem_recall` returns ranked facts \
+and edges plus an optional bounded rendered block, and the \
 `[fN]` id on each recalled line is how you address a fact in `plugmem_revise`/`plugmem_forget`. \
 For the full verb loop and worked examples, load the matching plugmem skill or see the project: \
 https://github.com/m62624/plugmem";

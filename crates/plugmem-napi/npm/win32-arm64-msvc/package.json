@@ -11,7 +11,7 @@
   "files": [
     "plugmem.win32-arm64-msvc.node"
   ],
-  "description": "Native Node.js addon for plugmem: an embedded long-term memory engine for LLM agents (remember / recall / revise / forget over one local file).",
+  "description": "Native Node.js addon for plugmem: an embedded bitemporal memory and retrieval engine for local-first applications and agents (remember / recall / revise / forget over one local database).",
   "license": "MIT",
   "engines": {
     "node": ">= 16"

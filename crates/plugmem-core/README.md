@@ -5,13 +5,14 @@
 > Claude models, in roughly equal measure. Expect non-professional design
 > choices, rough edges, broken behavior, or mistakes. Use it at your own risk.
 
-`plugmem-core` is an embedded **temporal-memory engine for LLM agents** — a
-library that runs inside the process. An agent talks to
-it in four verbs — `remember / recall / revise / forget` — and it answers
-with a ranked, token-budgeted context block ready to paste into a prompt.
-It keeps a whole database in one snapshot file plus an append-only
-journal; storage is flat byte arenas, so the memory image *is* the file
-format (loading is a bounds-check plus adopt, replay is deterministic to
+`plugmem-core` is an embedded **bitemporal memory and retrieval engine for
+local-first applications and agents** — a library that runs inside the process.
+Callers use `remember / recall / revise / forget`; recall returns ranked facts
+and edges plus an optional rendered block constrained by a token budget. That
+block is useful for prompts, but it is not the only consumer of the result.
+It keeps a whole database image in a snapshot plus an append-only journal when
+the host supplies persistence; storage is flat byte arenas, so the memory image
+*is* the snapshot format (loading is a bounds-check plus adopt, replay is deterministic to
 the byte, and the same file opens on native, wasm32 and wasm64 unchanged).
 
 It is **not** a vector database. Recall fuses four sources by [reciprocal-rank
@@ -49,8 +50,8 @@ when you need `no_std` or your own persistence.
 | **A memory in a Rust program** — the common case | [`plugmem-host`](https://docs.rs/plugmem-host/latest) (`std`) | Everything included: files, locking, read-only mmap, HTTP embedders (OpenAI/Ollama/LM Studio/vLLM/llama.cpp), integrity, concurrency. Re-exports this engine. |
 | A memory in Rust with **no `std`** or **your own storage** (browser, wasm host, custom persistence) | **`plugmem-core`** (this crate) | The engine only. You bring the `Storage` trait, the clock, file I/O and embedding — so you manage when the file opens and how memory loads. |
 | Just the **flat byte-pool containers** (sorted page arenas, blob heap, chunk pool, interner) | [`plugmem-arena`](https://docs.rs/plugmem-arena/latest) (`no_std`) | The storage substrate, engine-agnostic. |
-| A memory from a **terminal or shell script** | `plugmem-cli` (`plugmem`) | One file, no server; `plugmem repl` keeps the engine open for host speed. |
-| A memory for an **LLM agent** or a **non-Rust program** | `plugmem-mcp` | Long-lived stdio JSON-RPC; language-independent. In Rust, embed the host lib instead. |
+| A memory from a **terminal or shell script** | `plugmem-cli` (`plugmem`) | One local database, no server; `plugmem repl` keeps the engine open for host speed. |
+| A memory for an **agent, local-first app, or non-Rust program** | `plugmem-mcp` | Long-lived stdio JSON-RPC; language-independent. In Rust, embed the host lib instead. |
 | A memory in **JavaScript / TypeScript** (Node) | `plugmem-napi` | The engine as a native Node addon (napi-rs), in-process; on npm as `plugmem`. |
 
 ## Who this is for
@@ -58,8 +59,8 @@ when you need `no_std` or your own persistence.
 Agents and applications that need a **personal memory**: tens of
 thousands to a hundred thousand facts about a user, a project, a codebase — with
 temporal reasoning ("what was true then"), revision history, a
-relationship graph, and hybrid retrieval, all inside the process and
-inside a single file. It is not a horizontally scalable search cluster
+relationship graph, and hybrid retrieval, all inside the process with
+file-backed persistence. It is not a horizontally scalable search cluster
 and does not try to be one; the capacity passport is deliberately sized
 to the 32-bit wasm address space (≤ 2 GiB, design center 100k facts,
 ceiling 1M). On 64-bit hosts — native or WebAssembly 3.0
@@ -284,7 +285,7 @@ fusion](https://dl.acm.org/doi/10.1145/1571941.1572114) (Cormack, Clarke
 & Buettcher) — rank-based, so the sources need no score calibration —
 plus an exponential recency boost. Selection is greedy under `k` and a
 token budget, and the result includes both structured facts and a
-rendered block ready to paste into a prompt.
+bounded rendered block for prompts and other context-limited consumers.
 
 ## Algorithms and optimizations
 

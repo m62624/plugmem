@@ -8,7 +8,7 @@
 `plugmem-cli` is the command-line surface over the plugmem
 [temporal-memory engine](https://docs.rs/plugmem-core/latest) — a thin shell around
 [`plugmem-host`](https://docs.rs/plugmem-host/latest) that lets you (or an agent's
-launcher) keep a memory in a single file from a terminal or a shell script. Each
+launcher) keep a logical memory in a local database from a terminal or a shell script. Each
 one-shot command parses arguments, calls one engine verb, and prints the result
 (a human report, `--json` for tooling); the interactive `plugmem repl` keeps the
 engine open across commands for host speed. No memory logic lives here.
@@ -93,10 +93,10 @@ instead; an agent or another language comes in over a protocol.
 
 | You want | Use | Why |
 |---|---|---|
-| A memory from a **terminal or shell script** | **`plugmem-cli`** (this binary) | One file, no server; `plugmem repl` keeps the engine open for host speed. |
+| A memory from a **terminal or shell script** | **`plugmem-cli`** (this binary) | One local database, no server; `plugmem repl` keeps the engine open for host speed. |
 | **A memory in a Rust program** — the common case | [`plugmem-host`](https://docs.rs/plugmem-host/latest) (`std`) | The engine plus files, locking, mmap, HTTP embedders, integrity, concurrency. |
 | The engine with **no `std`** or **your own storage** | [`plugmem-core`](https://docs.rs/plugmem-core/latest) (`no_std`) | Engine only; you bring persistence. |
-| A memory for an **LLM agent** or a **non-Rust program** | `plugmem-mcp` | Long-lived stdio JSON-RPC; language-independent — the door for programmatic / cross-language access (the CLI is the human one). |
+| A memory for an **agent, local-first app, or non-Rust program** | `plugmem-mcp` | Long-lived stdio JSON-RPC; language-independent — the door for programmatic / cross-language access (the CLI is the human one). |
 | A memory in **JavaScript / TypeScript** (Node) | `plugmem-napi` | The engine as a native Node addon (napi-rs), in-process; on npm as `plugmem`. |
 
 ## What recall does
@@ -170,7 +170,7 @@ database — run `checkpoint` (or `maintain`) first if the journal is dirty.
 plugmem-cli remember "prefers tokio with pinned versions" --entity user --tag pref \
     --meta source=chat --meta uri=s3://bucket/note.txt
 
-# Recall — a ranked block ready to paste into a prompt:
+# Recall — a ranked block bounded for a prompt or another context consumer:
 plugmem-cli recall "which runtime"
 
 # Bitemporal: correct a fact, then ask what was true earlier.
@@ -205,7 +205,7 @@ plugmem-cli recover agent.recovered.plugmem   # salvage into a clean copy
 
 ## Many memories in one directory (optional)
 
-**Default: one memory, one file.** `--db path/to/memory.plugmem` and nothing
+**Default: one logical memory backed by a local database layout.** `--db path/to/memory.plugmem` and nothing
 here applies. Reach for this only when you keep several independent
 memories — one per project, per client, per agent — and want to address them by
 name instead of remembering where each file is.
@@ -416,7 +416,7 @@ what*; it applies verbatim to a file the CLI opens.
 
 ## Concurrency
 
-One database file is a single-writer resource: `plugmem-cli` takes an
+One database is a single-writer resource: `plugmem-cli` takes an
 exclusive lock for the length of the (short-lived) command, so a second
 `plugmem-cli` — or an MCP server holding the same file — is refused with
 exit `1` rather than corrupting it. See the

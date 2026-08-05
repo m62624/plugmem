@@ -1,9 +1,9 @@
-//! `Database`: the engine + its file + the maintenance policy behind
-//! one lock (§3).
+//! `Database`: the engine + its file-backed storage layout + the maintenance
+//! policy behind one lock (§3).
 //!
 //! The orchestration model in one paragraph: a `Database` handle is
 //! `Clone + Send + Sync` (an `Arc` around an `RwLock`-guarded engine), so
-//! any number of threads or agents in one process share one file by
+//! any number of threads or agents in one process share one local database by
 //! cloning the handle — the read verbs (`recall`/`get`/`stats`/…) run
 //! concurrently under a shared guard, the write verbs serialize under an
 //! exclusive one; at microsecond engine calls neither is a bottleneck. A
@@ -437,7 +437,7 @@ struct State {
     forgets: u64,
 }
 
-/// A clonable, thread-safe handle to one database file. See the module
+/// A clonable, thread-safe handle to one local database. See the module
 /// docs for the concurrency model.
 #[derive(Clone)]
 pub struct Database {

@@ -2,7 +2,7 @@
 //!
 //! Run with: `cargo run --example integrity -p plugmem-host`
 //!
-//! Shows the three integrity layers the host exposes over one file:
+//! Shows the three integrity layers the host exposes over one local database:
 //!   * `scrub()`   — resumable byte-level container check (bitrot detector)
 //!   * `verify()`  — content consistency (text UTF-8, vector bijection)
 //!   * `recover()` — salvage a content-corrupt database into a clean copy

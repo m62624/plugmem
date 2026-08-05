@@ -7,18 +7,18 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 use plugmem_host::MaintenanceMode;
 
-/// `plugmem` — a temporal memory for LLM agents in a single file.
+/// `plugmem` — bitemporal memory and hybrid retrieval in a local database.
 #[derive(Parser)]
 #[command(
     name = "plugmem-cli",
     version,
-    about = "Temporal memory for LLM agents — remember, recall, revise, forget over one file.",
+    about = "Bitemporal memory for local-first applications and agents — remember, recall, revise, forget over one local database.",
     long_about = LONG_ABOUT,
     after_help = AFTER_HELP,
     disable_help_subcommand = true,
 )]
 pub(crate) struct Cli {
-    /// Database file (default: the platform data path, or $PLUGMEM_DB). With a
+    /// Database path (default: the platform data path, or $PLUGMEM_DB). With a
     /// workspace configured this also takes a bare memory *name* — `work` is a
     /// name, `./work.plugmem` is a path.
     #[arg(long, global = true, value_name = "PATH|NAME")]
@@ -50,8 +50,9 @@ A local memory an agent talks to in four verbs — remember / recall / revise / 
 plus link / unlink / show / stats / maintain / checkpoint / export / import, integrity: verify / \
 scrub / recover, and an interactive `repl` (one open handle, host speed). Recall fuses lexical \
 (BM25), vector, entity-graph and temporal evidence into one \
-ranked, token-budgeted block. One database is a single snapshot file plus a journal; point \
---db at it (default: the platform data path, or $PLUGMEM_DB). Human output by default, --json for \
+ranked, token-budgeted block. One local database uses a manifest, immutable snapshot \
+generations, a journal and a lock; point --db at its manifest path (default: the platform data \
+path, or $PLUGMEM_DB). Human output by default, --json for \
 tooling. Exit code: 0 ok, 1 not found / database locked, 2 usage / runtime error / \
 corruption.";
 

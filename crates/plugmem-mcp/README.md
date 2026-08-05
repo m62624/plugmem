@@ -9,7 +9,8 @@
 server over the plugmem [temporal-memory engine](https://docs.rs/plugmem-core/latest)
 — a thin, long-lived shell around
 [`plugmem-host`](https://docs.rs/plugmem-host/latest) that exposes a memory to
-**AI agents and any non-Rust program** as MCP tools over stdio JSON-RPC. The
+**AI agents, local-first applications and any non-Rust program** as MCP tools
+over stdio JSON-RPC. The
 engine stays resident for the process's lifetime, so every call is host speed.
 
 The installed binary is **`plugmem-mcp`**.
@@ -105,7 +106,7 @@ you are tending *your own* memory file — plugmem keeps no server of its own.
 
 - A **sidecar process, not a daemon.** The host (Claude Desktop, an IDE, an
   agent runner) *spawns* `plugmem-mcp` and talks to it over stdin/stdout. It
-  listens on no port and serves **one memory file** for its lifetime. When the
+  listens on no port and serves **one local database** for its lifetime. When the
   host goes away, so does the sidecar.
 - **Many readers / many languages = many processes**, coordinated by plugmem's
   file-level MVCC (immutable snapshot generations + an advisory writer lock),

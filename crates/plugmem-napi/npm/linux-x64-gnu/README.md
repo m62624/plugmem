@@ -2,8 +2,8 @@
 
 The prebuilt **x86_64-unknown-linux-gnu** (Linux x64 (glibc)) native addon for
 [`plugmem`](https://www.npmjs.com/package/plugmem) — an embedded long-term
-memory engine for LLM agents (remember / recall / revise / forget over one
-local file).
+memory engine for local-first applications and agents (remember / recall / revise / forget over one
+local database).
 
 ## Don't install this directly
 

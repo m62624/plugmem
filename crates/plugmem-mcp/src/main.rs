@@ -5,7 +5,7 @@
 //! Transport: stdio, newline-delimited JSON-RPC 2.0 (one message per line).
 //! Hand-rolled with `serde_json` (no MCP SDK, no async runtime). It is a
 //! **sidecar process, not a daemon**: the host spawns it and talks on
-//! stdin/stdout; it listens on no port and serves one memory file for its
+//! stdin/stdout; it listens on no port and serves one local database for its
 //! lifetime. Cross-language / many-reader use is many processes over the file
 //! MVCC, not one network server.
 //!
@@ -47,7 +47,7 @@ struct Args {
     #[arg(long)]
     db: Option<String>,
 
-    /// Serve a directory of named memories instead of one file (else
+    /// Serve a directory of named memories instead of one local database (else
     /// $PLUGMEM_WORKSPACE, else `[workspace].dir`). Without it there is one
     /// memory and the tools have no `db` argument at all — the default, and
     /// the right choice for one process per conversation.
@@ -120,7 +120,7 @@ fn run(args: Args) -> Result<(), String> {
 
     // Workspace mode is opt-in and stays opt-in: with no flag, no environment
     // variable and no `[workspace].dir`, everything below behaves exactly as it
-    // did before workspaces existed — one file, and no `db` argument anywhere.
+    // did before workspaces existed — one local database, and no `db` argument anywhere.
     let root = workspace
         .or_else(|| std::env::var_os(ENV_WORKSPACE).map(PathBuf::from))
         .or_else(|| settings.workspace.dir.clone());
