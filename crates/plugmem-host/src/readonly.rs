@@ -285,6 +285,18 @@ impl ReadOnlyDatabase {
         self.with_mem(|mem| crate::db::export_facts_each(mem, f));
     }
 
+    /// Streams the currently-open edges — the zero-copy analog of
+    /// [`Database::export_edges_each`](crate::Database::export_edges_each), and
+    /// the path the CLI takes, since `export` runs read-only whenever it can.
+    pub fn export_edges_each(&self, mut f: impl FnMut(&str, &str, &str, plugmem_core::FactId)) {
+        self.with_mem(|mem| {
+            mem.edges_each(|src, rel, dst, fact| {
+                f(src, rel, dst, fact);
+                true
+            });
+        });
+    }
+
     /// Returns at most `limit` open facts starting at the opaque fact-id
     /// `cursor`. The mapped generation is immutable, so paging this handle is a
     /// snapshot-consistent bounded export. Pass the returned `next_cursor` to

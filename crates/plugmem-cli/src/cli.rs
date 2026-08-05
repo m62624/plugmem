@@ -123,6 +123,16 @@ pub(crate) enum Command {
         /// Include closed revisions (whole chains).
         #[arg(long)]
         closed: bool,
+        /// Token budget of the rendered block (default 512). The block is the
+        /// part that goes into a prompt, so this is the knob that decides how
+        /// much of the context window recall is allowed to spend.
+        #[arg(long = "token-budget", value_name = "N")]
+        token_budget: Option<usize>,
+        /// HNSW beam width for the vector source (default: `hnsw_ef_search`
+        /// from the config). Higher is more accurate and slower. Ignored while
+        /// the engine is still in the flat regime, below `flat_to_hnsw`.
+        #[arg(long, value_name = "N")]
+        ef: Option<usize>,
         /// A precomputed query embedding, comma-separated. Given, it
         /// **replaces** the embedder for this query — nothing is sent to the
         /// provider — and its length must equal the configured `dim`.
@@ -168,6 +178,10 @@ pub(crate) enum Command {
         rel: String,
         /// Destination entity.
         dst: String,
+        /// The fact this edge follows from. Recorded on the edge and returned
+        /// by graph recall, so a caller can answer "why is this edge here".
+        #[arg(long, value_name = "FACT_ID")]
+        provenance: Option<u32>,
     },
     /// Close the current typed edge between two entities.
     Unlink {
@@ -215,11 +229,26 @@ pub(crate) enum Command {
         /// Destination file for the recovered image (must differ from `--db`).
         dst: PathBuf,
     },
-    /// Dump the currently-open facts as JSONL (one fact per line) to stdout.
+    /// Dump the current memory as JSONL to stdout: every open fact, then every
+    /// open edge, one per line, each tagged with `kind`.
+    ///
+    /// Streamed on both halves, so a large memory never has to fit in RAM.
+    /// Facts carry text, entity, tags, metadata, `recorded_at` and
+    /// `valid_from`; edges carry `src`/`rel`/`dst` and the `provenance` fact,
+    /// referenced by its id in *this* database so an import can translate it.
+    ///
+    /// **Closed revisions and vectors are not in the format.** History does
+    /// not survive a round trip, and vectors are recomputed on import if an
+    /// embedder is configured. This is a portable knowledge dump, not a
+    /// backup — to back a database up, copy its files.
     Export,
-    /// Load facts from a JSONL file (as written by `export`), re-remembering
-    /// each. Ids and `recorded_at` are not preserved; text/entity/tags/
-    /// valid_from are.
+    /// Load a JSONL file written by `export`, re-remembering each fact and
+    /// re-linking each edge.
+    ///
+    /// Ids and `recorded_at` are not preserved (a fresh database assigns its
+    /// own); text, entity, tags, metadata, `valid_from`, edges and their
+    /// provenance are. A line without a `kind` is read as a fact, so files
+    /// written before edges were in the format still load.
     Import {
         /// The JSONL file to read.
         file: PathBuf,

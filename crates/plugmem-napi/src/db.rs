@@ -119,6 +119,14 @@ pub struct RecallArgs {
     pub k: Option<u32>,
     /// Include closed revisions (default false).
     pub closed: Option<bool>,
+    /// Token budget of the `rendered` block (default 512). That block is what
+    /// goes into a prompt, so this is the knob deciding how much of the
+    /// context window a recall may spend.
+    pub token_budget: Option<u32>,
+    /// HNSW beam width for the vector source (default: the configured
+    /// `hnsw_ef_search`). Higher is more accurate and slower; ignored while
+    /// the engine is still in the flat regime, below `flat_to_hnsw`.
+    pub ef: Option<u32>,
     /// A precomputed embedding. Its length must equal the configured `dim`.
     ///
     /// Given, it **replaces** the embedder: nothing is sent to the provider.
@@ -165,6 +173,10 @@ pub struct LinkArgs {
     pub rel: String,
     /// Destination entity name.
     pub dst: String,
+    /// The fact this edge follows from, recorded on the edge and returned by
+    /// graph recall — the answer to "why is this edge here". Ignored by
+    /// `unlink`, which closes an edge rather than opening one.
+    pub provenance: Option<u32>,
 }
 
 /// The open handle behind a [`Plugmem`]: a read-write writer, or a read-only
@@ -965,7 +977,7 @@ impl Task for WriteTask {
                     src: &args.src,
                     rel: &args.rel,
                     dst: &args.dst,
-                    provenance: None,
+                    provenance: args.provenance.map(FactId),
                 })
                 .map(|()| WriteOutput::Done)
                 .map_err(error::engine),
@@ -1099,9 +1111,9 @@ impl Task for RecallTask {
             as_of: self.as_of,
             range: self.range,
             k: self.args.k.unwrap_or(0) as usize,
-            token_budget: None,
+            token_budget: self.args.token_budget.map(|v| v as usize),
             include_closed: self.args.closed.unwrap_or(false),
-            ef: None,
+            ef: self.args.ef.map(|v| v as usize),
         };
         Ok(match &self.source {
             RecallSource::Writer(db) => db.recall(q),

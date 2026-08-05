@@ -899,6 +899,35 @@ impl<'a> Memory<'a> {
         core::str::from_utf8(self.texts.get(record.name)).ok()
     }
 
+    /// Visits every currently-open edge once, as
+    /// `(source name, relation, destination name, provenance)`.
+    ///
+    /// Reads the out-arena only: each edge is mirrored in both arenas, and the
+    /// out-arena holds it keyed `(src, rel, dst)`, which is the direction a
+    /// caller wants to write back. Closed versions live in the history arenas
+    /// and are not visited — this is the *current* graph, matching what a fact
+    /// export does for facts.
+    ///
+    /// Names are borrowed from the interner and the text pool, so a caller that
+    /// writes them straight out allocates nothing per edge. An edge whose
+    /// endpoint name is unreadable is skipped rather than reported with a
+    /// placeholder: deferred validation means a damaged image must not turn
+    /// into plausible-looking output.
+    ///
+    /// `visit` returning `false` stops the walk, so a caller can bound its own
+    /// work without materializing the graph.
+    pub fn edges_each(&self, mut visit: impl FnMut(&str, &str, &str, FactId) -> bool) {
+        for slot in self.edges_out.iter() {
+            let (Some(src), Some(dst)) = (self.entity_name(slot.a), self.entity_name(slot.b))
+            else {
+                continue;
+            };
+            if !visit(src, self.term(slot.rel), dst, slot.fact) {
+                return;
+            }
+        }
+    }
+
     /// Number of fact records currently stored (tombstoned facts count
     /// until `maintain` removes them). Purged ids stay burned, so this can
     /// be below [`Stats::next_fact`].

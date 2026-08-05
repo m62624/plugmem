@@ -1,3 +1,7 @@
+//! The crate README is included below as module documentation, which makes
+//! every Rust example in it a doctest: a README that drifts from the API stops
+//! compiling instead of quietly lying.
+#![doc = include_str!("../README.md")]
 //! `plugmem` — the command-line surface over the
 //! [temporal-memory engine](plugmem_core), a thin wrapper around
 //! [`plugmem_host::Database`]. Parse the arguments, call one
@@ -179,11 +183,23 @@ fn run_parsed(cli: Cli, out: &mut impl Write) -> u8 {
             .unwrap_or(DEFAULT_IMPORT_BATCH)
             .max(1);
         return match do_import(&db, now_ms(), file, batch_size, out) {
-            Ok(n) => {
+            Ok(report) => {
                 if cli.json {
-                    writeln!(out, "{}", json!({ "imported": n })).ok();
+                    writeln!(
+                        out,
+                        "{}",
+                        json!({ "imported": report.facts, "edges": report.edges })
+                    )
+                    .ok();
+                } else if report.edges == 0 {
+                    writeln!(out, "imported {} facts", report.facts).ok();
                 } else {
-                    writeln!(out, "imported {n} facts").ok();
+                    writeln!(
+                        out,
+                        "imported {} facts and {} edges",
+                        report.facts, report.edges
+                    )
+                    .ok();
                 }
                 0
             }
@@ -322,6 +338,7 @@ fn execute_ro(
         }
         Command::Export => {
             ro.export_each(|f| write_export_line(out, &f));
+            ro.export_edges_each(|src, rel, dst, fact| write_export_edge(out, src, rel, dst, fact));
             0
         }
         // A clean image returns Ok; corruption is a typed error mapped to exit 2.
@@ -416,13 +433,18 @@ fn execute(
             }
             Ok(0)
         }
-        Command::Link { src, rel, dst } => {
+        Command::Link {
+            src,
+            rel,
+            dst,
+            provenance,
+        } => {
             db.link(LinkInput {
                 now,
                 src,
                 rel,
                 dst,
-                provenance: None,
+                provenance: provenance.map(FactId),
             })?;
             if json {
                 writeln!(out, "{}", json!({ "src": src, "rel": rel, "dst": dst })).ok();
@@ -454,6 +476,7 @@ fn execute(
         }
         Command::Export => {
             db.export_each(|f| write_export_line(out, &f));
+            db.export_edges_each(|src, rel, dst, fact| write_export_edge(out, src, rel, dst, fact));
             Ok(0)
         }
         Command::Maintain { mode } => {
@@ -919,6 +942,8 @@ fn with_recall_query<R>(
         range,
         k,
         closed,
+        token_budget,
+        ef,
         vector,
     } = cmd
     else {
@@ -941,9 +966,9 @@ fn with_recall_query<R>(
         as_of: *as_of,
         range: range_pair,
         k: *k,
-        token_budget: None,
+        token_budget: *token_budget,
         include_closed: *closed,
-        ef: None,
+        ef: *ef,
     };
     f(q)
 }
@@ -966,10 +991,31 @@ fn render_recall(res: &RecallResult, json: bool, out: &mut impl Write) {
                 })
             })
             .collect();
+        // The edges the graph source walked. The MCP server and the napi
+        // binding have always returned these; the CLI built its JSON by hand
+        // and dropped them, which made `--provenance` write-only from here:
+        // recordable, then unreadable.
+        let edges: Vec<_> = res
+            .edges
+            .iter()
+            .map(|e| {
+                json!({
+                    "src": e.src.0,
+                    "rel": e.rel.0,
+                    "dst": e.dst.0,
+                    "provenance": (e.provenance != FactId::NONE).then_some(e.provenance.0),
+                })
+            })
+            .collect();
         writeln!(
             out,
             "{}",
-            json!({ "facts": facts, "rendered": res.rendered, "truncated": res.truncated })
+            json!({
+                "facts": facts,
+                "edges": edges,
+                "rendered": res.rendered,
+                "truncated": res.truncated,
+            })
         )
         .ok();
     } else if res.rendered.is_empty() {
@@ -1107,17 +1153,41 @@ fn render_stats(s: &Stats, json: bool, out: &mut impl Write) {
 
 /// Writes one exported fact as a JSONL line. The unit of the streaming export
 /// — the same shape with or without `--json` (JSONL is already machine-readable).
+///
+/// `kind` is what makes the format extensible: a reader dispatches on it, and a
+/// line without one is a fact, which is exactly how files written before edges
+/// existed still load.
 fn write_export_line(out: &mut impl Write, f: &ExportedFact) {
     writeln!(
         out,
         "{}",
         json!({
+            "kind": "fact",
+            "id": f.id,
             "text": f.text,
             "entity": f.entity,
             "tags": f.tags,
             "metadata": f.metadata,
             "recorded_at": f.recorded_at,
             "valid_from": f.valid_from,
+        })
+    )
+    .ok();
+}
+
+/// Writes one edge line. Emitted **after** every fact line, so an importer
+/// reading forward has already seen the fact a `provenance` names and can
+/// translate its id without buffering or a second pass.
+fn write_export_edge(out: &mut impl Write, src: &str, rel: &str, dst: &str, provenance: FactId) {
+    writeln!(
+        out,
+        "{}",
+        json!({
+            "kind": "edge",
+            "src": src,
+            "rel": rel,
+            "dst": dst,
+            "provenance": (provenance != FactId::NONE).then_some(provenance.0),
         })
     )
     .ok();
@@ -1144,31 +1214,91 @@ fn do_import(
     file: &std::path::Path,
     batch_size: usize,
     _out: &mut impl Write,
-) -> Result<usize, CliError> {
+) -> Result<ImportReport, CliError> {
     let f = std::fs::File::open(file)
         .map_err(|e| CliError::Usage(format!("reading {}: {e}", file.display())))?;
     let reader = io::BufReader::new(f);
     let mut count = 0usize;
     let mut batch: Vec<ParsedFact> = Vec::with_capacity(batch_size);
+    // Old fact id -> the id this database gave it. Sparse (an exporting
+    // database has burned ids), so a map rather than a dense vector: a file
+    // whose edges carry no provenance never grows it at all.
+    let mut remap: BTreeMap<u32, FactId> = BTreeMap::new();
+    let mut edges = 0usize;
+
     for (i, line) in reader.lines().enumerate() {
         let line = line.map_err(|e| CliError::Usage(format!("line {}: {e}", i + 1)))?;
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        batch.push(parse_import_line(line, i + 1)?);
-        if batch.len() >= batch_size {
-            count += flush_import_batch(db, now, &batch)?;
-            batch.clear();
+        match parse_import_line(line, i + 1)? {
+            ImportLine::Fact(fact) => {
+                batch.push(fact);
+                if batch.len() >= batch_size {
+                    count += flush_import_batch(db, now, &batch, &mut remap)?;
+                    batch.clear();
+                }
+            }
+            ImportLine::Edge(edge) => {
+                // Edges follow every fact in a file this CLI wrote, so the
+                // pending batch has to land before an edge can name a fact
+                // from it. Flushing here costs one extra batch write per file,
+                // not per edge.
+                if !batch.is_empty() {
+                    count += flush_import_batch(db, now, &batch, &mut remap)?;
+                    batch.clear();
+                }
+                db.link(LinkInput {
+                    now,
+                    src: &edge.src,
+                    rel: &edge.rel,
+                    dst: &edge.dst,
+                    // A provenance naming a fact this file did not carry (it
+                    // was closed, or forgotten before the export) links without
+                    // one rather than pointing at an unrelated id.
+                    provenance: edge.provenance.and_then(|old| remap.get(&old).copied()),
+                })?;
+                edges += 1;
+            }
         }
     }
-    count += flush_import_batch(db, now, &batch)?;
-    Ok(count)
+    count += flush_import_batch(db, now, &batch, &mut remap)?;
+    Ok(ImportReport {
+        facts: count,
+        edges,
+    })
+}
+
+/// What an import wrote. Edges are counted separately because a file may carry
+/// only facts (anything written before edges were in the format) and reporting
+/// "0 edges" for those would read as a loss rather than as their absence.
+#[derive(Debug, PartialEq, Eq)]
+struct ImportReport {
+    facts: usize,
+    edges: usize,
+}
+
+/// One line of an import file: the two shapes `export` writes.
+enum ImportLine {
+    Fact(ParsedFact),
+    Edge(ParsedEdge),
+}
+
+/// One parsed edge line. Its `provenance` is the fact id **in the exporting
+/// database**; the importer translates it through the ids it just assigned.
+struct ParsedEdge {
+    src: String,
+    rel: String,
+    dst: String,
+    provenance: Option<u32>,
 }
 
 /// One parsed JSONL fact, owned so a whole batch can be buffered before its
-/// `remember_many`.
+/// `remember_many`. `id` is the exporting database's id, kept only so edges in
+/// the same file can be pointed at the fact once it has a new one.
 struct ParsedFact {
+    id: Option<u32>,
     text: String,
     entity: Option<String>,
     tags: Vec<String>,
@@ -1176,11 +1306,41 @@ struct ParsedFact {
     valid_from: Option<u64>,
 }
 
-/// Parses one JSONL line into an owned fact. Bad JSON, or a missing/non-string
-/// `text`, is a usage error naming the 1-based line.
-fn parse_import_line(line: &str, lineno: usize) -> Result<ParsedFact, CliError> {
+/// Parses one JSONL line. Dispatches on `kind`; a line without one is a fact,
+/// which is how files written before edges existed still load. Bad JSON, an
+/// unknown `kind`, or a fact missing its `text` is a usage error naming the
+/// 1-based line.
+fn parse_import_line(line: &str, lineno: usize) -> Result<ImportLine, CliError> {
     let v: serde_json::Value =
         serde_json::from_str(line).map_err(|e| CliError::Usage(format!("line {lineno}: {e}")))?;
+    match v["kind"].as_str() {
+        None | Some("fact") => parse_import_fact(&v, lineno).map(ImportLine::Fact),
+        Some("edge") => parse_import_edge(&v, lineno).map(ImportLine::Edge),
+        Some(other) => Err(CliError::Usage(format!(
+            "line {lineno}: unknown kind \"{other}\" (expected \"fact\" or \"edge\")"
+        ))),
+    }
+}
+
+/// Parses an edge line. All three endpoints are required — an edge missing one
+/// is not a partial edge, it is a broken file.
+fn parse_import_edge(v: &serde_json::Value, lineno: usize) -> Result<ParsedEdge, CliError> {
+    let field = |key: &str| -> Result<String, CliError> {
+        v[key]
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| CliError::Usage(format!("line {lineno}: edge missing string \"{key}\"")))
+    };
+    Ok(ParsedEdge {
+        src: field("src")?,
+        rel: field("rel")?,
+        dst: field("dst")?,
+        provenance: v["provenance"].as_u64().and_then(|n| u32::try_from(n).ok()),
+    })
+}
+
+/// Parses a fact line into an owned fact.
+fn parse_import_fact(v: &serde_json::Value, lineno: usize) -> Result<ParsedFact, CliError> {
     let text = v["text"]
         .as_str()
         .ok_or_else(|| CliError::Usage(format!("line {lineno}: missing string \"text\"")))?
@@ -1208,6 +1368,7 @@ fn parse_import_line(line: &str, lineno: usize) -> Result<ParsedFact, CliError> 
         .unwrap_or_default();
     let valid_from = v["valid_from"].as_u64();
     Ok(ParsedFact {
+        id: v["id"].as_u64().and_then(|n| u32::try_from(n).ok()),
         text,
         entity,
         tags,
@@ -1218,7 +1379,12 @@ fn parse_import_line(line: &str, lineno: usize) -> Result<ParsedFact, CliError> 
 
 /// Writes one batch of parsed facts via `remember_many` (one embed round-trip,
 /// one fsync). Returns how many were written; an empty batch is a no-op.
-fn flush_import_batch(db: &Database, now: u64, batch: &[ParsedFact]) -> Result<usize, CliError> {
+fn flush_import_batch(
+    db: &Database,
+    now: u64,
+    batch: &[ParsedFact],
+    remap: &mut BTreeMap<u32, FactId>,
+) -> Result<usize, CliError> {
     if batch.is_empty() {
         return Ok(0);
     }
@@ -1249,7 +1415,14 @@ fn flush_import_batch(db: &Database, now: u64, batch: &[ParsedFact]) -> Result<u
             ..RememberInput::text(now, &p.text)
         })
         .collect();
-    db.remember_many(inputs)?;
+    // `remember_many` returns outcomes in input order, so each parsed fact
+    // learns the id this database gave it — the only thing an edge needs.
+    let outcomes = db.remember_many(inputs)?;
+    for (parsed, outcome) in batch.iter().zip(&outcomes) {
+        if let Some(old) = parsed.id {
+            remap.insert(old, outcome.id);
+        }
+    }
     Ok(batch.len())
 }
 
@@ -1388,6 +1561,8 @@ mod tests {
             range: None,
             k: 0,
             closed: false,
+            token_budget: None,
+            ef: None,
             vector: Vec::new(),
         }
     }
@@ -1400,6 +1575,7 @@ mod tests {
             snapshot_every_ops: None,
             snapshot_journal_bytes: None,
             maintain_every_forgets: None,
+            fsync: None,
             workspace: plugmem_host::WorkspaceSettings {
                 dir: None,
                 limits: plugmem_host::WorkspaceLimits::default(),
@@ -1705,6 +1881,8 @@ mod tests {
             range: None,
             k: 0,
             closed: false,
+            token_budget: None,
+            ef: None,
             vector: Vec::new(),
         };
         let (code, out) = run_cmd(&db, &recall, false, 2_000);
@@ -1729,6 +1907,8 @@ mod tests {
             range: None,
             k: 0,
             closed: false,
+            token_budget: None,
+            ef: None,
             vector: Vec::new(),
         };
         let (code, out) = run_cmd(&db, &recall, false, 1_000);
@@ -1829,6 +2009,7 @@ mod tests {
             src: "plugmem".into(),
             rel: "depends_on".into(),
             dst: "tokio".into(),
+            provenance: None,
         };
         let (code, out) = run_cmd(&db, &link, false, 2_000);
         assert_eq!(code, 0);
@@ -1899,6 +2080,8 @@ mod tests {
             range: None,
             k: 0,
             closed: false,
+            token_budget: None,
+            ef: None,
             vector: Vec::new(),
         };
         let (_, out) = run_cmd(&db, &as_of, false, 3_000);
@@ -1938,6 +2121,7 @@ mod tests {
             src: "plugmem".into(),
             rel: "depends_on".into(),
             dst: "tokio".into(),
+            provenance: None,
         };
         let (_, out) = run_cmd(&db, &link, true, 2_000);
         let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
@@ -1981,6 +2165,8 @@ mod tests {
             range: Some(vec![0, 10_000]),
             k: 4,
             closed: true,
+            token_budget: None,
+            ef: None,
             vector: Vec::new(),
         };
         let (_, out) = run_cmd(&db, &recall, true, 4_000);
@@ -2197,6 +2383,8 @@ mod tests {
             range: None,
             k: 1,
             closed: false,
+            token_budget: None,
+            ef: None,
             vector: Vec::new(),
         };
         assert_eq!(execute_ro(&ro, &recall, None, false, &mut out), 0);
@@ -2352,7 +2540,7 @@ mod tests {
         let mut bk: Vec<_> = b.export().iter().map(key).collect();
         ak.sort();
         bk.sort();
-        assert_eq!(n, ak.len());
+        assert_eq!(n.facts, ak.len());
         assert_eq!(
             ak, bk,
             "roundtrip must preserve text/entity/tags/valid_from"
@@ -2399,7 +2587,7 @@ mod tests {
         .unwrap();
         // A tiny batch size exercises the streaming/chunking path (two batches).
         let n = do_import(&db, 9_000, &good, 1, &mut Vec::new()).unwrap();
-        assert_eq!(n, 2, "both facts imported, blank line skipped");
+        assert_eq!(n.facts, 2, "both facts imported, blank line skipped");
 
         let bad = scratch.0.join("bad.jsonl");
         std::fs::write(&bad, "not json at all\n").unwrap();
@@ -2424,8 +2612,8 @@ mod tests {
         let na = do_import(&a, 9_000, &file, 1, &mut Vec::new()).unwrap();
         let nb = do_import(&b, 9_000, &file, 100, &mut Vec::new()).unwrap();
 
-        assert_eq!(na, 5);
-        assert_eq!(nb, 5);
+        assert_eq!(na.facts, 5);
+        assert_eq!(nb.facts, 5);
         let texts = |db: &Database| {
             let mut t: Vec<_> = db.export().into_iter().map(|f| f.text).collect();
             t.sort();
@@ -2550,6 +2738,8 @@ mod tests {
                 range: None,
                 k: 0,
                 closed: false,
+                token_budget: None,
+                ef: None,
                 vector: Vec::new(),
             },
         };

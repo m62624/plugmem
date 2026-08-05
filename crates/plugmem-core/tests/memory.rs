@@ -1079,3 +1079,93 @@ fn stats_report_engine_counters() {
     assert!(s.terms > 0, "tokens, tags and names were interned");
     assert!(s.pool_bytes > 0, "pools hold the records and texts");
 }
+
+#[test]
+fn edges_each_visits_every_open_edge_once_and_can_stop() {
+    // The walk a portable dump is built on: facts alone are not the memory,
+    // and an export without edges silently loses one of the four recall
+    // sources.
+    let (mut mem, mut store) = engine();
+    let f = mem
+        .remember(
+            &mut store,
+            RememberInput {
+                entity: Some("ann"),
+                ..RememberInput::text(10, "ann hired bob")
+            },
+        )
+        .unwrap();
+    for (rel, dst, provenance) in [
+        ("hires", "bob", Some(f.id)),
+        ("knows", "carol", None),
+        ("knows", "bob", None),
+    ] {
+        mem.link(
+            &mut store,
+            LinkInput {
+                now: 20,
+                src: "ann",
+                rel,
+                dst,
+                provenance,
+            },
+        )
+        .unwrap();
+    }
+
+    let mut seen = Vec::new();
+    mem.edges_each(|src, rel, dst, fact| {
+        seen.push((src.to_string(), rel.to_string(), dst.to_string(), fact));
+        true
+    });
+    seen.sort();
+    assert_eq!(
+        seen.len(),
+        3,
+        "each edge once, not once per mirror: {seen:?}"
+    );
+    assert!(
+        seen.iter()
+            .any(|(s, r, d, p)| s == "ann" && r == "hires" && d == "bob" && *p == f.id)
+    );
+    assert!(
+        seen.iter()
+            .any(|(_, r, d, p)| r == "knows" && d == "carol" && *p == FactId::NONE),
+        "an unsourced edge reports the sentinel: {seen:?}"
+    );
+
+    // A closed edge leaves the current graph (its history stays behind).
+    mem.unlink(
+        &mut store,
+        UnlinkInput {
+            now: 30,
+            src: "ann",
+            rel: "knows",
+            dst: "carol",
+        },
+    )
+    .unwrap();
+    let mut after = 0;
+    mem.edges_each(|_, _, _, _| {
+        after += 1;
+        true
+    });
+    assert_eq!(after, 2, "unlinked edges are not exported");
+
+    // Returning `false` stops the walk, so a caller can bound its own work.
+    let mut visited = 0;
+    mem.edges_each(|_, _, _, _| {
+        visited += 1;
+        false
+    });
+    assert_eq!(visited, 1, "the walk stops on the first refusal");
+
+    // Nothing to walk is not an error.
+    let (empty, _) = engine();
+    let mut none = 0;
+    empty.edges_each(|_, _, _, _| {
+        none += 1;
+        true
+    });
+    assert_eq!(none, 0);
+}

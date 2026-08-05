@@ -239,6 +239,16 @@ const DOCS: &[SettingDoc] = &[
     },
     SettingDoc {
         section: "maintenance",
+        key: "fsync",
+        value_type: "\"each_op\" | \"on_snapshot\"",
+        default: "each_op",
+        description: "When journal appends reach the disk. \"each_op\": every acknowledged write \
+survives a power cut. \"on_snapshot\": faster, an OS crash may lose the journal tail since the \
+last snapshot",
+        scope: SettingScope::Shared,
+    },
+    SettingDoc {
+        section: "maintenance",
         key: "batch_size",
         value_type: "positive integer",
         default: "128",

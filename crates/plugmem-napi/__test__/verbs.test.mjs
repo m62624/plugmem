@@ -253,3 +253,57 @@ test("a missing required arg throws, not crashes", async () => {
     assert.throws(() => db.remember({}));
   });
 });
+
+// The knobs that reached the engine but no wrapper: `token_budget` and `ef` on
+// recall, `provenance` on link. Every binding hardcoded them to `None`, so the
+// engine supported them and nobody could use them. These lock the parity.
+test("the token budget bounds the rendered block", async () => {
+  await withDb(async (db) => {
+    for (let i = 0; i < 40; i++) {
+      await db.remember({
+        text: `fact number ${i} about the deployment pipeline and its many stages`,
+      });
+    }
+
+    const generous = await db.recall({ query: "deployment pipeline", k: 40 });
+    const tight = await db.recall({
+      query: "deployment pipeline",
+      k: 40,
+      tokenBudget: 40,
+    });
+
+    assert.ok(
+      tight.rendered.length < generous.rendered.length,
+      `a tight budget must shrink the block: ${tight.rendered.length} vs ${generous.rendered.length}`,
+    );
+  });
+});
+
+test("ef is accepted and leaves a lexical answer alone", async () => {
+  await withDb(async (db) => {
+    await db.remember({ text: "the release ships on friday" });
+
+    const plain = await db.recall({ query: "release" });
+    const withEf = await db.recall({ query: "release", ef: 64 });
+    assert.deepEqual(withEf.facts.map((f) => f.id), plain.facts.map((f) => f.id));
+  });
+});
+
+test("link records provenance and recall returns it", async () => {
+  await withDb(async (db) => {
+    const source = await db.remember({ text: "ann hired bob in march" });
+
+    await db.link({ src: "ann", rel: "hires", dst: "bob", provenance: source.id });
+    const res = await db.recall({ entities: ["ann"] });
+
+    assert.ok(res.edges.length > 0, "the graph source walked the edge");
+    assert.ok(
+      res.edges.some((e) => e.provenance === source.id),
+      `the edge names the fact it follows from: ${JSON.stringify(res.edges)}`,
+    );
+
+    // unlink takes the same argument shape and ignores provenance: closing an
+    // edge has no source fact to name.
+    assert.equal(await db.unlink({ src: "ann", rel: "hires", dst: "bob" }), true);
+  });
+});

@@ -18,8 +18,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::{
-    Config, Database, DatabaseBuilder, Embedder, HostError, MAX_OPEN_CEILING, OpenAiCompatEmbedder,
-    Opener, SharedEmbedder, Workspace, WorkspaceLayout, WorkspaceLimits,
+    Config, Database, DatabaseBuilder, Embedder, FsyncPolicy, HostError, MAX_OPEN_CEILING,
+    OpenAiCompatEmbedder, Opener, SharedEmbedder, Workspace, WorkspaceLayout, WorkspaceLimits,
 };
 
 /// Environment variable naming the config file (below an explicit path).
@@ -37,6 +37,7 @@ pub(crate) const MAINTENANCE_SETTING_KEYS: &[&str] = &[
     "snapshot_every_ops",
     "snapshot_journal_bytes",
     "maintain_every_forgets",
+    "fsync",
 ];
 
 /// A configuration error: malformed TOML, a bad `[engine]` value, or an
@@ -74,6 +75,11 @@ pub struct Settings {
     pub snapshot_journal_bytes: Option<u64>,
     /// `[maintenance].maintain_every_forgets`, if set.
     pub maintain_every_forgets: Option<u64>,
+    /// `[maintenance].fsync`, if set. `None` leaves the engine default
+    /// ([`FsyncPolicy::EachOp`]) — every acknowledged write survives a power
+    /// cut. This is the largest single lever on write throughput, which is why
+    /// changing it is a deliberate config edit and not a per-call flag.
+    pub fsync: Option<FsyncPolicy>,
     /// The `[workspace]` section. Its `dir` is `None` unless the file names
     /// one — **the default is a single database**, and nothing turns a
     /// workspace on by itself.
@@ -111,6 +117,7 @@ impl Settings {
         let mut snapshot_every_ops = None;
         let mut snapshot_journal_bytes = None;
         let mut maintain_every_forgets = None;
+        let mut fsync = None;
         let mut workspace = WorkspaceSettings {
             dir: None,
             limits: WorkspaceLimits::default(),
@@ -141,6 +148,7 @@ impl Settings {
                 snapshot_every_ops = table_u64(t, MAINTENANCE_SETTING_KEYS[0]);
                 snapshot_journal_bytes = table_u64(t, MAINTENANCE_SETTING_KEYS[1]);
                 maintain_every_forgets = table_u64(t, MAINTENANCE_SETTING_KEYS[2]);
+                fsync = parse_fsync(t)?;
             }
             if let Some(t) = table.get("workspace").and_then(toml::Value::as_table) {
                 workspace = parse_workspace(t)?;
@@ -159,6 +167,7 @@ impl Settings {
             snapshot_every_ops,
             snapshot_journal_bytes,
             maintain_every_forgets,
+            fsync,
             workspace,
         })
     }
@@ -177,6 +186,9 @@ impl Settings {
         }
         if let Some(v) = self.maintain_every_forgets {
             b = b.maintain_every_forgets(v);
+        }
+        if let Some(v) = self.fsync {
+            b = b.fsync(v);
         }
         if let Some(e) = self.embedder {
             b = b.embedder(e);
@@ -289,6 +301,29 @@ pub fn read_config(flag: Option<&Path>) -> Result<Option<toml::Table>, SettingsE
 }
 
 /// A non-negative integer key from a table as `u64`, or `None`.
+/// Reads `[maintenance].fsync` as a named policy.
+///
+/// A string rather than a boolean, because the two values are not opposites of
+/// one thing: `"each_op"` says *when* a record is durable, `"on_snapshot"` says
+/// which window may be lost. A misspelling is refused rather than silently
+/// treated as the default — quietly running with weaker durability than the
+/// file asks for is the one outcome worth erroring over.
+fn parse_fsync(t: &toml::Table) -> Result<Option<FsyncPolicy>, SettingsError> {
+    let Some(value) = t.get(MAINTENANCE_SETTING_KEYS[3]) else {
+        return Ok(None);
+    };
+    let name = value.as_str().ok_or_else(|| {
+        SettingsError::config("[maintenance].fsync must be \"each_op\" or \"on_snapshot\"")
+    })?;
+    match name {
+        "each_op" => Ok(Some(FsyncPolicy::EachOp)),
+        "on_snapshot" => Ok(Some(FsyncPolicy::OnSnapshot)),
+        other => Err(SettingsError::config(format!(
+            "[maintenance].fsync must be \"each_op\" or \"on_snapshot\", got \"{other}\""
+        ))),
+    }
+}
+
 pub(crate) fn table_u64(t: &toml::Table, key: &str) -> Option<u64> {
     t.get(key)
         .and_then(toml::Value::as_integer)
@@ -516,6 +551,7 @@ dim = 8
             snapshot_every_ops: Some(4),
             snapshot_journal_bytes: Some(4096),
             maintain_every_forgets: Some(2),
+            fsync: Some(FsyncPolicy::OnSnapshot),
             workspace: WorkspaceSettings {
                 dir: None,
                 limits: WorkspaceLimits::default(),
@@ -598,6 +634,59 @@ dim = 8
             .unwrap();
         assert_eq!(db.stats().facts, 1);
         assert!(ws.layout().exists(&name));
+    }
+
+    #[test]
+    fn fsync_policy_is_named_and_a_misspelling_is_refused() {
+        let parse = |body: &str| {
+            let table: toml::Table = body.parse().unwrap();
+            let t = table.get("maintenance").unwrap().as_table().unwrap();
+            parse_fsync(t)
+        };
+
+        assert_eq!(
+            parse("[maintenance]\n").unwrap(),
+            None,
+            "absent stays default"
+        );
+        assert_eq!(
+            parse("[maintenance]\nfsync = \"each_op\"\n").unwrap(),
+            Some(FsyncPolicy::EachOp)
+        );
+        assert_eq!(
+            parse("[maintenance]\nfsync = \"on_snapshot\"\n").unwrap(),
+            Some(FsyncPolicy::OnSnapshot)
+        );
+
+        // The one thing worth erroring over: a typo must not quietly leave the
+        // database running with different durability than the file asks for.
+        for bad in [
+            "[maintenance]\nfsync = \"on-snapshot\"\n",
+            "[maintenance]\nfsync = \"none\"\n",
+            "[maintenance]\nfsync = true\n",
+            "[maintenance]\nfsync = 1\n",
+        ] {
+            let Err(err) = parse(bad) else {
+                panic!("{bad:?} must be refused");
+            };
+            assert!(
+                err.to_string().contains("each_op"),
+                "the message names the legal values: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn fsync_reaches_settings_from_the_config_file() {
+        // The gap this closes: `FsyncPolicy` was public in the host and
+        // reachable from nowhere else — not a CLI flag, not an MCP argument,
+        // not a napi option, not the config file. Only hand-written Rust.
+        let table: toml::Table = "[maintenance]\nfsync = \"on_snapshot\"\n".parse().unwrap();
+        let settings = Settings::from_table(Some(&table)).unwrap();
+        assert_eq!(settings.fsync, Some(FsyncPolicy::OnSnapshot));
+
+        let plain = Settings::from_table(None).unwrap();
+        assert_eq!(plain.fsync, None, "no config means the engine default");
     }
 
     #[test]
