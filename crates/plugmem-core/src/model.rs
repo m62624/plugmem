@@ -147,7 +147,7 @@ pub struct FactAux {
     /// The fact's tag list (`TermId` values) in the tag `ChunkPool`.
     pub tags: ListHandle,
     /// The fact's metadata blob in the `metas` heap (a canonical key→value
-    /// encoding, see [`crate::metadata`]), or [`BlobId`]`(`[`NONE_U32`]`)` when
+    /// encoding, see `crate::metadata`), or [`BlobId`]`(`[`NONE_U32`]`)` when
     /// the fact carries no metadata. The engine never interprets the bytes.
     pub meta: BlobId,
 }

@@ -54,6 +54,68 @@ with a recency boost (tags filter; they are not a source):
 | **Graph** | entity graph with typed edges, breadth-first from query anchors | relational knowledge |
 | **Temporal** | range scans over a `recorded_at`-ordered index; bitemporal validity | "what was true *then*", time windows |
 
+## Two clocks
+
+Every fact carries two timestamps, and the distinction is the reason the
+temporal source exists at all:
+
+- **`valid_from` / `valid_to`** — when the statement was true.
+- **`recorded_at`** — when the memory learned it. Stamped by the engine.
+
+One timestamp cannot hold both. Someone moved on March 1st; you found out on
+the 10th:
+
+```rust,no_run
+# use plugmem_host::{Config, Database, RecallQuery, RememberInput};
+# let (db, _) = Database::builder(Config::default()).open("agent.plugmem")?;
+const MAR_1: u64 = 1_772_323_200_000;
+const MAR_5: u64 = 1_772_668_800_000;
+const MAR_10: u64 = 1_773_100_800_000;
+
+// January: what you knew then.
+let moscow = db.remember(RememberInput {
+    entity: Some("kim"),
+    ..RememberInput::text(1_767_225_600_000, "lives in Moscow")
+})?;
+
+// March 10th: you learn about a move that happened on the 1st.
+db.revise(
+    moscow.id,
+    RememberInput {
+        entity: Some("kim"),
+        valid_from: Some(MAR_1),   // true since March 1st…
+        ..RememberInput::text(MAR_10, "lives in Berlin")  // …recorded on the 10th
+    },
+)?;
+
+// The current answer: Berlin.
+db.recall(RecallQuery {
+    entities: &["kim"],
+    ..RecallQuery::text(MAR_10, "kim")
+})?;
+
+// As of March 5th: Moscow. The move had happened, but you had not heard of it.
+db.recall(RecallQuery {
+    entities: &["kim"],
+    as_of: Some(MAR_5),
+    ..RecallQuery::text(MAR_10, "kim")
+})?;
+# Ok::<(), plugmem_host::HostError>(())
+```
+
+That last query is the point. `as_of` moves **both** clocks: a fact answers only
+if it was valid at that instant *and* had already been recorded by then. So it
+reconstructs what the memory actually held at a past moment, rather than
+applying today's knowledge to yesterday's question.
+
+The old fact is still on disk. `revise` closed its interval, it did not delete
+it, which is why the March 5th query has something to answer with. `forget` is
+the other verb, and it does destroy: use it when a fact was simply wrong, not
+when it changed.
+
+Edges are temporal the same way, so an `as_of` traversal walks the graph as it
+stood then — through relationships that have since been unlinked.
+
 ## What `plugmem-host` adds
 
 The retrieval above lives in the engine; this crate adds the OS side:
@@ -61,15 +123,18 @@ The retrieval above lives in the engine; this crate adds the OS side:
 - **File-backed storage** — atomic snapshots (tmp + fsync + rename),
   an append-only journal with a configurable fsync policy, crash
   recovery (a torn journal tail is detected and dropped on open);
-- **OS locking** — an advisory lock per database file: read-write opens
-  take it exclusively, read-only opens take it *shared*, so a conflicting
-  opener is refused with a typed `HostError::Locked` rather than corrupting
-  silently (the model is SQLite-like: N readers **or** one writer);
-- **A read-only mmap open** — `Database::open_readonly` maps the snapshot
-  and lets the engine borrow the mapped pages, so a large read-mostly
-  database residents only the pages a query touches instead of loading
-  the whole file. It holds a shared lock, so **many readers map the same
-  file at once** — across threads or processes — sharing the OS page cache;
+- **OS locking, one writer** — an advisory lock per database file. A second
+  read-write open is refused with a typed `HostError::Locked` rather than
+  corrupting the file silently. Readers do **not** take that lock;
+- **A read-only mmap open, concurrent with the writer** —
+  `Database::open_readonly` pins the current published snapshot generation and
+  maps it, borrowing the mapped pages so a large read-mostly database resides
+  only in the pages a query touches. Generations are immutable — a checkpoint
+  writes a new one and never rewrites an old one — so **a writer and any number
+  of readers run at the same time**, across threads and across processes,
+  sharing the OS page cache. This is the WAL/MVCC arrangement, not "N readers
+  *or* one writer": a reader sees state as of the checkpoint it pinned
+  (snapshot isolation) and calls `refresh()` to adopt a newer one;
 - **A write path that does not clone the file** — `Database::open`
   memory-maps the snapshot and the engine borrows it as an *overlay*:
   mutations land in a small owned overlay (an appended tail plus per-page
@@ -200,7 +265,7 @@ pooled, plus an optional registry of what each is for.
 use plugmem_host::{DbName, IfMissing, Settings};
 
 let ws = Settings::load(None)?.open_workspace("/srv/bot".as_ref())?;
-let db = ws.get(&DbName::parse("chat-42")?, now_ms, IfMissing::Create)?;
+let db = ws.get(&DbName::parse("chat-42")?, now_ms(), IfMissing::Create)?;
 # fn now_ms() -> u64 { 0 }
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```

@@ -15,7 +15,7 @@
 //! none:
 //!
 //! - document lengths come from a flat array indexed by fact id, not from the
-//!   stored arena (see [`Bm25Index::doc_len_dense`]);
+//!   stored arena (see `Bm25Index::doc_len_dense`);
 //! - partial scores accumulate by merging sorted runs, because the postings
 //!   are already sorted by fact id, so no map is probed;
 //! - the caller's `live` predicate — a fact-record lookup on the engine side —
@@ -90,7 +90,7 @@ pub struct DocLenSlot {
     /// "unknown": a document indexed before the signature existed, read
     /// through the legacy migration.
     pub distinct: u16,
-    /// Union of [`sig_bit`] over the document's distinct terms. A term absent
+    /// Union of `sig_bit` over the document's distinct terms. A term absent
     /// from this word is definitely absent from the document; a term present
     /// may still be absent (bits collide). Zero alongside `distinct == 0`
     /// means "unknown".
@@ -218,13 +218,13 @@ pub struct Bm25Index<'a> {
     /// `doc_len` on load, never written to the snapshot. `doc_len` remains the
     /// stored form and the only place the term-set summary lives.
     doc_len_dense: Vec<u32>,
-    /// Exclusive upper bound of the fact ids [`Bm25Index::doc_len_dense`] may
+    /// Exclusive upper bound of the fact ids `Bm25Index::doc_len_dense` may
     /// be trusted for. `usize::MAX` while it has covered every document it was
     /// offered; lowered to the first id it declined.
     dense_limit: usize,
 }
 
-/// [`Bm25Index::doc_len_dense`] entry for a fact id with no indexed document.
+/// `Bm25Index::doc_len_dense` entry for a fact id with no indexed document.
 /// Lengths saturate at `u16::MAX`, so this cannot collide with a real one.
 const DOC_LEN_ABSENT: u32 = u32::MAX;
 

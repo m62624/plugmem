@@ -74,7 +74,7 @@ pub struct RememberInput<'a> {
     pub valid_from: Option<u64>,
     /// Optional metadata as key→value pairs (UTF-8). Passed in any order; the
     /// engine canonicalizes (sorts keys, rejects duplicates) and stores them as
-    /// one opaque blob (see [`crate::metadata`]). `None` or an empty slice = no
+    /// one opaque blob (see `crate::metadata`). `None` or an empty slice = no
     /// metadata. The engine never interprets the values.
     pub metadata: Option<&'a [(&'a str, &'a str)]>,
 }
@@ -271,7 +271,7 @@ pub struct Memory<'a> {
     temporal: Arena<'a, TemporalSlot>,
     /// Fact texts and canonical entity names.
     texts: BlobHeap<'a>,
-    /// Per-fact metadata blobs (canonical key→value, see [`crate::metadata`]),
+    /// Per-fact metadata blobs (canonical key→value, see `crate::metadata`),
     /// referenced by [`FactAux::meta`]. Empty and inert until a fact carries
     /// metadata; kept out of `texts` so this cold pool stays non-resident on an
     /// mmap'd base until `show`/`export` touches it.

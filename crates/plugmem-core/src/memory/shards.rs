@@ -120,7 +120,7 @@ impl ShardLayout {
     /// Observable rather than internal: it is what tells a caller how much
     /// under-sharding to expect between rebuilds, and it is the figure a test
     /// needs to know how much data provokes one. Under-sharding is the cheap
-    /// direction — see [`ShardLayout::group_earns_rebuild`] — so this is wide
+    /// direction — see `ShardLayout::group_earns_rebuild` — so this is wide
     /// on purpose.
     pub const GROWTH_MARGIN: usize = GROW_FACTOR;
 
@@ -256,7 +256,7 @@ impl ShardLayout {
 
 /// How far a group must outgrow its shard count before growing it: three
 /// doublings. Wide because under-sharding is the cheap direction and each
-/// crossing costs a full rebuild — see [`ShardLayout::group_earns_rebuild`].
+/// crossing costs a full rebuild — see `ShardLayout::group_earns_rebuild`.
 const GROW_FACTOR: usize = 8;
 /// How far it must fall below before shrinking: two doublings. Narrower than
 /// [`GROW_FACTOR`] because over-sharding is the direction that actually costs

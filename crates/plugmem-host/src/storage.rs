@@ -77,7 +77,7 @@ impl FileStorage {
     /// Opens (creating as needed) the database at `base` and takes the
     /// **exclusive writer lock** — one writer at a time. Readers do *not* take
     /// this lock (they pin a generation file via
-    /// [`pin_current_generation`] instead), so a writer and any number of
+    /// `pin_current_generation` instead), so a writer and any number of
     /// readers coexist across threads or processes (the versioned
     /// MVCC layout).
     ///
@@ -416,7 +416,7 @@ fn sync_dir(base: &Path) -> Result<(), HostError> {
 
 /// Reclaims one superseded generation file, but only if nothing pins it. A
 /// reader holds a **shared** lock on the generation file for as long as it maps
-/// it (see [`pin_current_generation`]), so a successful **exclusive** try-lock
+/// it (see `pin_current_generation`), so a successful **exclusive** try-lock
 /// proves no reader is using it, and the delete under that lock cannot race a
 /// new pin. Best-effort: a pinned (or, on Windows, an open-mapped) generation is
 /// simply left for a later pass. Never deletes a live reader's snapshot.

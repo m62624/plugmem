@@ -91,6 +91,21 @@ Rust programs use the library (`host`, or `core` for specialists) — embedded
 in-process, like linking SQLite. Other languages and agents come in through
 `mcp` (or `napi` for Node/TS) — not the CLI, which is the human/scripting door.
 
+**One thing lives only in the CLI: the JSONL file format.** `export` streams
+every open fact and then every open edge to stdout, one per line, each tagged
+with a `kind`; `import` reads it back in batches. Both halves stream, so a
+memory of any size dumps and loads in bounded RAM. The library, the MCP server
+and the Node addon return exported facts as structures, but none of them reads
+or writes the file format, and none has an `import` verb — a program holding the
+structures already knows how to write them back.
+
+What crosses the round trip: text, subject entity, tags, metadata,
+`valid_from`, graph edges, and each edge's provenance fact (retargeted to the id
+the receiving database assigns). What does not: **closed revisions and vectors**
+— history does not survive, and vectors are recomputed on import when an
+embedder is configured. So JSONL is a portable knowledge dump, not a backup. For
+a backup, copy the database files.
+
 | Crate | What it is |
 |---|---|
 | [`plugmem-arena`](crates/plugmem-arena) | flat byte-pool storage structures (`no_std`, wasm-first) |

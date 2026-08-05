@@ -1,3 +1,7 @@
+//! The crate README is included below as module documentation, which makes
+//! every Rust example in it a doctest: a README that drifts from the API stops
+//! compiling instead of quietly lying.
+#![doc = include_str!("../README.md")]
 //! Native host layer for the plugmem engine: file-backed storage with
 //! exclusive locking, a thread-safe database handle with a maintenance
 //! policy, and embedding providers.

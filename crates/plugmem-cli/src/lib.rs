@@ -3,7 +3,7 @@
 //! compiling instead of quietly lying.
 #![doc = include_str!("../README.md")]
 //! `plugmem` — the command-line surface over the
-//! [temporal-memory engine](plugmem_core), a thin wrapper around
+//! [temporal-memory engine](https://docs.rs/plugmem-core/latest), a thin wrapper around
 //! [`plugmem_host::Database`]. Parse the arguments, call one
 //! engine verb, render the result — human text by default, `--json` for
 //! tooling and agents. No memory logic lives here; that is the engine's.
@@ -66,7 +66,7 @@ pub(crate) fn now_ms() -> u64 {
 
 /// Parses argv and runs one command, mapping the result to a process exit
 /// code. The binary's `main` is a one-liner over this; the wiring itself is
-/// [`run_parsed`], which is unit-testable (only `Cli::parse` is not).
+/// `run_parsed`, which is unit-testable (only `Cli::parse` is not).
 pub fn run() -> ExitCode {
     let stdout = io::stdout();
     ExitCode::from(run_parsed(Cli::parse(), &mut stdout.lock()))

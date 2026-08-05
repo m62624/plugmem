@@ -461,7 +461,7 @@ impl Database {
     ///
     /// [`HostError::Locked`], [`HostError::NeedsCheckpoint`],
     /// [`HostError::Io`], [`HostError::Engine`] — see
-    /// [`ReadOnlyDatabase::open`] semantics.
+    /// `ReadOnlyDatabase::open` semantics.
     pub fn open_readonly(
         path: impl Into<PathBuf>,
         cfg: Config,
@@ -978,7 +978,7 @@ impl Database {
     }
 
     /// Writes a full snapshot and clears the journal now (re-mapping the
-    /// fresh file — see [`Database::resnapshot`]).
+    /// fresh file — see `Database::resnapshot`).
     pub fn checkpoint(&self, now: u64) -> Result<(), HostError> {
         let mut st = self.write();
         self.resnapshot(&mut st, now)?;
