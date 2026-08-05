@@ -62,39 +62,39 @@ temporal source exists at all:
 - **`valid_from` / `valid_to`** — when the statement was true.
 - **`recorded_at`** — when the memory learned it. Stamped by the engine.
 
-One timestamp cannot hold both. Someone moved on March 1st; you found out on
-the 10th:
+One timestamp cannot hold both, and the host passes `now` explicitly, so the
+whole sequence is expressible:
 
 ```rust,no_run
 # use plugmem_host::{Config, Database, RecallQuery, RememberInput};
 # let (db, _) = Database::builder(Config::default()).open("agent.plugmem")?;
-const MAR_1: u64 = 1_772_323_200_000;
+const JAN: u64 = 1_767_225_600_000;
 const MAR_5: u64 = 1_772_668_800_000;
 const MAR_10: u64 = 1_773_100_800_000;
 
-// January: what you knew then.
-let moscow = db.remember(RememberInput {
+// In January the memory learns where kim lives.
+let first = db.remember(RememberInput {
     entity: Some("kim"),
-    ..RememberInput::text(1_767_225_600_000, "lives in Moscow")
+    ..RememberInput::text(JAN, "lives in Moscow")
 })?;
 
-// March 10th: you learn about a move that happened on the 1st.
+// On March 10th it learns the address changed. `revise` closes the old
+// interval at this instant; it does not delete the record.
 db.revise(
-    moscow.id,
+    first.id,
     RememberInput {
         entity: Some("kim"),
-        valid_from: Some(MAR_1),   // true since March 1st…
-        ..RememberInput::text(MAR_10, "lives in Berlin")  // …recorded on the 10th
+        ..RememberInput::text(MAR_10, "lives in Berlin")
     },
 )?;
 
-// The current answer: Berlin.
+// Now: Berlin.
 db.recall(RecallQuery {
     entities: &["kim"],
     ..RecallQuery::text(MAR_10, "kim")
 })?;
 
-// As of March 5th: Moscow. The move had happened, but you had not heard of it.
+// As of March 5th: Moscow. Still valid then, and already recorded.
 db.recall(RecallQuery {
     entities: &["kim"],
     as_of: Some(MAR_5),
@@ -103,15 +103,22 @@ db.recall(RecallQuery {
 # Ok::<(), plugmem_host::HostError>(())
 ```
 
-That last query is the point. `as_of` moves **both** clocks: a fact answers only
-if it was valid at that instant *and* had already been recorded by then. So it
-reconstructs what the memory actually held at a past moment, rather than
-applying today's knowledge to yesterday's question.
+`as_of` moves **both** clocks: a fact answers only if it was valid at that
+instant *and* had already been recorded by then. The second half is the one
+people trip over. An `as_of` earlier than a fact's `recorded_at` does not see
+it, because the memory genuinely knew nothing then — answering with today's
+knowledge would be the wrong answer to "what did I hold".
 
-The old fact is still on disk. `revise` closed its interval, it did not delete
-it, which is why the March 5th query has something to answer with. `forget` is
-the other verb, and it does destroy: use it when a fact was simply wrong, not
-when it changed.
+`valid_from` is the other half of the model: a statement that became true before
+you heard of it. Recording on March 10th that the move happened on March 1st —
+`valid_from: Some(MAR_1)` on the revision — closes the old interval at March 1st
+instead of at March 10th. A query as of March 5th then finds *neither*: Moscow
+had stopped being true, and Berlin was not yet known. That is not a hole in the
+model, it is the honest answer for that instant, and it is exactly what one
+timestamp cannot express.
+
+The old record stays on disk either way. `forget` is the destructive verb: use
+it when a fact was wrong, not when it changed.
 
 Edges are temporal the same way, so an `as_of` traversal walks the graph as it
 stood then — through relationships that have since been unlinked.

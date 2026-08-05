@@ -86,48 +86,48 @@ Every fact carries **two** timestamps, not one:
 - **`validFrom` / `validTo`** — when the statement was true.
 - **`recordedAt`** — when the memory learned it. Set by the engine, never by you.
 
-They are different questions, and one timestamp cannot hold both. Someone moved
-to Berlin on March 1st, but you only found out on March 10th:
+They are different questions, and one timestamp cannot hold both.
+
+Unlike the Rust library, this binding reads the system clock on every call — you
+never pass `now` — so `recordedAt` is always the moment of the write:
 
 ```typescript
-const MAR_1  = Date.parse("2026-03-01");
-const MAR_5  = Date.parse("2026-03-05");
-const MAR_10 = Date.parse("2026-03-10");
+await db.remember({ text: "lives in Moscow", entity: "kim" });
+const between = Date.now();
+await db.revise(0, { text: "lives in Berlin", entity: "kim" });
 
-// January: what you knew then.
-const moscow = await db.remember({ text: "lives in Moscow", entity: "kim" });
+(await db.recall({ entities: ["kim"] })).rendered;
+// - [f1] kim: lives in Berlin (2026-08; active)
 
-// March 10th: you learn about a move that happened on March 1st.
-await db.revise(moscow.id, {
-  text: "lives in Berlin",
-  entity: "kim",
-  validFrom: MAR_1,          // true since March 1st…
-});                          // …recorded now, on the 10th
-
-await db.recall({ entities: ["kim"] });
-// → Berlin, the current answer
-
-await db.recall({ entities: ["kim"], asOf: MAR_5 });
-// → Moscow. On March 5th you had not heard about the move yet.
+(await db.recall({ entities: ["kim"], asOf: between })).rendered;
+// - [f0] kim: lives in Moscow (2026-08 → 2026-08; closed)
 ```
 
-The last query is the point. `asOf` moves **both** clocks: a fact answers only
-if it was valid at that instant *and* had already been recorded by then. So
-`asOf` reconstructs what the memory actually held at a past moment, not what you
-later found out. An agent replaying old context gets what it had, without
-knowledge from its own future leaking in.
+`revise` closed the first fact's interval rather than deleting it, which is why
+the second query has something to answer with.
 
-The old fact is still there. `revise` closed its interval, it did not delete it,
-which is why the March 5th query has something to answer with. Use `revise` when
-something changed and `forget` only when a fact was simply wrong — `forget`
-destroys the "what was true then" answer, `revise` keeps it.
+`asOf` moves **both** clocks: a fact answers only if it was valid at that
+instant *and* had already been recorded by then. The second half is the one
+people trip over — an `asOf` earlier than a fact's `recordedAt` sees nothing,
+because the memory genuinely knew nothing then. Answering with today's knowledge
+would be the wrong answer to "what did I hold".
+
+`validFrom` is the other half: a statement that became true before you heard of
+it. Recording today that someone moved a week ago closes the previous interval a
+week ago rather than now, so a query as of three days back finds **neither** —
+the old fact had stopped being true, and the new one was not yet known. That is
+not a hole in the model; it is the honest answer for that instant, and it is
+what a single timestamp cannot express.
 
 Two more queries over the same axes:
 
 ```typescript
-await db.recall({ range: [MAR_1, MAR_10] });  // what did I record in this window
+await db.recall({ range: [from, to] });          // what did I record in this window
 await db.recall({ query: "kim", closed: true }); // include closed revisions
 ```
+
+Use `revise` when something changed and `forget` only when a fact was simply
+wrong: `forget` destroys the "what was true then" answer, `revise` keeps it.
 
 Edges are temporal too, so `asOf` walks the graph as it stood then — through
 relationships that have since been unlinked.
