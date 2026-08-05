@@ -102,6 +102,15 @@ startup network call; a mismatch with the server's response is a typed error). H
 `ureq` (blocking, small — the core is synchronous, no async is needed), JSON is
 `serde_json`. A built-in local embedder (candle, e5-small) is v1.1.
 
+**No lock sits in front of it.** `embed` takes `&self` (`05-api.md`), so a
+`Database` holds its embedder unlocked and `SharedEmbedder` — the handle a
+workspace clones into every memory so a hundred chats do not open a hundred HTTP
+clients — is a plain refcount. Concurrent verbs are inside the provider at the
+same time, which is the arrangement a batched remote service is built for. The
+round trip still happens **outside** the engine lock: a write embeds before it
+takes the state lock, and a read-only handle embeds in its wrapper because the
+engine cannot embed into a zero-copy mapping.
+
 ## Errors
 
 ```rust
