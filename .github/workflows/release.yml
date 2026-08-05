@@ -345,7 +345,7 @@ jobs:
   #     free-threaded interpreter, so the same crate simply yields a
   #     version-specific `cp314t` wheel.
   #
-  # Six abi3 wheels plus four free-threaded ones (see the matrix note) — ten,
+  # Six abi3 wheels plus five free-threaded ones (see the matrix note) — eleven,
   # and every GIL-bearing CPython on every supported platform is covered by the
   # six. musl is deliberately absent, exactly as it is from cargo-dist and
   # napi: it exists nowhere else in this repository, and a wheel-only exception
@@ -357,16 +357,32 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # `freethreaded` is false exactly where the runner cannot provide a
-          # 3.14t interpreter *for the target*. The abi3 wheel needs no
-          # interpreter at all — the stable ABI is a compile-time contract — so
-          # it is built everywhere. A version-specific `cp314t` wheel is not:
-          # maturin has to inspect a matching interpreter, and on these two
-          # targets the only one available is the host's, which is the wrong
-          # architecture. Attempting it would fail at tag time, which is the
-          # worst possible moment to discover a matrix entry is wrong.
+          # Every row builds on a host of its own architecture, and that is not
+          # a preference: the aarch64-linux wheel was originally cross-built
+          # from an x86_64 runner, where `maturin-action` reaches for
+          # `ghcr.io/rust-cross/manylinux2014-cross:aarch64` and its ancient
+          # `aarch64-unknown-linux-gnu-gcc`. That compiler does not define
+          # `__ARM_ARCH` when it assembles, so `ring` (rustls → ureq → host)
+          # stops at `#error "ARM assembler must define __ARM_ARCH"` and the
+          # build dies. On an arm64 host the action picks the *native*
+          # `quay.io/pypa/manylinux2014_aarch64` instead and there is no cross
+          # compiler in the picture at all. GitHub's arm64 runners are free for
+          # public repositories, so this costs nothing and keeps the glibc floor
+          # at 2.17 — bumping to `manylinux_2_28` would also dodge the old gcc,
+          # but by narrowing who can install the wheel.
+          #
+          # `freethreaded` is false exactly where the target's own 3.14t
+          # interpreter cannot be reached. The abi3 wheel needs no interpreter
+          # at all — the stable ABI is a compile-time contract — so it is built
+          # everywhere. A version-specific `cp314t` wheel is not: maturin has to
+          # inspect a matching interpreter. Inside a manylinux container that is
+          # the image's own `/opt/python/cp314-cp314t`, which the action puts on
+          # PATH; off-container it is whatever `setup-python` installed, which
+          # on the aarch64-windows row is the host's x86_64 build and therefore
+          # the wrong architecture. Attempting it there would fail at tag time,
+          # the worst possible moment to discover a matrix entry is wrong.
           - { target: x86_64-unknown-linux-gnu, host: ubuntu-24.04, manylinux: auto, freethreaded: true }
-          - { target: aarch64-unknown-linux-gnu, host: ubuntu-24.04, manylinux: auto, freethreaded: false }
+          - { target: aarch64-unknown-linux-gnu, host: ubuntu-24.04-arm, manylinux: auto, freethreaded: true }
           - { target: x86_64-apple-darwin, host: macos-26-intel, manylinux: "off", freethreaded: true }
           - { target: aarch64-apple-darwin, host: macos-26, manylinux: "off", freethreaded: true }
           - { target: x86_64-pc-windows-msvc, host: windows-2025, manylinux: "off", freethreaded: true }
@@ -392,7 +408,13 @@ jobs:
           args: --release --out dist
           sccache: "true"
       - name: A free-threaded interpreter for the second wheel
-        if: ${{ matrix.freethreaded }}
+        # Only off-container. `maturin-action` mounts the workspace into the
+        # manylinux image and nothing else — the hosted tool cache is not
+        # visible in there — so on the two linux rows this step would install an
+        # interpreter the build could never see, and the one the build actually
+        # uses is the image's own. macOS and Windows have no container and do
+        # need it.
+        if: ${{ matrix.freethreaded && matrix.manylinux == 'off' }}
         uses: actions/setup-python@v7
         with:
           python-version: "3.14t"
@@ -472,8 +494,8 @@ jobs:
         with:
           packages-dir: dist
           # Makes a re-run idempotent, which is the property `publish-napi`
-          # already relies on and this job had no equivalent of. Eleven files
-          # (ten wheels and an sdist) go up in one call; a network blip on the
+          # already relies on and this job had no equivalent of. Twelve files
+          # (eleven wheels and an sdist) go up in one call; a network blip on the
           # seventh leaves six uploaded, and without this a re-run dies on
           # "File already exists" for those six — turning a transient failure
           # into a version burnt on PyPI while crates.io and npm, which publish
