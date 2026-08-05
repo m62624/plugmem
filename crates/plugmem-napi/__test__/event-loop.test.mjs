@@ -27,7 +27,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const require = createRequire(import.meta.url);
-const { Plugmem } = require("../index.js");
+const { Plugmem, recover } = require("../index.js");
 
 const ms = (t0) => Number(process.hrtime.bigint() - t0) / 1e6;
 
@@ -112,6 +112,9 @@ test("no verb holds the JS thread for database-sized work", async () => {
     for (let i = 0; i < 20000; i += 2000) {
       await db.rememberMany(Array.from({ length: 2000 }, (_, j) => fact(i + j)));
     }
+    // Publish a generation up front, so `scrub` below has one whatever order
+    // the cases run in.
+    await db.checkpoint();
     const floor = await noiseFloor();
 
     // Every verb whose cost scales with the database. `export` is deliberately
@@ -133,6 +136,20 @@ test("no verb holds the JS thread for database-sized work", async () => {
           }
         },
       ],
+      // The salvage verbs. Each is here for its own reason: `exportEdges`
+      // hands batches to a JS callback from a worker, and a scrub step is a
+      // page fault on an mmap, which is blocking I/O of unknown length. Both
+      // are the shapes most likely to end up back on the main thread.
+      ["exportEdges", () => db.exportEdges(() => {})],
+      [
+        "scrub sweep",
+        async () => {
+          const scrub = await db.scrub({ budget: 64 * 1024 });
+          while ((await scrub.next()) !== null) {
+            /* to completion */
+          }
+        },
+      ],
     ]) {
       const { total, held } = await heldFor(run);
       assert.ok(
@@ -141,6 +158,72 @@ test("no verb holds the JS thread for database-sized work", async () => {
           `(budget ${budget(total, floor).toFixed(0)} ms on this machine)`,
       );
     }
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("recover does not hold the JS thread, and its callers keep working", async () => {
+  // `recover` gets its own test because it addresses *paths*, not a handle: it
+  // takes the source's exclusive lock, so it cannot run while this process
+  // holds that database open. It is also the longest single call in the
+  // binding — a whole database read, swept and rewritten.
+  const dir = tempdir("recover");
+  try {
+    const src = join(dir, "src.plugmem");
+    {
+      const db = await Plugmem.open(src, {});
+      for (let i = 0; i < 20000; i += 2000) {
+        await db.rememberMany(Array.from({ length: 2000 }, (_, j) => fact(i + j)));
+      }
+      await db.checkpoint();
+      db.close();
+    }
+    const floor = await noiseFloor();
+
+    const { value, total, held } = await heldFor(() => recover(src, join(dir, "dst.plugmem")));
+    assert.equal(value.kept, 20000, "a clean image keeps everything");
+    assert.ok(
+      held <= budget(total, floor),
+      `recover held the JS thread for ${held.toFixed(0)} of its ${total.toFixed(0)} ms ` +
+        `(budget ${budget(total, floor).toFixed(0)} ms on this machine)`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("exportEdges hands its batches back without stalling the loop", async () => {
+  // The batch callback runs on the JS thread by construction — that is what a
+  // callback is. What must not happen is the *walk* running there too, or the
+  // worker racing ahead and buffering the graph. Measured against the same
+  // data pulled with a callback that does nothing.
+  const dir = tempdir("edges");
+  try {
+    const db = await Plugmem.open(join(dir, "m.plugmem"), {});
+    for (let i = 0; i < 20000; i++) {
+      await db.link({ src: `e${i}`, rel: "r", dst: `d${i % 500}` });
+    }
+    const floor = await noiseFloor();
+
+    const sizes = [];
+    const { value, total, held } = await heldFor(() =>
+      db.exportEdges((edges) => sizes.push(edges.length)),
+    );
+
+    assert.equal(value, 20000, "every edge arrives");
+    assert.equal(
+      sizes.reduce((a, b) => a + b, 0),
+      value,
+      "and the batches account for all of them",
+    );
+    assert.ok(sizes.length > 1, "in more than one batch");
+    assert.ok(
+      held <= budget(total, floor),
+      `exportEdges held the JS thread for ${held.toFixed(0)} of its ${total.toFixed(0)} ms ` +
+        `(budget ${budget(total, floor).toFixed(0)} ms on this machine)`,
+    );
     db.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
