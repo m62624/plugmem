@@ -345,9 +345,9 @@ jobs:
   #     free-threaded interpreter, so the same crate simply yields a
   #     version-specific `cp314t` wheel.
   #
-  # Six abi3 wheels plus five free-threaded ones (see the matrix note) — eleven,
-  # and every GIL-bearing CPython on every supported platform is covered by the
-  # six. musl is deliberately absent, exactly as it is from cargo-dist and
+  # Six abi3 wheels plus six free-threaded ones — twelve, and every GIL-bearing
+  # CPython on every supported platform is covered by the six abi3 wheels.
+  # musl is deliberately absent, exactly as it is from cargo-dist and
   # napi: it exists nowhere else in this repository, and a wheel-only exception
   # would be the wrapper divergence AGENTS.md forbids.
   py-build:
@@ -371,22 +371,17 @@ jobs:
           # at 2.17 — bumping to `manylinux_2_28` would also dodge the old gcc,
           # but by narrowing who can install the wheel.
           #
-          # `freethreaded` is false exactly where the target's own 3.14t
-          # interpreter cannot be reached. The abi3 wheel needs no interpreter
-          # at all — the stable ABI is a compile-time contract — so it is built
-          # everywhere. A version-specific `cp314t` wheel is not: maturin has to
-          # inspect a matching interpreter. Inside a manylinux container that is
-          # the image's own `/opt/python/cp314-cp314t`, which the action puts on
-          # PATH; off-container it is whatever `setup-python` installed, which
-          # on the aarch64-windows row is the host's x86_64 build and therefore
-          # the wrong architecture. Attempting it there would fail at tag time,
-          # the worst possible moment to discover a matrix entry is wrong.
-          - { target: x86_64-unknown-linux-gnu, host: ubuntu-24.04, manylinux: auto, freethreaded: true }
-          - { target: aarch64-unknown-linux-gnu, host: ubuntu-24.04-arm, manylinux: auto, freethreaded: true }
-          - { target: x86_64-apple-darwin, host: macos-26-intel, manylinux: "off", freethreaded: true }
-          - { target: aarch64-apple-darwin, host: macos-26, manylinux: "off", freethreaded: true }
-          - { target: x86_64-pc-windows-msvc, host: windows-2025, manylinux: "off", freethreaded: true }
-          - { target: aarch64-pc-windows-msvc, host: windows-2025, manylinux: "off", freethreaded: false }
+          # `freethreaded` is true on every target now. Linux gets its matching
+          # interpreter from the manylinux image; the off-container rows get it
+          # from setup-python. Windows ARM uses the native ARM64 hosted runner,
+          # so setup-python installs an ARM64 3.14t instead of the x64 Python
+          # that made the old cross-built row unable to produce cp314t.
+          - { target: x86_64-unknown-linux-gnu, host: ubuntu-24.04, manylinux: auto, freethreaded: true, python_arch: x64 }
+          - { target: aarch64-unknown-linux-gnu, host: ubuntu-24.04-arm, manylinux: auto, freethreaded: true, python_arch: arm64 }
+          - { target: x86_64-apple-darwin, host: macos-26-intel, manylinux: "off", freethreaded: true, python_arch: x64 }
+          - { target: aarch64-apple-darwin, host: macos-26, manylinux: "off", freethreaded: true, python_arch: arm64 }
+          - { target: x86_64-pc-windows-msvc, host: windows-2025, manylinux: "off", freethreaded: true, python_arch: x64 }
+          - { target: aarch64-pc-windows-msvc, host: windows-11-arm, manylinux: "off", freethreaded: true, python_arch: arm64 }
     runs-on: ${{ matrix.host }}
     steps:
       - uses: actions/checkout@v7
@@ -418,6 +413,7 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.14t"
+          architecture: ${{ matrix.python_arch }}
       - name: Build the free-threaded wheel (3.14t has no stable ABI)
         if: ${{ matrix.freethreaded }}
         uses: PyO3/maturin-action@v1

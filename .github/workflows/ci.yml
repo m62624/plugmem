@@ -493,6 +493,60 @@ jobs:
       - name: Test through Python
         run: .venv/bin/pytest -q
 
+  # Exercise the release-only Windows ARM64 wheel on every PR. The release
+  # matrix uses the same native runner and the same two maturin invocations;
+  # this catches hosted-runner, Python-architecture, and Rust-target problems
+  # before a tag is cut. GitHub currently labels this runner Public Preview.
+  py-wheel-windows-arm64:
+    name: python wheel (Windows ARM64)
+    runs-on: windows-11-arm
+    defaults:
+      run:
+        working-directory: crates/plugmem-py
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "crates/plugmem-py"
+      - name: Set up native ARM64 CPython
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+          architecture: arm64
+      - name: Confirm the runner and regular interpreter architecture
+        run: python -c "import platform, sys; print(platform.machine()); print(sys.version)"
+      - name: Build the ARM64 abi3 wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: aarch64-pc-windows-msvc
+          manylinux: "off"
+          working-directory: crates/plugmem-py
+          args: --release --out dist
+          sccache: "true"
+      - name: Set up native ARM64 free-threaded CPython
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14t"
+          architecture: arm64
+      - name: Confirm the free-threaded interpreter architecture
+        run: python -c "import platform, sys; print(platform.machine()); print(sys.version)"
+      - name: Build the ARM64 free-threaded wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: aarch64-pc-windows-msvc
+          manylinux: "off"
+          working-directory: crates/plugmem-py
+          args: --release --out dist -i python3.14t
+          sccache: "true"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: py-aarch64-pc-windows-msvc
+          path: crates/plugmem-py/dist/*.whl
+          if-no-files-found: error
+
 
   dist-plan:
     name: cargo-dist plan
@@ -516,7 +570,7 @@ jobs:
   ci-pass:
     name: CI passed
     if: always()
-    needs: [format, check, fuzz, no_std, wasm-suite, wasm-equivalence, skill-lint, napi-npm, py-wheel, dist-plan]
+    needs: [format, check, fuzz, no_std, wasm-suite, wasm-equivalence, skill-lint, napi-npm, py-wheel, py-wheel-windows-arm64, dist-plan]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any required job did not succeed
@@ -532,6 +586,7 @@ jobs:
           echo "  skill-lint       = ${{ needs.skill-lint.result }}"
           echo "  napi-npm         = ${{ needs.napi-npm.result }}"
           echo "  dist-plan        = ${{ needs.dist-plan.result }}"
+          echo "  py-wheel-arm64   = ${{ needs.py-wheel-windows-arm64.result }}"
           exit 1
       - name: All required jobs passed
-        run: echo "format + lint/test (3 OSes × feature matrix), no_std, wasm suite (wasmtime+wasmer), cross-target equivalence, skill, napi npm and dist-plan are green."
+        run: echo "format + lint/test, no_std, wasm suite, cross-target equivalence, skill, napi npm, Python wheels (x64 + ARM64), and dist-plan are green."
