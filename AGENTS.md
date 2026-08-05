@@ -105,7 +105,11 @@ MCP adapter/server. It exposes memory operations through the host API and should
 
 ### `crates/plugmem-napi`
 
-Node.js N-API bindings. Treat it as a boundary layer; measure FFI overhead separately from core and host performance.
+Node.js N-API bindings. A boundary layer only: its surface equals `plugmem-host`'s (see the wrapper-parity rule below), the engine logic stays in host, and FFI overhead is measured separately from core and host performance.
+
+### `crates/plugmem-py`
+
+Python bindings (PyO3), published to PyPI as `plugmem`. The same boundary layer as `plugmem-napi` and under the same parity rule: synchronous methods that release the GIL around every host call, so a caller's threads (or `asyncio.to_thread`) get real parallelism.
 
 ### `crates/plugmem-testgen`
 
@@ -167,6 +171,35 @@ git status --short
 ```
 
 For a targeted package or example, prefer a focused command first, then run the broader workspace checks when practical. If a check is skipped, state that explicitly in the handoff.
+
+## Wrapper parity
+
+A wrapper (`plugmem-napi`, `plugmem-py`) exposes the whole of `plugmem-host`'s surface.
+
+- An omission is allowed only when the construct is **unrepresentable** in the target
+  language, never because it is awkward to write. "A resumable iterator is inconvenient
+  across this boundary" is not a reason; it is the work.
+- Format concerns are not host verbs and do not live in a wrapper's Rust. JSONL
+  import/export belongs to the CLI, or to a pure module in the target language shipped
+  in the same package.
+- Idioms the target language demands are not divergence: a Python context manager or a
+  JavaScript promise has no counterpart to drift from.
+- A divergence between wrappers that does not follow from the above is a bug, not a
+  decision. Two verbs are worth naming because they were once excluded on this exact
+  mistaken ground: `scrub` and `recover`.
+
+`plugmem-mcp` is judged differently, and deliberately. It is not a language binding: its
+caller is a model reading a tool list, where every additional tool spends context and
+adds a way to go wrong, and where a path argument is chosen by the model rather than by
+a programmer. Its measure is "what an agent should be handed", not "what host has". So
+the salvage verbs stay out of it — but that is the *only* licence the difference grants.
+Anything an agent legitimately uses must be whole: `plugmem_export` returning facts
+without edges is the same defect as the equivalent gap in a binding, not an exercise of
+this exemption.
+
+The corollary for configuration: every wrapper reaches `Config` through the one shared
+loader (`Settings::load`), so a setting that is not in `settings_help` is a setting no
+wrapper can offer. Adding a knob means adding it there, not in four places.
 
 ## Engineering rules
 
