@@ -19,7 +19,8 @@ use std::path::{Path, PathBuf};
 
 use crate::{
     Config, Database, DatabaseBuilder, Embedder, FsyncPolicy, HostError, MAX_OPEN_CEILING,
-    OpenAiCompatEmbedder, Opener, SharedEmbedder, Workspace, WorkspaceLayout, WorkspaceLimits,
+    OpenAiCompatEmbedder, Opener, SettingWarning, SharedEmbedder, Workspace, WorkspaceLayout,
+    WorkspaceLimits, settings_help::settings_help,
 };
 
 /// Environment variable naming the config file (below an explicit path).
@@ -84,6 +85,13 @@ pub struct Settings {
     /// one — **the default is a single database**, and nothing turns a
     /// workspace on by itself.
     pub workspace: WorkspaceSettings,
+    /// Sections and keys in the file that nothing claimed, in file order.
+    ///
+    /// Empty for a clean config, which is why this is a field rather than an
+    /// error: a typo must not stop a program that was configured correctly
+    /// enough to run. **Show them.** A surface that drops these is back to the
+    /// silence this exists to end — see [`SettingWarning`].
+    pub warnings: Vec<SettingWarning>,
 }
 
 /// The `[workspace]` section: where a directory of named databases lives, and
@@ -122,6 +130,9 @@ impl Settings {
             dir: None,
             limits: WorkspaceLimits::default(),
         };
+        let warnings = table
+            .map(|t| settings_help().unknown_in(t))
+            .unwrap_or_default();
 
         if let Some(table) = table {
             if let Some(t) = table.get("database").and_then(toml::Value::as_table) {
@@ -169,6 +180,7 @@ impl Settings {
             maintain_every_forgets,
             fsync,
             workspace,
+            warnings,
         })
     }
 
@@ -435,6 +447,12 @@ impl EmbedderCfg {
 mod tests {
     use super::*;
 
+    /// A config table from lines, so the fixtures indent with the code instead
+    /// of being pinned to the file's left margin.
+    fn toml_of(lines: &[&str]) -> toml::Table {
+        lines.join("\n").parse().expect("valid TOML fixture")
+    }
+
     /// A unique temp directory; removed on drop.
     struct TempDir(PathBuf);
     impl TempDir {
@@ -459,16 +477,15 @@ mod tests {
 
     #[test]
     fn engine_and_maintenance_parse() {
-        let text = "\
-[engine]
-dim = 384
-max_text = 2048
-[maintenance]
-snapshot_every_ops = 50
-snapshot_journal_bytes = 8192
-maintain_every_forgets = 3
-";
-        let table: toml::Table = text.parse().unwrap();
+        let table = toml_of(&[
+            "[engine]",
+            "dim = 384",
+            "max_text = 2048",
+            "[maintenance]",
+            "snapshot_every_ops = 50",
+            "snapshot_journal_bytes = 8192",
+            "maintain_every_forgets = 3",
+        ]);
         let s = Settings::from_table(Some(&table)).unwrap();
         assert_eq!(s.config.dim, 384);
         assert_eq!(s.config.max_text, 2048);
@@ -494,16 +511,15 @@ maintain_every_forgets = 3
 
     #[test]
     fn embedder_merge_reads_every_field() {
-        let text = "\
-[embedder]
-kind = \"ollama\"
-url = \"http://localhost:11434/v1\"
-model = \"nomic-embed-text\"
-api_key_env = \"SOME_ENV\"
-[engine]
-dim = 8
-";
-        let table: toml::Table = text.parse().unwrap();
+        let table = toml_of(&[
+            "[embedder]",
+            r#"kind = "ollama""#,
+            r#"url = "http://localhost:11434/v1""#,
+            r#"model = "nomic-embed-text""#,
+            r#"api_key_env = "SOME_ENV""#,
+            "[engine]",
+            "dim = 8",
+        ]);
         // An OpenAI-compatible kind with a url, model and dim > 0 builds.
         let s = Settings::from_table(Some(&table)).unwrap();
         assert!(s.embedder.is_some());
@@ -556,6 +572,7 @@ dim = 8
                 dir: None,
                 limits: WorkspaceLimits::default(),
             },
+            warnings: Vec::new(),
         };
         let db = settings.open(&tmp.0.join("m.plugmem")).unwrap();
         assert_eq!(db.stats().facts, 0);

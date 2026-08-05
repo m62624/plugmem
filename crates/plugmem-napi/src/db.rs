@@ -27,14 +27,15 @@ use napi::threadsafe_function::{
 use napi::{Env, JsFunction, Task};
 use napi_derive::napi;
 use plugmem_host::{
-    Database, Embedder, FactId, LinkInput, MaintenanceOptions, ReadOnlyDatabase, RecallQuery,
-    RememberInput, Settings, SharedEmbedder, UnlinkInput,
+    Database, Embedder, FactId, HostError, LinkInput, MaintenanceOptions, ReadOnlyDatabase,
+    RecallQuery, RememberInput, Settings, SharedEmbedder, UnlinkInput,
 };
 
 use crate::error::{self, Error, Produced, Result, code};
+use crate::scrub::{ScrubOpenTask, ScrubOptions};
 use crate::types::{
     self, ExportPage, ExportedEdge, ExportedFact, FactSnapshot, MaintainMode, MaintainReport,
-    RecallResult, RememberOutcome, Stats,
+    RecallResult, RecoverReport, RememberOutcome, Stats,
 };
 
 /// Keep one native→JS transfer bounded. This matches the workspace's existing
@@ -235,6 +236,9 @@ pub struct Plugmem {
     /// from `PLUGMEM_DB`, the config or the platform default, and a caller that
     /// passed no path otherwise has no way to learn which file it just opened.
     path: PathBuf,
+    /// Rendered `config.toml` warnings, carried from the open so a caller can
+    /// read them off the handle. See [`Plugmem::config_warnings`].
+    warnings: Vec<String>,
 }
 
 #[napi]
@@ -293,26 +297,13 @@ impl Plugmem {
             })?;
         }
 
-        // A `dim` option sets the embedding dimension. If the config built an
-        // embedder, that embedder's dimension is authoritative — `dim` must
-        // agree, or the vectors would silently disagree in size.
-        if let Some(dim) = options.dim {
-            let dim = dim as usize;
-            if let Some(e) = &settings.embedder
-                && e.dim() != dim
-            {
-                return Err(error::invalid_arg(format!(
-                    "dim option {dim} disagrees with the configured embedder dimension {}",
-                    e.dim()
-                )));
-            }
-            settings.config.dim = dim;
-        }
+        apply_dim(&mut settings, options.dim)?;
 
         // Everything above is cheap and synchronous — reading `config.toml`,
         // resolving the path, checking the dimension — so a caller's mistake
         // throws where they stand. The open itself goes to a worker.
         Ok(OpenTask {
+            warnings: settings.warnings.iter().map(|w| w.to_string()).collect(),
             settings: Some(settings),
             path,
             read_only: options.read_only.unwrap_or(false),
@@ -329,7 +320,24 @@ impl Plugmem {
         Self {
             handle: Some(Handle::Writer(db)),
             path,
+            // The workspace reported them once when it loaded the config; a
+            // per-memory copy would repeat the same lines for every open.
+            warnings: Vec::new(),
         }
+    }
+
+    /// What `config.toml` said that nothing claimed — a misspelled key, a
+    /// misspelled section — one human-readable line each, empty when the file
+    /// was clean.
+    ///
+    /// It is a value rather than a printed warning because a native addon has
+    /// nowhere sensible to print: stderr belongs to the host application, which
+    /// may be a server that logs as JSON. **Read it once after opening and log
+    /// it your own way** — ignoring it puts you back where a typo silently
+    /// changes nothing.
+    #[napi]
+    pub fn config_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
     }
 
     /// The file this memory is open on.
@@ -558,6 +566,31 @@ impl Plugmem {
             source,
             sink: Some(sink),
         }))
+    }
+
+    /// Starts a resumable byte-level check of the current published snapshot,
+    /// and resolves with the [`Scrub`](crate::scrub::Scrub) that paces it.
+    ///
+    /// The counterpart to `verify`, not a replacement: `verify` asks whether
+    /// the *content* agrees with itself, this asks whether the *bytes* are the
+    /// ones that were written. Only the second catches a flipped bit that the
+    /// structure accepts.
+    ///
+    /// Available on a writer as well as a read-only handle: a scrub reads the
+    /// published generation from disk and has no opinion about which handle
+    /// asked. It does need something published — checkpoint once first.
+    ///
+    /// **The returned object holds a shared lock** on the generation it scans
+    /// for as long as it lives, so run it to completion or `close()` it.
+    ///
+    /// @throws `PLUGMEM_NEEDS_CHECKPOINT` when nothing has been published yet.
+    #[napi(ts_return_type = "Promise<Scrub>")]
+    pub fn scrub(&self, options: Option<ScrubOptions>) -> Result<AsyncTask<ScrubOpenTask>> {
+        let source = match self.handle()? {
+            Handle::Writer(db) => ExportSource::Writer(db.clone()),
+            Handle::Reader { db, .. } => ExportSource::Reader(Arc::clone(db)),
+        };
+        Ok(AsyncTask::new(ScrubOpenTask::new(source, options)?))
     }
 
     /// One fact's tags, or an empty array for an unknown or tombstoned id.
@@ -840,7 +873,125 @@ impl Task for RememberManyTask {
     }
 }
 
-enum ExportSource {
+/// Applies a `dim` option to loaded settings.
+///
+/// If the config built an embedder, that embedder's dimension is authoritative:
+/// `dim` must agree, or the stored vectors would silently disagree in size with
+/// the ones the provider returns.
+fn apply_dim(settings: &mut Settings, dim: Option<u32>) -> Result<()> {
+    let Some(dim) = dim else { return Ok(()) };
+    let dim = dim as usize;
+    if let Some(e) = &settings.embedder
+        && e.dim() != dim
+    {
+        return Err(error::invalid_arg(format!(
+            "dim option {dim} disagrees with the configured embedder dimension {}",
+            e.dim()
+        )));
+    }
+    settings.config.dim = dim;
+    Ok(())
+}
+
+/// Options for [`recover`].
+#[napi(object)]
+#[derive(Default)]
+pub struct RecoverOptions {
+    /// Embedding dimension, as `OpenOptions.dim`. It must match what the source
+    /// database stores, so a memory with vectors needs this (or a `config`
+    /// naming the embedder) or the salvage cannot open it.
+    pub dim: Option<u32>,
+    /// Path to a `config.toml`; the standard discovery applies when omitted.
+    pub config: Option<String>,
+}
+
+/// Salvages a content-corrupt memory: reads `src`, drops the facts that fail
+/// the content checks, and writes a clean, compacted image to `dst`.
+///
+/// **`src` is never written.** The damaged file stays exactly as it was, as
+/// evidence — this produces a repaired copy beside it, and swapping them is
+/// your decision, not this function's. `dst` must therefore be a different
+/// path.
+///
+/// **It handles *content* damage**, the kind `verify` reports: text that is not
+/// valid UTF-8, a vector slot that disagrees with its fact, metadata that will
+/// not decode. *Structural* damage — a snapshot whose container will not parse
+/// at all — is not salvageable here and rejects; that is what a backup is for.
+///
+/// Memory stays proportional to the record count rather than the image: the
+/// two large pools are streamed through temp files, so a database far bigger
+/// than RAM can be recovered as long as its graph fits.
+///
+/// **Async**: it opens, sweeps and rewrites a whole database.
+///
+/// @throws `PLUGMEM_LOCKED` if either path is open elsewhere; `PLUGMEM_ENGINE`
+/// if `dst` resolves to the same file as `src`, or the source will not parse;
+/// `PLUGMEM_OPEN` for an IO failure on either path.
+#[napi(ts_return_type = "Promise<RecoverReport>")]
+pub fn recover(
+    src: String,
+    dst: String,
+    options: Option<RecoverOptions>,
+) -> Result<AsyncTask<RecoverTask>> {
+    Ok(AsyncTask::new(recover_task(src, dst, options)?))
+}
+
+/// The checked, not-yet-scheduled half of [`recover`]. Separate for the same
+/// reason as [`Plugmem::open_task`]: a native test can run the body without a
+/// Node runtime.
+fn recover_task(src: String, dst: String, options: Option<RecoverOptions>) -> Result<RecoverTask> {
+    let options = options.unwrap_or_default();
+    // Read and check the config where the caller stands: a bad `config.toml` or
+    // a `dim` that disagrees is a mistake to report now, not to reject later.
+    let mut settings =
+        Settings::load(options.config.as_deref().map(Path::new)).map_err(error::settings)?;
+    apply_dim(&mut settings, options.dim)?;
+    Ok(RecoverTask {
+        src: PathBuf::from(src),
+        dst: PathBuf::from(dst),
+        cfg: settings.config,
+        now: now_ms(),
+    })
+}
+
+/// The libuv-thread body of [`recover`].
+pub struct RecoverTask {
+    src: PathBuf,
+    dst: PathBuf,
+    cfg: plugmem_host::Config,
+    now: u64,
+}
+
+impl Task for RecoverTask {
+    type Output = Produced<plugmem_host::RecoverReport>;
+    type JsValue = RecoverReport;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        Ok(
+            Database::recover(&self.src, &self.dst, self.cfg.clone(), self.now).map_err(|e| {
+                match e {
+                    // Not an open failure: the engine judged the request. Both
+                    // cases it covers here — a destination that resolves to the
+                    // source, a source whose container will not parse — are
+                    // things only the host can decide, since both need the
+                    // filesystem to answer.
+                    HostError::Engine(_) => error::engine(e),
+                    other => error::open(other),
+                }
+            }),
+        )
+    }
+
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(RecoverReport::from(
+            output.map_err(|e| error::to_js(env, e))?,
+        ))
+    }
+}
+
+/// Which handle a path-level read runs against. Shared with [`crate::scrub`],
+/// whose verbs exist on both.
+pub(crate) enum ExportSource {
     Writer(Database),
     Reader(Arc<ReadOnlyDatabase>),
 }
@@ -944,6 +1095,9 @@ pub struct OpenTask {
     settings: Option<Settings>,
     path: PathBuf,
     read_only: bool,
+    /// Rendered here rather than in `resolve`, because `Settings` is consumed
+    /// on the worker and these have to outlive it.
+    warnings: Vec<String>,
 }
 
 impl Task for OpenTask {
@@ -958,6 +1112,7 @@ impl Task for OpenTask {
         Ok(Plugmem {
             handle: Some(output.map_err(|e| error::to_js(env, e))?),
             path: std::mem::take(&mut self.path),
+            warnings: std::mem::take(&mut self.warnings),
         })
     }
 }
@@ -1373,6 +1528,7 @@ mod tests {
         Ok(Plugmem {
             handle: Some(handle),
             path: std::mem::take(&mut task.path),
+            warnings: std::mem::take(&mut task.warnings),
         })
     }
 
@@ -1572,5 +1728,73 @@ model = \"dummy\"
             panic!("an explicit but missing config path must throw");
         };
         assert!(!err.reason.is_empty());
+    }
+
+    /// Runs a `recover` the way JavaScript would, minus the promise: the
+    /// argument checks, then the task body inline.
+    fn recover_blocking(
+        src: String,
+        dst: String,
+        options: Option<RecoverOptions>,
+    ) -> Result<plugmem_host::RecoverReport> {
+        let mut task = recover_task(src, dst, options)?;
+        match task.compute() {
+            Ok(produced) => produced,
+            // `compute` only fails through its own `Output`, never the outer
+            // `napi::Result` — this arm exists to say so, not to happen.
+            Err(e) => Err(error::internal(e.reason)),
+        }
+    }
+
+    #[test]
+    fn recover_salvages_into_a_second_file_and_leaves_the_first_alone() {
+        let tmp = TempDir::new("recover");
+        let src = tmp.path("broken.plugmem");
+        let dst = tmp.path("fixed.plugmem");
+        {
+            let db = open_blocking(Some(src.clone()), None).expect("open");
+            let Some(Handle::Writer(writer)) = db.handle.as_ref() else {
+                panic!("a path open is a writer");
+            };
+            for i in 0..4u64 {
+                writer
+                    .remember(RememberInput::text(i + 1, "a fact worth keeping"))
+                    .expect("remember");
+            }
+            writer.checkpoint(10).expect("checkpoint");
+        }
+
+        let before = std::fs::metadata(&src).expect("source exists").len();
+        let report = recover_blocking(src.clone(), dst.clone(), None).expect("recover");
+        assert_eq!(report.kept, 4, "a clean image keeps everything");
+        assert_eq!(
+            report.dropped_text + report.dropped_vector + report.dropped_metadata,
+            0
+        );
+        assert_eq!(
+            std::fs::metadata(&src).unwrap().len(),
+            before,
+            "the source is evidence, not a workspace"
+        );
+        assert!(std::fs::metadata(&dst).is_ok(), "the salvaged copy exists");
+    }
+
+    #[test]
+    fn recover_refuses_its_own_source_as_a_destination() {
+        let tmp = TempDir::new("recover-same");
+        let src = tmp.path("m.plugmem");
+        {
+            let db = open_blocking(Some(src.clone()), None).expect("open");
+            let Some(Handle::Writer(writer)) = db.handle.as_ref() else {
+                panic!("a path open is a writer");
+            };
+            writer
+                .remember(RememberInput::text(1, "one"))
+                .expect("remember");
+            writer.checkpoint(2).expect("checkpoint");
+        }
+        let err = recover_blocking(src.clone(), src, None).expect_err("same path is refused");
+        assert_eq!(err.status, code::ENGINE, "the engine judged the request");
+        assert!(err.reason.contains("must differ from the source"));
     }
 }

@@ -50,7 +50,7 @@ pub use readonly::{ReadOnlyDatabase, Scrub};
 #[cfg(feature = "config")]
 pub use settings::{Settings, SettingsError, WorkspaceSettings, read_config};
 #[cfg(feature = "config")]
-pub use settings_help::{SettingDoc, SettingScope, SettingsHelp, settings_help};
+pub use settings_help::{SettingDoc, SettingScope, SettingWarning, SettingsHelp, settings_help};
 pub use storage::{FileScratch, FileStorage, FsyncPolicy};
 pub use workspace::{
     ARCHIVED_TAG, DEFAULT_IDLE_TIMEOUT_MS, DEFAULT_MAX_OPEN, DbEntry, DbName, Description,

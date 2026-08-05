@@ -111,6 +111,12 @@ fn run(args: Args) -> Result<(), String> {
     let table = plugmem_host::read_config(config.as_deref()).map_err(|e| e.to_string())?;
     let workers = workers.unwrap_or_else(|| resolve_workers(table.as_ref()));
     let settings = plugmem_host::Settings::from_table(table.as_ref()).map_err(|e| e.to_string())?;
+    // Anything in config.toml nobody claimed. Stderr is the only place it can
+    // go: stdout carries the JSON-RPC framing, and a stray line there would
+    // break the protocol rather than inform anyone.
+    for warning in &settings.warnings {
+        eprintln!("plugmem-mcp: {warning}");
+    }
 
     // Workspace mode is opt-in and stays opt-in: with no flag, no environment
     // variable and no `[workspace].dir`, everything below behaves exactly as it

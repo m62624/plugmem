@@ -8,6 +8,39 @@ use std::fmt::Write as _;
 
 const PLATFORM_DEFAULT_SOURCE: &str = "platform default config path";
 
+/// Something in `config.toml` that was read and then ignored.
+///
+/// A warning rather than an error, deliberately: refusing an unknown key would
+/// mean an older binary could not read a config written for a newer one, which
+/// is a worse failure than a typo. But *silence* is worse than both — a
+/// misspelled `w_vec` changes no behaviour and says nothing, and the user is
+/// left believing they tuned something.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettingWarning {
+    /// The TOML section it appeared in, without brackets. Empty for an unknown
+    /// *section*, where [`Self::key`] is the section's own name.
+    pub section: String,
+    /// The key (or section) nobody claimed.
+    pub key: String,
+    /// The closest known name, when one is close enough to be worth offering.
+    pub did_you_mean: Option<&'static str>,
+}
+
+impl std::fmt::Display for SettingWarning {
+    /// One line, ready for a stderr note or a log.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.section.is_empty() {
+            write!(f, "unknown config section [{}]", self.key)?;
+        } else {
+            write!(f, "unknown setting [{}].{}", self.section, self.key)?;
+        }
+        match self.did_you_mean {
+            Some(near) => write!(f, " — did you mean `{near}`?"),
+            None => write!(f, " (ignored)"),
+        }
+    }
+}
+
 /// Which runtime surface owns a setting.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SettingScope {
@@ -65,6 +98,65 @@ impl SettingsHelp {
         self.config_path_precedence
     }
 
+    /// Every section this catalogue knows, in first-appearance order.
+    ///
+    /// Borrowed `&'static str`s from the catalogue itself: no allocation, and
+    /// there are five of them, so a linear scan beats any index.
+    fn sections(self) -> impl Iterator<Item = &'static str> {
+        self.docs
+            .iter()
+            .enumerate()
+            .filter(|(i, doc)| *i == 0 || self.docs[i - 1].section != doc.section)
+            .map(|(_, doc)| doc.section)
+    }
+
+    /// The keys documented under `section`.
+    fn keys_in(self, section: &str) -> impl Iterator<Item = &'static str> {
+        self.docs
+            .iter()
+            .filter(move |doc| doc.section == section)
+            .map(|doc| doc.key)
+    }
+
+    /// Reports every section and key in `table` that no surface claims.
+    ///
+    /// The catalogue is the authority rather than the parser's own key lists,
+    /// and it has to be: `[maintenance].batch_size` belongs to the CLI and
+    /// `[server].workers` to the MCP server, so a check that only knew what
+    /// [`super::settings`] parses would warn about both on every run.
+    ///
+    /// Allocation-free in the ordinary case — a clean config returns an empty
+    /// `Vec`, which allocates nothing. Only a real mistake costs anything.
+    pub fn unknown_in(self, table: &toml::Table) -> Vec<SettingWarning> {
+        let mut out = Vec::new();
+        for (name, value) in table {
+            let Some(section) = self.sections().find(|s| s == name) else {
+                out.push(SettingWarning {
+                    section: String::new(),
+                    key: name.clone(),
+                    did_you_mean: nearest(name, self.sections()),
+                });
+                continue;
+            };
+            // A section given as something other than a table is the parser's
+            // business to reject, not this scan's.
+            let Some(entries) = value.as_table() else {
+                continue;
+            };
+            for key in entries.keys() {
+                if self.keys_in(section).any(|k| k == key) {
+                    continue;
+                }
+                out.push(SettingWarning {
+                    section: section.to_string(),
+                    key: key.clone(),
+                    did_you_mean: nearest(key, self.keys_in(section)),
+                });
+            }
+        }
+        out
+    }
+
     /// Render the catalogue for a terminal or a human-facing tool response.
     pub fn render_human(self) -> String {
         let mut output = String::from("plugmem settings\n\n");
@@ -107,6 +199,40 @@ impl SettingsHelp {
 
         output
     }
+}
+
+/// The closest candidate to `typo`, if one is close enough to suggest.
+///
+/// The threshold is a third of the name's length (at least one edit): long
+/// names tolerate a bigger slip than short ones, and `dim` never gets confused
+/// with `url`. Offering a wrong guess is worse than offering none — it sends
+/// the reader to fix the wrong line.
+fn nearest(typo: &str, candidates: impl Iterator<Item = &'static str>) -> Option<&'static str> {
+    let budget = (typo.chars().count() / 3).max(1);
+    candidates
+        .map(|c| (edit_distance(typo, c), c))
+        .filter(|(d, _)| *d <= budget)
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, c)| c)
+}
+
+/// Levenshtein distance over `char`s, two rows at a time.
+///
+/// Two `Vec<usize>` the width of the shorter name — setting names are a handful
+/// of characters, and this runs only when something is already wrong.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut row = vec![0; b.len() + 1];
+    for (i, ca) in a.chars().enumerate() {
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != *cb);
+            row[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(row[j] + 1);
+        }
+        core::mem::swap(&mut prev, &mut row);
+    }
+    prev[b.len()]
 }
 
 const CONFIG_PATH_PRECEDENCE: &[&str] = &[
@@ -278,6 +404,138 @@ pub const fn settings_help() -> &'static SettingsHelp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edit_distance_holds_at_the_degenerate_ends() {
+        // The empty string against anything is that thing's length, from both
+        // sides: with `a` empty the inner loop never runs and the seeded first
+        // row is the answer; with `b` empty the table is one column wide and
+        // only `row[0]` ever moves. Both are easy to get wrong by one.
+        assert_eq!(edit_distance("", ""), 0);
+        assert_eq!(edit_distance("", "dim"), 3);
+        assert_eq!(edit_distance("dim", ""), 3);
+
+        // One character each way, same and different.
+        assert_eq!(edit_distance("a", "a"), 0);
+        assert_eq!(edit_distance("a", "b"), 1);
+        assert_eq!(edit_distance("a", ""), 1);
+        assert_eq!(edit_distance(" ", ""), 1);
+        assert_eq!(edit_distance(" ", "a"), 1);
+
+        // The three edits, each in isolation.
+        assert_eq!(edit_distance("dim", "dm"), 1, "deletion");
+        assert_eq!(edit_distance("dim", "diim"), 1, "insertion");
+        assert_eq!(edit_distance("dim", "dir"), 1, "substitution");
+
+        // Counted in characters, not bytes: a multi-byte name must not read as
+        // several edits away from itself.
+        assert_eq!(edit_distance("ключ", "ключ"), 0);
+        assert_eq!(edit_distance("ключ", "клуч"), 1);
+        assert_eq!(edit_distance("ключ", ""), 4);
+
+        // Symmetric, which a two-row implementation can quietly break.
+        for (a, b) in [("dim", "max_text"), ("", "fsync"), ("a", "workers")] {
+            assert_eq!(edit_distance(a, b), edit_distance(b, a), "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn a_suggestion_is_offered_only_when_it_is_worth_offering() {
+        let engine = || settings_help().keys_in("engine");
+
+        // Close enough to be the obvious intent.
+        assert_eq!(nearest("dm", engine()), Some("dim"));
+        assert_eq!(nearest("max_txt", engine()), Some("max_text"));
+
+        // Not close to anything: silence beats sending someone to the wrong
+        // line. A single character is the sharpest case — the budget floors at
+        // one edit, so it must not reach a three-character key.
+        assert_eq!(nearest("a", engine()), None);
+        assert_eq!(nearest("", engine()), None);
+        assert_eq!(nearest(" ", engine()), None);
+        assert_eq!(nearest("completely_unrelated", engine()), None);
+    }
+
+    /// A config table from lines, so the fixtures indent with the code instead
+    /// of being pinned to the file's left margin.
+    fn toml_of(lines: &[&str]) -> toml::Table {
+        lines.join("\n").parse().expect("valid TOML fixture")
+    }
+
+    #[test]
+    fn unknown_sections_and_keys_are_reported_with_their_context() {
+        let table = toml_of(&[
+            "[engine]",
+            "dim = 8",
+            "max_txt = 10",
+            "",
+            "[embedder]",
+            r#"kind = "none""#,
+            "",
+            "[engin]",
+            "dim = 4",
+        ]);
+
+        let found = settings_help().unknown_in(&table);
+        // A misspelled key inside a real section, and a misspelled section.
+        assert_eq!(
+            found,
+            vec![
+                SettingWarning {
+                    section: String::new(),
+                    key: "engin".to_string(),
+                    did_you_mean: Some("engine"),
+                },
+                SettingWarning {
+                    section: "engine".to_string(),
+                    key: "max_txt".to_string(),
+                    did_you_mean: Some("max_text"),
+                },
+            ]
+        );
+        assert!(
+            found[0]
+                .to_string()
+                .contains("unknown config section [engin]")
+        );
+        assert!(found[1].to_string().contains("[engine].max_txt"));
+    }
+
+    #[test]
+    fn keys_a_wrapper_owns_are_not_warned_about() {
+        // The reason the catalogue is the authority and the parser's own lists
+        // are not: host parses neither of these, and warning about them would
+        // fire on every CLI and MCP run.
+        let table = toml_of(&[
+            "[maintenance]",
+            "batch_size = 256",
+            "",
+            "[server]",
+            "workers = 4",
+        ]);
+        assert_eq!(settings_help().unknown_in(&table), vec![]);
+    }
+
+    #[test]
+    fn a_clean_config_warns_about_nothing() {
+        let mut text = String::new();
+        let mut section = "";
+        for doc in DOCS {
+            if doc.section != section {
+                let _ = writeln!(text, "[{}]", doc.section);
+                section = doc.section;
+            }
+            // The value is irrelevant here: this scan checks names, and the
+            // parser owns types. Every documented key must pass it.
+            let _ = writeln!(text, "{} = 0", doc.key);
+        }
+        let table: toml::Table = text.parse().unwrap();
+        assert_eq!(
+            settings_help().unknown_in(&table),
+            vec![],
+            "the catalogue must accept everything it documents"
+        );
+    }
 
     #[test]
     fn every_documented_setting_has_a_complete_description() {

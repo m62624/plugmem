@@ -12,10 +12,20 @@ use napi_derive::napi;
 mod db;
 /// The thrown-error contract: which failures carry a `code`, and which do not.
 mod error;
+/// The `Scrub` class — a resumable byte-level check of one snapshot generation.
+mod scrub;
 /// Typed result mirrors, so verbs return precise TypeScript interfaces.
 mod types;
 /// The `Workspace` class — many memories in one directory, addressed by name.
 mod workspace;
+
+/// Salvage a content-corrupt memory into a clean copy.
+///
+/// Re-exported rather than left inside [`db`]: the classes are reachable
+/// because the crate builds them, but a free function in a private module is
+/// not, so without this the rlib half of the crate (what `cargo test` links)
+/// cannot see it at all.
+pub use db::recover;
 
 /// The companion skill, embedded so a consumer can persist it next to the
 /// engine without a second download. Single source of truth: the repo-root

@@ -92,6 +92,12 @@ fn run_parsed(cli: Cli, out: &mut impl Write) -> u8 {
         Ok(s) => s,
         Err(e) => return report_err(&e.into()),
     };
+    // Anything in config.toml nobody claimed. To stderr, not `out`: it is a
+    // note about the environment, and it must not land in the middle of `--json`
+    // output that something is piping.
+    for warning in &settings.warnings {
+        eprintln!("plugmem: {warning}");
+    }
     // A workspace is opt-in: with no flag, no environment variable and no
     // `[workspace].dir`, `root` is `None` and everything below behaves exactly
     // as it did before workspaces existed — `--db` is a path, and the
@@ -1580,6 +1586,7 @@ mod tests {
                 dir: None,
                 limits: plugmem_host::WorkspaceLimits::default(),
             },
+            warnings: Vec::new(),
         }
     }
 
