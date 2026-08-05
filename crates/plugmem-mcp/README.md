@@ -106,7 +106,7 @@ you are tending *your own* memory file — plugmem keeps no server of its own.
 
 - A **sidecar process, not a daemon.** The host (Claude Desktop, an IDE, an
   agent runner) *spawns* `plugmem-mcp` and talks to it over stdin/stdout. It
-  listens on no port and serves **one memory file** for its lifetime. When the
+  listens on no port and serves **one local database** for its lifetime. When the
   host goes away, so does the sidecar.
 - **Many readers / many languages = many processes**, coordinated by plugmem's
   file-level MVCC (immutable snapshot generations + an advisory writer lock),

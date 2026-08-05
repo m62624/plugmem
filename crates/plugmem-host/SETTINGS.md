@@ -115,7 +115,7 @@ The layout under `dir` is fixed:
 
 A name is `[a-z0-9][a-z0-9_-]*`, at most 64 bytes. It is not a path and cannot
 become one: separators, dots and leading dashes are not names, so a name can
-only ever resolve to one file directly inside `<dir>/db`.
+only ever resolve to one named database directly inside `<dir>/db`.
 
 `idle_timeout_ms` is about **reachability, not memory**. An open database holds
 an exclusive file lock, so a long-running server that never let go would make

@@ -25,16 +25,16 @@
 ## What plugmem is
 
 An embeddable **memory database for local-first applications and agents** — you
-link it into your program like SQLite, in-process and single-file. plugmem stores short
+link it into your program like SQLite, in-process and file-backed. plugmem stores short
 **facts** — with a subject entity, tags, optional metadata, an optional
 embedding and two time axes — and answers a query with a ranked,
 token-budgeted result with structured facts and edges plus an optional bounded
-rendered block. It runs in-process from one snapshot file plus an append-only
-journal — no server, no daemon, one machine.
+rendered block. It runs in-process from a manifest, immutable snapshot
+generations, an append-only journal and a lock — no server, no daemon, one machine.
 The core is `no_std`, so the same engine runs natively and in WebAssembly.
 
 It is meant for a local-first application or agent on your own device or inside
-your own project — one process, one file — not a multi-tenant service fielding
+your own project — one process, one local database — not a multi-tenant service fielding
 queries from many users.
 
 It is **not** a vector database. A vector is one of four recall sources —
@@ -58,7 +58,7 @@ fusion; tags act as filters. What the engine does:
   render text constrained by a token budget; prompt-ready rendering is one
   consumer of the result.
 - **`no_std + alloc` core.** Single-threaded, zero-allocation recall after
-  warm-up, one file, no server; built and tested on `wasm32v1-none` and a real
+  warm-up, one local database, no server; built and tested on `wasm32v1-none` and a real
   32-bit wasm runtime in CI.
 
 The two clocks are what differs from other stores. `revise` closes an interval
@@ -90,7 +90,7 @@ was no longer true, and the new one was not yet known. That is not a gap in the
 model, it is the honest answer for that instant.
 
 **Where it fits — and where it doesn't.** plugmem is for local-first applications,
-agent memory and embedded systems: one process, one file, no service to operate. Its interactive
+agent memory and embedded systems: one process, one local database, no service to operate. Its interactive
 design center is about 100k active facts on one machine; the benchmark suite also
 tracks 1M-operation profiles to show how the same file-backed engine scales
 under heavier local workloads. These numbers are measured operating points, not
@@ -116,7 +116,7 @@ are for narrower needs.
 | **A memory in a Rust program** — the common case | **[`plugmem-host`](crates/plugmem-host)** (`std`) | Everything included: files, locking, read-only mmap, HTTP embedders, integrity, cross-process concurrency. One dependency — it re-exports the engine. |
 | A memory in Rust with **no `std`** or **your own storage** (browser, wasm host, custom file layer) | [`plugmem-core`](crates/plugmem-core) (`no_std`) | The engine only. You bring the `Storage` trait, the clock, file I/O and embedding — so you also manage when the file opens and how memory loads. |
 | Just the **flat byte-pool containers**, to build your own index/store | [`plugmem-arena`](crates/plugmem-arena) (`no_std`) | The storage substrate, engine-agnostic. |
-| A memory from a **terminal or shell script** | [`plugmem-cli`](crates/plugmem-cli) (`plugmem`) | One file, no server; `plugmem repl` keeps the engine open for host speed. |
+| A memory from a **terminal or shell script** | [`plugmem-cli`](crates/plugmem-cli) (`plugmem`) | One local database, no server; `plugmem repl` keeps the engine open for host speed. |
 | A memory for an **agent, local-first app, or non-Rust program** | [`plugmem-mcp`](crates/plugmem-mcp) | Long-lived stdio JSON-RPC; language-independent. **Don't** front your own Rust with it — embed `host` instead. |
 | A memory in **JavaScript / TypeScript** (Node) | [`plugmem-napi`](crates/plugmem-napi) | The engine as a native Node addon (napi-rs), in-process and typed for TS. On npm as `plugmem`. |
 
@@ -164,7 +164,7 @@ recency boost (tags filter; they are not a source):
 
 ## Many memories in one directory (optional)
 
-**Default: one memory, one file.** Point `--db` at it and nothing below applies.
+**Default: one logical memory backed by a local database layout.** Point `--db` at it and nothing below applies.
 
 When one process serves many independent memories — a memory per conversation,
 per tenant — point it at a directory instead and address them by name:
@@ -175,7 +175,7 @@ $ plugmem-mcp --workspace ~/bot-data          # every tool gains a `db` argument
 ```
 
 A name (`[a-z0-9][a-z0-9_-]*`) is not a path and cannot become one, so it
-resolves to exactly one file inside the directory. A first write to an unused
+resolves to exactly one named database inside the directory. A first write to an unused
 name creates that memory — no registration step. Each memory can describe what
 it is for, and `workspace find` searches those descriptions when the caller does
 not know the name.

@@ -21,9 +21,9 @@ host does not "improve" this — it orchestrates it honestly at three levels:
 
 | Level | Mechanism | Behavior |
 |---|---|---|
-| **One file, many processes** | an exclusive OS advisory lock on `<base>.lock` (std `File::try_lock`, no new dependency) | a second **writer** gets `HostError::Locked` immediately, no wait. A loud refusal instead of silent corruption |
-| **One file, many threads/agents of one process** | `Database` = `Arc<Inner>`, engine state behind a `Mutex`; the handle is `Clone + Send + Sync` | all verbs serialize on the mutex. At microsecond core operations that is hundreds of thousands of ops/s — a queue, not a bottleneck |
-| **Different files** | independent `Database`s | full parallelism: different mutexes, different lock files. No "database manager" type is needed — open as many `Database`s as files |
+| **One database, many processes** | an exclusive OS advisory lock on `<base>.lock` (std `File::try_lock`, no new dependency) | a second **writer** gets `HostError::Locked` immediately, no wait. A loud refusal instead of silent corruption |
+| **One database, many threads/agents of one process** | `Database` = `Arc<Inner>`, engine state behind a `Mutex`; the handle is `Clone + Send + Sync` | all verbs serialize on the mutex. At microsecond core operations that is hundreds of thousands of ops/s — a queue, not a bottleneck |
+| **Different databases** | independent `Database`s | full parallelism: different mutexes, different lock files. No "database manager" type is needed — open as many `Database`s as needed |
 
 **Network outside the lock.** The expensive external step — computing an embedding over
 HTTP — happens **before** the mutex is taken. While one agent waits on the embedder,

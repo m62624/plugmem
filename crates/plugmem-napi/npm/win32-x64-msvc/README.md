@@ -3,7 +3,7 @@
 The prebuilt **x86_64-pc-windows-msvc** (Windows x64 (MSVC)) native addon for
 [`plugmem`](https://www.npmjs.com/package/plugmem) — an embedded long-term
 memory engine for local-first applications and agents (remember / recall / revise / forget over one
-local file).
+local database).
 
 ## Don't install this directly
 

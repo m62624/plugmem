@@ -205,7 +205,7 @@ pub enum WorkspaceError {
     /// The database is open for writing elsewhere.
     ///
     /// Distinct from [`HostError::Locked`] so the message can name the database
-    /// rather than a path the caller never typed. One file has one writer, and
+    /// rather than a path the caller never typed. One local database has one writer, and
     /// in a workspace the other writer is usually a long-running sidecar that
     /// will release it once the handle goes idle.
     #[error(

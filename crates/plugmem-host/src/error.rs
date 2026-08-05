@@ -9,7 +9,7 @@ use std::path::PathBuf;
 #[non_exhaustive]
 pub enum HostError {
     /// The database file is exclusively locked by another process (or
-    /// another handle in this process). One file has one owner — open a
+    /// another handle in this process). One local database has one owner — open a
     /// different file, or drop the other handle.
     #[error("database at {} is locked by another process", path.display())]
     Locked {

@@ -47,7 +47,7 @@ enforced on every platform so a workspace directory can be copied between
 machines:
 
 - **lowercase only** — Windows and macOS filesystems are case-insensitive, so
-  `Work` and `work` would be one file with two names;
+  `Work` and `work` would address one database with two names;
 - **no dots** — a name is the whole stem, and the sidecar files
   (`.lock`, `.journal`, `.snap.N`) are distinguished by what follows the first
   dot;
@@ -72,7 +72,7 @@ Each memory **describes itself**, in a fact on the reserved entity
 A registry that were the source of truth would instead have four ways to
 disagree with the disk, and each would lose data rather than lose search.
 
-`reindex` cannot read a memory another process holds open (one file, one
+`reindex` cannot read a memory another process holds open (one database, one
 writer), so it names those in its report rather than skipping them silently: the
 rebuilt registry is knowingly incomplete. The normal path — `describe` keeping
 the registry current — has no such limit.

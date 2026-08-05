@@ -12,7 +12,7 @@ pub const SERVER_NAME: &str = "plugmem";
 /// The `--help` blurb for the binary itself (not a model-facing tool).
 pub const ABOUT_CLI: &str = "plugmem MCP server: exposes a plugmem memory to AI agents over stdio \
 JSON-RPC. The host spawns this process and talks to it on stdin/stdout; it is not a daemon and \
-listens on no port. One process serves one memory file.";
+listens on no port. One process serves one local database.";
 
 /// Shared by every tool description: the `format` argument.
 pub const ARG_FORMAT: &str = "Output format. \"json\" (default) returns compact machine JSON; \

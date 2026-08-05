@@ -9,7 +9,7 @@ An embeddable bitemporal memory database for local-first applications and
 agents, embedded in your Node process. It stores short facts and answers a
 query with ranked facts and edges plus an optional bounded rendered block.
 
-One file on disk, no server, no daemon. It links into your process the way
+File-backed on disk, no server, no daemon. It links into your process the way
 SQLite does: the engine is [`plugmem-host`](https://docs.rs/plugmem-host/latest)
 compiled to a native addon through [napi-rs](https://napi.rs), so there is no
 WebAssembly copy of the file in RAM and no 4 GiB ceiling. Runs on Node, Deno and
@@ -514,7 +514,7 @@ processes, sharing the OS page cache.
 
 ## Many memories in one directory
 
-**Default: one memory, one file.** `Plugmem.open(path)` and nothing here
+**Default: one logical memory backed by a local database layout.** `Plugmem.open(path)` and nothing here
 applies.
 
 The problem this solves: a process serving many conversations, tenants or
@@ -553,7 +553,7 @@ const byOwner: DbEntry[] = await ws.find("ann");            // → the same memo
 ```
 
 A name is `[a-z0-9][a-z0-9_-]*` and **cannot express a path**, so it resolves to
-exactly one file inside the directory — traversal is not filtered out, it is
+exactly one named database inside the directory — traversal is not filtered out, it is
 unconstructible. `ws.open(name, false)` refuses a name that does not exist yet,
 which is what a read should do so a typo is diagnosed rather than answered with
 an empty result.
@@ -598,7 +598,7 @@ data.
 
 ## What it is not for
 
-plugmem is for local-first application and agent memory: one process, one file,
+plugmem is for local-first application and agent memory: one process, one local database,
 no service to operate. Its design centre is around 100 000 active facts on one machine, and
 the benchmarks track 1M-operation profiles to show how the same engine behaves
 under heavier local load.

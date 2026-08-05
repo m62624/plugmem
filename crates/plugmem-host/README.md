@@ -22,7 +22,7 @@ everything.** The others are for narrower needs.
 | **A memory in a Rust program** — the common case | **`plugmem-host`** (this crate, `std`) | Everything included: files, locking, read-only mmap, HTTP embedders, integrity, cross-process concurrency. One dependency — it re-exports the engine. |
 | A memory in Rust with **no `std`** or **your own storage** (browser, wasm host, custom file layer) | [`plugmem-core`](https://docs.rs/plugmem-core/latest) (`no_std`) | The engine only. You bring the `Storage` trait, the clock, file I/O and embedding — so you also manage when the file opens and how memory loads. |
 | Just the **flat byte-pool containers** | [`plugmem-arena`](https://docs.rs/plugmem-arena/latest) (`no_std`) | The storage substrate, engine-agnostic. |
-| A memory from a **terminal or shell script** | [`plugmem-cli`](https://docs.rs/plugmem-cli/latest) (`plugmem`) | One file, no server; `plugmem repl` keeps the engine open for host speed. |
+| A memory from a **terminal or shell script** | [`plugmem-cli`](https://docs.rs/plugmem-cli/latest) (`plugmem`) | One local database, no server; `plugmem repl` keeps the engine open for host speed. |
 | A memory for an **agent, local-first app, or non-Rust program** | [`plugmem-mcp`](https://docs.rs/plugmem-mcp/latest) | Long-lived stdio JSON-RPC; language-independent. In Rust, embed this crate instead. |
 | A memory in **JavaScript / TypeScript** (Node) | [`plugmem-napi`](https://docs.rs/plugmem-napi/latest) | The engine as a native Node addon (napi-rs), in-process; on npm as `plugmem`. |
 
@@ -254,12 +254,13 @@ long as its configured limits fit that host.
 
 ## Files
 
-One database at `agent.plugmem` is:
+One local database rooted at `agent.plugmem` consists of:
 
 | file | role |
 |---|---|
-| `agent.plugmem` | the snapshot — the engine's memory image, verbatim |
-| `agent.plugmem.journal` | append-only journal since the last snapshot |
+| `agent.plugmem` | the manifest naming the current snapshot generation |
+| `agent.plugmem.snap.<N>` | immutable snapshot generation — the engine's memory image |
+| `agent.plugmem.journal` | append-only journal since the current generation |
 | `agent.plugmem.lock` | advisory lock file |
 
 Snapshot writes are atomic (tmp + fsync + rename + directory fsync): a
@@ -272,7 +273,7 @@ detected, dropped and reported.
 
 ## Workspaces (optional)
 
-**Default: one `Database`, one file.** `Workspace` is for a process serving many
+**Default: one `Database`, one local database layout.** `Workspace` is for a process serving many
 independent memories — a directory of named databases, opened on demand and
 pooled, plus an optional registry of what each is for.
 
@@ -286,7 +287,7 @@ let db = ws.get(&DbName::parse("chat-42")?, now_ms(), IfMissing::Create)?;
 ```
 
 A name is `[a-z0-9][a-z0-9_-]*` and cannot represent a path, so it resolves to
-exactly one file inside the directory. The pool bounds how many stay open;
+exactly one named database inside the directory. The pool bounds how many stay open;
 `close_idle` releases the rest, which matters because an open writer holds the
 file's exclusive lock — the timeout is a liveness setting, not a memory one.
 

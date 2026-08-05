@@ -457,7 +457,7 @@ fn temp_workspace(tag: &str) -> PathBuf {
     dir.parent().unwrap().to_path_buf()
 }
 
-/// Drive a server started over a workspace directory rather than one file.
+/// Drive a server started over a workspace directory rather than one local database.
 /// `extra` carries the rest of the flags (`--db NAME`, `--allow`, `--no-create`).
 fn workspace_roundtrip(root: &PathBuf, extra: &[&str], requests: &[&str]) -> Vec<Value> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_plugmem-mcp"))
