@@ -15,3 +15,6 @@ __pycache__/
 # Copied in by the release job so the wheel carries it (PEP 639 wants the
 # path inside the project); the original lives at the repository root.
 /LICENSE
+
+# The CI job builds into a local virtualenv (maturin develop needs one).
+/.venv/

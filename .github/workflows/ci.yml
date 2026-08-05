@@ -458,9 +458,15 @@ jobs:
           # whatever the runner defaults to.
           python-version: "3.10"
       - name: Install the build and check tools
-        run: pip install "maturin>=1.14,<2.0" pytest mypy ruff
+        # Into a venv, not the runner's interpreter: `maturin develop` installs
+        # the extension into an environment and refuses to guess one, so a bare
+        # `setup-python` leaves it with nowhere to put the module. A `.venv` in
+        # this directory is what it looks for.
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --quiet "maturin>=1.14,<2.0" pytest mypy ruff
       - name: Build and install the extension
-        run: maturin develop
+        run: .venv/bin/maturin develop
       - name: The committed stubs match the Rust surface
         # `python/plugmem/_plugmem.pyi` is generated AND committed, because it
         # is what gives an editor completion and a type checker something to
@@ -481,11 +487,11 @@ jobs:
         # upstream changes shape, that patch silently stops applying and the
         # whole exception hierarchy quietly degrades to `Any`. Checking the
         # stub itself turns that silence into a red build.
-        run: mypy --strict python/plugmem/_plugmem.pyi python/plugmem/__init__.py
+        run: .venv/bin/mypy --strict python/plugmem/_plugmem.pyi python/plugmem/__init__.py
       - name: Lint the Python
-        run: ruff check python tests
+        run: .venv/bin/ruff check python tests
       - name: Test through Python
-        run: pytest -q
+        run: .venv/bin/pytest -q
 
   dist-plan:
     name: cargo-dist plan
