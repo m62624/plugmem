@@ -51,7 +51,7 @@ with a recency boost (tags filter; they are not a source):
 |---|---|---|
 | **Lexical** | [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) (Robertson idf) over a Unicode ([UAX #29](https://unicode.org/reports/tr29/)) tokenizer | exact terms / keyword overlap |
 | **Semantic** | int8-quantized cosine — a flat two-phase scan below a threshold, an [HNSW](https://arxiv.org/abs/1603.09320) graph above | meaning / nearest neighbours |
-| **Graph** | entity graph with typed edges, breadth-first from query anchors | relational knowledge |
+| **Graph** | entity graph with typed edges, breadth-first from query anchors; depth defaults to `Config::graph_depth` and can be overridden per recall | relational knowledge |
 | **Temporal** | range scans over a `recorded_at`-ordered index; bitemporal validity | "what was true *then*", time windows |
 
 ## Two clocks
@@ -98,6 +98,14 @@ db.recall(RecallQuery {
 db.recall(RecallQuery {
     entities: &["kim"],
     as_of: Some(MAR_5),
+    ..RecallQuery::text(MAR_10, "kim")
+})?;
+
+// The graph depth belongs to this question: widen the walk for a neighbourhood
+// query, or use `Some(0)` when only kim's own facts should answer.
+let _around_kim = db.recall(RecallQuery {
+    entities: &["kim"],
+    graph_depth: Some(3),
     ..RecallQuery::text(MAR_10, "kim")
 })?;
 # Ok::<(), plugmem_host::HostError>(())
