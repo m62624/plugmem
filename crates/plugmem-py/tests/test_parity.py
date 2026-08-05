@@ -17,9 +17,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
-
 import plugmem
+import pytest
 
 NAPI_DTS = (
     Path(__file__).resolve().parents[2] / "plugmem-napi" / "index.d.ts"
@@ -64,7 +63,7 @@ def napi_class_members(source: str, class_name: str) -> set[str]:
     # `name(` or `static name(` at the start of a line, skipping doc comments.
     return {
         camel_to_snake(match.group(1))
-        for match in re.finditer(r"^\s*(?:static\s+)?([a-zA-Z_]\w*)\s*\(", body, re.M)
+        for match in re.finditer(r"^\s*(?:static\s+)?([a-zA-Z_]\w*)\s*\(", body, re.MULTILINE)
         if match.group(1) not in {"constructor", "if", "for", "while"}
     }
 
@@ -72,7 +71,7 @@ def napi_class_members(source: str, class_name: str) -> set[str]:
 def napi_functions(source: str) -> set[str]:
     return {
         camel_to_snake(match.group(1))
-        for match in re.finditer(r"^export declare function (\w+)", source, re.M)
+        for match in re.finditer(r"^export declare function (\w+)", source, re.MULTILINE)
     }
 
 

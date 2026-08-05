@@ -32,11 +32,13 @@
   },
   "devDependencies": {
     "@napi-rs/cli": "^2.18.4",
+    "oxlint": "^1.0.0",
     "typescript": "^5.9.3"
   },
   "scripts": {
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
+    "lint": "oxlint __test__ --deny-warnings",
     "test": "node --test __test__/*.test.mjs",
     "typecheck": "tsc -p tsconfig.json"
   }

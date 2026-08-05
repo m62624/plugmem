@@ -19,9 +19,8 @@ import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import pytest
-
 import plugmem
+import pytest
 
 DIM = 8
 WRITERS = 4
@@ -43,7 +42,7 @@ COUNTER = Counter()
 
 
 class Handler(BaseHTTPRequestHandler):
-    def do_POST(self) -> None:  # noqa: N802  (the stdlib spells it this way)
+    def do_POST(self) -> None:
         with COUNTER.lock:
             COUNTER.inside += 1
             COUNTER.peak = max(COUNTER.peak, COUNTER.inside)
