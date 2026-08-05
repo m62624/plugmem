@@ -159,6 +159,7 @@ const res = await db.recall({
   tags: ["work"],          // filter: a fact must carry all of these
   k: 10,                   // cap the number of facts
   tokenBudget: 400,        // cap the size of the block — your context budget
+  graphDepth: 3,           // how far to walk from the anchors (default 2)
 });
 
 res.rendered;   // string, prompt-ready

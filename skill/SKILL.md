@@ -194,9 +194,10 @@ So the two axes are not a fact-only feature: "who reported to whom last spring"
 is a question this answers, and it is the reason to `unlink` rather than to
 forget the fact that stated the relationship.
 
-How far the walk goes is `[recall].graph_depth` (default 2 hops, ceiling 4).
-There is no per-call flag for it: it is a property of how the memory should be
-read, not of one question.
+How far the walk goes is `--graph-depth N` on the recall (`graph_depth` over
+MCP, `graphDepth` in Node), defaulting to `[recall].graph_depth`. Reach for it when *this* question wants a different net than the
+memory's usual one: `--graph-depth 3` for "everything around ann",
+`--graph-depth 0` for "ann's own facts and nothing her neighbours know".
 
 ## Saying *why* an edge exists
 
@@ -231,7 +232,7 @@ MANDATORY.
   | Verb | Shape |
   |------|-------|
   | `remember` | `remember "<text>" [--entity E] [--tag T]… [--link REL:ENTITY]… [--meta K=V]… [--valid-from MS] [--vector F32,…]` |
-  | `recall` | `recall ["<query>"] [--tag T]… [--entity E]… [--as-of MS] [--range FROM TO] [-k N] [--closed] [--token-budget N] [--ef N] [--vector F32,…]` |
+  | `recall` | `recall ["<query>"] [--tag T]… [--entity E]… [--as-of MS] [--range FROM TO] [-k N] [--closed] [--token-budget N] [--ef N] [--graph-depth N] [--vector F32,…]` |
   | `revise` | `revise <id> "<text>" [same flags as remember]` |
   | `forget` | `forget <id>` |
   | `link` | `link <src> <rel> <dst> [--provenance FACT_ID]` |

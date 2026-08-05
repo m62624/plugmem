@@ -47,10 +47,13 @@ process per command): no work before the command is parsed.
 
 stdio JSON-RPC (newline-delimited, one message per line). The tools mirror the core:
 `plugmem_remember`, `plugmem_recall`, `plugmem_revise`, `plugmem_forget`,
-`plugmem_link`, `plugmem_show`, `plugmem_stats`, `plugmem_export`, `plugmem_maintain`,
+`plugmem_link`, `plugmem_show`, `plugmem_stats`, `plugmem_export` (`{ facts, edges }` —
+an edge belongs to no single fact, so facts alone lose the graph), `plugmem_maintain`,
 `plugmem_checkpoint`, `plugmem_verify`, plus `plugmem_version` and `plugmem_about`. A
 read-only server adds `plugmem_generation` / `plugmem_refresh` (cross-process freshness)
-and refuses the write verbs. (`scrub`, `recover` and `import` are CLI-only.) Each tool
+and refuses the write verbs. (`scrub` and `recover` are deliberately absent: the server
+is judged by what an agent should be handed, not by what host has — see the wrapper
+parity rule in `AGENTS.md`. `import` is a CLI feature, not a host verb.) Each tool
 takes `format` ("json" default | "human"). `plugmem_remember`'s description says
 outright: "if similar contains a contradiction, decide: plugmem_revise or keep both".
 
@@ -68,9 +71,10 @@ A **native napi addon, not wasm**: the host is compiled as-is (real mmap/MVCC/lo
 RAM bloat and no 4 GiB ceiling). The crate is `crate-type = ["cdylib", "rlib"]`,
 `publish = false` (it ships to npm as the meta package `plugmem` plus six platform
 packages). The `Plugmem` class wraps the host `Database` verb for verb — every method is
-the identically-named host verb — though it is not yet the *whole* of `Database`:
-`remember_many`, `export_each` and `tags_of` are not exposed, and `recover` is CLI-only
-like `import` and `scrub`. The crate README names the gaps. Inputs/outputs are
+the identically-named host verb, and it is the *whole* of `Database`: `exportEdges`,
+`scrub` and `recover` are there alongside the rest, per the wrapper-parity rule in
+`AGENTS.md`. The one thing host has and this does not is `import`, which is not a host
+verb at all — JSONL is a format the CLI defines. Inputs/outputs are
 `napi(object)` mapped to hand-written TypeScript interfaces; the heavy verbs
 (`maintain`/`checkpoint`) are async on libuv. Node opens a file directly (real file
 I/O), so there is no JS storage bridge. A `Workspace` class mirrors the host type the

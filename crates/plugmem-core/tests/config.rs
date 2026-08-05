@@ -108,7 +108,6 @@ fn every_range_check_fires() {
     rejects(|c| c.w_time = -0.1, "w_time must be finite and >= 0");
     rejects(|c| c.w_recency = -2.0, "w_recency must be finite and >= 0");
     rejects(|c| c.half_life_days = 0, "half_life_days must be >= 1");
-    rejects(|c| c.graph_depth = 5, "graph_depth must be <= 4");
     rejects(|c| c.graph_decay = 0.0, "graph_decay must be in (0, 1]");
     rejects(|c| c.graph_decay = 1.1, "graph_decay must be in (0, 1]");
     rejects(|c| c.similar_cos = -0.5, "similar_cos must be in [0, 1]");
@@ -151,6 +150,12 @@ fn zero_weights_and_boundary_values_are_valid() {
     cfg.similar_cos = 1.0;
     cfg.similar_jaccard = 0.0;
     cfg.graph_depth = 0;
+    cfg.validate().unwrap();
+
+    // Depth has no ceiling: what a graph walk costs is held by the entity and
+    // edge caps in the recall path, so a hop count only decides how far a
+    // *sparse* walk may go — and there the hops are the cheap part.
+    cfg.graph_depth = u32::MAX;
     cfg.validate().unwrap();
 }
 

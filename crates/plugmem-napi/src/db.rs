@@ -153,6 +153,14 @@ pub struct RecallArgs {
     /// `hnsw_ef_search`). Higher is more accurate and slower; ignored while
     /// the engine is still in the flat regime, below `flat_to_hnsw`.
     pub ef: Option<u32>,
+    /// How many edges the graph source may follow from an anchor entity
+    /// (default: the configured `graph_depth`). `0` asks for the anchors' own
+    /// facts and no neighbours.
+    ///
+    /// Per call for the same reason `k` and `tokenBudget` are: how wide a net
+    /// to cast belongs to the question. "What is known around this person"
+    /// wants more hops than "what is this person's stated preference".
+    pub graph_depth: Option<u32>,
     /// A precomputed embedding. Its length must equal the configured `dim`.
     ///
     /// Given, it **replaces** the embedder: nothing is sent to the provider.
@@ -1441,6 +1449,7 @@ impl Task for RecallTask {
             token_budget: self.args.token_budget.map(|v| v as usize),
             include_closed: self.args.closed.unwrap_or(false),
             ef: self.args.ef.map(|v| v as usize),
+            graph_depth: self.args.graph_depth,
         };
         Ok(match &self.source {
             RecallSource::Writer(db) => db.recall(q),

@@ -543,6 +543,7 @@ fn recall_ro(reader: &ReaderShared, id: Value, args: Option<&Value>) -> Value {
         token_budget: arg_u64(args, "token_budget").map(|v| v as usize),
         include_closed: arg_bool(args, "closed"),
         ef: arg_u64(args, "ef").map(|v| v as usize),
+        graph_depth: arg_u64(args, "graph_depth").map(|v| v as u32),
     };
     let db = reader.db.read().expect("snapshot lock");
     match db.recall(q) {
@@ -710,6 +711,7 @@ fn recall(db: &Database, id: Value, args: Option<&Value>) -> Value {
         token_budget: arg_u64(args, "token_budget").map(|v| v as usize),
         include_closed: arg_bool(args, "closed"),
         ef: arg_u64(args, "ef").map(|v| v as usize),
+        graph_depth: arg_u64(args, "graph_depth").map(|v| v as u32),
     };
     match db.recall(q) {
         // Human = the rendered block; json = the structured result.
@@ -810,6 +812,7 @@ fn recall_def() -> Value {
                 "closed": { "type": "boolean", "description": messages::ARG_CLOSED },
                 "token_budget": { "type": "integer", "minimum": 1, "description": messages::ARG_TOKEN_BUDGET },
                 "ef": { "type": "integer", "minimum": 1, "description": messages::ARG_EF },
+                "graph_depth": { "type": "integer", "minimum": 0, "description": messages::ARG_GRAPH_DEPTH },
                 "vector": vector_prop(),
                 "format": format_prop()
             }
@@ -1596,6 +1599,52 @@ mod tests {
         .unwrap();
         assert_eq!(card["metadata"]["uri"], "s3://b/x");
         assert_eq!(card["metadata"]["mime"], "pdf");
+    }
+
+    #[test]
+    fn recall_takes_graph_depth_per_call() {
+        // A chain a -> b -> c -> d with one fact each: the number of facts a
+        // recall returns is the number of hops it took.
+        let tmp = TempDir::new("graph-depth");
+        let (db, _) = Database::open(tmp.db(), Config::default()).unwrap();
+        for (entity, next) in [("a", "b"), ("b", "c"), ("c", "d"), ("d", "e")] {
+            call(
+                &db,
+                json!(1),
+                Some(&params(
+                    "plugmem_remember",
+                    json!({
+                        "text": format!("fact on {entity}"),
+                        "entity": entity,
+                        "links": [{ "rel": "leads_to", "entity": next }],
+                    }),
+                )),
+            );
+        }
+
+        let reached = |args: Value| {
+            let r = call(&db, json!(2), Some(&params("plugmem_recall", args)));
+            assert!(!is_error(&r));
+            serde_json::from_str::<Value>(&text(&r)).unwrap()["facts"]
+                .as_array()
+                .expect("facts")
+                .len()
+        };
+
+        let base = json!({ "entities": ["a"], "k": 64, "token_budget": 4096 });
+        let with = |depth: u64| {
+            let mut a = base.clone();
+            a["graph_depth"] = json!(depth);
+            a
+        };
+
+        assert_eq!(reached(base.clone()), 3, "the configured default is 2 hops");
+        assert_eq!(reached(with(0)), 1, "no expansion: the anchor's own fact");
+        assert_eq!(reached(with(1)), 2);
+        assert_eq!(reached(with(3)), 4);
+        // The schema caps it at 4, but a model that ignores the schema is still
+        // held to the engine's ceiling rather than granted a deeper walk.
+        assert_eq!(reached(with(99)), reached(with(4)));
     }
 
     #[test]

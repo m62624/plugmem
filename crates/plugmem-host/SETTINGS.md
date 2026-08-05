@@ -169,7 +169,7 @@ this section when a specific memory answers badly, not before.
 | `rrf_k` | `60` | Reciprocal-rank-fusion constant. Larger flattens the gap between rank 1 and rank 10. |
 | `bm25_k1` | `1.2` | BM25 term-frequency saturation: higher lets a repeated word keep counting. |
 | `bm25_b` | `0.75` | BM25 length normalisation: `0` ignores fact length, `1` penalises long facts fully. |
-| `graph_depth` | `2` | How many edges the graph source may follow from an anchor. Ceiling `4`. |
+| `graph_depth` | `2` | Default hops the graph source may follow from an anchor; a recall's own `graph_depth` overrides it, the way `ef` overrides `hnsw_ef_search`. Uncapped: what a walk costs is held by its entity and edge caps, not by the hop count. |
 | `graph_decay` | `0.5` | How much each extra hop discounts a fact reached through the graph. |
 | `hnsw_ef_search` | `64` | Default vector-search beam width. A recall's own `ef` overrides it, and it does nothing while the index is still flat. |
 | `similar_cos` | `0.85` | Cosine above which `remember` reports an existing fact as possibly conflicting. |

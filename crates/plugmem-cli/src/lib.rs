@@ -950,6 +950,7 @@ fn with_recall_query<R>(
         closed,
         token_budget,
         ef,
+        graph_depth,
         vector,
     } = cmd
     else {
@@ -975,6 +976,7 @@ fn with_recall_query<R>(
         token_budget: *token_budget,
         include_closed: *closed,
         ef: *ef,
+        graph_depth: *graph_depth,
     };
     f(q)
 }
@@ -1569,6 +1571,7 @@ mod tests {
             closed: false,
             token_budget: None,
             ef: None,
+            graph_depth: None,
             vector: Vec::new(),
         }
     }
@@ -1890,6 +1893,7 @@ mod tests {
             closed: false,
             token_budget: None,
             ef: None,
+            graph_depth: None,
             vector: Vec::new(),
         };
         let (code, out) = run_cmd(&db, &recall, false, 2_000);
@@ -1916,6 +1920,7 @@ mod tests {
             closed: false,
             token_budget: None,
             ef: None,
+            graph_depth: None,
             vector: Vec::new(),
         };
         let (code, out) = run_cmd(&db, &recall, false, 1_000);
@@ -2089,6 +2094,7 @@ mod tests {
             closed: false,
             token_budget: None,
             ef: None,
+            graph_depth: None,
             vector: Vec::new(),
         };
         let (_, out) = run_cmd(&db, &as_of, false, 3_000);
@@ -2174,10 +2180,60 @@ mod tests {
             closed: true,
             token_budget: None,
             ef: None,
+            graph_depth: None,
             vector: Vec::new(),
         };
         let (_, out) = run_cmd(&db, &recall, true, 4_000);
         assert!(serde_json::from_str::<serde_json::Value>(out.trim()).is_ok());
+    }
+
+    #[test]
+    fn graph_depth_is_a_per_call_flag_over_the_configured_default() {
+        // A chain a -> b -> c -> d with one fact each, so the number of facts
+        // recalled *is* the number of hops taken.
+        let (db, _t) = TempDb::open();
+        for (i, (entity, next)) in [("a", "b"), ("b", "c"), ("c", "d"), ("d", "e")]
+            .iter()
+            .enumerate()
+        {
+            let cmd = Command::Remember {
+                text: format!("fact on {entity}"),
+                entity: Some((*entity).into()),
+                tags: Vec::new(),
+                links: vec![format!("leads_to:{next}")],
+                meta: Vec::new(),
+                valid_from: None,
+                vector: Vec::new(),
+            };
+            run_cmd(&db, &cmd, false, 1_000 + i as u64);
+        }
+
+        let reached = |depth: Option<u32>| {
+            let recall = Command::Recall {
+                query: None,
+                tags: Vec::new(),
+                entities: vec!["a".into()],
+                as_of: None,
+                range: None,
+                k: 64,
+                closed: false,
+                token_budget: Some(4096),
+                ef: None,
+                graph_depth: depth,
+                vector: Vec::new(),
+            };
+            let (_, out) = run_cmd(&db, &recall, false, 5_000);
+            out.lines().filter(|l| l.starts_with("- [f")).count()
+        };
+
+        assert_eq!(reached(None), 3, "the configured default is 2 hops");
+        assert_eq!(reached(Some(0)), 1, "no expansion: the anchor's own fact");
+        assert_eq!(reached(Some(1)), 2);
+        assert_eq!(reached(Some(3)), 4);
+        // No hop ceiling, and an absurd depth terminates: the walk ends when a
+        // pass adds no entity, not when a counter runs out.
+        assert_eq!(reached(Some(99)), 4);
+        assert_eq!(reached(Some(u32::MAX)), 4);
     }
 
     #[test]
@@ -2392,6 +2448,7 @@ mod tests {
             closed: false,
             token_budget: None,
             ef: None,
+            graph_depth: None,
             vector: Vec::new(),
         };
         assert_eq!(execute_ro(&ro, &recall, None, false, &mut out), 0);
@@ -2747,6 +2804,7 @@ mod tests {
                 closed: false,
                 token_budget: None,
                 ef: None,
+                graph_depth: None,
                 vector: Vec::new(),
             },
         };

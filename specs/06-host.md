@@ -84,8 +84,10 @@ embedder = a purely structural database, complete by design) and input ownership
 (methods take `&str`/slices like the core, no extra copies).
 
 **Integrity and recovery.** Beyond the mirror verbs the host adds `verify()` (content
-consistency), `ReadOnlyDatabase::scrub()` (byte-level container integrity, a resumable
-iterator under the shared lock), and `recover(src, dst, cfg, now)` (drop content-broken
+consistency), `scrub()` on **either** handle (byte-level container integrity, a
+resumable iterator holding its own shared lock on the generation it pins — it reads the
+file, not a handle's view of it, and needs a published generation but not a clean
+journal), and `recover(src, dst, cfg, now)` (drop content-broken
 facts, write a clean copy, src untouched). `recover` and `maintain` are **disk-first**:
 the large pools (vectors, text) stream through a temp `Scratch`, keeping only metadata
 and the HNSW graph in RAM, so a rebuild is not bounded by the image size. Open is

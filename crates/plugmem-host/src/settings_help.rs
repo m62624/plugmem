@@ -387,9 +387,9 @@ const DOCS: &[SettingDoc] = &[
     SettingDoc {
         section: "recall",
         key: "graph_depth",
-        value_type: "integer in 0..=4",
+        value_type: "non-negative integer",
         default: "2",
-        description: "How many edges the graph source may follow from an anchor entity",
+        description: "Default hops the graph source may follow from an anchor entity; a recall's own `graph_depth` overrides it. Uncapped — the walk is bounded by its entity and edge caps, not by depth",
         scope: SettingScope::Shared,
     },
     SettingDoc {

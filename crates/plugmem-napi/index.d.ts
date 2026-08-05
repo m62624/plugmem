@@ -99,6 +99,16 @@ export interface RecallArgs {
    */
   ef?: number
   /**
+   * How many edges the graph source may follow from an anchor entity
+   * (default: the configured `graph_depth`). `0` asks for the anchors' own
+   * facts and no neighbours.
+   *
+   * Per call for the same reason `k` and `tokenBudget` are: how wide a net
+   * to cast belongs to the question. "What is known around this person"
+   * wants more hops than "what is this person's stated preference".
+   */
+  graphDepth?: number
+  /**
    * A precomputed embedding. Its length must equal the configured `dim`.
    *
    * Given, it **replaces** the embedder: nothing is sent to the provider.
