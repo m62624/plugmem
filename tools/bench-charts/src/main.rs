@@ -34,7 +34,7 @@
 //! Benchmarks jitter run to run, so a re-render would churn the SVGs even
 //! when nothing really moved. Before rewriting a chart the tool compares
 //! its new values against a committed [`baseline`](../baseline.tsv): if
-//! every value moved less than the `threshold` in [`config.toml`], the SVG
+//! every value moved less than the `threshold` in `config.toml`, the SVG
 //! is left byte-identical (so `git status` stays clean); if any moved
 //! more, the SVG is rewritten and the baseline updated in lockstep. This
 //! only decides what lands on disk — you always choose what to commit. It

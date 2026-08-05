@@ -532,9 +532,9 @@ fn recall_ro(reader: &ReaderShared, id: Value, args: Option<&Value>) -> Value {
         as_of,
         range,
         k: arg_u64(args, "k").unwrap_or(0) as usize,
-        token_budget: None,
+        token_budget: arg_u64(args, "token_budget").map(|v| v as usize),
         include_closed: arg_bool(args, "closed"),
-        ef: None,
+        ef: arg_u64(args, "ef").map(|v| v as usize),
     };
     let db = reader.db.read().expect("snapshot lock");
     match db.recall(q) {
@@ -629,7 +629,7 @@ fn link(db: &Database, id: Value, args: Option<&Value>) -> Value {
         src,
         rel,
         dst,
-        provenance: None,
+        provenance: arg_u64(args, "provenance").map(|v| FactId(v as u32)),
     }) {
         Ok(()) => rpc::tool_result(
             id,
@@ -699,9 +699,9 @@ fn recall(db: &Database, id: Value, args: Option<&Value>) -> Value {
         as_of,
         range,
         k: arg_u64(args, "k").unwrap_or(0) as usize,
-        token_budget: None,
+        token_budget: arg_u64(args, "token_budget").map(|v| v as usize),
         include_closed: arg_bool(args, "closed"),
-        ef: None,
+        ef: arg_u64(args, "ef").map(|v| v as usize),
     };
     match db.recall(q) {
         // Human = the rendered block; json = the structured result.
@@ -800,6 +800,8 @@ fn recall_def() -> Value {
                 },
                 "k": { "type": "integer", "minimum": 0, "description": messages::ARG_K },
                 "closed": { "type": "boolean", "description": messages::ARG_CLOSED },
+                "token_budget": { "type": "integer", "minimum": 1, "description": messages::ARG_TOKEN_BUDGET },
+                "ef": { "type": "integer", "minimum": 1, "description": messages::ARG_EF },
                 "vector": vector_prop(),
                 "format": format_prop()
             }
@@ -831,8 +833,17 @@ fn id_only_def(name: &str, description: &str) -> Value {
     })
 }
 
+/// `link` takes one argument `unlink` does not: the edge's provenance. Hence
+/// its own definition rather than a shared [`edge_def`] — closing an edge has
+/// no source fact to name, only opening one does.
 fn link_def() -> Value {
-    edge_def(LINK, messages::LINK_TOOL)
+    let mut def = edge_def(LINK, messages::LINK_TOOL);
+    def["inputSchema"]["properties"]["provenance"] = json!({
+        "type": "integer",
+        "minimum": 0,
+        "description": messages::ARG_PROVENANCE
+    });
+    def
 }
 
 fn unlink_def() -> Value {
@@ -1794,6 +1805,38 @@ mod workspace_tests {
                 "{tool} should not take {DB_ARG}"
             );
         }
+    }
+
+    #[test]
+    fn recall_and_link_advertise_the_knobs_the_engine_actually_has() {
+        // These three reached the engine and no wrapper: every binding pinned
+        // them to `None`, so the capability existed and no caller could use
+        // it. An agent only knows what the schema advertises, so the schema is
+        // where the parity has to be asserted.
+        let defs = definitions();
+        let prop = |tool: &str, key: &str| -> Option<Value> {
+            defs.iter()
+                .find(|d| d["name"] == tool)?
+                .get("inputSchema")?
+                .get("properties")?
+                .get(key)
+                .cloned()
+        };
+
+        for key in ["token_budget", "ef"] {
+            let p = prop(RECALL, key).unwrap_or_else(|| panic!("{RECALL} must advertise {key}"));
+            assert_eq!(p["type"], "integer", "{key} is a number");
+            assert!(
+                p["description"].as_str().is_some_and(|d| !d.is_empty()),
+                "{key} is documented for the agent reading the schema"
+            );
+        }
+
+        let provenance = prop(LINK, "provenance").expect("link must advertise provenance");
+        assert_eq!(provenance["type"], "integer");
+
+        // `unlink` deliberately does not: closing an edge names no source fact.
+        assert_eq!(prop(UNLINK, "provenance"), None);
     }
 
     #[test]

@@ -87,6 +87,18 @@ export interface RecallArgs {
   /** Include closed revisions (default false). */
   closed?: boolean
   /**
+   * Token budget of the `rendered` block (default 512). That block is what
+   * goes into a prompt, so this is the knob deciding how much of the
+   * context window a recall may spend.
+   */
+  tokenBudget?: number
+  /**
+   * HNSW beam width for the vector source (default: the configured
+   * `hnsw_ef_search`). Higher is more accurate and slower; ignored while
+   * the engine is still in the flat regime, below `flat_to_hnsw`.
+   */
+  ef?: number
+  /**
    * A precomputed embedding. Its length must equal the configured `dim`.
    *
    * Given, it **replaces** the embedder: nothing is sent to the provider.
@@ -104,6 +116,12 @@ export interface LinkArgs {
   rel: string
   /** Destination entity name. */
   dst: string
+  /**
+   * The fact this edge follows from, recorded on the edge and returned by
+   * graph recall — the answer to "why is this edge here". Ignored by
+   * `unlink`, which closes an edge rather than opening one.
+   */
+  provenance?: number
 }
 /** One similar / potentially-conflicting live fact surfaced by `remember`. */
 export interface Similar {
@@ -226,6 +244,12 @@ export interface FactSnapshot {
 }
 /** One exported fact — the id-free, import-ready shape. */
 export interface ExportedFact {
+  /**
+   * The fact's id in the database it came from. Informational: an import
+   * assigns fresh ids. Present because edges name their provenance fact by
+   * id, so a dump carrying edges needs something for them to point at.
+   */
+  id: number
   /** The fact text. */
   text: string
   /** Subject entity name, if any. */

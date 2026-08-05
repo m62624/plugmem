@@ -40,14 +40,14 @@ use core::fmt;
 use crate::error::Error;
 use crate::paged::Paged;
 
-/// Size of one chunk in bytes: a chain link ([`LINK_BYTES`]) plus the payload.
+/// Size of one chunk in bytes: a chain link (`LINK_BYTES`) plus the payload.
 pub const CHUNK_BYTES: usize = 64;
 
 /// Bytes of a chunk's chain link — a little-endian `u32` at the chunk's start,
 /// holding either the next chunk in a list chain or the next free chunk.
 const LINK_BYTES: usize = core::mem::size_of::<u32>();
 
-/// Payload bytes per chunk ([`CHUNK_BYTES`] minus the [`LINK_BYTES`] link).
+/// Payload bytes per chunk ([`CHUNK_BYTES`] minus the `LINK_BYTES` link).
 /// Also the maximum length of a single pushed value.
 pub const CHUNK_PAYLOAD: usize = CHUNK_BYTES - LINK_BYTES;
 
@@ -425,7 +425,7 @@ impl<'a> ChunkPool<'a> {
 
     /// Appends the pool section to `out`.
     ///
-    /// Each chunk contributes its [`LINK_BYTES`] link, its used payload prefix
+    /// Each chunk contributes its `LINK_BYTES` link, its used payload prefix
     /// and zero padding to [`CHUNK_BYTES`]; free chunks contribute link plus
     /// zeros. This canonicalizes the stale bytes recycling leaves behind
     /// (see [`ChunkPool::free`]) — identical logical state, identical
@@ -489,7 +489,7 @@ impl<'a> ChunkPool<'a> {
     /// Opens a pool over a borrowed base for the **overlay** write path: the
     /// chunk bytes are mapped read-only, and the first write to any base chunk
     /// (a value push, or a chain/free-list link update) copies just that chunk
-    /// into owned storage (per-page copy-on-write, see [`Paged`](crate::paged)),
+    /// into owned storage (per-page copy-on-write, see `Paged`),
     /// while chunks grown after open live in an owned tail. Unlike
     /// [`ChunkPool::load_borrowed`] the returned pool is fully mutable — pushes
     /// and frees work — yet the borrowed base is never cloned as a whole or

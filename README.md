@@ -38,23 +38,54 @@ users.
 
 It is **not** a vector database. A vector is one of four recall sources —
 lexical (BM25), vector, entity graph and time — fused with reciprocal-rank
-fusion; tags act as filters. What plugmem is actually about:
+fusion; tags act as filters. What the engine does:
 
-- **bitemporal facts** — `revise`/`forget`, "what was true *then*" vs now,
-  revision chains kept intact, physical erasure on `maintain`;
-- **an entity graph** — typed edges between entities, with `link`/`unlink`
-  lifecycle and `as_of` graph recall, not just nearest-neighbor vectors;
-- **opaque per-fact metadata** — an optional key→value map (a URI to the real
-  payload in another store, a mime type, an external key); the engine stores
-  and returns it but never interprets it — big blobs live outside, by reference;
-- **conflict surfacing on `remember`** — a new fact comes back with the
-  live facts it may duplicate or contradict; the engine never merges on
-  its own, the caller decides;
-- **a compact rendered block** — the result is selected greedily under a
-  token budget, ready for the prompt;
-- **embeddable everywhere** — single-threaded `no_std + alloc` core,
-  zero-allocation recall after warm-up, one file, no server; built and
-  tested on `wasm32v1-none` and a real 32-bit wasm runtime in CI.
+- **two clocks per fact.** `valid_from`/`valid_to` say when a statement was
+  true, `recorded_at` says when the memory learned it. `revise` closes an
+  interval rather than overwriting, so `as_of` answers "what did I hold then";
+  `forget` is the destructive verb and `maintain` erases the bytes.
+- **a typed entity graph.** Edges between entities, opened by `link` and closed
+  by `unlink`, each optionally naming the fact it follows from. An `as_of`
+  traversal walks the graph as it stood then, through edges since removed.
+- **opaque per-fact metadata.** A key→value map — a URI to the real payload in
+  another store, a mime type, an external key. Stored and returned verbatim,
+  never interpreted or searched; large blobs stay outside, by reference.
+- **conflicts surfaced, not resolved.** `remember` returns the live facts a new
+  one may duplicate or contradict. The engine never merges on its own; the
+  caller revises, forgets, or keeps both.
+- **a block, not a result set.** Recall selects greedily under a token budget
+  and renders text ready to paste into a prompt.
+- **`no_std + alloc` core.** Single-threaded, zero-allocation recall after
+  warm-up, one file, no server; built and tested on `wasm32v1-none` and a real
+  32-bit wasm runtime in CI.
+
+The two clocks are what differs from other stores. `revise` closes an interval
+instead of overwriting a row, so the earlier state is still answerable:
+
+```console
+$ plugmem-cli remember "lives in Moscow" --entity kim
+remembered fact 0
+$ plugmem-cli revise 0 "lives in Berlin" --entity kim
+remembered fact 1
+
+$ plugmem-cli recall --entity kim
+- [f1] kim: lives in Berlin (2026-08; active)
+
+$ plugmem-cli recall --entity kim --as-of <an instant between the two>
+- [f0] kim: lives in Moscow (2026-08 → 2026-08; closed)
+```
+
+`as_of` moves **both** clocks: a fact answers only if it was valid at that
+instant *and* had already been recorded by then. That second half is the one
+people trip over — `as_of` before a fact was written returns nothing, because
+the memory genuinely knew nothing then, and reporting today's knowledge would be
+the wrong answer to "what did I hold".
+
+`--valid-from` is the other half: a statement that became true before you heard
+of it. Recording on March 10th that someone moved on March 1st closes the old
+interval at March 1st, so a query as of March 5th finds neither — the old fact
+was no longer true, and the new one was not yet known. That is not a gap in the
+model, it is the honest answer for that instant.
 
 **Where it fits — and where it doesn't.** plugmem is for local agent memory and
 embedded systems: one process, one file, no service to operate. Its interactive
@@ -90,6 +121,21 @@ are for narrower needs.
 Rust programs use the library (`host`, or `core` for specialists) — embedded
 in-process, like linking SQLite. Other languages and agents come in through
 `mcp` (or `napi` for Node/TS) — not the CLI, which is the human/scripting door.
+
+**One thing lives only in the CLI: the JSONL file format.** `export` streams
+every open fact and then every open edge to stdout, one per line, each tagged
+with a `kind`; `import` reads it back in batches. Both halves stream, so a
+memory of any size dumps and loads in bounded RAM. The library, the MCP server
+and the Node addon return exported facts as structures, but none of them reads
+or writes the file format, and none has an `import` verb — a program holding the
+structures already knows how to write them back.
+
+What crosses the round trip: text, subject entity, tags, metadata,
+`valid_from`, graph edges, and each edge's provenance fact (retargeted to the id
+the receiving database assigns). What does not: **closed revisions and vectors**
+— history does not survive, and vectors are recomputed on import when an
+embedder is configured. So JSONL is a portable knowledge dump, not a backup. For
+a backup, copy the database files.
 
 | Crate | What it is |
 |---|---|

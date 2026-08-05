@@ -55,10 +55,10 @@ env:
 
 jobs:
   # --- formatting ------------------------------------------------------------
-  # Formatting is deterministic and platform-independent, so run it once
-  # instead of repeating the same check in every OS/feature job below.
+  # Formatting and documentation are deterministic and platform-independent, so
+  # they run once here instead of repeating in every OS/feature job below.
   format:
-    name: formatting
+    name: formatting + docs
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -70,6 +70,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Formatting
         run: cargo fmt --all --check
+      # `bench-charts` pulls plotters, which needs system fontconfig to build.
+      # The matrix jobs below install it for the same reason.
+      - name: System deps for the chart tool
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
+      # rustdoc's own diagnostics, which nothing ran before: `cargo doc` was in
+      # no workflow, so a broken doc link sat in the tree unnoticed (it did —
+      # `bench-charts` failed to document at all). Doctests are deliberately
+      # *not* repeated here: every matrix job below runs `cargo test`, which
+      # already includes them, and the crate READMEs are part of that through
+      # `#![doc = include_str!("../README.md")]`.
+      #
+      # `-D warnings` because a link to a private item renders as plain text on
+      # docs.rs and is invisible locally. `broken_intra_doc_links` is already
+      # denied in `[workspace.lints]`; this makes the private-link case as loud.
+      - name: Rustdoc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --all-features
 
   # --- linter + tests, fanned out across OSes and feature profiles -----------
   # Each feature profile is its own matrix entry, so the three independent

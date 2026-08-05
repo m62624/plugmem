@@ -52,12 +52,16 @@ file alongside. That is what lets a reader in another process map a stable
 image while a writer keeps working — the MVCC arrangement in `06-host.md`. The
 full on-disk layout, including the manifest's bytes, is `11-file-format.md` §1.
 
-**Locking: one database, one process.** On open `FileStorage` takes an exclusive
-advisory lock (flock/LockFileEx on a lock file beside the database) and holds it for
-the handle's lifetime. A second writer gets `Error::Locked` ("database is locked by
-another process") with no wait. Read-only handles instead take a *shared* lock, so
-N readers OR one writer (the SQLite model; see the read-only path below and
-`06-host.md`).
+**Locking: one writer, any number of readers.** On open `FileStorage` takes an
+exclusive advisory lock (flock/LockFileEx on a lock file beside the database) and
+holds it for the handle's lifetime. A second **writer** gets `Error::Locked`
+("database is locked by another process") with no wait.
+
+Readers do not contend for that lock at all: `open_readonly` pins a published
+generation by taking a *shared* lock on the immutable `*.snap.<N>` file and maps
+it, so a writer and N readers run **at the same time**. This is the WAL/MVCC
+arrangement, not "N readers OR one writer" — see the read-only path below and
+`06-host.md`.
 
 ## Snapshot format
 

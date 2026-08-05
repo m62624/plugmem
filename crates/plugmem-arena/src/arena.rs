@@ -894,7 +894,7 @@ impl<'a, T: Slot> Arena<'a, T> {
     /// Opens an arena over a borrowed base for the **overlay** write path: the
     /// base pages are mapped read-only, and the first write to any base page
     /// copies just that page into owned storage (per-page copy-on-write, see
-    /// [`Paged`](crate::paged)), while pages grown after open live in an owned
+    /// `Paged`), while pages grown after open live in an owned
     /// tail. Unlike [`Arena::load_borrowed`] the returned arena is fully
     /// mutable — inserts, removals and splits work — yet the borrowed base is
     /// never cloned as a whole and never mutated, so a memory-mapped database

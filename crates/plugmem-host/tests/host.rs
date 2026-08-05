@@ -8,8 +8,8 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use plugmem_host::{
-    Config, Database, Embedder, FactId, FsyncPolicy, HostError, NullEmbedder, OpenAiCompatEmbedder,
-    ReadOnlyDatabase, RecallQuery, RememberInput, ShardLayout, UnlinkInput,
+    Config, Database, Embedder, FactId, FsyncPolicy, HostError, LinkInput, NullEmbedder,
+    OpenAiCompatEmbedder, ReadOnlyDatabase, RecallQuery, RememberInput, ShardLayout, UnlinkInput,
 };
 
 /// A unique temp directory per test; removed on drop.
@@ -1992,4 +1992,69 @@ fn fifty_small_memories_fit_in_a_budget_a_bot_can_afford() {
             .unwrap();
         assert!(out.rendered.contains(&format!("memory {i} fact")), "{i}");
     }
+}
+
+#[test]
+fn export_edges_each_streams_the_current_graph_on_both_handles() {
+    // The edge half of a portable dump. Asserted on the read-write handle and
+    // on the zero-copy read-only one, because the CLI takes whichever is
+    // available and the two reach the engine by different paths.
+    let tmp = TempDir::new("export-edges");
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    let sourced = db
+        .remember(RememberInput {
+            entity: Some("ann"),
+            ..RememberInput::text(1, "ann hired bob")
+        })
+        .unwrap();
+    for (rel, dst, provenance) in [("hires", "bob", Some(sourced.id)), ("knows", "carol", None)] {
+        db.link(LinkInput {
+            now: 2,
+            src: "ann",
+            rel,
+            dst,
+            provenance,
+        })
+        .unwrap();
+    }
+
+    /// One walked edge, owned so the callback's borrows do not escape.
+    type Walked = (String, String, String, FactId);
+    /// A visitor of the shape both handles' `export_edges_each` accept.
+    type Visit<'a> = &'a mut dyn FnMut(&str, &str, &str, FactId);
+
+    let collect = |walk: &dyn Fn(Visit<'_>)| {
+        let mut seen: Vec<Walked> = Vec::new();
+        walk(&mut |src, rel, dst, fact| {
+            seen.push((src.into(), rel.into(), dst.into(), fact));
+        });
+        seen.sort();
+        seen
+    };
+
+    let from_writer = collect(&|visit| db.export_edges_each(visit));
+    assert_eq!(from_writer.len(), 2);
+    assert_eq!(from_writer[0].0, "ann", "edges are keyed by their source");
+    assert!(
+        from_writer
+            .iter()
+            .any(|(_, rel, dst, p)| rel == "hires" && dst == "bob" && *p == sourced.id),
+        "provenance survives the walk: {from_writer:?}"
+    );
+    assert!(
+        from_writer
+            .iter()
+            .any(|(_, rel, _, p)| rel == "knows" && *p == FactId::NONE),
+        "an unsourced edge carries the sentinel"
+    );
+
+    // The read-only handle sees the same graph once it is published.
+    db.checkpoint(3).unwrap();
+    drop(db);
+    let ro = Database::open_readonly(tmp.db(), cfg()).unwrap();
+    let from_reader = collect(&|visit| ro.export_edges_each(visit));
+    assert_eq!(
+        from_reader, from_writer,
+        "both handles export the same edges"
+    );
 }

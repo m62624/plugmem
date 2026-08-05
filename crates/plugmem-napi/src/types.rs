@@ -187,6 +187,10 @@ pub struct FactSnapshot {
 #[napi(object)]
 #[derive(serde::Deserialize)]
 pub struct ExportedFact {
+    /// The fact's id in the database it came from. Informational: an import
+    /// assigns fresh ids. Present because edges name their provenance fact by
+    /// id, so a dump carrying edges needs something for them to point at.
+    pub id: f64,
     /// The fact text.
     pub text: String,
     /// Subject entity name, if any.
@@ -204,6 +208,7 @@ pub struct ExportedFact {
 impl From<plugmem_host::ExportedFact> for ExportedFact {
     fn from(fact: plugmem_host::ExportedFact) -> Self {
         Self {
+            id: f64::from(fact.id),
             text: fact.text,
             entity: fact.entity,
             tags: fact.tags,

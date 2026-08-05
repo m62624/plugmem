@@ -128,6 +128,45 @@ filter; they are not a source):
 | **Graph** | entity graph with current typed edges on the hot path; `as_of` walks edge history | relational knowledge |
 | **Temporal** | range scans over a `recorded_at`-ordered index; bitemporal validity | "what was true *then*", time windows |
 
+### Two clocks
+
+The temporal source exists because a fact carries two timestamps, not one:
+`valid_from`/`valid_to` for when the statement was true, and `recorded_at` for
+when the memory learned it. The server reads the system clock on every call, so
+`recorded_at` is the moment of the write.
+
+`plugmem_revise` closes the old fact's interval instead of deleting it, so the
+earlier state stays answerable:
+
+```jsonc
+{"name": "plugmem_remember", "arguments": {"text": "lives in Moscow", "entity": "kim"}}
+// → fact 0
+
+{"name": "plugmem_revise", "arguments": {"id": 0, "text": "lives in Berlin", "entity": "kim"}}
+// → fact 1
+
+{"name": "plugmem_recall", "arguments": {"entities": ["kim"]}}
+// → f1, Berlin, active
+
+{"name": "plugmem_recall", "arguments": {"entities": ["kim"], "as_of": <between the two>}}
+// → f0, Moscow, closed
+```
+
+`as_of` moves **both** clocks: a fact answers only if it was valid at that
+instant *and* had already been recorded by then. That second half matters for an
+agent replaying old context — an `as_of` earlier than a fact's `recorded_at`
+sees nothing, because the memory genuinely knew nothing then, and reporting
+today's knowledge would be the wrong answer to "what did I hold".
+
+`valid_from` is the other half: something that became true before the agent
+heard of it. Recording today that a move happened last week closes the previous
+interval last week rather than today, so a query as of three days ago finds
+*neither* — the old fact had stopped being true and the new one was not yet
+known. That is the honest answer for that instant.
+
+`plugmem_forget` is the destructive verb: for a fact that was wrong, not one
+that changed.
+
 ## Tools
 
 Every tool is named `plugmem_*` (so it never collides with another server's
@@ -142,10 +181,10 @@ sets `isError: true` so the model can read and react to it.
 | tool | what it does |
 |---|---|
 | `plugmem_remember` | store a fact (`text`, optional `entity`, `tags[]`, `links[]` of `{rel, entity}`, `valid_from`); returns the id + similar/conflicting facts |
-| `plugmem_recall` | ranked, token-budgeted recall (`query`, `tags[]`, `entities[]`, `as_of`, `range [from,to]`, `k`, `closed`) |
+| `plugmem_recall` | ranked, token-budgeted recall (`query`, `tags[]`, `entities[]`, `as_of`, `range [from,to]`, `k`, `closed`, `token_budget`, `ef`) |
 | `plugmem_revise` | close fact `id`, record the successor (same args as remember + `id`) |
 | `plugmem_forget` | tombstone fact `id` (purged at the next maintain) |
-| `plugmem_link` | upsert a typed edge `src -rel-> dst` |
+| `plugmem_link` | upsert a typed edge `src -rel-> dst`, optionally with `provenance`: the fact id the edge follows from, which graph recall returns |
 | `plugmem_unlink` | close the current typed edge `src -rel-> dst` while preserving `as_of` history |
 | `plugmem_show` | one fact's full card by `id` |
 | `plugmem_stats` | engine size counters |

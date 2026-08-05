@@ -111,6 +111,33 @@ Query them separately:
 - **`recall --closed`** — include closed revision chains (with their intervals),
   not just the currently-live facts.
 
+## Sizing the block you paste
+
+The `rendered` block is what goes into your prompt, so its size is your
+context budget, not the engine's.
+
+- **`--token-budget <n>`** (default 512) caps the block. Lower it when you are
+  pulling context alongside a large task; raise it when recall *is* the task.
+  `-k` caps the number of facts, this caps the text — set both.
+- **`--ef <n>`** widens the vector search beam (default: the configured
+  `hnsw_ef_search`). Higher is more accurate and slower. It does nothing until
+  the database is past the flat-search threshold, so reach for it only on a
+  large memory whose vector answers look thin.
+
+## Saying *why* an edge exists
+
+`link --provenance <fact_id>` records the fact an edge follows from, and graph
+recall returns it. Use it whenever the relationship was *stated* somewhere:
+
+```
+remember "ann hired bob in march" --entity ann   # → fact 7
+link ann hires bob --provenance 7
+```
+
+A later reader (you, next week) can then answer "why does the memory think ann
+hires bob" instead of trusting a bare edge. An edge without it is fine — it just
+has no citation.
+
 <!-- wasm-strip:begin -->
 
 ## Run it — verify the engine first (CLI / MCP)
@@ -130,14 +157,14 @@ MANDATORY.
   | Verb | Shape |
   |------|-------|
   | `remember` | `remember "<text>" [--entity E] [--tag T]… [--link REL:ENTITY]… [--meta K=V]… [--valid-from MS] [--vector F32,…]` |
-  | `recall` | `recall ["<query>"] [--tag T]… [--entity E]… [--as-of MS] [--range FROM TO] [-k N] [--closed] [--vector F32,…]` |
+  | `recall` | `recall ["<query>"] [--tag T]… [--entity E]… [--as-of MS] [--range FROM TO] [-k N] [--closed] [--token-budget N] [--ef N] [--vector F32,…]` |
   | `revise` | `revise <id> "<text>" [same flags as remember]` |
   | `forget` | `forget <id>` |
-  | `link` | `link <src> <rel> <dst>` |
+  | `link` | `link <src> <rel> <dst> [--provenance FACT_ID]` |
   | `unlink` | `unlink <src> <rel> <dst>` |
   | `show` / `stats` | `show <id>` · `stats` |
   | upkeep | `maintain [--mode M]` · `checkpoint` · `verify` · `scrub` · `recover <dst>` |
-  | bulk | `export` (JSONL to stdout) · `import <file> [--batch N]` |
+  | bulk | `export` (JSONL: facts then edges, streamed to stdout) · `import <file> [--batch N]` |
 
   Add `--json` to any read verb for machine output; `plugmem-cli --version`
   reports the engine version (used in Step 0c).
@@ -249,7 +276,7 @@ comparison line:
 plugmem version check: skill <marker> vs engine <reported> → OK | MISMATCH
 ```
 
-<!-- skill-version: 0.4.0 -->
+<!-- skill-version: 0.5.0 -->
 
 If they differ in ANY way: **stop**, warn the user that skill and engine
 describe different functionality, and proceed only on their explicit

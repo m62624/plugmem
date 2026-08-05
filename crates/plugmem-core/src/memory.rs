@@ -74,7 +74,7 @@ pub struct RememberInput<'a> {
     pub valid_from: Option<u64>,
     /// Optional metadata as key→value pairs (UTF-8). Passed in any order; the
     /// engine canonicalizes (sorts keys, rejects duplicates) and stores them as
-    /// one opaque blob (see [`crate::metadata`]). `None` or an empty slice = no
+    /// one opaque blob (see `crate::metadata`). `None` or an empty slice = no
     /// metadata. The engine never interprets the values.
     pub metadata: Option<&'a [(&'a str, &'a str)]>,
 }
@@ -271,7 +271,7 @@ pub struct Memory<'a> {
     temporal: Arena<'a, TemporalSlot>,
     /// Fact texts and canonical entity names.
     texts: BlobHeap<'a>,
-    /// Per-fact metadata blobs (canonical key→value, see [`crate::metadata`]),
+    /// Per-fact metadata blobs (canonical key→value, see `crate::metadata`),
     /// referenced by [`FactAux::meta`]. Empty and inert until a fact carries
     /// metadata; kept out of `texts` so this cold pool stays non-resident on an
     /// mmap'd base until `show`/`export` touches it.
@@ -897,6 +897,35 @@ impl<'a> Memory<'a> {
         // Tolerate invalid bytes (deferred validation): an
         // unreadable name reads as `None`, never a panic.
         core::str::from_utf8(self.texts.get(record.name)).ok()
+    }
+
+    /// Visits every currently-open edge once, as
+    /// `(source name, relation, destination name, provenance)`.
+    ///
+    /// Reads the out-arena only: each edge is mirrored in both arenas, and the
+    /// out-arena holds it keyed `(src, rel, dst)`, which is the direction a
+    /// caller wants to write back. Closed versions live in the history arenas
+    /// and are not visited — this is the *current* graph, matching what a fact
+    /// export does for facts.
+    ///
+    /// Names are borrowed from the interner and the text pool, so a caller that
+    /// writes them straight out allocates nothing per edge. An edge whose
+    /// endpoint name is unreadable is skipped rather than reported with a
+    /// placeholder: deferred validation means a damaged image must not turn
+    /// into plausible-looking output.
+    ///
+    /// `visit` returning `false` stops the walk, so a caller can bound its own
+    /// work without materializing the graph.
+    pub fn edges_each(&self, mut visit: impl FnMut(&str, &str, &str, FactId) -> bool) {
+        for slot in self.edges_out.iter() {
+            let (Some(src), Some(dst)) = (self.entity_name(slot.a), self.entity_name(slot.b))
+            else {
+                continue;
+            };
+            if !visit(src, self.term(slot.rel), dst, slot.fact) {
+                return;
+            }
+        }
     }
 
     /// Number of fact records currently stored (tombstoned facts count

@@ -124,10 +124,10 @@ engine keeps no clock, so `now` comes from the system clock at each call.
 | command | what it does |
 |---|---|
 | `remember <TEXT> [--entity E] [--tag T]… [--link REL:ENTITY]… [--meta KEY=VALUE]… [--valid-from TS] [--vector F32,…]` | store a fact; prints its id and any similar/conflicting facts. `--meta` is repeatable (opaque key→value, e.g. a URI; last value wins per key) |
-| `recall [QUERY] [--tag T]… [--entity E]… [--as-of TS] [--range FROM TO] [-k N] [--closed] [--vector F32,…]` | ranked, token-budgeted block; sources compose. Each line is `- [fN] text …` — `N` is the fact's id (see below) |
+| `recall [QUERY] [--tag T]… [--entity E]… [--as-of TS] [--range FROM TO] [-k N] [--closed] [--token-budget N] [--ef N] [--vector F32,…]` | ranked, token-budgeted block; sources compose. Each line is `- [fN] text …` — `N` is the fact's id (see below). `--token-budget` caps the block (default 512), `--ef` widens the vector search beam |
 | `revise <ID> <TEXT> [same flags as remember]` | close the old fact, record the successor |
 | `forget <ID>` | tombstone a fact (purged physically at the next `maintain`) |
-| `link <SRC> <REL> <DST>` | upsert a typed edge between entities |
+| `link <SRC> <REL> <DST> [--provenance FACT_ID]` | upsert a typed edge between entities. `--provenance` records the fact the edge follows from, and graph recall returns it |
 | `unlink <SRC> <REL> <DST>` | close the current typed edge while preserving `--as-of` history |
 | `show <ID>` | one fact's full card — text, both time axes, state |
 | `stats` | engine size counters |
@@ -136,8 +136,8 @@ engine keeps no clock, so `now` comes from the system clock at each call.
 | `verify` | check integrity an open defers: text UTF-8, metadata, vector↔fact consistency, and that the edge graph agrees with itself; exit 2 on damage |
 | `scrub` | check the snapshot's byte-level container checksums; exit 2 on the first damaged section |
 | `recover <DST>` | salvage a content-corrupt database into a clean `DST`; the source (`--db`) is left untouched |
-| `export` | dump the currently-open facts as JSONL (one per line) to stdout |
-| `import <FILE> [--batch N]` | load facts from a JSONL file (as written by `export`), streamed in batches — one embed round-trip and one fsync per batch |
+| `export` | dump the memory as JSONL to stdout: every open fact, then every open edge, one per line, each tagged with `kind`. Streamed, so a large memory never has to fit in RAM |
+| `import <FILE> [--batch N]` | load a file written by `export`, streamed in batches — one embed round-trip and one fsync per batch. Edges are re-linked and their provenance retargeted to the ids this database assigns |
 
 `--vector` takes a comma-separated embedding (`--vector 0.1,-0.2,…`, or
 `--vector "$(cat vec.txt)"` for a real one). Given, it **replaces** the
@@ -188,10 +188,14 @@ plugmem-cli recall "old runtime note"   # → - [f3] prefers deno …
 plugmem-cli forget 3                     # the 3 from [f3]
 plugmem-cli maintain
 
-# Human-readable backup and restore. export streams line by line; import
-# streams the file back in batches (one embed round-trip + one fsync each):
-plugmem-cli export > backup.jsonl
-plugmem-cli --db other.plugmem import backup.jsonl --batch 256
+# Move a memory to another file. Both halves stream, so size does not matter:
+plugmem-cli export > dump.jsonl
+plugmem-cli --db other.plugmem import dump.jsonl --batch 256
+# → "imported 128 facts and 14 edges"
+#
+# What crosses: text, entity, tags, metadata, valid_from, edges and each
+# edge's provenance. What does not: closed revisions and vectors. This is a
+# portable knowledge dump, not a backup — for a backup, copy the files.
 
 # Integrity & recovery (exit 2 on corruption — scriptable as a gate):
 plugmem-cli verify                       # content consistency

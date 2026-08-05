@@ -533,3 +533,308 @@ fn recover_refuses_a_destination_equal_to_the_source() {
     let out = plugmem(&tmp.db(), &["recover", tmp.db().to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(2), "dst == src is a usage error");
 }
+
+/// The three query/edge knobs that used to be reachable only from Rust.
+///
+/// Each was hardcoded to `None` in every wrapper — CLI, MCP and napi alike —
+/// so the engine supported them and nobody could reach them. These tests are
+/// the parity gate: they fail if a wrapper stops passing one through.
+#[test]
+fn the_token_budget_bounds_the_rendered_block() {
+    let tmp = TempDir::new("token-budget");
+    for i in 0..40 {
+        plugmem(
+            &tmp.db(),
+            &[
+                "remember",
+                &format!("fact number {i} about the deployment pipeline and its many stages"),
+            ],
+        );
+    }
+
+    let generous = plugmem(&tmp.db(), &["recall", "deployment pipeline", "-k", "40"]);
+    let tight = plugmem(
+        &tmp.db(),
+        &[
+            "recall",
+            "deployment pipeline",
+            "-k",
+            "40",
+            "--token-budget",
+            "40",
+        ],
+    );
+    assert!(generous.status.success() && tight.status.success());
+
+    let (big, small) = (stdout(&generous).len(), stdout(&tight).len());
+    assert!(
+        small < big,
+        "a tight budget must shrink the block: {small} vs {big} bytes"
+    );
+}
+
+#[test]
+fn ef_is_accepted_and_does_not_change_a_lexical_answer() {
+    // `ef` only steers the vector source, and this database has no vectors,
+    // so the observable contract here is "accepted, and answers identically".
+    let tmp = TempDir::new("ef");
+    plugmem(&tmp.db(), &["remember", "the release ships on friday"]);
+
+    let plain = plugmem(&tmp.db(), &["recall", "release", "--json"]);
+    let with_ef = plugmem(&tmp.db(), &["recall", "release", "--ef", "64", "--json"]);
+    assert!(with_ef.status.success(), "--ef must be accepted");
+    assert_eq!(stdout(&plain), stdout(&with_ef));
+}
+
+#[test]
+fn provenance_is_recorded_on_an_edge_and_comes_back_from_recall() {
+    let tmp = TempDir::new("provenance");
+    // The fact that justifies the edge.
+    let out = plugmem(&tmp.db(), &["remember", "ann hired bob in march", "--json"]);
+    let source: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("remember json");
+    let fact_id = source["id"].as_u64().expect("fact id");
+
+    let linked = plugmem(
+        &tmp.db(),
+        &[
+            "link",
+            "ann",
+            "hires",
+            "bob",
+            "--provenance",
+            &fact_id.to_string(),
+        ],
+    );
+    assert!(linked.status.success(), "--provenance must be accepted");
+
+    let recalled = plugmem(&tmp.db(), &["recall", "--entity", "ann", "--json"]);
+    let res: serde_json::Value = serde_json::from_str(&stdout(&recalled)).expect("recall json");
+    let edges = res["edges"].as_array().expect("recall JSON carries edges");
+    assert!(!edges.is_empty(), "the graph source walked the edge");
+    assert!(
+        edges
+            .iter()
+            .any(|e| e["provenance"].as_u64() == Some(fact_id)),
+        "the edge names the fact it follows from: {edges:?}"
+    );
+}
+
+#[test]
+fn an_edge_without_provenance_reports_none_rather_than_a_sentinel() {
+    // The engine stores `FactId::NONE` for "no source fact". Leaking that
+    // sentinel as a number would make callers compare against a magic value.
+    let tmp = TempDir::new("no-provenance");
+    plugmem(&tmp.db(), &["link", "team", "hires", "bob"]);
+    let recalled = plugmem(&tmp.db(), &["recall", "--entity", "team", "--json"]);
+    let res: serde_json::Value = serde_json::from_str(&stdout(&recalled)).expect("recall json");
+    for edge in res["edges"].as_array().expect("edges") {
+        assert!(
+            edge["provenance"].is_null(),
+            "an unsourced edge reports null, not a sentinel: {edge}"
+        );
+    }
+}
+
+#[test]
+fn the_fsync_policy_is_settable_from_the_config_file() {
+    // `FsyncPolicy` was public in the host and reachable from no wrapper at
+    // all. It is a config setting rather than a flag because it changes what
+    // survives a power cut, which is not a per-command decision.
+    let tmp = TempDir::new("fsync");
+    let cfg = tmp.0.join("config.toml");
+    std::fs::write(&cfg, "[maintenance]\nfsync = \"on_snapshot\"\n").unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_plugmem-cli"))
+        .arg("--config")
+        .arg(&cfg)
+        .arg("--db")
+        .arg(tmp.db())
+        .args(["remember", "written under a relaxed fsync policy"])
+        .output()
+        .expect("run plugmem");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // And a misspelling is refused rather than silently ignored.
+    std::fs::write(&cfg, "[maintenance]\nfsync = \"on-snapshot\"\n").unwrap();
+    let bad = Command::new(env!("CARGO_BIN_EXE_plugmem-cli"))
+        .arg("--config")
+        .arg(&cfg)
+        .arg("--db")
+        .arg(tmp.db())
+        .args(["stats"])
+        .output()
+        .expect("run plugmem");
+    assert!(!bad.status.success(), "a bad fsync value must be refused");
+}
+
+#[test]
+fn settings_help_lists_the_fsync_policy() {
+    let tmp = TempDir::new("settings-fsync");
+    let out = plugmem(&tmp.db(), &["help", "settings"]);
+    let text = stdout(&out);
+    assert!(
+        text.contains("fsync"),
+        "the settings catalogue documents every key it parses"
+    );
+}
+
+/// The JSONL round trip used to lose the graph: `export` wrote facts only, so
+/// `import` rebuilt a memory with none of its edges — one of the four recall
+/// sources, gone without a word. These hold the format honest.
+#[test]
+fn the_round_trip_carries_edges_and_their_provenance() {
+    let src = TempDir::new("rt-src");
+    let out = plugmem(&src.db(), &["remember", "ann hired bob in march", "--json"]);
+    let fact: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("remember json");
+    let fact_id = fact["id"].as_u64().expect("fact id");
+    plugmem(&src.db(), &["remember", "bob reviews the notes"]);
+    plugmem(
+        &src.db(),
+        &[
+            "link",
+            "ann",
+            "hires",
+            "bob",
+            "--provenance",
+            &fact_id.to_string(),
+        ],
+    );
+    plugmem(&src.db(), &["link", "ann", "knows", "bob"]);
+
+    let dump = plugmem(&src.db(), &["export"]);
+    let text = stdout(&dump);
+    let facts = text
+        .lines()
+        .filter(|l| l.contains("\"kind\":\"fact\""))
+        .count();
+    let edges = text
+        .lines()
+        .filter(|l| l.contains("\"kind\":\"edge\""))
+        .count();
+    assert_eq!((facts, edges), (2, 2), "both kinds are written:\n{text}");
+
+    // Every fact line precedes every edge line: that ordering is what lets the
+    // importer resolve a provenance in one forward pass.
+    let kinds: Vec<&str> = text.lines().collect();
+    let last_fact = kinds
+        .iter()
+        .rposition(|l| l.contains("\"kind\":\"fact\""))
+        .unwrap();
+    let first_edge = kinds
+        .iter()
+        .position(|l| l.contains("\"kind\":\"edge\""))
+        .unwrap();
+    assert!(last_fact < first_edge, "facts must come before edges");
+
+    let dst = TempDir::new("rt-dst");
+    let file = src.0.join("dump.jsonl");
+    std::fs::write(&file, &text).unwrap();
+    let imported = plugmem(&dst.db(), &["import", file.to_str().unwrap(), "--json"]);
+    let report: serde_json::Value = serde_json::from_str(&stdout(&imported)).expect("import json");
+    assert_eq!(report["imported"], 2);
+    assert_eq!(report["edges"], 2, "edges are imported, not skipped");
+
+    let recalled = plugmem(&dst.db(), &["recall", "--entity", "ann", "--json"]);
+    let res: serde_json::Value = serde_json::from_str(&stdout(&recalled)).expect("recall json");
+    let got = res["edges"].as_array().expect("edges");
+    assert_eq!(got.len(), 2, "both edges came back");
+    assert_eq!(
+        got.iter().filter(|e| !e["provenance"].is_null()).count(),
+        1,
+        "exactly the sourced edge kept its provenance: {got:?}"
+    );
+}
+
+#[test]
+fn provenance_is_retargeted_to_the_id_the_new_database_assigns() {
+    // The subtle half: ids do not survive an import, so a provenance copied
+    // verbatim would point at an unrelated fact. It has to be translated.
+    let src = TempDir::new("remap-src");
+    let out = plugmem(&src.db(), &["remember", "ann hired bob", "--json"]);
+    let old_id = serde_json::from_str::<serde_json::Value>(&stdout(&out)).unwrap()["id"]
+        .as_u64()
+        .unwrap();
+    plugmem(
+        &src.db(),
+        &[
+            "link",
+            "ann",
+            "hires",
+            "bob",
+            "--provenance",
+            &old_id.to_string(),
+        ],
+    );
+    let file = src.0.join("dump.jsonl");
+    std::fs::write(&file, stdout(&plugmem(&src.db(), &["export"]))).unwrap();
+
+    // Pre-fill the destination so the same fact lands on a different id.
+    let dst = TempDir::new("remap-dst");
+    for i in 0..3 {
+        plugmem(&dst.db(), &["remember", &format!("filler {i}")]);
+    }
+    plugmem(&dst.db(), &["import", file.to_str().unwrap()]);
+
+    let hit = plugmem(&dst.db(), &["recall", "ann hired", "--json"]);
+    let new_id =
+        serde_json::from_str::<serde_json::Value>(&stdout(&hit)).unwrap()["facts"][0]["id"]
+            .as_u64()
+            .unwrap();
+    assert_ne!(new_id, old_id, "the destination must assign a different id");
+
+    let recalled = plugmem(&dst.db(), &["recall", "--entity", "ann", "--json"]);
+    let res: serde_json::Value = serde_json::from_str(&stdout(&recalled)).unwrap();
+    assert!(
+        res["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["provenance"].as_u64() == Some(new_id)),
+        "provenance follows the fact to its new id: {}",
+        res["edges"]
+    );
+}
+
+#[test]
+fn a_file_written_before_edges_existed_still_imports() {
+    // Backwards compatibility is the reason `kind` is optional on read: a line
+    // without one is a fact, exactly as the old format meant it.
+    let tmp = TempDir::new("legacy");
+    let file = tmp.0.join("legacy.jsonl");
+    std::fs::write(
+        &file,
+        "{\"text\":\"legacy fact\",\"entity\":\"old\",\"tags\":[\"x\"],\"valid_from\":42}\n",
+    )
+    .unwrap();
+
+    let out = plugmem(&tmp.db(), &["import", file.to_str().unwrap(), "--json"]);
+    let report: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("import json");
+    assert_eq!(report["imported"], 1);
+    assert_eq!(report["edges"], 0);
+
+    let hit = plugmem(&tmp.db(), &["recall", "legacy", "--json"]);
+    let res: serde_json::Value = serde_json::from_str(&stdout(&hit)).unwrap();
+    assert_eq!(
+        res["facts"][0]["valid_from"], 42,
+        "the old fields still apply"
+    );
+}
+
+#[test]
+fn an_unknown_line_kind_is_refused_rather_than_skipped() {
+    let tmp = TempDir::new("bad-kind");
+    let file = tmp.0.join("bad.jsonl");
+    std::fs::write(&file, "{\"kind\":\"vector\",\"text\":\"x\"}\n").unwrap();
+    let out = plugmem(&tmp.db(), &["import", file.to_str().unwrap()]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "an unknown kind is a usage error"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("line 1"), "the message names the line: {err}");
+}

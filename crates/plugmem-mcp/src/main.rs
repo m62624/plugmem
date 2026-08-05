@@ -48,7 +48,7 @@ struct Args {
     db: Option<String>,
 
     /// Serve a directory of named memories instead of one file (else
-    /// $PLUGMEM_WORKSPACE, else [workspace].dir). Without it there is one
+    /// $PLUGMEM_WORKSPACE, else `[workspace].dir`). Without it there is one
     /// memory and the tools have no `db` argument at all — the default, and
     /// the right choice for one process per conversation.
     #[arg(long)]

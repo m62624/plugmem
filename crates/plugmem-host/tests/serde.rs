@@ -25,6 +25,7 @@ fn host_data_types_round_trip() {
     );
 
     let fact = ExportedFact {
+        id: 7,
         text: "prefers tokio".to_string(),
         entity: Some("user".to_string()),
         tags: vec!["pref".to_string()],

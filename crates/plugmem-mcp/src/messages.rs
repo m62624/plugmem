@@ -138,10 +138,17 @@ axis) for the temporal source.";
 pub const ARG_K: &str = "Max facts to return (0 or omitted = 8; hard ceiling 64).";
 pub const ARG_CLOSED: &str =
     "Include closed revisions too (whole chains, marked by intervals). Default false.";
+pub const ARG_TOKEN_BUDGET: &str = "Token budget of the rendered block (default 512). The block \
+is what goes into a prompt, so this decides how much of your context window recall may spend.";
+pub const ARG_EF: &str = "HNSW beam width for the vector source (default: the configured \
+`hnsw_ef_search`). Higher is more accurate and slower. Ignored while the engine is still in the \
+flat regime.";
 pub const ARG_ID: &str = "The fact id (as printed by remember, or the `[fN]` in a recall block).";
 pub const ARG_SRC: &str = "Source entity name (created lazily).";
 pub const ARG_REL: &str = "Relation term, verbatim (e.g. \"works_at\").";
 pub const ARG_DST: &str = "Destination entity name (created lazily).";
+pub const ARG_PROVENANCE: &str = "The fact this edge follows from. Recorded on the edge and \
+returned by graph recall, so a later reader can answer \"why is this edge here\".";
 
 // ── Read-only mode: freshness meta ────────────────────────────────────────
 

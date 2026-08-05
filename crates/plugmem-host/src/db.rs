@@ -178,6 +178,13 @@ pub struct FactSnapshot {
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExportedFact {
+    /// The fact's id **in the database it came from**.
+    ///
+    /// Informational, and deliberately not restored on import: a fresh database
+    /// assigns its own. It is here because edges reference their provenance
+    /// fact by id, so a dump that carries edges needs something for them to
+    /// point at — an importer translates old id to new as it goes.
+    pub id: u32,
     /// The fact text.
     pub text: String,
     /// Subject entity name, if the fact had one.
@@ -258,6 +265,7 @@ fn exported_fact(
     mem.tags_of(id, terms);
     let tags = terms.iter().map(|t| mem.term(*t).to_string()).collect();
     Some(ExportedFact {
+        id: id.0,
         text: view.text.to_string(),
         entity,
         tags,
@@ -453,7 +461,7 @@ impl Database {
     ///
     /// [`HostError::Locked`], [`HostError::NeedsCheckpoint`],
     /// [`HostError::Io`], [`HostError::Engine`] — see
-    /// [`ReadOnlyDatabase::open`] semantics.
+    /// `ReadOnlyDatabase::open` semantics.
     pub fn open_readonly(
         path: impl Into<PathBuf>,
         cfg: Config,
@@ -827,6 +835,27 @@ impl Database {
         self.read().engine.read(|mem| export_facts_each(mem, f));
     }
 
+    /// Streams the currently-open **edges**, calling `f` with
+    /// `(source, relation, destination, provenance fact)` under the read guard.
+    ///
+    /// The companion to [`export_each`](Self::export_each): facts alone are not
+    /// the memory, and a dump without edges silently drops one of the four
+    /// recall sources. Names are borrowed, so a writer that formats them
+    /// directly allocates nothing per edge.
+    ///
+    /// `provenance` is the fact id **as this database numbers it**. Ids do not
+    /// survive a re-import, so a file format that wants to keep provenance has
+    /// to translate it — see the CLI's `export`/`import`, which rewrite it as a
+    /// position within the same file.
+    pub fn export_edges_each(&self, mut f: impl FnMut(&str, &str, &str, plugmem_core::FactId)) {
+        self.read().engine.read(|mem| {
+            mem.edges_each(|src, rel, dst, fact| {
+                f(src, rel, dst, fact);
+                true
+            });
+        });
+    }
+
     /// Inspects at most `limit` fact ids starting at `cursor` and returns the
     /// ones that are currently open. A sparse page may therefore contain fewer
     /// facts, including zero, while still carrying a `next_cursor`.
@@ -949,7 +978,7 @@ impl Database {
     }
 
     /// Writes a full snapshot and clears the journal now (re-mapping the
-    /// fresh file — see [`Database::resnapshot`]).
+    /// fresh file — see `Database::resnapshot`).
     pub fn checkpoint(&self, now: u64) -> Result<(), HostError> {
         let mut st = self.write();
         self.resnapshot(&mut st, now)?;
