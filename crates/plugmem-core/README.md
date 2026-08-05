@@ -56,9 +56,10 @@ when you need `no_std` or your own persistence.
 | **A memory in a Rust program** — the common case | [`plugmem-host`](https://docs.rs/plugmem-host/latest) (`std`) | Everything included: files, locking, read-only mmap, HTTP embedders (OpenAI/Ollama/LM Studio/vLLM/llama.cpp), integrity, concurrency. Re-exports this engine. |
 | A memory in Rust with **no `std`** or **your own storage** (browser, wasm host, custom persistence) | **`plugmem-core`** (this crate) | The engine only. You bring the `Storage` trait, the clock, file I/O and embedding — so you manage when the file opens and how memory loads. |
 | Just the **flat byte-pool containers** (sorted page arenas, blob heap, chunk pool, interner) | [`plugmem-arena`](https://docs.rs/plugmem-arena/latest) (`no_std`) | The storage substrate, engine-agnostic. |
-| A memory from a **terminal or shell script** | `plugmem-cli` (`plugmem`) | One local database, no server; `plugmem repl` keeps the engine open for host speed. |
-| A memory for an **agent, local-first app, or non-Rust program** | `plugmem-mcp` | Long-lived stdio JSON-RPC; language-independent. In Rust, embed the host lib instead. |
-| A memory in **JavaScript / TypeScript** (Node) | `plugmem-napi` | The engine as a native Node addon (napi-rs), in-process; on npm as `plugmem`. |
+| A memory from a **terminal or shell script** | [`plugmem-cli`](https://docs.rs/plugmem-cli/latest) (`plugmem`) | One local database, no server; `plugmem repl` keeps the engine open for host speed. |
+| A memory for an **agent, local-first app, or non-Rust program** | [`plugmem-mcp`](https://docs.rs/plugmem-mcp/latest) | Long-lived stdio JSON-RPC; language-independent. In Rust, embed the host lib instead. |
+| A memory in **JavaScript / TypeScript** (Node) | [`plugmem-napi`](https://github.com/m62624/plugmem/tree/main/crates/plugmem-napi) | The engine as a native Node addon (napi-rs), in-process; on npm as `plugmem`. |
+| A memory in **Python** | [`plugmem-py`](https://github.com/m62624/plugmem/tree/main/crates/plugmem-py) | The engine as a CPython extension (PyO3), in-process; on PyPI as `plugmem`. |
 
 ## Who this is for
 

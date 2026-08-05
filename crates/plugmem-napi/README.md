@@ -619,11 +619,12 @@ search. For those, use a dedicated system — [Qdrant](https://qdrant.tech),
 
 ## Other ways in
 
-The same engine ships four ways. This package is the Node one.
+The same engine ships five ways. This package is the Node one.
 
 | You are | Use |
 |---|---|
 | writing JavaScript / TypeScript for Node | **this package** |
+| writing Python | [`plugmem`](https://pypi.org/project/plugmem/) on PyPI |
 | writing Rust | [`plugmem-host`](https://docs.rs/plugmem-host/latest) — the engine in your process |
 | an agent, or another language | [`plugmem-mcp`](https://docs.rs/plugmem-mcp/latest) — a stdio JSON-RPC sidecar |
 | a person at a terminal | [`plugmem-cli`](https://docs.rs/plugmem-cli/latest) |

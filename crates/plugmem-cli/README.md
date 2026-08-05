@@ -101,8 +101,9 @@ instead; an agent or another language comes in over a protocol.
 | A memory from a **terminal or shell script** | **`plugmem-cli`** (this binary) | One local database, no server; `plugmem repl` keeps the engine open for host speed. |
 | **A memory in a Rust program** — the common case | [`plugmem-host`](https://docs.rs/plugmem-host/latest) (`std`) | The engine plus files, locking, mmap, HTTP embedders, integrity, concurrency. |
 | The engine with **no `std`** or **your own storage** | [`plugmem-core`](https://docs.rs/plugmem-core/latest) (`no_std`) | Engine only; you bring persistence. |
-| A memory for an **agent, local-first app, or non-Rust program** | `plugmem-mcp` | Long-lived stdio JSON-RPC; language-independent — the door for programmatic / cross-language access (the CLI is the human one). |
-| A memory in **JavaScript / TypeScript** (Node) | `plugmem-napi` | The engine as a native Node addon (napi-rs), in-process; on npm as `plugmem`. |
+| A memory for an **agent, local-first app, or non-Rust program** | [`plugmem-mcp`](https://docs.rs/plugmem-mcp/latest) | Long-lived stdio JSON-RPC; language-independent — the door for programmatic / cross-language access (the CLI is the human one). |
+| A memory in **JavaScript / TypeScript** (Node) | [`plugmem-napi`](https://github.com/m62624/plugmem/tree/main/crates/plugmem-napi) | The engine as a native Node addon (napi-rs), in-process; on npm as `plugmem`. |
+| A memory in **Python** | [`plugmem-py`](https://github.com/m62624/plugmem/tree/main/crates/plugmem-py) | The engine as a CPython extension (PyO3), in-process; on PyPI as `plugmem`. |
 
 ## What recall does
 

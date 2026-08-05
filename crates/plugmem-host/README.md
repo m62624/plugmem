@@ -31,7 +31,8 @@ everything.** The others are for narrower needs.
 | Just the **flat byte-pool containers** | [`plugmem-arena`](https://docs.rs/plugmem-arena/latest) (`no_std`) | The storage substrate, engine-agnostic. |
 | A memory from a **terminal or shell script** | [`plugmem-cli`](https://docs.rs/plugmem-cli/latest) (`plugmem`) | One local database, no server; `plugmem repl` keeps the engine open for host speed. |
 | A memory for an **agent, local-first app, or non-Rust program** | [`plugmem-mcp`](https://docs.rs/plugmem-mcp/latest) | Long-lived stdio JSON-RPC; language-independent. In Rust, embed this crate instead. |
-| A memory in **JavaScript / TypeScript** (Node) | [`plugmem-napi`](https://docs.rs/plugmem-napi/latest) | The engine as a native Node addon (napi-rs), in-process; on npm as `plugmem`. |
+| A memory in **JavaScript / TypeScript** (Node) | [`plugmem-napi`](https://github.com/m62624/plugmem/tree/main/crates/plugmem-napi) | The engine as a native Node addon (napi-rs), in-process; on npm as `plugmem`. |
+| A memory in **Python** | [`plugmem-py`](https://github.com/m62624/plugmem/tree/main/crates/plugmem-py) | The engine as a CPython extension (PyO3), in-process; on PyPI as `plugmem`. |
 
 ## Configuration
 
@@ -39,7 +40,7 @@ The shared `config.toml` loader and platform-aware database paths are documented
 in the [full settings reference](https://github.com/m62624/plugmem/blob/main/crates/plugmem-host/SETTINGS.md).
 [`plugmem-cli`](https://docs.rs/plugmem-cli/latest),
 [`plugmem-mcp`](https://docs.rs/plugmem-mcp/latest) and
-[`plugmem-napi`](https://docs.rs/plugmem-napi/latest) use the same settings
+[`plugmem-napi`](https://github.com/m62624/plugmem/tree/main/crates/plugmem-napi) use the same settings
 catalogue and database-path precedence; only their explicit override syntax
 differs.
 
