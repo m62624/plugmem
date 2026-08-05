@@ -54,6 +54,15 @@ timeout = "300s"
 # skill-version gate) is covered by its own cargo tests; the `#[napi]` verbs
 # are covered by the Node tests in `__test__/`, neither attributable by
 # tarpaulin anyway (see `exclude-files` below).
+#
+# plugmem-py is excluded for a *different* reason, worth keeping separate so
+# neither is loosened by accident. It links fine — libpython is present on any
+# runner — so this is not a link failure like napi's. It is that instrumenting
+# it buys nothing: the `#[pyclass]`/`#[pyfunction]` surface only executes
+# inside a CPython process (pytest against a built wheel), which tarpaulin
+# cannot attribute, and the crate also carries a `stub_gen` binary that is a
+# code generator rather than shipped code. Its pure wrapper logic is covered by
+# its own cargo tests through the rlib, in the `check` matrix.
 exclude = ["plugmem-napi", "plugmem-py"]
 out = ["Html", "Lcov", "Stdout"]
 output-dir = "coverage"
