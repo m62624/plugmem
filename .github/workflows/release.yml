@@ -3,9 +3,10 @@ name: Release
 # Orchestrator (the elenchus release mechanism, Rust-native). Push a tag like
 # `pin/v0.1.0`:  prepare (bump the workspace version, make an RC branch) → tests
 # (run CI on the RC) → tag (create the real `vX.Y.Z`) → dist (cargo-dist builds
-# the binaries + installers for all targets and publishes the GitHub Release) →
-# crates.io (publish source crates only after binaries succeed) → sync (open a
-# PR bringing the version bump back to main).
+# the binaries + installers for all targets and creates a draft GitHub Release)
+# → notes/skill (complete that draft) → publish (make it visible) → crates.io
+# (publish source crates only after binaries succeed) → sync (open a PR bringing
+# the version bump back to main).
 on:
   push:
     tags:
@@ -229,6 +230,21 @@ jobs:
           TAG="${{ needs.prepare.outputs.tag }}"
           # --clobber keeps this idempotent if the release job is re-run.
           gh release upload "$TAG" skill/SKILL.md --clobber
+
+  # Publish only after the draft has its final changelog and companion skill.
+  # The binaries and installers were already uploaded by `dist`; changing the
+  # draft flag does not rebuild or re-upload any release asset.
+  publish-release:
+    name: Publish completed GitHub Release
+    needs: [prepare, dist, release-notes, skill-asset]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Publish the completed draft
+        run: gh release edit "${{ needs.prepare.outputs.tag }}" --draft=false
 
   # crates.io publish waits for `dist`, so a failed binary/installer release
   # cannot burn immutable crate versions. This is what makes `cargo install

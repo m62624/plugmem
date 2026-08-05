@@ -295,12 +295,12 @@ jobs:
           # Write and read notes from a file to avoid quoting breaking things
           echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
 
-          # Published, not drafted (hand-edited; `allow-dirty = ["ci"]` in the
-          # dist config is what keeps dist from regenerating over it). The body
-          # is assembled by machine and the gates that decide whether a release
-          # may exist all ran before the tag, so there was nothing for a human
-          # to approve — only a button to remember to press.
-          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+          # Keep the release private until the outer workflow has prepended the
+          # changelog and attached SKILL.md. The final publish job flips this
+          # existing release to public; it does not re-upload these artifacts.
+          # This file is hand-edited; `allow-dirty = ["ci"]` keeps dist from
+          # regenerating over it.
+          gh release create "${{ needs.plan.outputs.tag }}" --draft --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
   publish-homebrew-formula:
     needs:
