@@ -122,8 +122,8 @@ impl SettingsHelp {
     ///
     /// The catalogue is the authority rather than the parser's own key lists,
     /// and it has to be: `[maintenance].batch_size` belongs to the CLI and
-    /// `[server].workers` to the MCP server, so a check that only knew what
-    /// [`super::settings`] parses would warn about both on every run.
+    /// `[server].workers` to the MCP server, so a check that only knew what the
+    /// shared loader parses would warn about both on every run.
     ///
     /// Allocation-free in the ordinary case — a clean config returns an empty
     /// `Vec`, which allocates nothing. Only a real mistake costs anything.
@@ -203,12 +203,17 @@ impl SettingsHelp {
 
 /// The closest candidate to `typo`, if one is close enough to suggest.
 ///
-/// The threshold is a third of the name's length (at least one edit): long
-/// names tolerate a bigger slip than short ones, and `dim` never gets confused
-/// with `url`. Offering a wrong guess is worse than offering none — it sends
-/// the reader to fix the wrong line.
+/// One edit always, plus one per four characters: long names tolerate a bigger
+/// slip than short ones, and `dim` never gets confused with `url`. Offering a
+/// wrong guess is worse than offering none — it sends the reader to fix the
+/// wrong line.
+///
+/// The scale is set by the mistakes people actually make. `w_vector` for
+/// `w_vec` is three edits on an eight-character name: the likeliest typo in the
+/// whole catalogue, since the field is a vector weight and nobody abbreviates
+/// on the first try. A tighter budget looks principled and misses it.
 fn nearest(typo: &str, candidates: impl Iterator<Item = &'static str>) -> Option<&'static str> {
-    let budget = (typo.chars().count() / 3).max(1);
+    let budget = 1 + typo.chars().count() / 4;
     candidates
         .map(|c| (edit_distance(typo, c), c))
         .filter(|(d, _)| *d <= budget)
@@ -574,6 +579,18 @@ mod tests {
         // Close enough to be the obvious intent.
         assert_eq!(nearest("dm", engine()), Some("dim"));
         assert_eq!(nearest("max_txt", engine()), Some("max_text"));
+
+        // The one the budget exists for: three edits on an eight-character
+        // name, and the likeliest typo in the catalogue.
+        let recall = || settings_help().keys_in("recall");
+        assert_eq!(nearest("w_vector", recall()), Some("w_vec"));
+        assert_eq!(nearest("similar_cosine", recall()), Some("similar_cos"));
+
+        // A truncation is not chased. `half_life` is five edits from
+        // `half_life_days`, and widening the budget far enough to reach it
+        // would start matching keys that share a prefix and nothing else.
+        // The warning still names the key; only the guess is withheld.
+        assert_eq!(nearest("half_life", recall()), None);
 
         // Not close to anything: silence beats sending someone to the wrong
         // line. A single character is the sharpest case — the budget floors at

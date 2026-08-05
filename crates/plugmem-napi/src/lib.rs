@@ -21,8 +21,8 @@ mod workspace;
 
 /// Salvage a content-corrupt memory into a clean copy.
 ///
-/// Re-exported rather than left inside [`db`]: the classes are reachable
-/// because the crate builds them, but a free function in a private module is
+/// Re-exported rather than left inside the private `db` module: the classes
+/// there are reachable because the crate builds them, but a free function is
 /// not, so without this the rlib half of the crate (what `cargo test` links)
 /// cannot see it at all.
 pub use db::recover;

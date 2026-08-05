@@ -198,14 +198,29 @@ MANDATORY.
   have a reason (a file from elsewhere, a crash, a suspicion), not before every
   session. An open that succeeded is not a clean bill of health; `verify` is.
 
+  **`verify` or `scrub`?** They ask different questions and neither replaces the
+  other. `verify` asks whether the *content* agrees with itself. `scrub` asks
+  whether the *bytes* are the ones that were written — it recomputes the stored
+  checksums, which is what catches a flipped bit that the structure accepts.
+  Suspect a bad answer, run `verify`; suspect the disk or a file that travelled,
+  run `scrub`. If `scrub` reports damage, `recover <dst>` salvages what survives
+  into a **new** file and leaves the original untouched as evidence — the swap
+  is the user's decision, not yours.
+
 - **No shell, but your tools include `plugmem_recall` →** MCP. The server
   exposes, as tools: `plugmem_remember`, `plugmem_recall`, `plugmem_revise`,
   `plugmem_forget`, `plugmem_link`, `plugmem_unlink`, `plugmem_show`, `plugmem_stats`,
   `plugmem_export`, `plugmem_maintain`, `plugmem_checkpoint`, `plugmem_verify`,
   plus `plugmem_version` and `plugmem_about`. A read-only server adds
   `plugmem_generation` / `plugmem_refresh` and refuses the write verbs.
-  (`scrub`, `recover` and `import` are CLI-only — there is no MCP tool for
-  them.) Each tool takes `format:"json"` (default) or `"human"`.
+  (`scrub`, `recover` and `import` have no MCP tool. The first two are an
+  operator's job on the server's own disk; the third needs a file the server can
+  see. Reach for `plugmem-cli` — or tell the user to.) Each tool takes
+  `format:"json"` (default) or `"human"`.
+
+  `plugmem_export` returns `{ facts, edges }`. Both halves matter: an edge is a
+  statement *between* two entities and belongs to no single fact, so the facts
+  alone are not a copy of the memory.
 
   Arguments that narrow an answer are checked, not guessed: `range` must be
   exactly `[from, to]` and `as_of` / `valid_from` must each be a whole,
@@ -240,6 +255,13 @@ path = "/path/to/memory.plugmem" # optional
 [engine]
 dim = 0                         # 0 keeps vectors disabled
 
+[recall]                        # optional: every key has a tuned default
+w_vec = 1.0                     # per-source weights, 0 turns a source off
+half_life_days = 180            # how fast an old fact loses ground
+
+[index]                         # optional
+flat_to_hnsw = 24000            # vectors before the graph index is built
+
 [embedder]
 kind = "none"                  # or ollama/openai/lmstudio/vllm/llamacpp
 
@@ -248,8 +270,22 @@ snapshot_every_ops = 1024
 snapshot_journal_bytes = 4194304
 ```
 
+`[engine]` is what a database is built with — changing one of those on an
+existing memory is refused. `[recall]` and `[index]` are the opposite: reopening
+with different weights is how ranking changes, so they are safe to tune on a
+live memory.
+
+**Do not tune `[recall]` on your own initiative.** The defaults are tuned, and a
+weight you moved because one answer looked wrong will quietly change every
+answer afterwards. Change it when the user asks for it, or when you can say
+which source is misbehaving and why — then say what you changed.
+
 Do not invent provider URLs, model names or paths. Ask for settings help when
 the user needs to configure them, and otherwise rely on the platform default.
+
+An unknown key is reported, not applied: the CLI and the MCP server print it to
+stderr, and NAPI returns it from `configWarnings()`. If you see one, the setting
+did nothing — fix the spelling rather than assuming it took effect.
 
 ### Step 0b — smoke-test
 
@@ -276,7 +312,7 @@ comparison line:
 plugmem version check: skill <marker> vs engine <reported> → OK | MISMATCH
 ```
 
-<!-- skill-version: 0.5.0 -->
+<!-- skill-version: 0.6.0 -->
 
 If they differ in ANY way: **stop**, warn the user that skill and engine
 describe different functionality, and proceed only on their explicit

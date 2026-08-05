@@ -372,7 +372,7 @@ error or a repaired file.
 | call | checks | cost |
 |---|---|---|
 | `verify()` | everything an open defers — stored text is valid UTF-8, metadata blobs decode, the fact↔vector-slot bijection holds, and the graph agrees with itself (both edge mirrors, a current edge against its open version, every open version reachable as a current edge) | one linear pass over the text + vector pools, plus a lookup per edge |
-| `scrub()` | *byte-level* container integrity — each section's stored xxh3 and the whole-file hash (the ZFS-scrub model) | resumable; a read-handle op |
+| `scrub()` | *byte-level* container integrity — each section's stored xxh3 and the whole-file hash (the ZFS-scrub model) | resumable; on either handle |
 | `recover()` | *salvage* — drop the content-corrupt facts, rebuild, write a clean copy | rebuilds in RAM ≈ image size |
 
 **`scrub()` — the bitrot detector.** A resumable iterator over the mapped
@@ -383,18 +383,27 @@ life, reads the map linearly (pages fault in, get hashed, stay
 reclaimable — it never residents the whole file), and reports the first
 mismatch, naming the damaged section.
 
+A scrub reads the *file*, not a handle's view of it, so it is on both
+handles. Use the writer's when you already hold one: a second read-only
+open would map the whole image again and take a second lock to hash bytes
+whose path you already know.
+
 ```rust,no_run
 use plugmem_host::{Config, Database};
 
-let ro = Database::open_readonly("agent.plugmem", Config::default())?;
+let (db, _) = Database::open("agent.plugmem", Config::default())?;
 // Verify every container byte, a slice at a time.
-for step in ro.scrub()? {
+for step in db.scrub()? {
     let progress = step?; // Err(Corrupt) names the first damaged section
     // e.g. report progress.done_bytes / progress.total_bytes to a UI
     let _ = progress;
 }
 # Ok::<(), plugmem_host::HostError>(())
 ```
+
+It needs a *published* generation — checkpoint once — but not a clean
+journal: it checks the container as it stands, and the journal describes
+the generation that has not been written yet.
 
 **`recover()` — Tier 2 salvage.** For *content* corruption (bad text
 bytes, a broken vector bijection): it opens the source, drops the facts
