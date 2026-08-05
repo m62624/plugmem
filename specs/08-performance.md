@@ -191,6 +191,7 @@ publishing (no long-lived registry token); crates.io's `release.yml` job gets
 Trusted publishing is configured separately on crates.io for each published
 workspace crate: `plugmem-arena`, `plugmem-core`, `plugmem-host`,
 `plugmem-cli`, and `plugmem-mcp`. Each entry trusts owner `m62624`, repository
-`plugmem`, and `.github/workflows/release.yml`; no Cargo manifest setting is
-needed. The first version of each crate must already exist on crates.io before
-its trusted publisher can be added.
+`plugmem`, and workflow filename `release.yml` (the file lives under
+`.github/workflows/`); no Cargo manifest setting is needed. The first version
+of each crate must already exist on crates.io before its trusted publisher can
+be added.
