@@ -244,7 +244,9 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Publish the completed draft
-        run: gh release edit "${{ needs.prepare.outputs.tag }}" --draft=false
+        # This job deliberately has no checkout: pass the repository explicitly
+        # so gh does not try to infer it from a missing .git directory.
+        run: gh release edit "${{ needs.prepare.outputs.tag }}" --repo "$GITHUB_REPOSITORY" --draft=false
 
   # crates.io publish waits for `dist`, so a failed binary/installer release
   # cannot burn immutable crate versions. This is what makes `cargo install
