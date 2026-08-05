@@ -309,18 +309,19 @@ impl From<plugmem_host::Stats> for Stats {
             next_entity,
             next_edge,
             pool_bytes,
-            // Dropped on purpose, and only because napi drops them: a 128-bit
-            // lineage id exceeds a JavaScript number, and the shard layout is
-            // engine bookkeeping. Python could carry both — carrying them here
-            // alone would make `stats()` mean something different per language.
-            db_uuid: _,
-            shards: _,
-            // `Stats` is the one host result marked `#[non_exhaustive]`, so the
-            // compiler *requires* this rest pattern and the drift guarantee the
-            // rest of this file gets does not apply to it. That is the host's
-            // deliberate choice — it reserves the right to add counters — so
-            // the check has to be a test instead: see `stats_carries_every_
-            // counter_the_host_publishes` below.
+            // `..` covers `db_uuid` and `shards`, both dropped on purpose and
+            // only because napi drops them: a 128-bit lineage id exceeds a
+            // JavaScript number, and the shard layout is engine bookkeeping.
+            // Python could carry either — carrying them here alone would make
+            // `stats()` mean something different per language.
+            //
+            // Naming them as `_` alongside the `..` would read as documentation
+            // but buy nothing, which is what `clippy::unneeded_wildcard_pattern`
+            // says. The rest pattern is not optional here: `Stats` is the one
+            // host result marked `#[non_exhaustive]`, so this is also the one
+            // conversion in this file without the compile-error-on-a-new-field
+            // guarantee. That is the host reserving the right to add counters,
+            // and the cost of it is that this list has to be reviewed by hand.
             ..
         } = stats;
         Self {
