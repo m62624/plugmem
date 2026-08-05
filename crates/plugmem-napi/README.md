@@ -296,6 +296,14 @@ plugmem's tasks are unusually long — `maintain('full')` is minutes on a large
 memory — so raise `UV_THREADPOOL_SIZE` if the process does anything else with
 libuv while maintenance runs.
 
+The pool is also the ceiling on **concurrent embedding**. With an `[embedder]`
+configured, each `remember`/`recall` occupies one worker for its HTTP round trip,
+so at the default four, four is as parallel as it gets. Against a mock provider
+with a fixed 100 ms latency, 16 concurrent recalls took 404 ms on the default
+pool and 101 ms at `UV_THREADPOOL_SIZE=16` — the same 16 requests, four waves or
+one. If a process issues many concurrent recalls against a remote provider, size
+the pool for that, not for the CPU.
+
 **`export()` builds its whole result on your thread.** The scan is on a worker,
 but every fact becomes a JavaScript object in the promise's resolution, and that
 part is main-thread work by definition. On 100 000 facts it holds the thread for
