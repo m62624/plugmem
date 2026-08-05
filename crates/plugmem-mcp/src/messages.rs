@@ -80,9 +80,11 @@ pub const SHOW_TOOL: &str = "Return one fact's full card by id — text, both ti
 (recorded_at, valid_from/valid_to) and state. A missing id is a tool error.";
 
 /// `plugmem_export` tool description.
-pub const EXPORT_TOOL: &str = "Dump every currently-open fact as a JSON array (text, entity, tags, \
-recorded_at, valid_from). The counterpart of the CLI's JSONL export; useful for backup or \
-inspection.";
+pub const EXPORT_TOOL: &str = "Dump the whole memory as `{ facts, edges }`: every currently-open \
+fact (id, text, entity, tags, metadata, recorded_at, valid_from) and every current edge (src, rel, \
+dst, provenance). Both halves matter — an edge is a statement between two entities and belongs to \
+no single fact, so facts alone lose the graph. The counterpart of the CLI's JSONL export; useful \
+for backup or inspection.";
 
 /// `plugmem_maintain` tool description.
 pub const MAINTAIN_TOOL: &str = "Run policy-driven maintenance: no-op when nothing is pending, \
