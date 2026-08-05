@@ -248,24 +248,34 @@ jobs:
 
   # crates.io publish waits for `dist`, so a failed binary/installer release
   # cannot burn immutable crate versions. This is what makes `cargo install
-  # <crate>` / `cargo binstall <crate>` resolve by name. `cargo publish
-  # --workspace` publishes every member in dependency order (arena -> core ->
-  # host -> cli -> mcp) and waits for the index between crates; members with
-  # `publish = false` (napi, testgen, tools) are skipped automatically. The
-  # libraries' `dist = false` only affects cargo-dist, not crates.io.
+  # <crate>` / `cargo binstall <crate>` resolve by name. Trusted publishing is
+  # configured once per published crate on crates.io for this repository and
+  # this workflow; the job exchanges GitHub's OIDC identity for a short-lived
+  # registry token, so no long-lived crates.io secret is stored in GitHub.
+  # `cargo publish --workspace` publishes every member in dependency order
+  # (arena -> core -> host -> cli -> mcp) and waits for the index between
+  # crates; members with `publish = false` (napi, testgen, tools) are skipped
+  # automatically. The libraries' `dist = false` only affects cargo-dist, not
+  # crates.io.
   publish-crates:
-    name: Publish to crates.io
+    name: Publish to crates.io (trusted publishing)
     needs: [prepare, tag, dist]
     runs-on: ubuntu-latest
-    env:
-      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Authenticate with crates.io trusted publishing
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
       - name: Publish all workspace crates
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: cargo publish --workspace --locked
 
   # Build the native Node addon for every target, one job per platform (native

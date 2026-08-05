@@ -181,7 +181,16 @@ needs editing:
 7. **cargo-dist plan**: validate the release plan.
 
 Coverage (tarpaulin) and hardening (miri, a leak-growth gate) run in their own
-workflows. The release pipeline (cargo-dist) needs two secrets set by hand:
-`CARGO_REGISTRY_TOKEN` (crates.io) and `HOMEBREW_TAP_TOKEN` (a fine-grained PAT with
-Contents: write on `m62624/homebrew-plugmem`); the npm publish is OIDC (no token), and
+workflows. The release pipeline (cargo-dist) needs one secret set by hand:
+`HOMEBREW_TAP_TOKEN` (a fine-grained PAT with Contents: write on
+`m62624/homebrew-plugmem`). Both npm and crates.io publishing use OIDC trusted
+publishing (no long-lived registry token); crates.io's `release.yml` job gets
+`id-token: write` and exchanges it through `rust-lang/crates-io-auth-action@v1`.
 `GITHUB_TOKEN` is provided automatically.
+
+Trusted publishing is configured separately on crates.io for each published
+workspace crate: `plugmem-arena`, `plugmem-core`, `plugmem-host`,
+`plugmem-cli`, and `plugmem-mcp`. Each entry trusts owner `m62624`, repository
+`plugmem`, and `.github/workflows/release.yml`; no Cargo manifest setting is
+needed. The first version of each crate must already exist on crates.io before
+its trusted publisher can be added.
