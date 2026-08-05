@@ -60,7 +60,7 @@ thread_local! {
 
 use crate::embedder::Embedder;
 use crate::error::HostError;
-use crate::readonly::ReadOnlyDatabase;
+use crate::readonly::{ReadOnlyDatabase, Scrub};
 use crate::storage::{FileScratch, FileStorage, FsyncPolicy};
 
 self_cell::self_cell!(
@@ -453,9 +453,11 @@ impl Database {
     /// Opens `path` read-only over a memory-mapped snapshot:
     /// the engine borrows the mapped pages instead of copying the file
     /// into RAM, so a large read-mostly database residents only the pages
-    /// `recall`/`get` touch. Requires a checkpointed database (empty
-    /// journal) and takes a shared lock (N readers or one writer).
-    /// See [`ReadOnlyDatabase`].
+    /// `recall`/`get` touch. Requires a **published snapshot generation** —
+    /// checkpoint the database once — and takes a shared lock, so readers run
+    /// alongside the writer rather than excluding it. A journal written since
+    /// that checkpoint is not an obstacle and not visible either: the handle
+    /// answers as of the generation it mapped. See [`ReadOnlyDatabase`].
     ///
     /// # Errors
     ///
@@ -1000,6 +1002,43 @@ impl Database {
     /// for the first inconsistency found.
     pub fn verify(&self) -> Result<(), HostError> {
         Ok(self.read().engine.read(|mem| mem.verify())?)
+    }
+
+    /// A resumable byte-level container scrub of the current published
+    /// generation, with the default slice budget. See
+    /// [`Database::scrub_with_budget`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Database::scrub_with_budget`].
+    pub fn scrub(&self) -> Result<Scrub, HostError> {
+        self.scrub_with_budget(plugmem_core::snapshot::DEFAULT_SCRUB_BUDGET)
+    }
+
+    /// A resumable container scrub hashing at most `budget` bytes per
+    /// [`Iterator::next`] — the writer's counterpart to
+    /// [`ReadOnlyDatabase::scrub_with_budget`], and the same [`Scrub`].
+    ///
+    /// It exists because a scrub is an operation on the **file**, not on this
+    /// handle's view of it: it hashes the published container as it stands, and
+    /// the journal belongs to the generation the writer has not published yet.
+    /// A writer could always have reached one by opening a second, read-only
+    /// handle on the same path — but that maps the whole image again, takes a
+    /// second lock and reconciles the config, all to hash bytes this handle
+    /// already knows the path of.
+    ///
+    /// The returned [`Scrub`] is independent of this handle: it owns its map
+    /// and a shared lock on the generation it pins, so it outlives the
+    /// database, can be moved to its own thread, and keeps this generation
+    /// safe from the writer's own GC until it is dropped.
+    ///
+    /// # Errors
+    ///
+    /// [`HostError::NeedsCheckpoint`] when nothing has been published yet;
+    /// [`HostError::Io`] if the generation cannot be opened or mapped;
+    /// [`HostError::Engine`] if its container will not parse.
+    pub fn scrub_with_budget(&self, budget: usize) -> Result<Scrub, HostError> {
+        Scrub::open(self.read().store.path(), budget)
     }
 
     /// Salvages a content-corrupt database (Tier 2): opens `src`,

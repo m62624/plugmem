@@ -924,6 +924,17 @@ impl<'a> Memory<'a> {
         {
             return Err(Error::ConfigMismatch("stored size limits differ"));
         }
+        // The HNSW degrees shape the stored graph: `level0` is exactly
+        // `indexed * m0` neighbour slots, and the upper lists are sized from
+        // `m`. Loading with different ones is checked either way — but down in
+        // `HnswGraph::from_parts`, where the only thing left to notice is that a
+        // section's length is not what it should be, and the report is
+        // `Corrupt`. That reads as a damaged file when the file is fine and the
+        // *config* is wrong, which sends the reader hunting for the wrong bug.
+        // Compared here instead, while the two values are still side by side.
+        if stored.hnsw_m != cfg.hnsw_m || stored.hnsw_m0 != cfg.hnsw_m0 {
+            return Err(Error::ConfigMismatch("stored hnsw degrees differ"));
+        }
         // The lineage identity is the snapshot's, not the caller's: a
         // caller passing 0 adopts the stored uuid; a nonzero caller value
         // is an assertion "this must be that database" and must match.

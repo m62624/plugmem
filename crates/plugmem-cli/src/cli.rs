@@ -133,6 +133,13 @@ pub(crate) enum Command {
         /// the engine is still in the flat regime, below `flat_to_hnsw`.
         #[arg(long, value_name = "N")]
         ef: Option<usize>,
+        /// How many edges the graph source may follow from an anchor entity
+        /// (default: `graph_depth` from the config). `0` asks for the anchors'
+        /// own facts and no neighbours. Use it when this
+        /// particular question wants a wider or narrower net than the memory's
+        /// usual one.
+        #[arg(long = "graph-depth", value_name = "N")]
+        graph_depth: Option<u32>,
         /// A precomputed query embedding, comma-separated. Given, it
         /// **replaces** the embedder for this query — nothing is sent to the
         /// provider — and its length must equal the configured `dim`.

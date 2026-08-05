@@ -172,9 +172,9 @@ markers, the id for a later revise/forget. An empty result → an empty string (
 | `rrf_k` | 60 | |
 | `w_bm25 / w_vec / w_graph / w_time` | 1.0 | RRF weights |
 | `w_recency / half_life_days` | 0.25 / 180 | |
-| `graph_depth / graph_decay` | 2 / 0.5 | |
+| `graph_depth / graph_decay` | 2 / 0.5 | `graph_depth` is the *default*; a recall overrides it per call, uncapped (the walk is bounded by its entity/edge caps) |
 | `similar_cos / similar_jaccard` | 0.85 / 0.5 | |
-| `hnsw_m / m0 / ef_construction / ef_search` | 16 / 32 / 200 / 64 | |
+| `hnsw_m / m0 / ef_construction / ef_search` | 16 / 32 / 200 / 64 | `m`/`m0` shape the stored graph, so a mismatch on open is `ConfigMismatch`; `ef_search` is the default a recall's `ef` overrides |
 | `flat_to_hnsw` | 24_000 | threshold, tuned by a bench |
 | `db_uuid` | 0 | u128 database lineage id: host-minted at creation, 0 = unnamed; on open 0 adopts the stored one, nonzero must match (`ConfigMismatch`); printed in `stats()` |
 

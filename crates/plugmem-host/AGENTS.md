@@ -16,7 +16,7 @@ Never overwrite a published generation in place. Preserve the temp-write, fsync,
 
 ## Writer, reader, and mmap rules
 
-`Database` provides read-your-writes through its in-process engine and shared/exclusive locking. Readers can run concurrently with a writer according to the lock policy. `ReadOnlyDatabase` pins an immutable checkpoint generation and maps it without copying the large pools; it requires a checkpointed database with an empty journal at open.
+`Database` provides read-your-writes through its in-process engine and shared/exclusive locking. Readers can run concurrently with a writer according to the lock policy. `ReadOnlyDatabase` pins an immutable checkpoint generation and maps it without copying the large pools; it requires a *published* generation at open, and nothing else. A journal written since that checkpoint neither blocks the open nor shows up in the answers — the handle is snapshot-isolated, so it reports as of the generation it mapped. Do not write that it "requires an empty journal": `open` hands the core an empty journal slice and never inspects the real one, and that wording has already sent a reader looking for a bug that was not there.
 
 Read-only handles are snapshot-isolated. They do not move to a newer generation automatically; call `refresh()` and check the returned boolean. `generation()` is the freshness marker. Do not promise read-your-writes from a read-only handle.
 

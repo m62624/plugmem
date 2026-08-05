@@ -361,10 +361,31 @@ fn config_gates_reject_structural_drift() {
         Memory::from_bytes(Some(&bytes), &[], other).unwrap_err(),
         Error::ConfigMismatch("stored size limits differ")
     );
-    // Tuning fields may differ freely.
+    // The HNSW degrees shape the stored graph, so they are a gate too — and
+    // they are named as one. Left to be noticed further down, in
+    // `HnswGraph::from_parts`, the only symptom is a section whose length is
+    // wrong, reported as `Corrupt`: a healthy file accused of damage, which
+    // sends the reader looking for the wrong bug entirely.
+    for (label, mutate) in [
+        ("m", (|c: &mut Config| c.hnsw_m = 32) as fn(&mut Config)),
+        ("m0", |c: &mut Config| c.hnsw_m0 = 64),
+    ] {
+        let mut other = cfg();
+        mutate(&mut other);
+        assert_eq!(
+            Memory::from_bytes(Some(&bytes), &[], other).unwrap_err(),
+            Error::ConfigMismatch("stored hnsw degrees differ"),
+            "hnsw_{label} must be refused as a config mismatch, not as corruption"
+        );
+    }
+
+    // Tuning fields may differ freely — this is what makes them tunable at all:
+    // reopening with new weights is how a caller changes the ranking.
     let mut other = cfg();
     other.w_bm25 = 2.0;
     other.rrf_k = 30;
+    other.hnsw_ef_search = 128;
+    other.half_life_days = 30;
     assert!(Memory::from_bytes(Some(&bytes), &[], other).is_ok());
 }
 

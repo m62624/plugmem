@@ -3,9 +3,10 @@ name: Release
 # Orchestrator (the elenchus release mechanism, Rust-native). Push a tag like
 # `pin/v0.1.0`:  prepare (bump the workspace version, make an RC branch) → tests
 # (run CI on the RC) → tag (create the real `vX.Y.Z`) → dist (cargo-dist builds
-# the binaries + installers for all targets and publishes the GitHub Release) →
-# crates.io (publish source crates only after binaries succeed) → sync (open a
-# PR bringing the version bump back to main).
+# the binaries + installers for all targets and creates a draft GitHub Release)
+# → notes/skill (complete that draft) → publish (make it visible) → crates.io
+# (publish source crates only after binaries succeed) → sync (open a PR bringing
+# the version bump back to main).
 on:
   push:
     tags:
@@ -230,26 +231,51 @@ jobs:
           # --clobber keeps this idempotent if the release job is re-run.
           gh release upload "$TAG" skill/SKILL.md --clobber
 
+  # Publish only after the draft has its final changelog and companion skill.
+  # The binaries and installers were already uploaded by `dist`; changing the
+  # draft flag does not rebuild or re-upload any release asset.
+  publish-release:
+    name: Publish completed GitHub Release
+    needs: [prepare, dist, release-notes, skill-asset]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Publish the completed draft
+        run: gh release edit "${{ needs.prepare.outputs.tag }}" --draft=false
+
   # crates.io publish waits for `dist`, so a failed binary/installer release
   # cannot burn immutable crate versions. This is what makes `cargo install
-  # <crate>` / `cargo binstall <crate>` resolve by name. `cargo publish
-  # --workspace` publishes every member in dependency order (arena -> core ->
-  # host -> cli -> mcp) and waits for the index between crates; members with
-  # `publish = false` (napi, testgen, tools) are skipped automatically. The
-  # libraries' `dist = false` only affects cargo-dist, not crates.io.
+  # <crate>` / `cargo binstall <crate>` resolve by name. Trusted publishing is
+  # configured once per published crate on crates.io for this repository and
+  # this workflow; the job exchanges GitHub's OIDC identity for a short-lived
+  # registry token, so no long-lived crates.io secret is stored in GitHub.
+  # `cargo publish --workspace` publishes every member in dependency order
+  # (arena -> core -> host -> cli -> mcp) and waits for the index between
+  # crates; members with `publish = false` (napi, testgen, tools) are skipped
+  # automatically. The libraries' `dist = false` only affects cargo-dist, not
+  # crates.io.
   publish-crates:
-    name: Publish to crates.io
+    name: Publish to crates.io (trusted publishing)
     needs: [prepare, tag, dist]
     runs-on: ubuntu-latest
-    env:
-      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Authenticate with crates.io trusted publishing
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
       - name: Publish all workspace crates
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: cargo publish --workspace --locked
 
   # Build the native Node addon for every target, one job per platform (native

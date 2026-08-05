@@ -184,7 +184,12 @@ pub struct Config {
     pub w_recency: f32,
     /// Recency half-life in days.
     pub half_life_days: u32,
-    /// Graph expansion depth limit.
+    /// Default graph expansion depth. A recall overrides it per call
+    /// (`RecallQuery::graph_depth`).
+    ///
+    /// Not capped: the cost of a walk is held by the entity and edge caps in
+    /// the recall path, so a hop ceiling would only forbid the case where hops
+    /// are cheapest — a sparse chain, one entity per hop.
     pub graph_depth: u32,
     /// Per-hop weight decay of graph candidates, in `(0, 1]`.
     pub graph_decay: f32,
@@ -334,9 +339,6 @@ impl Config {
         check_weight(self.w_recency, "w_recency must be finite and >= 0")?;
         if self.half_life_days == 0 {
             return Err(Error::ConfigMismatch("half_life_days must be >= 1"));
-        }
-        if self.graph_depth > 4 {
-            return Err(Error::ConfigMismatch("graph_depth must be <= 4"));
         }
         if !(self.graph_decay.is_finite() && self.graph_decay > 0.0 && self.graph_decay <= 1.0) {
             return Err(Error::ConfigMismatch("graph_decay must be in (0, 1]"));

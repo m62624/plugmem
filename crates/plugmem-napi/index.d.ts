@@ -99,6 +99,16 @@ export interface RecallArgs {
    */
   ef?: number
   /**
+   * How many edges the graph source may follow from an anchor entity
+   * (default: the configured `graph_depth`). `0` asks for the anchors' own
+   * facts and no neighbours.
+   *
+   * Per call for the same reason `k` and `tokenBudget` are: how wide a net
+   * to cast belongs to the question. "What is known around this person"
+   * wants more hops than "what is this person's stated preference".
+   */
+  graphDepth?: number
+  /**
    * A precomputed embedding. Its length must equal the configured `dim`.
    *
    * Given, it **replaces** the embedder: nothing is sent to the provider.
@@ -122,6 +132,53 @@ export interface LinkArgs {
    * `unlink`, which closes an edge rather than opening one.
    */
   provenance?: number
+}
+/** Options for [`recover`]. */
+export interface RecoverOptions {
+  /**
+   * Embedding dimension, as `OpenOptions.dim`. It must match what the source
+   * database stores, so a memory with vectors needs this (or a `config`
+   * naming the embedder) or the salvage cannot open it.
+   */
+  dim?: number
+  /** Path to a `config.toml`; the standard discovery applies when omitted. */
+  config?: string
+}
+/**
+ * Salvages a content-corrupt memory: reads `src`, drops the facts that fail
+ * the content checks, and writes a clean, compacted image to `dst`.
+ *
+ * **`src` is never written.** The damaged file stays exactly as it was, as
+ * evidence — this produces a repaired copy beside it, and swapping them is
+ * your decision, not this function's. `dst` must therefore be a different
+ * path.
+ *
+ * **It handles *content* damage**, the kind `verify` reports: text that is not
+ * valid UTF-8, a vector slot that disagrees with its fact, metadata that will
+ * not decode. *Structural* damage — a snapshot whose container will not parse
+ * at all — is not salvageable here and rejects; that is what a backup is for.
+ *
+ * Memory stays proportional to the record count rather than the image: the
+ * two large pools are streamed through temp files, so a database far bigger
+ * than RAM can be recovered as long as its graph fits.
+ *
+ * **Async**: it opens, sweeps and rewrites a whole database.
+ *
+ * @throws `PLUGMEM_LOCKED` if either path is open elsewhere; `PLUGMEM_ENGINE`
+ * if `dst` resolves to the same file as `src`, or the source will not parse;
+ * `PLUGMEM_OPEN` for an IO failure on either path.
+ */
+export declare function recover(src: string, dst: string, options?: RecoverOptions | undefined | null): Promise<RecoverReport>
+/** Options for `Plugmem#scrub`. */
+export interface ScrubOptions {
+  /**
+   * Bytes to hash per step, at most. Default: the engine's own (1 MiB).
+   *
+   * This is the knob trading responsiveness for throughput: smaller steps
+   * return to JavaScript more often, larger ones spend less time crossing
+   * back and forth. It changes no answer, only the grain.
+   */
+  budget?: number
 }
 /** One similar / potentially-conflicting live fact surfaced by `remember`. */
 export interface Similar {
@@ -262,6 +319,52 @@ export interface ExportedFact {
   recordedAt: number
   /** Validity start (unix ms; preserved on import). */
   validFrom: number
+}
+/**
+ * One exported edge — the shape `exportEdges` streams, and the same fields the
+ * CLI's JSONL dump writes for an edge.
+ *
+ * Edges are not part of a fact's dump: a fact names its tags and metadata, but
+ * an edge is a statement *between* two entities and outlives any single fact.
+ * That is why a complete backup is the two streams together.
+ */
+export interface ExportedEdge {
+  /** Source entity name. */
+  src: string
+  /** The relation, verbatim. */
+  rel: string
+  /** Destination entity name. */
+  dst: string
+  /**
+   * The fact this edge follows from, if it was recorded with one. Absent
+   * rather than a sentinel, so "no provenance" cannot be mistaken for fact 0.
+   */
+  provenance?: number
+}
+/**
+ * What a `recover` salvaged, and what it had to leave behind.
+ *
+ * The three `dropped` counts are the damage: each is a fact the source could
+ * not produce intact, so a non-zero total means the recovered copy is smaller
+ * than the original claimed to be. Zeroes across the board mean the image was
+ * content-clean and this was a compaction.
+ */
+export interface RecoverReport {
+  /** Facts written to the destination — the survivors. */
+  kept: number
+  /** Dropped: the stored text was not valid UTF-8. */
+  droppedText: number
+  /** Dropped: the vector slot was out of range or disagreed with the fact. */
+  droppedVector: number
+  /** Dropped: the metadata blob did not decode to a well-formed map. */
+  droppedMetadata: number
+}
+/** How far a `Scrub` has got. */
+export interface ScrubProgress {
+  /** Bytes checksummed so far; equals `totalBytes` on the last step. */
+  doneBytes: number
+  /** The generation file's length — the total to checksum. */
+  totalBytes: number
 }
 /** One bounded page returned by `exportPage`. */
 export interface ExportPage {
@@ -499,6 +602,18 @@ export declare class Plugmem {
    */
   static open(path?: string | undefined | null, options?: OpenOptions | undefined | null): Promise<Plugmem>
   /**
+   * What `config.toml` said that nothing claimed — a misspelled key, a
+   * misspelled section — one human-readable line each, empty when the file
+   * was clean.
+   *
+   * It is a value rather than a printed warning because a native addon has
+   * nowhere sensible to print: stderr belongs to the host application, which
+   * may be a server that logs as JSON. **Read it once after opening and log
+   * it your own way** — ignoring it puts you back where a typo silently
+   * changes nothing.
+   */
+  configWarnings(): Array<string>
+  /**
    * The file this memory is open on.
    *
    * Worth having because the constructor may resolve the path rather than be
@@ -594,6 +709,50 @@ export declare class Plugmem {
    * mutate it during a snapshot-style backup; a read-only handle is stable.
    */
   exportPage(cursor?: number | undefined | null): Promise<ExportPage>
+  /**
+   * Streams every current edge to `onBatch`, in batches, and resolves with
+   * the number streamed.
+   *
+   * **The other half of a backup.** `export`/`exportPage` dump facts; an edge
+   * is a statement between two entities and belongs to no single fact, so a
+   * dump of facts alone silently loses the graph.
+   *
+   * **Async and bounded.** The walk runs on a libuv worker; batches reach
+   * `onBatch` on the JS thread through a threadsafe function with a queue of
+   * four. When the callback is slower than the walk, the *worker* waits — the
+   * event loop never does, and peak memory is four batches whatever the
+   * database's size.
+   *
+   * **When the promise resolves, every batch has been delivered.** Worth
+   * saying because a threadsafe-function call only queues work for the JS
+   * thread, so the natural implementation resolves early and hands you a
+   * half-filled accumulator on some runs and a full one on others. Each
+   * batch is acknowledged from the JS thread and the worker waits for the
+   * receipts, so reading your results straight after the `await` is correct.
+   *
+   * `onBatch` throwing is not caught here: it surfaces as an uncaught error,
+   * as it would from any callback Node invokes on your behalf.
+   */
+  exportEdges(onBatch: (edges: ExportedEdge[]) => void): Promise<number>
+  /**
+   * Starts a resumable byte-level check of the current published snapshot,
+   * and resolves with the [`Scrub`](crate::scrub::Scrub) that paces it.
+   *
+   * The counterpart to `verify`, not a replacement: `verify` asks whether
+   * the *content* agrees with itself, this asks whether the *bytes* are the
+   * ones that were written. Only the second catches a flipped bit that the
+   * structure accepts.
+   *
+   * Available on a writer as well as a read-only handle: a scrub reads the
+   * published generation from disk and has no opinion about which handle
+   * asked. It does need something published — checkpoint once first.
+   *
+   * **The returned object holds a shared lock** on the generation it scans
+   * for as long as it lives, so run it to completion or `close()` it.
+   *
+   * @throws `PLUGMEM_NEEDS_CHECKPOINT` when nothing has been published yet.
+   */
+  scrub(options?: ScrubOptions | undefined | null): Promise<Scrub>
   /** One fact's tags, or an empty array for an unknown or tombstoned id. */
   tagsOf(id: number): Array<string>
   /**
@@ -637,6 +796,46 @@ export declare class Plugmem {
    * but `close()` makes the moment explicit — e.g. before a read-only reopen.)
    */
   close(): void
+}
+/**
+ * A resumable byte-level check of one snapshot generation.
+ *
+ * **Holding this object holds a lock.** It pins the generation it is scanning
+ * with a shared lock for its whole life, so the writer's garbage collection
+ * cannot reclaim that generation under it. Finish the scan, or `close()` it —
+ * do not park one indefinitely.
+ *
+ * One-shot: once it has returned `null`, or thrown, it is done. Ask the
+ * database for another to scan again.
+ */
+export declare class Scrub {
+  /**
+   * Hashes the next slice and resolves with the progress so far, or `null`
+   * when the scan is complete.
+   *
+   * **Async**: see the module note — a step is disk I/O, not arithmetic.
+   *
+   * Concurrent calls are serialized rather than refused: the cursor has one
+   * position, so two overlapping steps would be two different slices of the
+   * same scan, which is what a caller pacing it from two places asked for.
+   *
+   * @throws on the first mismatch, naming what failed its checksum. The
+   * scrub is finished at that point; a further call resolves `null`.
+   */
+  next(): Promise<ScrubProgress | null>
+  /**
+   * Releases the pinned generation now, abandoning an unfinished scan.
+   *
+   * Idempotent, and the same bargain as `Plugmem#close`: waiting for the
+   * garbage collector to do it means the writer cannot reclaim that
+   * generation until it happens.
+   */
+  close(): void
+  /**
+   * Whether this scrub still has work — `false` once it finished, failed or
+   * was closed. Cheap: it inspects the handle, not the file.
+   */
+  active(): boolean
 }
 /**
  * A directory of named memories — the napi mirror of

@@ -219,6 +219,73 @@ impl From<plugmem_host::ExportedFact> for ExportedFact {
     }
 }
 
+/// One exported edge — the shape `exportEdges` streams, and the same fields the
+/// CLI's JSONL dump writes for an edge.
+///
+/// Edges are not part of a fact's dump: a fact names its tags and metadata, but
+/// an edge is a statement *between* two entities and outlives any single fact.
+/// That is why a complete backup is the two streams together.
+#[napi(object)]
+#[derive(serde::Deserialize)]
+pub struct ExportedEdge {
+    /// Source entity name.
+    pub src: String,
+    /// The relation, verbatim.
+    pub rel: String,
+    /// Destination entity name.
+    pub dst: String,
+    /// The fact this edge follows from, if it was recorded with one. Absent
+    /// rather than a sentinel, so "no provenance" cannot be mistaken for fact 0.
+    pub provenance: Option<f64>,
+}
+
+/// What a `recover` salvaged, and what it had to leave behind.
+///
+/// The three `dropped` counts are the damage: each is a fact the source could
+/// not produce intact, so a non-zero total means the recovered copy is smaller
+/// than the original claimed to be. Zeroes across the board mean the image was
+/// content-clean and this was a compaction.
+#[napi(object)]
+pub struct RecoverReport {
+    /// Facts written to the destination — the survivors.
+    pub kept: f64,
+    /// Dropped: the stored text was not valid UTF-8.
+    pub dropped_text: f64,
+    /// Dropped: the vector slot was out of range or disagreed with the fact.
+    pub dropped_vector: f64,
+    /// Dropped: the metadata blob did not decode to a well-formed map.
+    pub dropped_metadata: f64,
+}
+
+impl From<plugmem_host::RecoverReport> for RecoverReport {
+    fn from(r: plugmem_host::RecoverReport) -> Self {
+        Self {
+            kept: r.kept as f64,
+            dropped_text: r.dropped_text as f64,
+            dropped_vector: r.dropped_vector as f64,
+            dropped_metadata: r.dropped_metadata as f64,
+        }
+    }
+}
+
+/// How far a `Scrub` has got.
+#[napi(object)]
+pub struct ScrubProgress {
+    /// Bytes checksummed so far; equals `totalBytes` on the last step.
+    pub done_bytes: f64,
+    /// The generation file's length — the total to checksum.
+    pub total_bytes: f64,
+}
+
+impl From<plugmem_host::ScrubProgress> for ScrubProgress {
+    fn from(p: plugmem_host::ScrubProgress) -> Self {
+        Self {
+            done_bytes: p.done_bytes as f64,
+            total_bytes: p.total_bytes as f64,
+        }
+    }
+}
+
 /// One bounded page returned by `exportPage`.
 #[napi(object)]
 pub struct ExportPage {

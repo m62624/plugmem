@@ -51,7 +51,7 @@ with a recency boost (tags filter; they are not a source):
 |---|---|---|
 | **Lexical** | [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) (Robertson idf) over a Unicode ([UAX #29](https://unicode.org/reports/tr29/)) tokenizer | exact terms / keyword overlap |
 | **Semantic** | int8-quantized cosine — a flat two-phase scan below a threshold, an [HNSW](https://arxiv.org/abs/1603.09320) graph above | meaning / nearest neighbours |
-| **Graph** | entity graph with typed edges, breadth-first from query anchors | relational knowledge |
+| **Graph** | entity graph with typed edges, breadth-first from query anchors; depth defaults to `Config::graph_depth` and can be overridden per recall | relational knowledge |
 | **Temporal** | range scans over a `recorded_at`-ordered index; bitemporal validity | "what was true *then*", time windows |
 
 ## Two clocks
@@ -98,6 +98,14 @@ db.recall(RecallQuery {
 db.recall(RecallQuery {
     entities: &["kim"],
     as_of: Some(MAR_5),
+    ..RecallQuery::text(MAR_10, "kim")
+})?;
+
+// The graph depth belongs to this question: widen the walk for a neighbourhood
+// query, or use `Some(0)` when only kim's own facts should answer.
+let _around_kim = db.recall(RecallQuery {
+    entities: &["kim"],
+    graph_depth: Some(3),
     ..RecallQuery::text(MAR_10, "kim")
 })?;
 # Ok::<(), plugmem_host::HostError>(())
@@ -330,7 +338,9 @@ read-only consumers query it in parallel.
 use plugmem_host::{Config, Database, RecallQuery};
 
 // Many readers over one checkpointed file — zero-copy, shared page cache.
-// (A read-only open requires an empty journal: snapshot/checkpoint first.)
+// (A read-only open needs a published generation: checkpoint once, first. It
+// then reads that generation and ignores any later journal, so a reader sees
+// the memory as of the last checkpoint.)
 let ro = Database::open_readonly("agent.plugmem", Config::default())?;
 let out = ro.recall(RecallQuery::text(1_784_000_100_000, "which runtime?"))?;
 println!("{}", out.rendered);
@@ -370,7 +380,7 @@ error or a repaired file.
 | call | checks | cost |
 |---|---|---|
 | `verify()` | everything an open defers — stored text is valid UTF-8, metadata blobs decode, the fact↔vector-slot bijection holds, and the graph agrees with itself (both edge mirrors, a current edge against its open version, every open version reachable as a current edge) | one linear pass over the text + vector pools, plus a lookup per edge |
-| `scrub()` | *byte-level* container integrity — each section's stored xxh3 and the whole-file hash (the ZFS-scrub model) | resumable; a read-handle op |
+| `scrub()` | *byte-level* container integrity — each section's stored xxh3 and the whole-file hash (the ZFS-scrub model) | resumable; on either handle |
 | `recover()` | *salvage* — drop the content-corrupt facts, rebuild, write a clean copy | rebuilds in RAM ≈ image size |
 
 **`scrub()` — the bitrot detector.** A resumable iterator over the mapped
@@ -381,18 +391,27 @@ life, reads the map linearly (pages fault in, get hashed, stay
 reclaimable — it never residents the whole file), and reports the first
 mismatch, naming the damaged section.
 
+A scrub reads the *file*, not a handle's view of it, so it is on both
+handles. Use the writer's when you already hold one: a second read-only
+open would map the whole image again and take a second lock to hash bytes
+whose path you already know.
+
 ```rust,no_run
 use plugmem_host::{Config, Database};
 
-let ro = Database::open_readonly("agent.plugmem", Config::default())?;
+let (db, _) = Database::open("agent.plugmem", Config::default())?;
 // Verify every container byte, a slice at a time.
-for step in ro.scrub()? {
+for step in db.scrub()? {
     let progress = step?; // Err(Corrupt) names the first damaged section
     // e.g. report progress.done_bytes / progress.total_bytes to a UI
     let _ = progress;
 }
 # Ok::<(), plugmem_host::HostError>(())
 ```
+
+It needs a *published* generation — checkpoint once — but not a clean
+journal: it checks the container as it stands, and the journal describes
+the generation that has not been written yet.
 
 **`recover()` — Tier 2 salvage.** For *content* corruption (bad text
 bytes, a broken vector bijection): it opens the source, drops the facts

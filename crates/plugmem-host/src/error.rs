@@ -27,12 +27,16 @@ pub enum HostError {
         source: std::io::Error,
     },
 
-    /// A read-only open ([`crate::Database::open_readonly`]) found a
-    /// non-empty journal. Replaying it would mutate the engine — copying
-    /// whole arenas up from the mapped bytes (copy-on-write) — which
-    /// defeats the zero-copy intent. Open the database read-write once to
-    /// checkpoint it (fold the journal into the snapshot), then retry
-    #[error("database at {} needs a checkpoint before a read-only open (non-empty journal)", path.display())]
+    /// There is no published snapshot generation to map: the database has
+    /// never been checkpointed, so a read-only open ([`crate::Database::
+    /// open_readonly`]) or a [`crate::Database::scrub`] has nothing to point
+    /// at. Open it read-write once and checkpoint, then retry.
+    ///
+    /// A *dirty journal* is not this error. A reader maps the published
+    /// generation and never reads the journal, which is snapshot isolation:
+    /// it answers as of the last checkpoint rather than refusing until you
+    /// take one.
+    #[error("database at {} has no published snapshot yet: checkpoint it once first", path.display())]
     NeedsCheckpoint {
         /// The database base path.
         path: PathBuf,

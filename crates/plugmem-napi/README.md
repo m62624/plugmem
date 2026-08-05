@@ -159,6 +159,7 @@ const res = await db.recall({
   tags: ["work"],          // filter: a fact must carry all of these
   k: 10,                   // cap the number of facts
   tokenBudget: 400,        // cap the size of the block — your context budget
+  graphDepth: 3,           // how far to walk from the anchors (default 2)
 });
 
 res.rendered;   // string, prompt-ready
@@ -206,6 +207,8 @@ only moves arguments and results across the boundary.
 | `path()` | the file this handle resolved to (sync) |
 | `export()` | every open fact as one array (async, unbounded — see below) |
 | `exportPage(cursor?)` | the same data in bounded pages of 128 (async) |
+| `exportEdges(onBatch)` | every current edge, streamed in batches (async) |
+| `configWarnings()` | anything in `config.toml` nothing claimed (sync) |
 
 **Upkeep** — all async, all on a worker thread:
 
@@ -214,6 +217,8 @@ only moves arguments and results across the boundary.
 | `maintain(mode?)` | `"auto"` (default), `"compact"`, `"reindex-text"`, `"optimize-vectors"`, `"full"`. No mode ever drops a revision or an edge version |
 | `checkpoint()` | flush the journal into a fresh snapshot |
 | `verify()` | full content-integrity sweep; rejects on the first inconsistency |
+| `scrub(options?)` | start a resumable byte-level check of the snapshot |
+| `recover(src, dst, options?)` | module function: salvage a damaged file into a clean copy |
 
 **Read-only handles** (`{ readOnly: true }`) observe another process's writer
 over a published snapshot. The read verbs answer, the write verbs throw, and two
@@ -238,13 +243,106 @@ const res = await db.recall({ query: text, vector: own });
 Use it for vectors you already have, for a model that is not an OpenAI-shaped
 HTTP endpoint, or for a deterministic test with no network.
 
-### What the Rust library has and this does not
+### Backing up: facts are only half of it
 
-| Not here | Why |
-|---|---|
-| `recover` | salvaging a damaged file is a path-level operation on the host's disk — the CLI's job |
-| `import` | the JSONL file format lives in [`plugmem-cli`](https://docs.rs/plugmem-cli/latest). A Node program holding records already uses `rememberMany` |
-| `scrub` | byte-level container integrity, likewise CLI-side; `verify()` covers content |
+`export`/`exportPage` dump facts. An **edge** is a statement between two
+entities — `kim -works_on-> plugmem` — and belongs to no single fact, so a dump
+of facts alone loses the graph. `exportEdges` is the other half.
+
+It streams: the walk runs on a worker and hands your callback one batch at a
+time, so memory stays flat whether the graph has ten edges or ten million. When
+a callback is slower than the walk, the *worker* waits — never the event loop.
+
+```javascript
+const edges = [];
+const count = await db.exportEdges((batch) => edges.push(...batch));
+```
+
+`count` is `2` here, and `edges` is complete the moment the promise resolves —
+no extra tick needed:
+
+```json
+[
+  { "src": "kim", "rel": "works_on", "dst": "plugmem", "provenance": 0 },
+  { "src": "kim", "rel": "reports_to", "dst": "ann" }
+]
+```
+
+`provenance` is the fact the edge follows from, when it was recorded with one.
+It is **absent** rather than zero when there is none, so it can never be
+mistaken for fact `0` — as the second edge above shows.
+
+### Checking a file has not rotted
+
+`verify()` and `scrub()` ask different questions, and neither replaces the other:
+
+- **`verify()`** — does the *content* agree with itself? Text is valid UTF-8,
+  each vector belongs to its fact, both directions of every edge match.
+- **`scrub()`** — are the *bytes* the ones that were written? It recomputes each
+  section's checksum and the whole-file hash. This is what catches a flipped bit
+  that the structure happily accepts.
+
+A scrub is paced by you rather than run in one go, so it stays affordable on a
+live database — the model ZFS uses. Each step checks up to a budget's worth of
+bytes and returns:
+
+```javascript
+const scrub = await db.scrub();          // default budget: 1 MiB per step
+let step;
+while ((step = await scrub.next()) !== null) {
+  // step.doneBytes of step.totalBytes — progress through the snapshot file
+}
+```
+
+`next()` returns a promise because a step reads from disk, not because hashing
+is slow: over a memory-mapped file the bytes are paged in as they are read, so a
+step is I/O of whatever length your storage takes. On the JS thread that would
+freeze the process.
+
+Two things to know. **Holding the object holds a lock** on the snapshot
+generation it is scanning, so run it to completion or `close()` it. And it is
+one-shot: after it returns `null`, or throws, `active()` is `false` and you ask
+the database for another.
+
+```javascript
+const partial = await db.scrub({ budget: 16 * 1024 });
+await partial.next();     // { doneBytes: 16384, totalBytes: <the file's size> }
+partial.close();          // released; further next() calls return null
+```
+
+Damage rejects with `PLUGMEM_ENGINE` naming what failed its checksum.
+
+### Repairing a damaged file
+
+`recover` is a module function, not a method: it works on **paths**, and takes
+the source's exclusive lock, so close your handle first.
+
+```javascript
+import { recover } from "plugmem";
+
+const report = await recover("memory.plugmem", "repaired.plugmem");
+// { kept: 1, droppedText: 0, droppedVector: 0, droppedMetadata: 0 }
+```
+
+**The source is never written.** It stays exactly as it was, as evidence; this
+produces a repaired copy beside it, and swapping them is your decision. `dst`
+must therefore be a different path — passing the same one throws.
+
+The three `dropped` counts are the damage: each is a fact the source could not
+produce intact. All zero means the image was content-clean and this was a
+compaction. Memory stays proportional to the record count rather than the file,
+so a database far larger than RAM can be recovered.
+
+It handles **content** damage — the kind `verify()` reports. A snapshot whose
+container will not parse at all is not salvageable here; that is what a backup
+is for.
+
+### The one thing the Rust library has and this does not
+
+`import`. The JSONL dump format is defined by
+[`plugmem-cli`](https://docs.rs/plugmem-cli/latest), not by the engine — there is
+no `import` verb to mirror. A Node program holding records already has
+`rememberMany` and `link`, which is what an importer is made of.
 
 ## Errors
 
@@ -294,6 +392,10 @@ path = "/path/to/memory.plugmem"
 [engine]
 dim = 768                     # embedding size (0 = vectors off)
 
+[recall]                      # optional — every key has a tuned default
+w_vec = 2.0                   # trust meaning over keywords in this memory
+half_life_days = 30           # and treat anything older than a month as stale
+
 [embedder]                    # optional — omit for lexical/tag/graph/time only
 kind  = "ollama"              # or openai / lmstudio / vllm / llamacpp
 url   = "http://localhost:11434/v1/embeddings"
@@ -301,6 +403,24 @@ model = "nomic-embed-text"
 
 [maintenance]
 fsync = "each_op"             # or "on_snapshot": faster, loses the journal tail on an OS crash
+```
+
+`[engine]` is what a database is *built* with; changing one of those on an
+existing file is refused. `[recall]` and `[index]` are the opposite — reopening
+with different weights is how you change the ranking, so tune them freely. All
+of them are in the [full settings reference](https://github.com/m62624/plugmem/blob/main/crates/plugmem-host/SETTINGS.md).
+
+### When a key is misspelled
+
+Unknown keys and sections do not stop anything, but they are not swallowed
+either — a misspelled `w_vec` changes no behaviour, and silence would leave you
+believing you had tuned something. **Read them once after opening**, because a
+native addon has nowhere sensible to print:
+
+```javascript
+const db = await Plugmem.open("agent.plugmem", { config: "./plugmem.toml" });
+for (const warning of db.configWarnings()) console.warn(warning);
+// unknown setting [recall].w_vector — did you mean `w_vec`?
 ```
 
 With an `[embedder]`, a text-only `remember`/`recall` embeds automatically, and

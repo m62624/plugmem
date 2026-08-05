@@ -80,9 +80,11 @@ pub const SHOW_TOOL: &str = "Return one fact's full card by id — text, both ti
 (recorded_at, valid_from/valid_to) and state. A missing id is a tool error.";
 
 /// `plugmem_export` tool description.
-pub const EXPORT_TOOL: &str = "Dump every currently-open fact as a JSON array (text, entity, tags, \
-recorded_at, valid_from). The counterpart of the CLI's JSONL export; useful for backup or \
-inspection.";
+pub const EXPORT_TOOL: &str = "Dump the whole memory as `{ facts, edges }`: every currently-open \
+fact (id, text, entity, tags, metadata, recorded_at, valid_from) and every current edge (src, rel, \
+dst, provenance). Both halves matter — an edge is a statement between two entities and belongs to \
+no single fact, so facts alone lose the graph. The counterpart of the CLI's JSONL export; useful \
+for backup or inspection.";
 
 /// `plugmem_maintain` tool description.
 pub const MAINTAIN_TOOL: &str = "Run policy-driven maintenance: no-op when nothing is pending, \
@@ -143,6 +145,10 @@ is what goes into a prompt, so this decides how much of your context window reca
 pub const ARG_EF: &str = "HNSW beam width for the vector source (default: the configured \
 `hnsw_ef_search`). Higher is more accurate and slower. Ignored while the engine is still in the \
 flat regime.";
+pub const ARG_GRAPH_DEPTH: &str = "How many edges the graph source may follow from an \
+anchor entity (default: the configured `graph_depth`). `0` asks for the anchors' own \
+facts and no neighbours. Widen it when the question is \"what is known around this\", narrow it \
+when you want one entity's own facts and not its neighbourhood.";
 pub const ARG_ID: &str = "The fact id (as printed by remember, or the `[fN]` in a recall block).";
 pub const ARG_SRC: &str = "Source entity name (created lazily).";
 pub const ARG_REL: &str = "Relation term, verbatim (e.g. \"works_at\").";

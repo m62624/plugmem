@@ -436,6 +436,30 @@ struct Pooled {
 /// keeps the database locked for hours, whatever the idle timeout says. Hold
 /// one for the length of a request, as the MCP server does, and this never
 /// comes up.
+///
+/// # What the pool lock covers
+///
+/// One `Mutex` guards the pool, and every path mutates it — a *hit* writes
+/// `last_used_ms`, so an `RwLock` would buy nothing and cost more. It is not
+/// the engine lock: a handle is cloned out and the verb runs with the pool
+/// released, so two threads working in two databases never meet here.
+///
+/// Two things are worth knowing about how long it is held.
+///
+/// [`Workspace::get`] holds it **across the open** — creating the file,
+/// taking the lock, mapping the snapshot, replaying the journal. That is
+/// deliberate (see the comment in the body: dropping it first lets two threads
+/// of one process race for a file and hand the loser a `Busy` it caused
+/// itself), and the cost is that a cold open of one database queues a hit on
+/// an unrelated one. With a pool that warms in a few requests and a `max_open`
+/// in the tens, that queue is short.
+///
+/// The closing paths do the opposite: they take the evicted entries out under
+/// the lock and drop them **after** releasing it. Today that only defers
+/// closing a few file descriptors, since nothing in the handle has a `Drop`.
+/// It is written that way so it stays true if one ever gains one — a
+/// checkpoint-on-close would otherwise turn a timer tick into disk I/O under a
+/// lock every worker wants, which is a stall with no visible cause.
 pub struct Workspace {
     layout: WorkspaceLayout,
     open: Opener,
@@ -582,19 +606,26 @@ impl Workspace {
         if timeout == 0 {
             return 0;
         }
-        let mut pool = self.pooled();
-        let before = pool.len();
+        // `extract_if` rather than `retain` so the entries come *out* instead of
+        // being dropped in place: the guard is a temporary, so it is released at
+        // the semicolon and the handles die on the next line, unlocked.
+        //
         // `saturating_sub`: a clock that stepped backwards leaves handles open
         // rather than closing all of them at once.
-        pool.retain(|p| now_ms.saturating_sub(p.last_used_ms) < timeout);
-        before - pool.len()
+        let closing: Vec<Pooled> = self
+            .pooled()
+            .extract_if(.., |p| now_ms.saturating_sub(p.last_used_ms) >= timeout)
+            .collect();
+        closing.len()
     }
 
     /// Closes every open handle. The pool's copies, that is — see the note on
     /// [`Workspace`] about clones the caller still holds.
     pub fn close_all(&self) -> usize {
-        let mut pool = self.pooled();
-        std::mem::take(&mut *pool).len()
+        // Same shape as `close_idle`: the handles leave the pool under the lock
+        // and are dropped once it is released.
+        let closing = std::mem::take(&mut *self.pooled());
+        closing.len()
     }
 
     /// The pool guard. A panic in a verb cannot leave the pool half-updated

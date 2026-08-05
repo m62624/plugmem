@@ -114,6 +114,18 @@ pub struct RecallQuery<'a> {
     /// `Config::hnsw_ef_search`. Ignored while the engine is in the flat
     /// regime (below `Config::flat_to_hnsw`).
     pub ef: Option<usize>,
+    /// Graph expansion depth for this query; defaults to
+    /// `Config::graph_depth`, and is not capped: the cost of a walk is held by
+    /// the entity and edge caps, not by the hop count.
+    ///
+    /// A per-call knob for the same reason `k` and `token_budget` are: how wide
+    /// a net to cast is a property of the question, not of the memory. "What is
+    /// known around this person" wants more hops than "what is this person's
+    /// stated preference", and one number for the whole database cannot be both.
+    ///
+    /// `Some(0)` asks for no expansion at all: the anchors' own facts, and no
+    /// neighbours.
+    pub graph_depth: Option<u32>,
 }
 
 impl<'a> RecallQuery<'a> {
@@ -130,6 +142,7 @@ impl<'a> RecallQuery<'a> {
             k: 0,
             token_budget: None,
             include_closed: false,
+            graph_depth: None,
             ef: None,
         }
     }
@@ -535,8 +548,20 @@ impl Memory<'_> {
         };
         let mut frontier = 0usize;
         let mut weight = 1.0f32;
-        'expand: for _ in 0..self.cfg.graph_depth {
+        // The query's depth when it named one, else the configured default.
+        // Unbounded on purpose: what a walk may *cost* is held by the entity and
+        // edge caps above, not by the hop count, so a ceiling here would only
+        // forbid the case it is cheapest in — a sparse chain, where each hop
+        // adds one entity.
+        let depth = q.graph_depth.unwrap_or(self.cfg.graph_depth);
+        'expand: for _ in 0..depth {
             let depth_end = visited.len();
+            // Nothing new at the last depth means nothing new at any deeper one:
+            // the frontier is empty and every further pass would be a no-op.
+            // Without this, an absurd depth would spin instead of finishing.
+            if depth_end == frontier {
+                break;
+            }
             weight *= self.cfg.graph_decay;
             for at in frontier..depth_end {
                 if full(&out.edges, visited) {

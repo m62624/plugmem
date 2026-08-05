@@ -253,10 +253,23 @@ fn writer_verbs_round_trip() {
         serde_json::from_str(resps[5]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(unlinked["unlinked"], true);
 
-    // export → a JSON array of the open facts (>=1).
+    // export → the whole memory: the open facts (>=1) and the edges between
+    // them. The graph is the half a facts-only dump used to lose in silence;
+    // the sequence above linked and then unlinked, so `edges` is present and
+    // empty rather than absent.
     let exported: Value =
         serde_json::from_str(resps[6]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    assert!(exported.as_array().map(|a| !a.is_empty()).unwrap_or(false));
+    assert!(
+        exported["facts"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false),
+        "the dump carries facts: {exported}"
+    );
+    assert!(
+        exported["edges"].is_array(),
+        "and always carries an edges array, even when it is empty: {exported}"
+    );
 
     // maintain/checkpoint/verify all succeed.
     assert_eq!(resps[7]["result"]["isError"], false);

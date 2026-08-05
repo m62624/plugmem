@@ -188,7 +188,7 @@ sets `isError: true` so the model can read and react to it.
 | `plugmem_unlink` | close the current typed edge `src -rel-> dst` while preserving `as_of` history |
 | `plugmem_show` | one fact's full card by `id` |
 | `plugmem_stats` | engine size counters |
-| `plugmem_export` | every open fact as a JSON array |
+| `plugmem_export` | the whole memory as `{ facts, edges }` — an edge belongs to no single fact, so facts alone would lose the graph |
 | `plugmem_maintain` | run policy-driven maintenance: no-op, compact, reindex or optimize vectors. Optional `mode`: `auto` (default), `compact`, `reindex-text`, `optimize-vectors`, `full` |
 | `plugmem_checkpoint` | flush the journal into a fresh snapshot |
 | `plugmem_verify` | the integrity check an open defers: content plus graph consistency |
@@ -337,7 +337,18 @@ path = "/path/to/memory.plugmem" # optional example; --db and PLUGMEM_DB win
 workers = 4            # worker threads (default: half the cores)
 
 [engine]
-dim = 768              # embedding size (0 = vectors off)
+dim = 768              # embedding size (0 = vectors off); what the database is
+                       # *built* with — changing one later is refused
+
+[recall]               # optional — every key has a tuned default
+w_vec = 2.0            # weight of the vector source (0 turns it off)
+half_life_days = 30    # age at which the recency discount has halved
+                       # also: w_bm25, w_graph, w_time, w_recency, rrf_k,
+                       # bm25_k1, bm25_b, graph_depth, graph_decay,
+                       # hnsw_ef_search, similar_cos, similar_jaccard
+
+[index]                # optional
+flat_to_hnsw = 50000   # vectors before maintenance builds the HNSW graph
 
 [embedder]             # default: none — lexical/tags/graph/time still work
 kind = "ollama"        # ollama | openai | lmstudio | vllm | llamacpp | none
@@ -362,6 +373,17 @@ The embedder unlocks the **vector** recall source; with `kind = "none"` (the
 default) recall still answers from lexical, tag, graph and temporal evidence.
 One OpenAI-compatible client covers Ollama, OpenAI, LM Studio, vLLM and
 llama.cpp-server. `$PLUGMEM_EMBEDDER` overrides `[embedder].kind`.
+
+`[recall]` and `[index]` are safe to change on an existing memory — reopening
+with different weights is how the ranking changes — while `[engine]` is not.
+A key nothing recognises is reported on **stderr** (stdout carries the JSON-RPC
+framing, so nothing else can go there) rather than silently ignored:
+
+```text
+plugmem-mcp: unknown setting [recall].w_vector — did you mean `w_vec`?
+```
+
+The model can read the whole catalogue at runtime with `plugmem_settings_help`.
 
 ## License
 

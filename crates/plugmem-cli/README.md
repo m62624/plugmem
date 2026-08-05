@@ -124,7 +124,7 @@ engine keeps no clock, so `now` comes from the system clock at each call.
 | command | what it does |
 |---|---|
 | `remember <TEXT> [--entity E] [--tag T]… [--link REL:ENTITY]… [--meta KEY=VALUE]… [--valid-from TS] [--vector F32,…]` | store a fact; prints its id and any similar/conflicting facts. `--meta` is repeatable (opaque key→value, e.g. a URI; last value wins per key) |
-| `recall [QUERY] [--tag T]… [--entity E]… [--as-of TS] [--range FROM TO] [-k N] [--closed] [--token-budget N] [--ef N] [--vector F32,…]` | ranked, token-budgeted block; sources compose. Each line is `- [fN] text …` — `N` is the fact's id (see below). `--token-budget` caps the block (default 512), `--ef` widens the vector search beam |
+| `recall [QUERY] [--tag T]… [--entity E]… [--as-of TS] [--range FROM TO] [-k N] [--closed] [--token-budget N] [--ef N] [--graph-depth N] [--vector F32,…]` | ranked, token-budgeted block; sources compose. Each line is `- [fN] text …` — `N` is the fact's id (see below). `--token-budget` caps the block (default 512), `--ef` widens the vector search beam, `--graph-depth` sets how far the graph walks from an anchor (default 2; `0` disables expansion) |
 | `revise <ID> <TEXT> [same flags as remember]` | close the old fact, record the successor |
 | `forget <ID>` | tombstone a fact (purged physically at the next `maintain`) |
 | `link <SRC> <REL> <DST> [--provenance FACT_ID]` | upsert a typed edge between entities. `--provenance` records the fact the edge follows from, and graph recall returns it |
@@ -291,8 +291,10 @@ not write), so only the read verbs run — `recall`, `show`, `stats`, `export`,
 **These two verbs exist only in `--read-only`.** A normal (writer) `repl` and
 every one-shot command already see the newest data — read-your-writes, or a
 fresh open per command — so refreshing there is meaningless and is not offered.
-`--read-only` requires a checkpointed database (an un-checkpointed writer is
-refused): run `checkpoint` in the writing process first.
+`--read-only` needs a published snapshot to map, so a database that has never
+been checkpointed is refused: run `checkpoint` in the writing process first.
+After that the writer may keep writing — a read-only session simply answers as
+of the checkpoint it pinned, until you `refresh`.
 
 ```text
 $ plugmem-cli repl --read-only        # in a second terminal, while a writer runs
@@ -318,8 +320,20 @@ for all fields and OS-specific paths.
 path = "/path/to/memory.plugmem" # optional example; --db and PLUGMEM_DB win
 
 [engine]
-dim = 768              # embedding size (0 = vectors off); other Config
-                       # size fields: max_bytes, max_text, shards_* …
+dim = 768              # embedding size (0 = vectors off); also max_bytes,
+                       # max_text, max_blob. What the database is *built* with:
+                       # changing one on an existing file is refused.
+
+[recall]               # optional — every key has a tuned default
+w_vec = 2.0            # weight of the vector source (0 turns it off)
+half_life_days = 30    # age at which the recency discount has halved
+                       # also: w_bm25, w_graph, w_time, w_recency, rrf_k,
+                       # bm25_k1, bm25_b, graph_depth, graph_decay,
+                       # hnsw_ef_search, similar_cos, similar_jaccard
+
+[index]                # optional
+flat_to_hnsw = 50000   # vectors before maintenance builds the HNSW graph
+                       # also: hnsw_ef_construction
 
 [embedder]             # default: none — lexical/tags/graph/time still work
 kind = "ollama"        # ollama | openai | lmstudio | vllm | llamacpp | none
@@ -345,6 +359,26 @@ The embedder is what unlocks the **vector** recall source: with `kind =
 graph and temporal evidence, but no embeddings are computed. One
 OpenAI-compatible client covers Ollama, OpenAI, LM Studio, vLLM and
 llama.cpp-server. `$PLUGMEM_EMBEDDER` overrides `[embedder].kind`.
+
+`[recall]` and `[index]` are safe to change on an existing memory: reopening
+with different weights is how you change the ranking, and the next `checkpoint`
+records them in the file. Reach for them when a specific memory answers badly —
+the defaults are tuned, and `w_bm25 = 0` (say) is mostly useful for asking what
+one source alone thinks.
+
+A key nothing recognises is **reported, not ignored**, on stderr. Refusing it
+would mean an older binary could not read a newer config, but staying silent
+would leave you believing you had tuned something:
+
+```console
+$ plugmem-cli stats
+plugmem: unknown config section [engin] — did you mean `engine`?
+plugmem: unknown setting [recall].w_vector — did you mean `w_vec`?
+facts       0
+...
+```
+
+Run `plugmem-cli help settings` for the complete catalogue with every default.
 
 ## Exit codes
 

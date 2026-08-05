@@ -10,10 +10,18 @@
 //! pages resident, not 8 GiB.
 //!
 //! The handle is read-only by construction — it exposes `recall`/`get`/
-//! `stats` and nothing that mutates. It requires a *checkpointed*
-//! database (empty journal): replaying a journal would copy whole arenas
-//! up (copy-on-write) and defeat the zero-copy intent, so a non-empty
-//! journal is refused with [`HostError::NeedsCheckpoint`].
+//! `stats` and nothing that mutates. It requires a **published snapshot
+//! generation**, and that is the only thing it requires: with none, the open
+//! is refused with [`HostError::NeedsCheckpoint`].
+//!
+//! A non-empty journal is **not** a refusal. The reader maps the published
+//! generation and never reads the journal at all — replaying one would copy
+//! whole arenas up (copy-on-write) and defeat the zero-copy intent, so the
+//! journal is simply not this handle's business: it describes the generation
+//! the writer has not published yet. What the reader offers is snapshot
+//! isolation, "as of the last checkpoint", not a demand to checkpoint first.
+//! (The core's `from_bytes_borrowed` *does* reject a journal, which is why
+//! this is worth stating: `open` never hands it one.)
 //!
 //! Locking is a **shared** advisory lock held for the handle's whole life
 //! many read-only handles — in this process or others — map
@@ -448,7 +456,12 @@ pub struct Scrub {
 impl Scrub {
     /// Pins and maps the current generation at `base`, then builds the cursor.
     /// See [`ReadOnlyDatabase::scrub_with_budget`].
-    fn open(base: &Path, budget: usize) -> Result<Self, HostError> {
+    ///
+    /// `pub(crate)` so [`crate::Database`] can reach it too: a scrub needs a
+    /// *published generation*, not a checkpointed database, so routing every
+    /// caller through a read-only handle would deny it to a writer with a
+    /// journal for no reason of its own.
+    pub(crate) fn open(base: &Path, budget: usize) -> Result<Self, HostError> {
         // Pin the current generation with a shared lock (coexists with other
         // readers and the writer; blocks only the writer's GC of this one).
         let Some((pin, genp, _generation)) = pin_current_generation(base)? else {

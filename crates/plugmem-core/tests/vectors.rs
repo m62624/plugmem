@@ -50,6 +50,7 @@ fn vquery<'a>(now: u64, v: &'a [f32], k: usize) -> RecallQuery<'a> {
         token_budget: None,
         include_closed: false,
         ef: None,
+        graph_depth: None,
     }
 }
 

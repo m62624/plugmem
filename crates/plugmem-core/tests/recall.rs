@@ -469,3 +469,66 @@ proptest! {
         prop_assert_eq!(got, expected, "tags {:?}", query);
     }
 }
+
+#[test]
+fn a_query_sets_its_own_graph_depth() {
+    // A chain a -> b -> c -> d, one fact per entity, so the number of facts a
+    // recall returns *is* the number of hops it took.
+    let mut mem = Memory::new(cfg()).unwrap();
+    let mut store = MemStorage::new();
+    for (i, (entity, next)) in [("a", "b"), ("b", "c"), ("c", "d"), ("d", "e")]
+        .iter()
+        .enumerate()
+    {
+        mem.remember(
+            &mut store,
+            RememberInput {
+                entity: Some(entity),
+                links: &[("leads_to", next)],
+                ..RememberInput::text((i as u64 + 1) * DAY, "a fact on the chain")
+            },
+        )
+        .unwrap();
+    }
+
+    let reached = |depth: Option<u32>| {
+        mem.recall(RecallQuery {
+            entities: &["a"],
+            graph_depth: depth,
+            k: 64,
+            token_budget: Some(4096),
+            ..RecallQuery::text(50 * DAY, "")
+        })
+        .unwrap()
+        .facts
+        .len()
+    };
+
+    // `None` takes the configured default, which is 2 hops: a's own fact plus
+    // b and c.
+    assert_eq!(reached(None), 3, "the default is the config's 2 hops");
+
+    // And the query overrides it in both directions — the point of the knob.
+    assert_eq!(
+        reached(Some(0)),
+        1,
+        "no expansion: the anchor's own fact only"
+    );
+    assert_eq!(reached(Some(1)), 2);
+    assert_eq!(reached(Some(3)), 4);
+
+    // No hop ceiling — the entity and edge caps hold the cost, so depth is the
+    // caller's to choose. Past the end of the chain the answer simply stops
+    // growing, and an absurd depth terminates rather than spinning: a pass that
+    // adds no entity ends the walk.
+    assert_eq!(
+        reached(Some(9)),
+        4,
+        "past the chain's end, nothing more to add"
+    );
+    assert_eq!(
+        reached(Some(u32::MAX)),
+        4,
+        "an exhausted frontier stops the walk"
+    );
+}

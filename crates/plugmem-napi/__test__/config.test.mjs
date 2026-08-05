@@ -55,3 +55,46 @@ test("an explicit but missing config path throws", async () => {
     assert.throws(() => Plugmem.open(join(dir, "m.plugmem"), { config: join(dir, "nope.toml") }));
   });
 });
+
+test("a misspelled setting is reported rather than ignored", async () => {
+  await withDir(async (dir) => {
+    const cfg = join(dir, "config.toml");
+    writeFileSync(
+      cfg,
+      [
+        "[engine]",
+        "dim = 0",
+        "max_txt = 4096", // a key nothing claims
+        "",
+        "[engin]", // a section nothing claims
+        "dim = 4",
+        "",
+        "[maintenance]",
+        "batch_size = 256", // the CLI's, not host's — must NOT be warned about
+      ].join("\n"),
+    );
+
+    const db = await Plugmem.open(join(dir, "m.plugmem"), { config: cfg });
+    const warnings = db.configWarnings();
+
+    // A value, not a printed line: an addon has no business writing to the
+    // host application's stderr.
+    assert.equal(warnings.length, 2, warnings.join(" | "));
+    assert.match(warnings[0], /unknown config section \[engin\].*did you mean `engine`/);
+    assert.match(warnings[1], /unknown setting \[engine\]\.max_txt.*did you mean `max_text`/);
+
+    // The typo changed nothing, which is exactly why it had to be reported.
+    assert.equal(db.stats().facts, 0);
+    db.close();
+  });
+});
+
+test("a clean config warns about nothing", async () => {
+  await withDir(async (dir) => {
+    const cfg = join(dir, "config.toml");
+    writeFileSync(cfg, "[engine]\ndim = 0\n");
+    const db = await Plugmem.open(join(dir, "m.plugmem"), { config: cfg });
+    assert.deepEqual(db.configWarnings(), []);
+    db.close();
+  });
+});

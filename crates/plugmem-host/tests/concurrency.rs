@@ -217,8 +217,8 @@ fn readonly_serves_concurrent_readers_consistently() {
     const LOOPS: u64 = 400;
 
     let tmp = TempDir::new("ro-conc");
-    // Write a consistent corpus, then checkpoint so the read-only path (which
-    // needs an empty journal) can map the snapshot.
+    // Write a consistent corpus, then checkpoint so there is a published
+    // generation for the read-only path to map.
     {
         let (db, _) = Database::open(tmp.db(), Config::default()).unwrap();
         for v in 0..FACTS {

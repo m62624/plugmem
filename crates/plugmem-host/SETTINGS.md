@@ -56,6 +56,15 @@ max_bytes = 2147483648
 max_text = 4096
 max_blob = 65536
 
+# Optional. Every key here has a tuned default — reach for this section when a
+# specific memory answers badly, not before.
+[recall]
+w_vec = 2.0            # trust meaning over keywords in this memory
+half_life_days = 30    # and treat anything older than a month as stale
+
+[index]
+flat_to_hnsw = 50000   # this memory is small; stay exact for longer
+
 [embedder]
 # none | ollama | openai | lmstudio | vllm | llamacpp
 kind = "ollama"
@@ -115,8 +124,9 @@ them.
 
 ### `[engine]`
 
-These are the size-bearing fields accepted from TOML. BM25, fusion, graph and
-HNSW tuning fields remain programmatic `plugmem-core::Config` settings for now.
+The size-bearing fields — what a database is *built* with. Changing one on an
+existing file is refused with a typed error rather than applied, because the
+bytes on disk were laid out against it.
 
 | Key | Default | Meaning |
 |---|---:|---|
@@ -138,6 +148,60 @@ There is no shard-count setting. How many shards each arena gets is derived
 from how much the database holds, and `maintain` moves it as that changes —
 a thousand facts on a layout meant for a million cost fourteen megabytes
 instead of one. `plugmem-cli stats` reports the current layout.
+
+### `[recall]`
+
+What comes back for a query, and in what order. **Unlike `[engine]`, these are
+free to change on an existing database** — reopening with different weights is
+how you change the ranking, and the next checkpoint records them in the file.
+
+Every one of them is optional and the defaults are the tuned ones; reach for
+this section when a specific memory answers badly, not before.
+
+| Key | Default | Meaning |
+|---|---:|---|
+| `w_bm25` | `1.0` | Weight of the lexical source in the fused score. `0` switches it off. |
+| `w_vec` | `1.0` | Weight of the vector source. `0` switches it off; it already costs nothing when `dim = 0`. |
+| `w_graph` | `1.0` | Weight of the entity-graph source. `0` switches off relational expansion. |
+| `w_time` | `1.0` | Weight of the temporal source (the `recorded_at` window). |
+| `w_recency` | `0.25` | How much a fact's age discounts it, on top of the four sources. |
+| `half_life_days` | `180` | Age at which the recency discount has halved. Larger keeps old facts competitive. |
+| `rrf_k` | `60` | Reciprocal-rank-fusion constant. Larger flattens the gap between rank 1 and rank 10. |
+| `bm25_k1` | `1.2` | BM25 term-frequency saturation: higher lets a repeated word keep counting. |
+| `bm25_b` | `0.75` | BM25 length normalisation: `0` ignores fact length, `1` penalises long facts fully. |
+| `graph_depth` | `2` | Default hops the graph source may follow from an anchor; a recall's own `graph_depth` overrides it, the way `ef` overrides `hnsw_ef_search`. Uncapped: what a walk costs is held by its entity and edge caps, not by the hop count. |
+| `graph_decay` | `0.5` | How much each extra hop discounts a fact reached through the graph. |
+| `hnsw_ef_search` | `64` | Default vector-search beam width. A recall's own `ef` overrides it, and it does nothing while the index is still flat. |
+| `similar_cos` | `0.85` | Cosine above which `remember` reports an existing fact as possibly conflicting. |
+| `similar_jaccard` | `0.5` | Token overlap that does the same for a memory with no vectors. |
+
+The weights are relative, not probabilities: they scale each source's
+contribution before fusion, so doubling all four changes nothing. Setting one
+to `0` is the way to turn a source off entirely — useful for asking "what does
+lexical search alone think", and cheaper than it sounds, since a source with no
+weight is not consulted.
+
+`similar_cos`/`similar_jaccard` are the only two that affect *writing*: they set
+how alike an existing fact must be before `remember` reports it as a possible
+conflict. The engine never revises on its own — the report is for you to judge.
+
+### `[index]`
+
+How the vector index is built. Also free to change on an existing database,
+though `flat_to_hnsw` only takes effect at the next `maintain`.
+
+| Key | Default | Meaning |
+|---|---:|---|
+| `hnsw_ef_construction` | `200` | Beam width while building the vector graph: higher builds a better index, slower. Must be at least `hnsw_m` (16). |
+| `flat_to_hnsw` | `24000` | Vector count at which maintenance stops scanning flat and builds the HNSW graph. |
+
+Below `flat_to_hnsw` the engine scans vectors linearly, which is exact and, at
+that size, faster than a graph. The setting is where you decide that trade for
+your data rather than taking the default's word for it.
+
+The graph *degrees* (`hnsw_m`, `hnsw_m0`) are deliberately not here: they shape
+the stored graph, so changing them on an existing database is refused with a
+config mismatch, exactly like `[engine]`.
 
 ### `[embedder]`
 
@@ -181,6 +245,35 @@ permanently smaller file.
 | Key | Default | Meaning |
 |---|---:|---|
 | `workers` | half of available cores | MCP worker threads; `--workers` overrides it. |
+
+## A key nobody recognises
+
+An unknown section or key does not stop anything — refusing one would mean an
+older binary could not read a config written for a newer one, which is a worse
+failure than a typo. It is **reported**, though, because the alternative is
+silence: a misspelled `w_vec` changes no behaviour and says nothing, and you are
+left believing you tuned something.
+
+```console
+$ plugmem-cli stats
+plugmem: unknown config section [engin] — did you mean `engine`?
+plugmem: unknown setting [recall].w_vector — did you mean `w_vec`?
+facts       0
+...
+```
+
+The CLI and the MCP server write these to stderr — stdout carries results, and
+for MCP it carries the protocol itself. The Node addon returns them instead,
+from `configWarnings()`, because a native addon has no business writing to its
+host application's stderr:
+
+```javascript
+const db = await Plugmem.open("agent.plugmem", { config: "./plugmem.toml" });
+for (const warning of db.configWarnings()) console.warn(warning);
+```
+
+A suggestion is only offered when it is close enough to be the obvious intent —
+pointing at the wrong line is worse than pointing at none.
 
 ## Surface-specific overrides
 

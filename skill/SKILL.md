@@ -111,6 +111,35 @@ Query them separately:
 - **`recall --closed`** — include closed revision chains (with their intervals),
   not just the currently-live facts.
 
+This is the behaviour that makes plugmem different from a store that would just
+overwrite the fact, so it is worth seeing once:
+
+```
+remember "kim lives in Moscow" --entity kim     # → fact 0
+# ... time passes; note the instant, then correct the record ...
+revise 0 "kim lives in Berlin" --entity kim     # → fact 1
+
+recall --entity kim
+- [f1] kim: kim lives in Berlin (2026-08; active)
+
+recall --entity kim --as-of <the instant between them>
+- [f0] kim: kim lives in Moscow (2026-08 → 2026-08; closed)
+
+recall --entity kim --closed
+- [f0] kim: kim lives in Moscow (2026-08 → 2026-08; closed)
+- [f1] kim: kim lives in Berlin (2026-08; active)
+```
+
+`revise` **closed** the first fact's interval instead of deleting it, which is
+why the middle query has something to answer with. `forget` would have destroyed
+that answer — which is exactly when to prefer one over the other.
+
+One trap worth knowing: `--as-of` moves **both** clocks. A fact answers only if
+it was valid at that instant *and* had already been recorded by then. So an
+`--as-of` earlier than a fact's `recorded_at` sees nothing — the memory
+genuinely knew nothing then, and answering with today's knowledge would be the
+wrong answer to "what did I hold".
+
 ## Sizing the block you paste
 
 The `rendered` block is what goes into your prompt, so its size is your
@@ -123,6 +152,52 @@ context budget, not the engine's.
   `hnsw_ef_search`). Higher is more accurate and slower. It does nothing until
   the database is past the flat-search threshold, so reach for it only on a
   large memory whose vector answers look thin.
+
+## The entity graph — and it moves with time too
+
+Facts are joined by **typed edges between entities**: `ann —hires→ bob`. That is
+not decoration. When a recall anchors on an entity, the graph source walks its
+edges and pulls in the neighbours' facts, so asking about `ann` answers with
+what is known about `bob` as well:
+
+```
+remember "ann hired bob in march" --entity ann      # → fact 0
+link ann hires bob --provenance 0
+remember "bob owns the billing service" --entity bob
+
+recall --entity ann
+- [f0] ann: ann hired bob in march (2026-08; active)
+- [f1] bob: bob owns the billing service (2026-08; active)
+- links: ann —hires→ bob
+```
+
+Fact 1 never mentions ann. It came back because the edge led there — that is the
+whole point of linking, and why reusing the same entity spelling matters.
+
+**Edges are temporal in the same way facts are.** `unlink` closes a relationship
+rather than deleting it, so current recall stops using it while `--as-of` still
+walks the graph *as it stood then*:
+
+```
+unlink ann hires bob
+
+recall --entity ann
+- [f0] ann: ann hired bob in march (2026-08; active)
+
+recall --entity ann --as-of <an instant before the unlink>
+- [f0] ann: ann hired bob in march (2026-08; active)
+- [f1] bob: bob owns the billing service (2026-08; active)
+- links: ann —hires→ bob
+```
+
+So the two axes are not a fact-only feature: "who reported to whom last spring"
+is a question this answers, and it is the reason to `unlink` rather than to
+forget the fact that stated the relationship.
+
+How far the walk goes is `--graph-depth N` on the recall (`graph_depth` over
+MCP, `graphDepth` in Node), defaulting to `[recall].graph_depth`. Reach for it when *this* question wants a different net than the
+memory's usual one: `--graph-depth 3` for "everything around ann",
+`--graph-depth 0` for "ann's own facts and nothing her neighbours know".
 
 ## Saying *why* an edge exists
 
@@ -157,7 +232,7 @@ MANDATORY.
   | Verb | Shape |
   |------|-------|
   | `remember` | `remember "<text>" [--entity E] [--tag T]… [--link REL:ENTITY]… [--meta K=V]… [--valid-from MS] [--vector F32,…]` |
-  | `recall` | `recall ["<query>"] [--tag T]… [--entity E]… [--as-of MS] [--range FROM TO] [-k N] [--closed] [--token-budget N] [--ef N] [--vector F32,…]` |
+  | `recall` | `recall ["<query>"] [--tag T]… [--entity E]… [--as-of MS] [--range FROM TO] [-k N] [--closed] [--token-budget N] [--ef N] [--graph-depth N] [--vector F32,…]` |
   | `revise` | `revise <id> "<text>" [same flags as remember]` |
   | `forget` | `forget <id>` |
   | `link` | `link <src> <rel> <dst> [--provenance FACT_ID]` |
@@ -198,14 +273,29 @@ MANDATORY.
   have a reason (a file from elsewhere, a crash, a suspicion), not before every
   session. An open that succeeded is not a clean bill of health; `verify` is.
 
+  **`verify` or `scrub`?** They ask different questions and neither replaces the
+  other. `verify` asks whether the *content* agrees with itself. `scrub` asks
+  whether the *bytes* are the ones that were written — it recomputes the stored
+  checksums, which is what catches a flipped bit that the structure accepts.
+  Suspect a bad answer, run `verify`; suspect the disk or a file that travelled,
+  run `scrub`. If `scrub` reports damage, `recover <dst>` salvages what survives
+  into a **new** file and leaves the original untouched as evidence — the swap
+  is the user's decision, not yours.
+
 - **No shell, but your tools include `plugmem_recall` →** MCP. The server
   exposes, as tools: `plugmem_remember`, `plugmem_recall`, `plugmem_revise`,
   `plugmem_forget`, `plugmem_link`, `plugmem_unlink`, `plugmem_show`, `plugmem_stats`,
   `plugmem_export`, `plugmem_maintain`, `plugmem_checkpoint`, `plugmem_verify`,
   plus `plugmem_version` and `plugmem_about`. A read-only server adds
   `plugmem_generation` / `plugmem_refresh` and refuses the write verbs.
-  (`scrub`, `recover` and `import` are CLI-only — there is no MCP tool for
-  them.) Each tool takes `format:"json"` (default) or `"human"`.
+  (`scrub`, `recover` and `import` have no MCP tool. The first two are an
+  operator's job on the server's own disk; the third needs a file the server can
+  see. Reach for `plugmem-cli` — or tell the user to.) Each tool takes
+  `format:"json"` (default) or `"human"`.
+
+  `plugmem_export` returns `{ facts, edges }`. Both halves matter: an edge is a
+  statement *between* two entities and belongs to no single fact, so the facts
+  alone are not a copy of the memory.
 
   Arguments that narrow an answer are checked, not guessed: `range` must be
   exactly `[from, to]` and `as_of` / `valid_from` must each be a whole,
@@ -240,6 +330,13 @@ path = "/path/to/memory.plugmem" # optional
 [engine]
 dim = 0                         # 0 keeps vectors disabled
 
+[recall]                        # optional: every key has a tuned default
+w_vec = 1.0                     # per-source weights, 0 turns a source off
+half_life_days = 180            # how fast an old fact loses ground
+
+[index]                         # optional
+flat_to_hnsw = 24000            # vectors before the graph index is built
+
 [embedder]
 kind = "none"                  # or ollama/openai/lmstudio/vllm/llamacpp
 
@@ -248,8 +345,22 @@ snapshot_every_ops = 1024
 snapshot_journal_bytes = 4194304
 ```
 
+`[engine]` is what a database is built with — changing one of those on an
+existing memory is refused. `[recall]` and `[index]` are the opposite: reopening
+with different weights is how ranking changes, so they are safe to tune on a
+live memory.
+
+**Do not tune `[recall]` on your own initiative.** The defaults are tuned, and a
+weight you moved because one answer looked wrong will quietly change every
+answer afterwards. Change it when the user asks for it, or when you can say
+which source is misbehaving and why — then say what you changed.
+
 Do not invent provider URLs, model names or paths. Ask for settings help when
 the user needs to configure them, and otherwise rely on the platform default.
+
+An unknown key is reported, not applied: the CLI and the MCP server print it to
+stderr, and NAPI returns it from `configWarnings()`. If you see one, the setting
+did nothing — fix the spelling rather than assuming it took effect.
 
 ### Step 0b — smoke-test
 
@@ -276,7 +387,7 @@ comparison line:
 plugmem version check: skill <marker> vs engine <reported> → OK | MISMATCH
 ```
 
-<!-- skill-version: 0.5.0 -->
+<!-- skill-version: 0.6.0 -->
 
 If they differ in ANY way: **stop**, warn the user that skill and engine
 describe different functionality, and proceed only on their explicit

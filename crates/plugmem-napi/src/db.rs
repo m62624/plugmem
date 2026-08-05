@@ -3,13 +3,18 @@
 //!
 //! Every method wraps the identically-named host verb — the engine logic is
 //! 100% `plugmem-host`; this layer only marshals arguments and results across
-//! the Node boundary. `recover` is deliberately CLI-only alongside `import`
-//! and `scrub` — salvage is a path-level operation on the host's own disk. Inputs are typed `#[napi(object)]` structs so napi emits
-//! precise TypeScript interfaces (autocomplete in a TS host like Pi); results
-//! come back as the typed mirrors in [`crate::types`]. A failure becomes a
-//! thrown JS `Error` carrying a `code` — see [`crate::error`] for what is coded
-//! and why the engine's own failures are not; the clock is the system clock,
-//! read per call (the engine keeps none), exactly as the MCP server does.
+//! the Node boundary, and its surface is host's whole surface (see the
+//! wrapper-parity rule in the repository's `AGENTS.md`). The one thing here
+//! that host does not have is `import`: JSONL is a format the CLI defines, not
+//! an engine verb, so it belongs to the CLI or to JavaScript, not to this
+//! layer's Rust.
+//!
+//! Inputs are typed `#[napi(object)]` structs so napi emits precise TypeScript
+//! interfaces (autocomplete in a TS host like Pi); results come back as the
+//! typed mirrors in [`crate::types`]. A failure becomes a thrown JS `Error`
+//! carrying a `code` — see [`crate::error`] for what is coded and why the
+//! engine's own failures are not; the clock is the system clock, read per call
+//! (the engine keeps none), exactly as the MCP server does.
 //!
 //! Opened `readOnly`, the instance observes another process's writer over a
 //! shared snapshot: the read verbs answer, the write verbs throw, and the two
@@ -21,23 +26,44 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use napi::bindgen_prelude::AsyncTask;
-use napi::{Env, Task};
+use napi::threadsafe_function::{
+    ErrorStrategy, ThreadsafeFunction, ThreadsafeFunctionCallMode as CallMode,
+};
+use napi::{Env, JsFunction, Task};
 use napi_derive::napi;
 use plugmem_host::{
-    Database, Embedder, FactId, LinkInput, MaintenanceOptions, ReadOnlyDatabase, RecallQuery,
-    RememberInput, Settings, SharedEmbedder, UnlinkInput,
+    Database, Embedder, FactId, HostError, LinkInput, MaintenanceOptions, ReadOnlyDatabase,
+    RecallQuery, RememberInput, Settings, SharedEmbedder, UnlinkInput,
 };
 
 use crate::error::{self, Error, Produced, Result, code};
+use crate::scrub::{ScrubOpenTask, ScrubOptions};
 use crate::types::{
-    self, ExportPage, ExportedFact, FactSnapshot, MaintainMode, MaintainReport, RecallResult,
-    RememberOutcome, Stats,
+    self, ExportPage, ExportedEdge, ExportedFact, FactSnapshot, MaintainMode, MaintainReport,
+    RecallResult, RecoverReport, RememberOutcome, Stats,
 };
 
 /// Keep one native→JS transfer bounded. This matches the workspace's existing
 /// conservative batch grain (CLI import) without exposing a tuning knob that
 /// would let callers accidentally reconstruct an unbounded export.
 const EXPORT_PAGE_LIMIT: NonZeroUsize = NonZeroUsize::new(128).unwrap();
+
+/// Edges handed to the JS callback per `exportEdges` batch.
+///
+/// The same reasoning as [`EXPORT_PAGE_LIMIT`], for the other direction of the
+/// boundary. One call per *edge* would make a million-edge dump a million
+/// thread-boundary crossings and a million callback invocations on the event
+/// loop — not a block, but a saturation. One call per batch makes it a thousand.
+const EXPORT_EDGE_BATCH: usize = 1024;
+
+/// Batches allowed in flight before the worker waits on the consumer.
+///
+/// This is the whole of `exportEdges`' memory bound: at most this many batches
+/// exist at once, whatever the database's size. The queue being *full* is not a
+/// failure — it is the callback being slower than the walk, and the worker
+/// blocking is the correct response (see [`CallMode::Blocking`] at the call
+/// site: it blocks the libuv worker, never the JS thread).
+const EXPORT_EDGE_QUEUE: usize = 4;
 
 /// Options for [`Plugmem::new`].
 #[napi(object)]
@@ -127,6 +153,14 @@ pub struct RecallArgs {
     /// `hnsw_ef_search`). Higher is more accurate and slower; ignored while
     /// the engine is still in the flat regime, below `flat_to_hnsw`.
     pub ef: Option<u32>,
+    /// How many edges the graph source may follow from an anchor entity
+    /// (default: the configured `graph_depth`). `0` asks for the anchors' own
+    /// facts and no neighbours.
+    ///
+    /// Per call for the same reason `k` and `tokenBudget` are: how wide a net
+    /// to cast belongs to the question. "What is known around this person"
+    /// wants more hops than "what is this person's stated preference".
+    pub graph_depth: Option<u32>,
     /// A precomputed embedding. Its length must equal the configured `dim`.
     ///
     /// Given, it **replaces** the embedder: nothing is sent to the provider.
@@ -215,6 +249,9 @@ pub struct Plugmem {
     /// from `PLUGMEM_DB`, the config or the platform default, and a caller that
     /// passed no path otherwise has no way to learn which file it just opened.
     path: PathBuf,
+    /// Rendered `config.toml` warnings, carried from the open so a caller can
+    /// read them off the handle. See [`Plugmem::config_warnings`].
+    warnings: Vec<String>,
 }
 
 #[napi]
@@ -273,26 +310,13 @@ impl Plugmem {
             })?;
         }
 
-        // A `dim` option sets the embedding dimension. If the config built an
-        // embedder, that embedder's dimension is authoritative — `dim` must
-        // agree, or the vectors would silently disagree in size.
-        if let Some(dim) = options.dim {
-            let dim = dim as usize;
-            if let Some(e) = &settings.embedder
-                && e.dim() != dim
-            {
-                return Err(error::invalid_arg(format!(
-                    "dim option {dim} disagrees with the configured embedder dimension {}",
-                    e.dim()
-                )));
-            }
-            settings.config.dim = dim;
-        }
+        apply_dim(&mut settings, options.dim)?;
 
         // Everything above is cheap and synchronous — reading `config.toml`,
         // resolving the path, checking the dimension — so a caller's mistake
         // throws where they stand. The open itself goes to a worker.
         Ok(OpenTask {
+            warnings: settings.warnings.iter().map(|w| w.to_string()).collect(),
             settings: Some(settings),
             path,
             read_only: options.read_only.unwrap_or(false),
@@ -309,7 +333,24 @@ impl Plugmem {
         Self {
             handle: Some(Handle::Writer(db)),
             path,
+            // The workspace reported them once when it loaded the config; a
+            // per-memory copy would repeat the same lines for every open.
+            warnings: Vec::new(),
         }
+    }
+
+    /// What `config.toml` said that nothing claimed — a misspelled key, a
+    /// misspelled section — one human-readable line each, empty when the file
+    /// was clean.
+    ///
+    /// It is a value rather than a printed warning because a native addon has
+    /// nowhere sensible to print: stderr belongs to the host application, which
+    /// may be a server that logs as JSON. **Read it once after opening and log
+    /// it your own way** — ignoring it puts you back where a typo silently
+    /// changes nothing.
+    #[napi]
+    pub fn config_warnings(&self) -> Vec<String> {
+        self.warnings.clone()
     }
 
     /// The file this memory is open on.
@@ -501,6 +542,75 @@ impl Plugmem {
             source,
             cursor: cursor.unwrap_or(0),
         }))
+    }
+
+    /// Streams every current edge to `onBatch`, in batches, and resolves with
+    /// the number streamed.
+    ///
+    /// **The other half of a backup.** `export`/`exportPage` dump facts; an edge
+    /// is a statement between two entities and belongs to no single fact, so a
+    /// dump of facts alone silently loses the graph.
+    ///
+    /// **Async and bounded.** The walk runs on a libuv worker; batches reach
+    /// `onBatch` on the JS thread through a threadsafe function with a queue of
+    /// four. When the callback is slower than the walk, the *worker* waits — the
+    /// event loop never does, and peak memory is four batches whatever the
+    /// database's size.
+    ///
+    /// **When the promise resolves, every batch has been delivered.** Worth
+    /// saying because a threadsafe-function call only queues work for the JS
+    /// thread, so the natural implementation resolves early and hands you a
+    /// half-filled accumulator on some runs and a full one on others. Each
+    /// batch is acknowledged from the JS thread and the worker waits for the
+    /// receipts, so reading your results straight after the `await` is correct.
+    ///
+    /// `onBatch` throwing is not caught here: it surfaces as an uncaught error,
+    /// as it would from any callback Node invokes on your behalf.
+    #[napi(ts_return_type = "Promise<number>")]
+    pub fn export_edges(
+        &self,
+        #[napi(ts_arg_type = "(edges: ExportedEdge[]) => void")] on_batch: JsFunction,
+    ) -> Result<AsyncTask<ExportEdgesTask>> {
+        let source = match self.handle()? {
+            Handle::Writer(db) => ExportSource::Writer(db.clone()),
+            Handle::Reader { db, .. } => ExportSource::Reader(Arc::clone(db)),
+        };
+        // Created here, on the JS thread, because it needs the function value;
+        // it is `Send`, which is what lets the worker call back into JS at all.
+        // `Fatal`: the callback takes the batch alone, with no node-style error
+        // argument, because this call cannot fail *at* the callback.
+        let sink: ThreadsafeFunction<Vec<ExportedEdge>, ErrorStrategy::Fatal> = on_batch
+            .create_threadsafe_function(EXPORT_EDGE_QUEUE, |ctx| Ok(vec![ctx.value]))
+            .map_err(|e| error::internal(format!("cannot bridge the callback to a worker: {e}")))?;
+        Ok(AsyncTask::new(ExportEdgesTask {
+            source,
+            sink: Some(sink),
+        }))
+    }
+
+    /// Starts a resumable byte-level check of the current published snapshot,
+    /// and resolves with the [`Scrub`](crate::scrub::Scrub) that paces it.
+    ///
+    /// The counterpart to `verify`, not a replacement: `verify` asks whether
+    /// the *content* agrees with itself, this asks whether the *bytes* are the
+    /// ones that were written. Only the second catches a flipped bit that the
+    /// structure accepts.
+    ///
+    /// Available on a writer as well as a read-only handle: a scrub reads the
+    /// published generation from disk and has no opinion about which handle
+    /// asked. It does need something published — checkpoint once first.
+    ///
+    /// **The returned object holds a shared lock** on the generation it scans
+    /// for as long as it lives, so run it to completion or `close()` it.
+    ///
+    /// @throws `PLUGMEM_NEEDS_CHECKPOINT` when nothing has been published yet.
+    #[napi(ts_return_type = "Promise<Scrub>")]
+    pub fn scrub(&self, options: Option<ScrubOptions>) -> Result<AsyncTask<ScrubOpenTask>> {
+        let source = match self.handle()? {
+            Handle::Writer(db) => ExportSource::Writer(db.clone()),
+            Handle::Reader { db, .. } => ExportSource::Reader(Arc::clone(db)),
+        };
+        Ok(AsyncTask::new(ScrubOpenTask::new(source, options)?))
     }
 
     /// One fact's tags, or an empty array for an unknown or tombstoned id.
@@ -783,7 +893,125 @@ impl Task for RememberManyTask {
     }
 }
 
-enum ExportSource {
+/// Applies a `dim` option to loaded settings.
+///
+/// If the config built an embedder, that embedder's dimension is authoritative:
+/// `dim` must agree, or the stored vectors would silently disagree in size with
+/// the ones the provider returns.
+fn apply_dim(settings: &mut Settings, dim: Option<u32>) -> Result<()> {
+    let Some(dim) = dim else { return Ok(()) };
+    let dim = dim as usize;
+    if let Some(e) = &settings.embedder
+        && e.dim() != dim
+    {
+        return Err(error::invalid_arg(format!(
+            "dim option {dim} disagrees with the configured embedder dimension {}",
+            e.dim()
+        )));
+    }
+    settings.config.dim = dim;
+    Ok(())
+}
+
+/// Options for [`recover`].
+#[napi(object)]
+#[derive(Default)]
+pub struct RecoverOptions {
+    /// Embedding dimension, as `OpenOptions.dim`. It must match what the source
+    /// database stores, so a memory with vectors needs this (or a `config`
+    /// naming the embedder) or the salvage cannot open it.
+    pub dim: Option<u32>,
+    /// Path to a `config.toml`; the standard discovery applies when omitted.
+    pub config: Option<String>,
+}
+
+/// Salvages a content-corrupt memory: reads `src`, drops the facts that fail
+/// the content checks, and writes a clean, compacted image to `dst`.
+///
+/// **`src` is never written.** The damaged file stays exactly as it was, as
+/// evidence — this produces a repaired copy beside it, and swapping them is
+/// your decision, not this function's. `dst` must therefore be a different
+/// path.
+///
+/// **It handles *content* damage**, the kind `verify` reports: text that is not
+/// valid UTF-8, a vector slot that disagrees with its fact, metadata that will
+/// not decode. *Structural* damage — a snapshot whose container will not parse
+/// at all — is not salvageable here and rejects; that is what a backup is for.
+///
+/// Memory stays proportional to the record count rather than the image: the
+/// two large pools are streamed through temp files, so a database far bigger
+/// than RAM can be recovered as long as its graph fits.
+///
+/// **Async**: it opens, sweeps and rewrites a whole database.
+///
+/// @throws `PLUGMEM_LOCKED` if either path is open elsewhere; `PLUGMEM_ENGINE`
+/// if `dst` resolves to the same file as `src`, or the source will not parse;
+/// `PLUGMEM_OPEN` for an IO failure on either path.
+#[napi(ts_return_type = "Promise<RecoverReport>")]
+pub fn recover(
+    src: String,
+    dst: String,
+    options: Option<RecoverOptions>,
+) -> Result<AsyncTask<RecoverTask>> {
+    Ok(AsyncTask::new(recover_task(src, dst, options)?))
+}
+
+/// The checked, not-yet-scheduled half of [`recover`]. Separate for the same
+/// reason as [`Plugmem::open_task`]: a native test can run the body without a
+/// Node runtime.
+fn recover_task(src: String, dst: String, options: Option<RecoverOptions>) -> Result<RecoverTask> {
+    let options = options.unwrap_or_default();
+    // Read and check the config where the caller stands: a bad `config.toml` or
+    // a `dim` that disagrees is a mistake to report now, not to reject later.
+    let mut settings =
+        Settings::load(options.config.as_deref().map(Path::new)).map_err(error::settings)?;
+    apply_dim(&mut settings, options.dim)?;
+    Ok(RecoverTask {
+        src: PathBuf::from(src),
+        dst: PathBuf::from(dst),
+        cfg: settings.config,
+        now: now_ms(),
+    })
+}
+
+/// The libuv-thread body of [`recover`].
+pub struct RecoverTask {
+    src: PathBuf,
+    dst: PathBuf,
+    cfg: plugmem_host::Config,
+    now: u64,
+}
+
+impl Task for RecoverTask {
+    type Output = Produced<plugmem_host::RecoverReport>;
+    type JsValue = RecoverReport;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        Ok(
+            Database::recover(&self.src, &self.dst, self.cfg.clone(), self.now).map_err(|e| {
+                match e {
+                    // Not an open failure: the engine judged the request. Both
+                    // cases it covers here — a destination that resolves to the
+                    // source, a source whose container will not parse — are
+                    // things only the host can decide, since both need the
+                    // filesystem to answer.
+                    HostError::Engine(_) => error::engine(e),
+                    other => error::open(other),
+                }
+            }),
+        )
+    }
+
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(RecoverReport::from(
+            output.map_err(|e| error::to_js(env, e))?,
+        ))
+    }
+}
+
+/// Which handle a path-level read runs against. Shared with [`crate::scrub`],
+/// whose verbs exist on both.
+pub(crate) enum ExportSource {
     Writer(Database),
     Reader(Arc<ReadOnlyDatabase>),
 }
@@ -810,6 +1038,109 @@ impl Task for ExportPageTask {
     }
 }
 
+/// The libuv-thread body of [`Plugmem::export_edges`].
+pub struct ExportEdgesTask {
+    source: ExportSource,
+    /// `Option` only so `compute` can take it by value: the sink must be
+    /// **dropped** when the walk ends, and dropping it is what releases the
+    /// threadsafe function's hold on the event loop. Left alive, the process
+    /// would not exit.
+    sink: Option<ThreadsafeFunction<Vec<ExportedEdge>, ErrorStrategy::Fatal>>,
+}
+
+impl ExportEdgesTask {
+    /// Walks the edges, handing the callback one batch at a time.
+    ///
+    /// The host's visitor is per-edge; batching happens here, in Rust, so the
+    /// per-edge cost stays a `push` and only the batch crosses to JavaScript.
+    fn run(&mut self) -> usize {
+        let Some(sink) = self.sink.take() else {
+            return 0;
+        };
+        // Delivery receipts. A threadsafe-function call only *queues* work for
+        // the JS thread, so without these the promise could resolve while
+        // batches were still in the queue — the caller would `await` the
+        // export and find their accumulator half-filled, differently on every
+        // run. `call_with_return_value`'s callback runs on the JS thread after
+        // the user's function has returned, so one receipt per batch, counted
+        // here, is what makes "resolved" mean "delivered".
+        let (ack, receipts) = std::sync::mpsc::channel::<()>();
+        let mut awaiting = 0usize;
+        let send = |sink: &ThreadsafeFunction<Vec<ExportedEdge>, ErrorStrategy::Fatal>,
+                    batch: Vec<ExportedEdge>,
+                    awaiting: &mut usize| {
+            let receipt = ack.clone();
+            // Blocking: when the queue is full this parks *this* worker until
+            // the JS side drains one. That is the backpressure, and it is why
+            // peak memory is the queue rather than the graph.
+            let status = sink.call_with_return_value(
+                batch,
+                CallMode::Blocking,
+                move |_: napi::JsUnknown| {
+                    let _ = receipt.send(());
+                    Ok(())
+                },
+            );
+            if status == napi::Status::Ok {
+                *awaiting += 1;
+            }
+        };
+
+        let mut batch: Vec<ExportedEdge> = Vec::with_capacity(EXPORT_EDGE_BATCH);
+        let mut total = 0usize;
+        let mut visit = |src: &str, rel: &str, dst: &str, provenance: FactId| {
+            batch.push(ExportedEdge {
+                src: src.to_string(),
+                rel: rel.to_string(),
+                dst: dst.to_string(),
+                // Absent rather than the sentinel: `FactId::NONE` is `u32::MAX`,
+                // which would arrive in JS as a plausible-looking id.
+                provenance: (provenance != FactId::NONE).then(|| f64::from(provenance.0)),
+            });
+            total += 1;
+            if batch.len() == EXPORT_EDGE_BATCH {
+                send(&sink, std::mem::take(&mut batch), &mut awaiting);
+                batch = Vec::with_capacity(EXPORT_EDGE_BATCH);
+            }
+        };
+        match &self.source {
+            ExportSource::Writer(db) => db.export_edges_each(&mut visit),
+            ExportSource::Reader(db) => db.export_edges_each(&mut visit),
+        }
+        if !batch.is_empty() {
+            send(&sink, batch, &mut awaiting);
+        }
+
+        // Dropping our own sender is what lets the wait end if the environment
+        // tears down and the queued callbacks are dropped unrun: every clone
+        // goes with them, and `recv` reports the disconnect instead of parking
+        // this worker forever.
+        drop(ack);
+        for _ in 0..awaiting {
+            if receipts.recv().is_err() {
+                break;
+            }
+        }
+        // Explicit, because it is load-bearing rather than housekeeping: this
+        // is the release that lets Node exit.
+        drop(sink);
+        total
+    }
+}
+
+impl Task for ExportEdgesTask {
+    type Output = usize;
+    type JsValue = f64;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        Ok(self.run())
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output as f64)
+    }
+}
+
 /// The libuv-thread body of [`Plugmem::open`].
 ///
 /// Everything expensive about opening lives here: taking the file's exclusive
@@ -822,6 +1153,9 @@ pub struct OpenTask {
     settings: Option<Settings>,
     path: PathBuf,
     read_only: bool,
+    /// Rendered here rather than in `resolve`, because `Settings` is consumed
+    /// on the worker and these have to outlive it.
+    warnings: Vec<String>,
 }
 
 impl Task for OpenTask {
@@ -836,6 +1170,7 @@ impl Task for OpenTask {
         Ok(Plugmem {
             handle: Some(output.map_err(|e| error::to_js(env, e))?),
             path: std::mem::take(&mut self.path),
+            warnings: std::mem::take(&mut self.warnings),
         })
     }
 }
@@ -1114,6 +1449,7 @@ impl Task for RecallTask {
             token_budget: self.args.token_budget.map(|v| v as usize),
             include_closed: self.args.closed.unwrap_or(false),
             ef: self.args.ef.map(|v| v as usize),
+            graph_depth: self.args.graph_depth,
         };
         Ok(match &self.source {
             RecallSource::Writer(db) => db.recall(q),
@@ -1251,6 +1587,7 @@ mod tests {
         Ok(Plugmem {
             handle: Some(handle),
             path: std::mem::take(&mut task.path),
+            warnings: std::mem::take(&mut task.warnings),
         })
     }
 
@@ -1450,5 +1787,73 @@ model = \"dummy\"
             panic!("an explicit but missing config path must throw");
         };
         assert!(!err.reason.is_empty());
+    }
+
+    /// Runs a `recover` the way JavaScript would, minus the promise: the
+    /// argument checks, then the task body inline.
+    fn recover_blocking(
+        src: String,
+        dst: String,
+        options: Option<RecoverOptions>,
+    ) -> Result<plugmem_host::RecoverReport> {
+        let mut task = recover_task(src, dst, options)?;
+        match task.compute() {
+            Ok(produced) => produced,
+            // `compute` only fails through its own `Output`, never the outer
+            // `napi::Result` — this arm exists to say so, not to happen.
+            Err(e) => Err(error::internal(e.reason)),
+        }
+    }
+
+    #[test]
+    fn recover_salvages_into_a_second_file_and_leaves_the_first_alone() {
+        let tmp = TempDir::new("recover");
+        let src = tmp.path("broken.plugmem");
+        let dst = tmp.path("fixed.plugmem");
+        {
+            let db = open_blocking(Some(src.clone()), None).expect("open");
+            let Some(Handle::Writer(writer)) = db.handle.as_ref() else {
+                panic!("a path open is a writer");
+            };
+            for i in 0..4u64 {
+                writer
+                    .remember(RememberInput::text(i + 1, "a fact worth keeping"))
+                    .expect("remember");
+            }
+            writer.checkpoint(10).expect("checkpoint");
+        }
+
+        let before = std::fs::metadata(&src).expect("source exists").len();
+        let report = recover_blocking(src.clone(), dst.clone(), None).expect("recover");
+        assert_eq!(report.kept, 4, "a clean image keeps everything");
+        assert_eq!(
+            report.dropped_text + report.dropped_vector + report.dropped_metadata,
+            0
+        );
+        assert_eq!(
+            std::fs::metadata(&src).unwrap().len(),
+            before,
+            "the source is evidence, not a workspace"
+        );
+        assert!(std::fs::metadata(&dst).is_ok(), "the salvaged copy exists");
+    }
+
+    #[test]
+    fn recover_refuses_its_own_source_as_a_destination() {
+        let tmp = TempDir::new("recover-same");
+        let src = tmp.path("m.plugmem");
+        {
+            let db = open_blocking(Some(src.clone()), None).expect("open");
+            let Some(Handle::Writer(writer)) = db.handle.as_ref() else {
+                panic!("a path open is a writer");
+            };
+            writer
+                .remember(RememberInput::text(1, "one"))
+                .expect("remember");
+            writer.checkpoint(2).expect("checkpoint");
+        }
+        let err = recover_blocking(src.clone(), src, None).expect_err("same path is refused");
+        assert_eq!(err.status, code::ENGINE, "the engine judged the request");
+        assert!(err.reason.contains("must differ from the source"));
     }
 }

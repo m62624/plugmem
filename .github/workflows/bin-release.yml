@@ -295,6 +295,11 @@ jobs:
           # Write and read notes from a file to avoid quoting breaking things
           echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
 
+          # Keep the release private until the outer workflow has prepended the
+          # changelog and attached SKILL.md. The final publish job flips this
+          # existing release to public; it does not re-upload these artifacts.
+          # This file is hand-edited; `allow-dirty = ["ci"]` keeps dist from
+          # regenerating over it.
           gh release create "${{ needs.plan.outputs.tag }}" --draft --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
   publish-homebrew-formula:

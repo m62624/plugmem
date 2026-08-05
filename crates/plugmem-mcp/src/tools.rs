@@ -148,7 +148,12 @@ pub fn call(db: &Database, id: Value, params: Option<&Value>) -> Value {
         UNLINK => unlink(db, id, args),
         SHOW => show(db, id, args),
         STATS => rpc::tool_result(id, render(&db.stats(), format_arg(args)), false),
-        EXPORT => rpc::tool_result(id, render(&db.export(), format_arg(args)), false),
+        EXPORT => {
+            let mut edges = Vec::new();
+            db.export_edges_each(|s, r, d, p| edges.push(edge_json(s, r, d, p)));
+            let dump = export_json(db.export(), edges);
+            rpc::tool_result(id, render(&dump, format_arg(args)), false)
+        }
         MAINTAIN => match maintenance_options(args) {
             Ok(options) => match db.maintain_with_options(now_ms(), options) {
                 Ok(report) => rpc::tool_result(id, render(&report, format_arg(args)), false),
@@ -214,8 +219,11 @@ pub fn call_ro(reader: &ReaderShared, id: Value, params: Option<&Value>) -> Valu
             rpc::tool_result(id, render(&stats, format_arg(args)), false)
         }
         EXPORT => {
-            let facts = reader.db.read().expect("snapshot lock").export();
-            rpc::tool_result(id, render(&facts, format_arg(args)), false)
+            let db = reader.db.read().expect("snapshot lock");
+            let mut edges = Vec::new();
+            db.export_edges_each(|s, r, d, p| edges.push(edge_json(s, r, d, p)));
+            let dump = export_json(db.export(), edges);
+            rpc::tool_result(id, render(&dump, format_arg(args)), false)
         }
         VERIFY => match reader.db.read().expect("snapshot lock").verify() {
             Ok(()) => rpc::tool_result(id, render(&json!({ "ok": true }), format_arg(args)), false),
@@ -535,6 +543,7 @@ fn recall_ro(reader: &ReaderShared, id: Value, args: Option<&Value>) -> Value {
         token_budget: arg_u64(args, "token_budget").map(|v| v as usize),
         include_closed: arg_bool(args, "closed"),
         ef: arg_u64(args, "ef").map(|v| v as usize),
+        graph_depth: arg_u64(args, "graph_depth").map(|v| v as u32),
     };
     let db = reader.db.read().expect("snapshot lock");
     match db.recall(q) {
@@ -702,6 +711,7 @@ fn recall(db: &Database, id: Value, args: Option<&Value>) -> Value {
         token_budget: arg_u64(args, "token_budget").map(|v| v as usize),
         include_closed: arg_bool(args, "closed"),
         ef: arg_u64(args, "ef").map(|v| v as usize),
+        graph_depth: arg_u64(args, "graph_depth").map(|v| v as u32),
     };
     match db.recall(q) {
         // Human = the rendered block; json = the structured result.
@@ -802,6 +812,7 @@ fn recall_def() -> Value {
                 "closed": { "type": "boolean", "description": messages::ARG_CLOSED },
                 "token_budget": { "type": "integer", "minimum": 1, "description": messages::ARG_TOKEN_BUDGET },
                 "ef": { "type": "integer", "minimum": 1, "description": messages::ARG_EF },
+                "graph_depth": { "type": "integer", "minimum": 0, "description": messages::ARG_GRAPH_DEPTH },
                 "vector": vector_prop(),
                 "format": format_prop()
             }
@@ -1149,6 +1160,33 @@ fn format_arg(args: Option<&Value>) -> &str {
 
 /// Serialize a result to text: compact JSON for `"json"` (an agent's default),
 /// pretty-printed for `"human"`. serde does the work — no per-type renderer.
+/// One edge as a dump writes it — the same four fields the CLI's JSONL export
+/// uses, so the two dumps describe the graph identically.
+///
+/// `provenance` is absent rather than a sentinel: `FactId::NONE` is `u32::MAX`,
+/// which a reader would take for a real id.
+fn edge_json(src: &str, rel: &str, dst: &str, provenance: FactId) -> Value {
+    json!({
+        "src": src,
+        "rel": rel,
+        "dst": dst,
+        "provenance": (provenance != FactId::NONE).then_some(provenance.0),
+    })
+}
+
+/// The dump: the open facts, and the edges between them.
+///
+/// **Both halves, or it is not a backup.** A fact carries its own tags and
+/// metadata, but an edge is a statement *between* two entities and belongs to
+/// no single fact, so facts alone lose the graph — silently, which is the worst
+/// way to lose it.
+///
+/// Materialized rather than streamed, unlike the other surfaces': an MCP result
+/// is one JSON document, so it is built whole whatever this does.
+fn export_json<F: Serialize>(facts: F, edges: Vec<Value>) -> Value {
+    json!({ "facts": facts, "edges": edges })
+}
+
 fn render<T: Serialize>(value: &T, format: &str) -> String {
     let out = if format == "human" {
         serde_json::to_string_pretty(value)
@@ -1462,8 +1500,23 @@ mod tests {
                 json!(7),
                 Some(&params("plugmem_export", json!({})))
             )))
-            .unwrap()
-            .is_array()
+            .unwrap()["facts"]
+                .is_array()
+        );
+        // And the graph, which the dump used to drop on the floor: the first
+        // remember above attached `user -at-> acme`, so a complete dump has it.
+        let dump: Value = serde_json::from_str(&text(&call(
+            &db,
+            json!(7),
+            Some(&params("plugmem_export", json!({}))),
+        )))
+        .unwrap();
+        let edges = dump["edges"].as_array().expect("a dump carries its edges");
+        assert!(
+            edges
+                .iter()
+                .any(|e| { e["src"] == "user" && e["rel"] == "at" && e["dst"] == "acme" }),
+            "the edge remembered with the fact must survive the dump: {edges:?}"
         );
         assert!(!is_error(&call(
             &db,
@@ -1549,6 +1602,52 @@ mod tests {
     }
 
     #[test]
+    fn recall_takes_graph_depth_per_call() {
+        // A chain a -> b -> c -> d with one fact each: the number of facts a
+        // recall returns is the number of hops it took.
+        let tmp = TempDir::new("graph-depth");
+        let (db, _) = Database::open(tmp.db(), Config::default()).unwrap();
+        for (entity, next) in [("a", "b"), ("b", "c"), ("c", "d"), ("d", "e")] {
+            call(
+                &db,
+                json!(1),
+                Some(&params(
+                    "plugmem_remember",
+                    json!({
+                        "text": format!("fact on {entity}"),
+                        "entity": entity,
+                        "links": [{ "rel": "leads_to", "entity": next }],
+                    }),
+                )),
+            );
+        }
+
+        let reached = |args: Value| {
+            let r = call(&db, json!(2), Some(&params("plugmem_recall", args)));
+            assert!(!is_error(&r));
+            serde_json::from_str::<Value>(&text(&r)).unwrap()["facts"]
+                .as_array()
+                .expect("facts")
+                .len()
+        };
+
+        let base = json!({ "entities": ["a"], "k": 64, "token_budget": 4096 });
+        let with = |depth: u64| {
+            let mut a = base.clone();
+            a["graph_depth"] = json!(depth);
+            a
+        };
+
+        assert_eq!(reached(base.clone()), 3, "the configured default is 2 hops");
+        assert_eq!(reached(with(0)), 1, "no expansion: the anchor's own fact");
+        assert_eq!(reached(with(1)), 2);
+        assert_eq!(reached(with(3)), 4);
+        // The schema caps it at 4, but a model that ignores the schema is still
+        // held to the engine's ceiling rather than granted a deeper walk.
+        assert_eq!(reached(with(99)), reached(with(4)));
+    }
+
+    #[test]
     fn read_only_call_dispatches_and_refuses_writes() {
         let tmp = TempDir::new("call-ro");
         // A writer stores + checkpoints, then is dropped so a read-only open sees
@@ -1614,8 +1713,8 @@ mod tests {
                 json!(5),
                 Some(&params("plugmem_export", json!({})))
             )))
-            .unwrap()
-            .is_array()
+            .unwrap()["edges"]
+                .is_array()
         );
         assert!(!is_error(&call_ro(
             &reader,

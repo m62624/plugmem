@@ -307,3 +307,34 @@ test("link records provenance and recall returns it", async () => {
     assert.equal(await db.unlink({ src: "ann", rel: "hires", dst: "bob" }), true);
   });
 });
+
+test("graphDepth is a per-call knob over the configured default", async () => {
+  // A chain a -> b -> c -> d with one fact each, so the number of facts a
+  // recall returns is the number of hops it took.
+  await withDb(async (db) => {
+    for (const [entity, next] of [
+      ["a", "b"],
+      ["b", "c"],
+      ["c", "d"],
+      ["d", "e"],
+    ]) {
+      await db.remember({
+        text: `fact on ${entity}`,
+        entity,
+        links: [{ rel: "leads_to", entity: next }],
+      });
+    }
+
+    const reached = async (graphDepth) =>
+      (
+        await db.recall({ entities: ["a"], k: 64, tokenBudget: 4096, graphDepth })
+      ).facts.length;
+
+    assert.equal(await reached(undefined), 3, "the configured default is 2 hops");
+    assert.equal(await reached(0), 1, "no expansion: the anchor's own fact");
+    assert.equal(await reached(1), 2);
+    assert.equal(await reached(3), 4);
+    // The ceiling is the engine's, not a suggestion the caller may exceed.
+    assert.equal(await reached(99), await reached(4));
+  });
+});
