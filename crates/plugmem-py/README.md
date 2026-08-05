@@ -37,9 +37,9 @@ $ pip install plugmem
 
 Prebuilt wheels cover Linux, macOS and Windows on x86-64 and arm64. One wheel
 per platform serves every CPython from 3.10 on — it is built against the stable
-ABI, which does not change between versions — plus, everywhere except arm64
-Windows, a separate wheel for the free-threaded 3.14t build, which has an ABI of
-its own. No toolchain, no build step.
+ABI, which does not change between versions — plus a separate wheel for the
+free-threaded 3.14t build, which has an ABI of its own. No toolchain, no build
+step.
 
 ## Quick start
 
