@@ -341,11 +341,11 @@ half_life_days = 30    # age at which the recency discount has halved
 flat_to_hnsw = 50000   # vectors before maintenance builds the HNSW graph
                        # also: hnsw_ef_construction
 
-[embedder]             # default: none — lexical/tags/graph/time still work
-kind = "ollama"        # ollama | openai | lmstudio | vllm | llamacpp | none
-url = "http://localhost:11434/v1"
+[embedder]             # optional — omit for lexical/tags/graph/time only
+enabled = true         # false keeps settings but makes no embedder calls
+url = "http://localhost:11434/v1/embeddings"
 model = "nomic-embed-text"
-api_key_env = "OPENAI_API_KEY"   # env var holding the bearer token (openai)
+api_key_env = "OPENAI_API_KEY"   # env var holding the bearer token
 
 [maintenance]
 snapshot_every_ops = 1024
@@ -360,11 +360,15 @@ fsync, so a bulk load with an embedder makes one HTTP call per batch instead of
 one per fact, and the file is never fully read into memory. Larger batches mean
 fewer round-trips but a bigger request body and more memory per batch.
 
-The embedder is what unlocks the **vector** recall source: with `kind =
-"none"` (the default) `remember`/`recall` still answer from lexical, tag,
-graph and temporal evidence, but no embeddings are computed. One
-OpenAI-compatible client covers Ollama, OpenAI, LM Studio, vLLM and
-llama.cpp-server. `$PLUGMEM_EMBEDDER` overrides `[embedder].kind`.
+The embedder is what unlocks the **vector** recall source: without an active
+`[embedder]`, `remember`/`recall` still answer from lexical, tag, graph and
+temporal evidence, but no embeddings are computed. The host creates its one
+`OpenAiCompatEmbedder` implementation for any OpenAI-compatible server —
+OpenAI, Ollama, LM Studio, vLLM or llama.cpp-server. Set `enabled = false` to
+keep the URL/model settings without creating the client; the environment
+variable `$PLUGMEM_EMBEDDER_ENABLED` overrides the config value with `true` or
+`false`. `api_key_env` names the environment variable that contains the
+bearer token.
 
 `[recall]` and `[index]` are safe to change on an existing memory: reopening
 with different weights is how you change the ranking, and the next `checkpoint`

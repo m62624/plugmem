@@ -273,6 +273,14 @@ fn spawn_mock_embedder(dim: usize, responses: usize) -> (String, std::thread::Jo
                 }
             };
             let body: serde_json::Value = serde_json::from_slice(&buf[body_start..read]).unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&buf[..body_start])
+                    .lines()
+                    .next()
+                    .unwrap(),
+                "POST /v1/embeddings HTTP/1.1",
+                "the client must use the configured full endpoint"
+            );
             let inputs = body["input"].as_array().unwrap();
             let data: Vec<serde_json::Value> = inputs
                 .iter()
@@ -291,7 +299,7 @@ fn spawn_mock_embedder(dim: usize, responses: usize) -> (String, std::thread::Jo
             sock.write_all(response.as_bytes()).unwrap();
         }
     });
-    (format!("http://{addr}/v1"), handle)
+    (format!("http://{addr}/v1/embeddings"), handle)
 }
 
 #[test]
@@ -583,7 +591,7 @@ fn export_pages_are_bounded_and_advance_across_closed_and_tombstoned_ids() {
 #[test]
 fn embedder_transport_and_shape_errors_are_typed() {
     // A refused connection is a typed Embed error.
-    let refused = OpenAiCompatEmbedder::new("http://127.0.0.1:1/v1", "m", 4);
+    let refused = OpenAiCompatEmbedder::new("http://127.0.0.1:1/v1/embeddings", "m", 4);
     assert!(matches!(refused.embed(&["x"]), Err(HostError::Embed(_))));
 
     // A server sending the wrong dimension is a typed Embed error.
@@ -597,7 +605,11 @@ fn embedder_transport_and_shape_errors_are_typed() {
     let mut config = cfg();
     config.dim = 4;
     let err = Database::builder(config)
-        .embedder(Box::new(OpenAiCompatEmbedder::new("http://x/v1", "m", 8)))
+        .embedder(Box::new(OpenAiCompatEmbedder::new(
+            "http://x/v1/embeddings",
+            "m",
+            8,
+        )))
         .open(tmp.db())
         .unwrap_err();
     assert!(matches!(err, HostError::Engine(_)));
@@ -626,7 +638,7 @@ fn spawn_canned(payload: String) -> (String, std::thread::JoinHandle<()>) {
         );
         sock.write_all(response.as_bytes()).unwrap();
     });
-    (format!("http://{addr}/v1"), handle)
+    (format!("http://{addr}/v1/embeddings"), handle)
 }
 
 #[test]
@@ -907,7 +919,7 @@ fn embedder_edge_cases() {
     assert_eq!(null.embed(&["a", "b"]).unwrap(), vec![Vec::<f32>::new(); 2]);
 
     // Empty input short-circuits without a network call.
-    let e = OpenAiCompatEmbedder::new("http://127.0.0.1:1/v1", "m", 4);
+    let e = OpenAiCompatEmbedder::new("http://127.0.0.1:1/v1/embeddings", "m", 4);
     assert!(e.embed(&[]).unwrap().is_empty());
 
     // The api-key path sends and succeeds against the mock.

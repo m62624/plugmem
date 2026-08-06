@@ -217,7 +217,8 @@ fn read_only_commands_coexist_with_a_live_writer() {
 
 /// A minimal `/v1/embeddings` mock: one thread, `responses` sequential canned
 /// replies with deterministic `dim`-length vectors (seeded by input length),
-/// honoring request order. Returns the base URL. No network leaves localhost.
+/// honoring request order. Returns the full embeddings endpoint URL. No network
+/// leaves localhost.
 fn spawn_mock_embedder(dim: usize, responses: usize) -> (String, std::thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -264,7 +265,7 @@ fn spawn_mock_embedder(dim: usize, responses: usize) -> (String, std::thread::Jo
             sock.write_all(response.as_bytes()).unwrap();
         }
     });
-    (format!("http://{addr}/v1"), handle)
+    (format!("http://{addr}/v1/embeddings"), handle)
 }
 
 #[test]
@@ -278,7 +279,7 @@ fn recall_with_an_embedder_coexists_with_a_live_writer() {
     let config = tmp.0.join("config.toml");
     std::fs::write(
         &config,
-        format!("[engine]\ndim = {dim}\n\n[embedder]\nkind = \"openai\"\nurl = \"{url}\"\nmodel = \"mock\"\n"),
+        format!("[engine]\ndim = {dim}\n\n[embedder]\nurl = \"{url}\"\nmodel = \"mock\"\n"),
     )
     .unwrap();
 
@@ -334,7 +335,7 @@ fn import_streams_the_file_in_batches_one_http_each() {
     let config = tmp.0.join("config.toml");
     std::fs::write(
         &config,
-        format!("[engine]\ndim = {dim}\n\n[embedder]\nkind = \"openai\"\nurl = \"{url}\"\nmodel = \"mock\"\n"),
+        format!("[engine]\ndim = {dim}\n\n[embedder]\nurl = \"{url}\"\nmodel = \"mock\"\n"),
     )
     .unwrap();
 
@@ -440,6 +441,39 @@ fn config_file_is_accepted_and_missing_one_is_a_usage_error() {
         .output()
         .unwrap();
     assert_eq!(bad.status.code(), Some(2));
+}
+
+#[test]
+fn embedder_enabled_env_overrides_a_configured_endpoint() {
+    let tmp = TempDir::new("embedder-enabled-env");
+    let config = tmp.0.join("config.toml");
+    std::fs::write(
+        &config,
+        "[engine]\ndim = 8\n[embedder]\nenabled = true\nurl = \"http://127.0.0.1:1/v1/embeddings\"\nmodel = \"mock\"\n",
+    )
+    .unwrap();
+
+    // false prevents the configured client from being created, so a write
+    // succeeds without contacting the unreachable endpoint.
+    let disabled = Command::new(env!("CARGO_BIN_EXE_plugmem-cli"))
+        .args(["--config", config.to_str().unwrap(), "--db"])
+        .arg(tmp.db())
+        .args(["remember", "env-disabled"])
+        .env("PLUGMEM_EMBEDDER_ENABLED", "false")
+        .output()
+        .unwrap();
+    assert!(disabled.status.success(), "{}", stdout(&disabled));
+
+    // true overrides a file-level false/omission in the opposite direction;
+    // the unreachable endpoint now surfaces as an embedder failure.
+    let enabled = Command::new(env!("CARGO_BIN_EXE_plugmem-cli"))
+        .args(["--config", config.to_str().unwrap(), "--db"])
+        .arg(tmp.0.join("enabled.plugmem"))
+        .args(["remember", "env-enabled"])
+        .env("PLUGMEM_EMBEDDER_ENABLED", "true")
+        .output()
+        .unwrap();
+    assert!(!enabled.status.success());
 }
 
 #[test]

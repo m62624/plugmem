@@ -443,10 +443,10 @@ const DOCS: &[SettingDoc] = &[
     },
     SettingDoc {
         section: "embedder",
-        key: "kind",
-        value_type: "string",
-        default: "none",
-        description: "Embedding provider: none, ollama, openai, lmstudio, vllm or llamacpp",
+        key: "enabled",
+        value_type: "boolean",
+        default: "automatic",
+        description: "Enable or disable creation and use of the configured OpenAI-compatible embedder",
         scope: SettingScope::Shared,
     },
     SettingDoc {
@@ -616,7 +616,7 @@ mod tests {
             "max_txt = 10",
             "",
             "[embedder]",
-            r#"kind = "none""#,
+            "enabled = false",
             "",
             "[engin]",
             "dim = 4",

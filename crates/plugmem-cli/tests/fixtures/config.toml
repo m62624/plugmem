@@ -6,14 +6,13 @@
 dim = 8
 
 [embedder]
-# "none" keeps the CLI fully functional without any service (lexical,
-# tags, graph and time still answer). Switch to an OpenAI-compatible
-# server with kind/url/model/api_key_env:
-#   kind = "ollama"
-#   url = "http://localhost:11434/v1"
+# `enabled = false` keeps the CLI fully functional without any service
+# (lexical, tags, graph and time still answer). Switch to an
+# OpenAI-compatible server with url/model/api_key_env:
+#   url = "http://localhost:11434/v1/embeddings"
 #   model = "nomic-embed-text"
 #   api_key_env = "OPENAI_API_KEY"
-kind = "none"
+enabled = false
 
 [maintenance]
 # Auto-snapshot after this many mutations.

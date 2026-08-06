@@ -64,9 +64,9 @@ server.listen(0, "127.0.0.1", () => {
 `;
 
 /**
- * Runs `fn(base, seen)` against a worker-hosted embedder.
+ * Runs `fn(endpoint, seen)` against a worker-hosted embedder.
  *
- * `base` is what `[embedder].url` wants: the host appends `/embeddings` to it.
+ * `endpoint` is the exact `[embedder].url` used by the host.
  */
 async function withEmbedder(fn) {
   const counter = new SharedArrayBuffer(4);
@@ -80,7 +80,7 @@ async function withEmbedder(fn) {
     worker.once("error", reject);
   });
   try {
-    return await fn(`http://127.0.0.1:${port}/v1`, seen);
+    return await fn(`http://127.0.0.1:${port}/v1/embeddings`, seen);
   } finally {
     await worker.terminate();
   }
@@ -93,12 +93,12 @@ async function withEmbedder(fn) {
  * the instant `fn` returned its promise, deleting the database out from under
  * the work still in flight.
  */
-async function withConfig(base, fn) {
+async function withConfig(endpoint, fn) {
   const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-embed-"));
   const config = join(dir, "config.toml");
   writeFileSync(
     config,
-    `[engine]\ndim = ${DIM}\n[embedder]\nkind = "openai"\nurl = "${base}"\nmodel = "test"\n`,
+    `[engine]\ndim = ${DIM}\n[embedder]\nurl = "${endpoint}"\nmodel = "test"\n`,
   );
   try {
     return await fn({ config, path: join(dir, "m.plugmem") });
@@ -217,7 +217,7 @@ test("an unreachable embedder surfaces as a thrown error, not a silent miss", as
       const broken = join(dir, "config.toml");
       writeFileSync(
         broken,
-        `[engine]\ndim = ${DIM}\n[embedder]\nkind = "openai"\nurl = "http://127.0.0.1:1/v1"\nmodel = "test"\n`,
+        `[engine]\ndim = ${DIM}\n[embedder]\nurl = "http://127.0.0.1:1/v1/embeddings"\nmodel = "test"\n`,
       );
       try {
         const ro = await Plugmem.open(path, { config: broken, readOnly: true });

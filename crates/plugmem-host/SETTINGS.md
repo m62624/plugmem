@@ -68,11 +68,10 @@ half_life_days = 30    # and treat anything older than a month as stale
 flat_to_hnsw = 50000   # this memory is small; stay exact for longer
 
 [embedder]
-# none | ollama | openai | lmstudio | vllm | llamacpp
-kind = "ollama"
-url = "http://localhost:11434/v1"
+enabled = true
+url = "http://localhost:11434/v1/embeddings"
 model = "nomic-embed-text"
-api_key_env = "OPENAI_API_KEY"
+# api_key_env = "OPENAI_API_KEY" # name of the env var holding the token
 
 [maintenance]
 snapshot_every_ops = 1024
@@ -207,15 +206,20 @@ config mismatch, exactly like `[engine]`.
 
 ### `[embedder]`
 
-The default is `kind = "none"`; lexical, tag, graph and temporal retrieval
-still work without an embedder. `$PLUGMEM_EMBEDDER` overrides
-`[embedder].kind`.
+The `[embedder]` section is optional. Without `url` and `model`, lexical, tag,
+graph and temporal retrieval still work without an embedder. The single
+supported implementation is `OpenAiCompatEmbedder`, which talks to the
+OpenAI-compatible `/v1/embeddings` endpoint used by OpenAI, Ollama, LM Studio,
+vLLM and llama.cpp. Set `enabled = false` to keep the URL/model settings but
+not create or use an embedder; no HTTP requests are made. The
+`$PLUGMEM_EMBEDDER_ENABLED` environment variable overrides that value and
+accepts only `true` or `false`.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `kind` | `none` | `none`, `ollama`, `openai`, `lmstudio`, `vllm` or `llamacpp`. |
-| `url` | unset | OpenAI-compatible `/v1/embeddings` endpoint. Required for an active embedder. |
-| `model` | unset | Embedding model name. Required for an active embedder. |
+| `enabled` | automatic | Set `false` to keep the settings but not create or use the embedder. |
+| `url` | unset | Full OpenAI-compatible embeddings endpoint URL. Required for an active embedder. |
+| `model` | unset | Embedding model name understood by the selected server. Required for an active embedder. |
 | `api_key_env` | unset | Environment variable containing the bearer token. |
 
 An active embedder also requires `[engine].dim > 0`. All supported providers

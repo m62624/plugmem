@@ -34,8 +34,8 @@ use crate::{
 
 /// Environment variable naming the config file (below an explicit path).
 const ENV_CONFIG: &str = "PLUGMEM_CONFIG";
-/// Environment variable selecting the embedder kind (above the config file).
-const ENV_EMBEDDER: &str = "PLUGMEM_EMBEDDER";
+/// Environment variable that overrides `[embedder].enabled`.
+const ENV_EMBEDDER_ENABLED: &str = "PLUGMEM_EMBEDDER_ENABLED";
 // Keep these inventories next to the parser. The settings-help tests compare
 // them with the public documentation catalogue, so adding a parser key without
 // adding its help entry fails loudly.
@@ -67,7 +67,7 @@ pub(crate) const RECALL_SETTING_KEYS: &[&str] = &[
 pub(crate) const INDEX_SETTING_KEYS: &[&str] = &["hnsw_ef_construction", "flat_to_hnsw"];
 pub(crate) const DATABASE_SETTING_KEYS: &[&str] = &["path"];
 pub(crate) const WORKSPACE_SETTING_KEYS: &[&str] = &["dir", "max_open", "idle_timeout_ms"];
-pub(crate) const EMBEDDER_SETTING_KEYS: &[&str] = &["kind", "url", "model", "api_key_env"];
+pub(crate) const EMBEDDER_SETTING_KEYS: &[&str] = &["enabled", "url", "model", "api_key_env"];
 pub(crate) const MAINTENANCE_SETTING_KEYS: &[&str] = &[
     "snapshot_every_ops",
     "snapshot_journal_bytes",
@@ -149,9 +149,9 @@ impl Settings {
     }
 
     /// Builds settings from an already-parsed config table (or `None` for
-    /// all defaults). `$PLUGMEM_EMBEDDER` overrides `[embedder].kind`. Use
-    /// this when the caller also needs its own keys from the same table
-    /// (read once via [`read_config`], then passed here).
+    /// all defaults). `$PLUGMEM_EMBEDDER_ENABLED` overrides
+    /// `[embedder].enabled`. Use this when the caller also needs its own keys
+    /// from the same table (read once via [`read_config`], then passed here).
     pub fn from_table(table: Option<&toml::Table>) -> Result<Settings, SettingsError> {
         let mut config = Config::default();
         let mut database_path = None;
@@ -200,7 +200,7 @@ impl Settings {
                 .validate()
                 .map_err(|e| SettingsError::config(format!("config.toml: {e}")))?;
             if let Some(t) = table.get("embedder").and_then(toml::Value::as_table) {
-                embedder.merge(t);
+                embedder.merge(t)?;
             }
             if let Some(t) = table.get("maintenance").and_then(toml::Value::as_table) {
                 snapshot_every_ops = table_u64(t, MAINTENANCE_SETTING_KEYS[0]);
@@ -213,8 +213,8 @@ impl Settings {
             }
         }
 
-        if let Some(kind) = std::env::var_os(ENV_EMBEDDER) {
-            embedder.kind = Some(kind.to_string_lossy().into_owned());
+        if let Some(enabled) = std::env::var_os(ENV_EMBEDDER_ENABLED) {
+            embedder.enabled = Some(parse_embedder_enabled(&enabled.to_string_lossy())?);
         }
 
         let embedder = embedder.build(config.dim)?;
@@ -502,17 +502,20 @@ fn apply_index(cfg: &mut Config, t: &toml::Table) -> Result<(), SettingsError> {
 /// The `[embedder]` section, before it is turned into an [`Embedder`].
 #[derive(Default)]
 struct EmbedderCfg {
-    kind: Option<String>,
+    enabled: Option<bool>,
     url: Option<String>,
     model: Option<String>,
     api_key_env: Option<String>,
 }
 
 impl EmbedderCfg {
-    fn merge(&mut self, t: &toml::Table) {
+    fn merge(&mut self, t: &toml::Table) -> Result<(), SettingsError> {
         let s = |t: &toml::Table, k: &str| t.get(k).and_then(toml::Value::as_str).map(String::from);
-        if let Some(v) = s(t, EMBEDDER_SETTING_KEYS[0]) {
-            self.kind = Some(v);
+        if let Some(value) = t.get(EMBEDDER_SETTING_KEYS[0]) {
+            self.enabled =
+                Some(value.as_bool().ok_or_else(|| {
+                    SettingsError::config("[embedder].enabled must be a boolean")
+                })?);
         }
         if let Some(v) = s(t, EMBEDDER_SETTING_KEYS[1]) {
             self.url = Some(v);
@@ -523,40 +526,51 @@ impl EmbedderCfg {
         if let Some(v) = s(t, EMBEDDER_SETTING_KEYS[3]) {
             self.api_key_env = Some(v);
         }
+        Ok(())
     }
 
-    /// Builds the embedder. `kind = "none"` (or unset) → no embedder; an
-    /// OpenAI-compatible `kind` (ollama/openai/lmstudio/vllm/llamacpp) needs a
-    /// `url`, a `model` and `[engine].dim > 0`; an optional `api_key_env` names
-    /// an environment variable holding the bearer token.
+    /// Builds the one supported embedder. An explicitly disabled embedder, or
+    /// an absent/incomplete section with no activation request, produces no
+    /// embedder. An active embedder needs a `url`, a `model` and
+    /// `[engine].dim > 0`; an optional `api_key_env` names an environment
+    /// variable holding the bearer token.
     fn build(&self, dim: usize) -> Result<Option<Box<dyn Embedder>>, SettingsError> {
-        let kind = self.kind.as_deref().unwrap_or("none");
-        match kind {
-            "none" | "" => Ok(None),
-            "ollama" | "openai" | "openai-compat" | "lmstudio" | "vllm" | "llamacpp" => {
-                let url = self.url.clone().ok_or_else(|| {
-                    SettingsError::config(format!("[embedder] kind \"{kind}\" needs a url"))
-                })?;
-                let model = self.model.clone().ok_or_else(|| {
-                    SettingsError::config(format!("[embedder] kind \"{kind}\" needs a model"))
-                })?;
-                if dim == 0 {
-                    return Err(SettingsError::config(
-                        "[embedder] requires [engine].dim > 0 (the embedding size)",
-                    ));
-                }
-                let mut e = OpenAiCompatEmbedder::new(&url, &model, dim);
-                if let Some(env) = &self.api_key_env
-                    && let Some(key) = std::env::var_os(env)
-                {
-                    e = e.with_api_key(key.to_string_lossy().into_owned());
-                }
-                Ok(Some(Box::new(e)))
-            }
-            other => Err(SettingsError::config(format!(
-                "unknown [embedder] kind: {other}"
-            ))),
+        let enabled = self
+            .enabled
+            .unwrap_or(self.url.is_some() || self.model.is_some());
+        if !enabled {
+            return Ok(None);
         }
+        let url = self
+            .url
+            .clone()
+            .ok_or_else(|| SettingsError::config("[embedder] enabled embedder needs a URL"))?;
+        let model = self
+            .model
+            .clone()
+            .ok_or_else(|| SettingsError::config("[embedder] enabled embedder needs a model"))?;
+        if dim == 0 {
+            return Err(SettingsError::config(
+                "[embedder] requires [engine].dim > 0 (the embedding size)",
+            ));
+        }
+        let mut e = OpenAiCompatEmbedder::new(&url, &model, dim);
+        if let Some(env) = &self.api_key_env
+            && let Some(key) = std::env::var_os(env)
+        {
+            e = e.with_api_key(key.to_string_lossy().into_owned());
+        }
+        Ok(Some(Box::new(e)))
+    }
+}
+
+fn parse_embedder_enabled(value: &str) -> Result<bool, SettingsError> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => Err(SettingsError::config(format!(
+            "{ENV_EMBEDDER_ENABLED} must be true or false, got \"{other}\""
+        ))),
     }
 }
 
@@ -630,14 +644,15 @@ mod tests {
     fn embedder_merge_reads_every_field() {
         let table = toml_of(&[
             "[embedder]",
-            r#"kind = "ollama""#,
-            r#"url = "http://localhost:11434/v1""#,
+            "enabled = true",
+            r#"url = "http://localhost:11434/v1/embeddings""#,
             r#"model = "nomic-embed-text""#,
             r#"api_key_env = "SOME_ENV""#,
             "[engine]",
             "dim = 8",
         ]);
-        // An OpenAI-compatible kind with a url, model and dim > 0 builds.
+        // The shared OpenAI-compatible client builds with a url, model and
+        // dim > 0; the server may be OpenAI, Ollama or another compatible one.
         let s = Settings::from_table(Some(&table)).unwrap();
         assert!(s.embedder.is_some());
     }
@@ -669,8 +684,8 @@ mod tests {
         let mut config = Config::default();
         config.dim = 8;
         let embedder = EmbedderCfg {
-            kind: Some("ollama".into()),
-            url: Some("http://127.0.0.1:0/v1".into()),
+            enabled: Some(true),
+            url: Some("http://127.0.0.1:0/v1/embeddings".into()),
             model: Some("m".into()),
             api_key_env: None,
         }
@@ -827,35 +842,40 @@ mod tests {
     fn embedder_build_rules() {
         assert!(EmbedderCfg::default().build(0).unwrap().is_none());
         let no_url = EmbedderCfg {
-            kind: Some("ollama".into()),
+            enabled: Some(true),
             ..Default::default()
         };
         assert!(matches!(no_url.build(384), Err(SettingsError::Config(_))));
         let no_model = EmbedderCfg {
-            kind: Some("ollama".into()),
-            url: Some("http://x/v1".into()),
+            enabled: Some(true),
+            url: Some("http://x/v1/embeddings".into()),
             ..Default::default()
         };
         assert!(matches!(no_model.build(384), Err(SettingsError::Config(_))));
         let zero_dim = EmbedderCfg {
-            kind: Some("ollama".into()),
-            url: Some("http://x/v1".into()),
+            enabled: Some(true),
+            url: Some("http://x/v1/embeddings".into()),
             model: Some("m".into()),
             api_key_env: None,
         };
         assert!(matches!(zero_dim.build(0), Err(SettingsError::Config(_))));
         let ok = EmbedderCfg {
-            kind: Some("openai".into()),
-            url: Some("http://x/v1".into()),
+            enabled: None,
+            url: Some("http://x/v1/embeddings".into()),
             model: Some("m".into()),
             api_key_env: Some("PLUGMEM_TEST_KEY_UNSET".into()),
         };
         assert!(ok.build(384).unwrap().is_some());
-        let weird = EmbedderCfg {
-            kind: Some("weird".into()),
+        let disabled = EmbedderCfg {
+            enabled: Some(false),
+            url: Some("http://x/v1/embeddings".into()),
+            model: Some("m".into()),
             ..Default::default()
         };
-        assert!(matches!(weird.build(384), Err(SettingsError::Config(_))));
+        assert!(disabled.build(0).unwrap().is_none());
+        assert!(parse_embedder_enabled("true").unwrap());
+        assert!(!parse_embedder_enabled("false").unwrap());
+        assert!(parse_embedder_enabled("ollama").is_err());
     }
 
     #[test]
@@ -864,7 +884,7 @@ mod tests {
         let cfgfile = tmp.0.join("config.toml");
         std::fs::write(
             &cfgfile,
-            "[database]\npath = \"memory.plugmem\"\n[engine]\ndim = 512\n[embedder]\nkind = \"none\"\n[maintenance]\nsnapshot_every_ops = 64\n",
+            "[database]\npath = \"memory.plugmem\"\n[engine]\ndim = 512\n[embedder]\nenabled = false\n[maintenance]\nsnapshot_every_ops = 64\n",
         )
         .unwrap();
         let s = Settings::load(Some(&cfgfile)).unwrap();

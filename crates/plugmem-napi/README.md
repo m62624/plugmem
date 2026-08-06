@@ -405,9 +405,10 @@ w_vec = 2.0                   # trust meaning over keywords in this memory
 half_life_days = 30           # and treat anything older than a month as stale
 
 [embedder]                    # optional — omit for lexical/tag/graph/time only
-kind  = "ollama"              # or openai / lmstudio / vllm / llamacpp
+enabled = true                # false keeps settings but makes no embedder calls
 url   = "http://localhost:11434/v1/embeddings"
 model = "nomic-embed-text"
+api_key_env = "OPENAI_API_KEY" # env var holding the bearer token
 
 [maintenance]
 fsync = "each_op"             # or "on_snapshot": faster, loses the journal tail on an OS crash
@@ -435,6 +436,13 @@ With an `[embedder]`, a text-only `remember`/`recall` embeds automatically, and
 the provider's HTTP call happens outside the engine lock. The `dim` open option
 sets the embedding size when there is no config; if the config built an
 embedder, its dimension governs and `dim` must agree.
+
+The host uses one `OpenAiCompatEmbedder` implementation for OpenAI, Ollama,
+LM Studio, vLLM and other OpenAI-compatible servers. `url` is the complete
+embeddings endpoint exactly as provided (nothing is appended), and `model` is
+the model name understood by that server. Set `enabled = false` to keep the
+settings without creating or calling the embedder; `$PLUGMEM_EMBEDDER_ENABLED`
+overrides it with `true` or `false`.
 
 A read-only handle cannot embed inside the engine — writing into a zero-copy
 mapping is exactly what read-only exists to avoid — so this binding embeds the
