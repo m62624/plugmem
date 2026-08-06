@@ -18,7 +18,7 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 authors = ["Mansur Azatbek <mansur62624@gmail.com>"]
 license = "MIT"
@@ -27,9 +27,9 @@ homepage = "https://github.com/m62624/plugmem"
 
 [workspace.dependencies]
 # Local crates (version pinned so the crates can be published to crates.io)
-plugmem-arena = { path = "crates/plugmem-arena", version = "0.7.0", default-features = false }
-plugmem-core = { path = "crates/plugmem-core", version = "0.7.0", default-features = false }
-plugmem-host = { path = "crates/plugmem-host", version = "0.7.0" }
+plugmem-arena = { path = "crates/plugmem-arena", version = "0.7.1", default-features = false }
+plugmem-core = { path = "crates/plugmem-core", version = "0.7.1", default-features = false }
+plugmem-host = { path = "crates/plugmem-host", version = "0.7.1" }
 # Internal, never published: path-only, so cargo strips it from published
 # manifests when it appears as a dev-dependency.
 plugmem-testgen = { path = "crates/plugmem-testgen" }
