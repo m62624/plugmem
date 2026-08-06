@@ -1420,7 +1420,7 @@ dependencies = [
 
 [[package]]
 name = "plugmem-arena"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "criterion",
  "proptest",
@@ -1432,7 +1432,7 @@ dependencies = [
 
 [[package]]
 name = "plugmem-bench-charts"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "plotters",
  "toml 0.8.23",
@@ -1440,11 +1440,11 @@ dependencies = [
 
 [[package]]
 name = "plugmem-bench-matrix"
-version = "0.7.0"
+version = "0.7.1"
 
 [[package]]
 name = "plugmem-cli"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "clap",
  "plugmem-host",
@@ -1454,7 +1454,7 @@ dependencies = [
 
 [[package]]
 name = "plugmem-core"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "criterion",
  "hashbrown",
@@ -1478,7 +1478,7 @@ dependencies = [
 
 [[package]]
 name = "plugmem-host"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "criterion",
  "directories",
@@ -1497,7 +1497,7 @@ dependencies = [
 
 [[package]]
 name = "plugmem-mcp"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "clap",
  "plugmem-host",
@@ -1508,7 +1508,7 @@ dependencies = [
 
 [[package]]
 name = "plugmem-napi"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "napi",
  "napi-build",
@@ -1520,7 +1520,7 @@ dependencies = [
 
 [[package]]
 name = "plugmem-py"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "plugmem-host",
  "pyo3",
@@ -1529,14 +1529,14 @@ dependencies = [
 
 [[package]]
 name = "plugmem-testgen"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "plugmem-core",
 ]
 
 [[package]]
 name = "plugmem-wasm-probe"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "plugmem-core",
  "xxhash-rust",
