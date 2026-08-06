@@ -38,7 +38,7 @@
 The main dependency flow is:
 
 ```text
-plugmem-arena -> plugmem-core -> plugmem-host -> plugmem-cli / plugmem-mcp / plugmem-napi
+plugmem-arena -> plugmem-core -> plugmem-host -> plugmem-cli / plugmem-mcp / plugmem-napi / plugmem-py
                          ^
                  plugmem-testgen and benchmark tools
 ```

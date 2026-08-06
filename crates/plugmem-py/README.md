@@ -347,8 +347,10 @@ source something to work with — see
 [Do you need an embedder?](#do-you-need-an-embedder) for the trade.
 
 The file is resolved the same way on every surface — CLI, MCP server, Node and
-Python: an explicit path, then `$PLUGMEM_CONFIG`, then
-`$XDG_CONFIG_HOME/plugmem/config.toml`.
+Python: an explicit path, then `$PLUGMEM_CONFIG`, then the platform config
+directory — `$XDG_CONFIG_HOME/plugmem/config.toml` on Linux,
+`~/Library/Application Support/plugmem/config.toml` on macOS,
+`%APPDATA%\plugmem\config\config.toml` on Windows.
 
 ```toml
 # plugmem.toml
