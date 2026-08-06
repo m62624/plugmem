@@ -1,6 +1,3 @@
-//! The crate README is included below as module documentation, which makes
-//! every Rust example in it a doctest: a README that drifts from the API stops
-//! compiling instead of quietly lying.
 #![doc = include_str!("../README.md")]
 //! `plugmem` — the command-line surface over the
 //! [temporal-memory engine](https://docs.rs/plugmem-core/latest), a thin wrapper around

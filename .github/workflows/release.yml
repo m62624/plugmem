@@ -443,8 +443,18 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
-      - shell: bash
-        run: cp LICENSE crates/plugmem-py/LICENSE
+      - name: The two files the archive cannot be assembled without
+        # `pyproject.toml` explains what each is for; the short version is that
+        # both live outside this crate, `include` refuses a path containing
+        # `..`, and so the only way in is a copy under the crate. The licence
+        # decides whether PyPI accepts the upload; `skill/SKILL.md` decides
+        # whether the upload can then be compiled. `ci.yml` builds this same
+        # archive and installs from it, so a third such file fails there first.
+        shell: bash
+        run: |
+          cp LICENSE crates/plugmem-py/LICENSE
+          mkdir -p crates/plugmem-py/skill
+          cp skill/SKILL.md crates/plugmem-py/skill/SKILL.md
       - uses: PyO3/maturin-action@v1
         with:
           command: sdist
@@ -490,12 +500,12 @@ jobs:
         with:
           packages-dir: dist
           # Makes a re-run idempotent, which is the property `publish-napi`
-          # already relies on and this job had no equivalent of. Twelve files
-          # (eleven wheels and an sdist) go up in one call; a network blip on the
-          # seventh leaves six uploaded, and without this a re-run dies on
-          # "File already exists" for those six — turning a transient failure
-          # into a version burnt on PyPI while crates.io and npm, which publish
-          # in parallel, already succeeded.
+          # already relies on and this job had no equivalent of. Thirteen files
+          # (twelve wheels and an sdist) go up in one call, and 0.7.0 proved the
+          # scenario is not hypothetical: the twelve wheels landed and the sdist
+          # was rejected, which without this flag would leave the version burnt
+          # on PyPI while crates.io and npm, which publish in parallel, had
+          # already succeeded.
           #
           # It skips only files whose *exact* version already exists, so it can
           # never mask a genuine attempt to overwrite a release: PyPI versions

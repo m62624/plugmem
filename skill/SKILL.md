@@ -311,17 +311,17 @@ MANDATORY.
 
 ### Configuration — ask for it only when needed
 
-All three external surfaces share the same config model. Request detailed
+Every external surface shares the same config model. Request detailed
 settings help only when configuration is relevant:
 
 - CLI: `plugmem-cli help settings` (or `plugmem-cli --json help settings`).
 - MCP: call `plugmem_settings_help` with `format:"json"` or `format:"human"`.
-- NAPI: call the exported `settingsHelp()` function.
+- Node: call the exported `settingsHelp()`; Python: `settings_help()`.
 
-The config file itself resolves as `--config`/constructor `config`, then
-`$PLUGMEM_CONFIG`, then the platform config directory. Database-path precedence
-is an explicit `--db`/constructor path, then `$PLUGMEM_DB`, then
-`[database].path`, then the platform data directory.
+The config file itself resolves as `--config` (or the `config` option passed to
+`open`), then `$PLUGMEM_CONFIG`, then the platform config directory.
+Database-path precedence is an explicit `--db` or `open` path, then
+`$PLUGMEM_DB`, then `[database].path`, then the platform data directory.
 
 The common shape is:
 
@@ -361,8 +361,9 @@ Do not invent provider URLs, model names or paths. Ask for settings help when
 the user needs to configure them, and otherwise rely on the platform default.
 
 An unknown key is reported, not applied: the CLI and the MCP server print it to
-stderr, and NAPI returns it from `configWarnings()`. If you see one, the setting
-did nothing — fix the spelling rather than assuming it took effect.
+stderr, Node returns it from `configWarnings()` and Python from
+`config_warnings()`. If you see one, the setting did nothing — fix the spelling
+rather than assuming it took effect.
 
 ### Step 0b — smoke-test
 
@@ -389,7 +390,7 @@ comparison line:
 plugmem version check: skill <marker> vs engine <reported> → OK | MISMATCH
 ```
 
-<!-- skill-version: 0.7.0 -->
+<!-- skill-version: 0.7.1 -->
 
 If they differ in ANY way: **stop**, warn the user that skill and engine
 describe different functionality, and proceed only on their explicit

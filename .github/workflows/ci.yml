@@ -492,6 +492,39 @@ jobs:
         run: .venv/bin/ruff check python tests
       - name: Test through Python
         run: .venv/bin/pytest -q
+      - name: The sdist builds what it ships
+        # Last, because it replaces the `maturin develop` install above.
+        #
+        # The sdist is the one artifact assembled from a file list instead of
+        # from the tree, and the only one whose failure is invisible here: it is
+        # what a platform without a wheel falls back to, so a missing file shows
+        # up on a stranger's machine weeks later. 0.7.0 shipped both halves of
+        # that — an archive PyPI rejected for a `License-File` it did not carry,
+        # and, underneath, one that would not have compiled anyway because
+        # `src/lib.rs` embeds `skill/SKILL.md` from outside the crate. Building
+        # the archive and then compiling *from it* is the only check that covers
+        # the next such file too.
+        #
+        # `--profile dev` and a shared `CARGO_TARGET_DIR` point the isolated
+        # build at the objects the steps above already produced, so this costs
+        # the local crates rather than the dependency tree. `--no-build-isolation`
+        # reuses the maturin in `.venv` instead of downloading a second one —
+        # and that is why `.venv/bin` has to be on PATH rather than merely
+        # called by path: the backend shells out to a bare `maturin`.
+        env:
+          MATURIN_PEP517_ARGS: --profile dev
+        run: |
+          cp ../../LICENSE LICENSE
+          mkdir -p skill && cp ../../skill/SKILL.md skill/SKILL.md
+          .venv/bin/maturin sdist --out dist
+          PATH="$PWD/.venv/bin:$PATH" CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" \
+            .venv/bin/pip install --quiet --no-build-isolation \
+              --force-reinstall dist/plugmem-*.tar.gz
+          .venv/bin/python -c "
+          import plugmem
+          assert plugmem.skill_version(), 'the embedded skill did not survive the sdist'
+          print('sdist install:', plugmem.version(), 'skill', plugmem.skill_version())
+          "
 
   dist-plan:
     name: cargo-dist plan

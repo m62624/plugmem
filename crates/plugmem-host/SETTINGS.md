@@ -1,13 +1,14 @@
 # plugmem settings
 
 This is the canonical configuration reference for `plugmem-host` and every
-wrapper that uses it: `plugmem-cli`, `plugmem-mcp` and `plugmem-napi`.
+wrapper that uses it: `plugmem-cli`, `plugmem-mcp`, `plugmem-napi` and
+`plugmem-py`.
 
 ## Config-file discovery
 
 The config file itself is resolved in this order:
 
-1. An explicit `--config PATH` (CLI/MCP) or `config` option (NAPI).
+1. An explicit `--config PATH` (CLI/MCP) or `config` option (Node, Python).
 2. `$PLUGMEM_CONFIG`.
 3. The platform config directory from `directories::ProjectDirs`:
 
@@ -25,7 +26,8 @@ file is optional; its absence means that all defaults apply.
 
 The database path is resolved separately from the config-file path:
 
-1. An explicit path (`--db` for CLI/MCP, or the NAPI constructor path).
+1. An explicit path (`--db` for CLI/MCP, or the path passed to `open` in Node
+   and Python).
 2. `$PLUGMEM_DB`.
 3. `[database].path` from this config file.
 4. The platform data path.
@@ -47,7 +49,7 @@ project.
 
 ```toml
 [database]
-# Optional. Explicit --db / constructor path and PLUGMEM_DB override this.
+# Optional. An explicit --db or open path and PLUGMEM_DB override this.
 path = "/path/to/memory.plugmem"
 
 [engine]
@@ -226,6 +228,7 @@ use the same OpenAI-compatible HTTP shape.
 | `snapshot_every_ops` | `1024` | Snapshot after this many mutations. |
 | `snapshot_journal_bytes` | `4194304` | Snapshot when the journal reaches this size. |
 | `maintain_every_forgets` | off | Run policy maintenance after this many forgets. |
+| `fsync` | `each_op` | When journal appends reach the disk. `each_op`: every acknowledged write survives a power cut. `on_snapshot`: faster, but an OS crash may lose the journal tail written since the last snapshot. |
 | `batch_size` | `128` | CLI-only `import` batch size; `--batch` overrides it. |
 
 One maintenance trigger has no key and is always on: a database that outgrows
@@ -281,7 +284,8 @@ pointing at the wrong line is worse than pointing at none.
 |---|---|---|---|
 | CLI | `--db PATH` | `--config PATH` | `--batch`, `--json` |
 | MCP | `--db PATH` | `--config PATH` | `--workers`, `--read-only` |
-| NAPI | constructor `path` | `OpenOptions.config` | `OpenOptions.dim`, `readOnly` |
+| Node | `Plugmem.open(path)` | `OpenOptions.config` | `OpenOptions.dim`, `readOnly` |
+| Python | `Plugmem.open(path)` | `config=` | `dim=`, `read_only=` |
 | Host | `Database::open(path, config)` | `Settings::load(path)` | programmatic builder options |
 
 Use the runtime help surfaces when the full reference is not available:
@@ -291,5 +295,5 @@ $ plugmem-cli help settings
 $ plugmem-cli --json help settings
 ```
 
-MCP exposes `plugmem_settings_help` with `format: "json"` or `"human"`, and
-NAPI exposes `settingsHelp()`.
+MCP exposes `plugmem_settings_help` with `format: "json"` or `"human"`; Node
+exposes `settingsHelp()` and Python `settings_help()`.

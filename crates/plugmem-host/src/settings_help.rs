@@ -1,8 +1,9 @@
 //! The single source of truth for config.toml help.
 //!
-//! The parser lives in [`super::settings`], while CLI/MCP/NAPI are separate
-//! surfaces. Keeping the public setting catalogue here lets those surfaces
-//! render their own help without copying descriptions or defaults.
+//! The parser lives in [`super::settings`], while the CLI, the MCP server and
+//! the Node and Python bindings are separate surfaces. Keeping the public
+//! setting catalogue here lets those surfaces render their own help without
+//! copying descriptions or defaults.
 
 use std::fmt::Write as _;
 
@@ -253,7 +254,7 @@ const DOCS: &[SettingDoc] = &[
         key: "path",
         value_type: "path string",
         default: "platform data directory/memory.plugmem",
-        description: "Persistent database file; explicit --db/constructor path and PLUGMEM_DB override it",
+        description: "Persistent database file; an explicit --db or open path and PLUGMEM_DB override it",
         scope: SettingScope::Shared,
     },
     SettingDoc {
