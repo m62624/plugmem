@@ -363,7 +363,7 @@ dim = 1536
 # Optional. Delete this section and everything still works, minus the vector
 # source.
 [embedder]
-kind = "openai"
+enabled = true
 url = "https://api.openai.com/v1/embeddings"
 model = "text-embedding-3-small"
 api_key_env = "OPENAI_API_KEY"
@@ -379,6 +379,13 @@ graph_depth = 2     # default hops, overridable per call
 ```python
 db = plugmem.Plugmem.open("agent.plugmem", config="plugmem.toml")
 ```
+
+The host uses one `OpenAiCompatEmbedder` implementation for OpenAI, Ollama,
+LM Studio, vLLM and other OpenAI-compatible servers. `url` is the complete
+embeddings endpoint exactly as provided (nothing is appended), and `model` is
+the model name understood by that server. Set `enabled = false` to keep the
+settings without creating or calling the embedder; `$PLUGMEM_EMBEDDER_ENABLED`
+overrides it with `true` or `false`.
 
 `plugmem.settings_help()` returns the whole catalogue — every section, key,
 type, default and what it does — without opening anything.

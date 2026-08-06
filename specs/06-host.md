@@ -98,7 +98,7 @@ trust/sparse by default (the image is not checksummed).
 The trait is as in `05-api.md`. **There is no native Ollama client:** Ollama, LM
 Studio, vLLM, llama.cpp-server, OpenAI, OpenRouter and so on all speak one
 OpenAI-compatible `/v1/embeddings`, so one `OpenAiCompatEmbedder` covers them all (for
-Ollama, `base_url = "http://localhost:11434/v1"`). `OpenAiCompatEmbedder::new(base_url,
+Ollama, `endpoint_url = "http://localhost:11434/v1/embeddings"`). `OpenAiCompatEmbedder::new(endpoint_url,
 model, dim)` + `.with_api_key(...)`: `dim` is given explicitly (determinism and no
 startup network call; a mismatch with the server's response is a typed error). HTTP is
 `ureq` (blocking, small — the core is synchronous, no async is needed), JSON is

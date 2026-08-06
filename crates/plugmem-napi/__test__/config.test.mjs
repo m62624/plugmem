@@ -39,7 +39,7 @@ test("a dim option disagreeing with the config embedder throws", async () => {
     const cfg = join(dir, "config.toml");
     writeFileSync(
       cfg,
-      '[engine]\ndim = 8\n[embedder]\nkind = "openai"\nurl = "http://127.0.0.1:1/v1/embeddings"\nmodel = "dummy"\n',
+      '[engine]\ndim = 8\n[embedder]\nurl = "http://127.0.0.1:1/v1/embeddings"\nmodel = "dummy"\n',
     );
     // The dim conflict is decided before any work is scheduled: a synchronous
     // throw, not a rejection.

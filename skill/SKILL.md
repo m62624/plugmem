@@ -340,7 +340,14 @@ half_life_days = 180            # how fast an old fact loses ground
 flat_to_hnsw = 24000            # vectors before the graph index is built
 
 [embedder]
-kind = "none"                  # or ollama/openai/lmstudio/vllm/llamacpp
+# Optional: omit the section for lexical/tags/graph/time only.
+# The one client is OpenAiCompatEmbedder; url is the complete embeddings
+# endpoint (no path is appended), and model selects the server-side model.
+enabled = false                # keep settings but do not create/use the embedder
+# To enable it, set [engine].dim > 0, change this to true (or omit it), and add:
+# url = "http://localhost:11434/v1/embeddings"
+# model = "nomic-embed-text"
+# api_key_env = "OPENAI_API_KEY" # env var containing the bearer token
 
 [maintenance]
 snapshot_every_ops = 1024
@@ -390,7 +397,7 @@ comparison line:
 plugmem version check: skill <marker> vs engine <reported> → OK | MISMATCH
 ```
 
-<!-- skill-version: 0.7.1 -->
+<!-- skill-version: 0.8.0 -->
 
 If they differ in ANY way: **stop**, warn the user that skill and engine
 describe different functionality, and proceed only on their explicit

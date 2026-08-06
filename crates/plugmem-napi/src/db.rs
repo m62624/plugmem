@@ -1597,7 +1597,6 @@ mod tests {
 [engine]
 dim = 8
 [embedder]
-kind = \"openai\"
 url = \"http://127.0.0.1:1/v1/embeddings\"
 model = \"dummy\"
 ";

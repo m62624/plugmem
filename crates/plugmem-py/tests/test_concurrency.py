@@ -90,7 +90,7 @@ def embedder_url() -> str:
 def test_remember_releases_the_interpreter(embedder_url: str, tmp_path) -> None:
     config = tmp_path / "config.toml"
     config.write_text(
-        f'[engine]\ndim = {DIM}\n[embedder]\nkind = "openai"\n'
+        f'[engine]\ndim = {DIM}\n[embedder]\n'
         f'url = "{embedder_url}"\nmodel = "test"\n',
         encoding="utf-8",
     )

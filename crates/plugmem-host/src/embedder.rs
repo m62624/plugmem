@@ -2,7 +2,7 @@
 //!
 //! The engine takes ready vectors; computing them is the host's job.
 //! One HTTP client covers the whole OpenAI-compatible ecosystem —
-//! OpenAI itself, Ollama (`http://localhost:11434/v1`), LM Studio,
+//! OpenAI itself, Ollama (`http://localhost:11434/v1/embeddings`), LM Studio,
 //! vLLM, llama.cpp-server — because they all speak the same
 //! `/v1/embeddings` shape; a provider-specific client would be a second
 //! implementation of the same JSON (records the decision).
@@ -108,14 +108,16 @@ pub struct OpenAiCompatEmbedder {
 }
 
 impl OpenAiCompatEmbedder {
-    /// Creates a client for `base_url` (e.g. `https://api.openai.com/v1`
-    /// or `http://localhost:11434/v1`), a model name and the expected
-    /// dimension. The dimension is explicit — no startup probe request,
-    /// and a server disagreeing with it is a typed error, not a silently
-    /// reconfigured database.
-    pub fn new(base_url: &str, model: &str, dim: usize) -> Self {
+    /// Creates a client for the exact embeddings `endpoint_url` (e.g.
+    /// `https://api.openai.com/v1/embeddings` or
+    /// `http://localhost:11434/v1/embeddings`), a model name and the expected
+    /// dimension. The URL is used as supplied; this constructor does not
+    /// append or otherwise rewrite a path. The dimension is explicit — no
+    /// startup probe request, and a server disagreeing with it is a typed
+    /// error, not a silently reconfigured database.
+    pub fn new(endpoint_url: &str, model: &str, dim: usize) -> Self {
         Self {
-            url: format!("{}/embeddings", base_url.trim_end_matches('/')),
+            url: endpoint_url.to_string(),
             model: model.to_string(),
             api_key: None,
             dim,

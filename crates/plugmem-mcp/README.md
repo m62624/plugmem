@@ -357,11 +357,11 @@ half_life_days = 30    # age at which the recency discount has halved
 [index]                # optional
 flat_to_hnsw = 50000   # vectors before maintenance builds the HNSW graph
 
-[embedder]             # default: none — lexical/tags/graph/time still work
-kind = "ollama"        # ollama | openai | lmstudio | vllm | llamacpp | none
-url = "http://localhost:11434/v1"
+[embedder]             # optional — omit for lexical/tags/graph/time only
+enabled = true         # false keeps settings but makes no embedder calls
+url = "http://localhost:11434/v1/embeddings"
 model = "nomic-embed-text"
-api_key_env = "OPENAI_API_KEY"
+api_key_env = "OPENAI_API_KEY" # env var holding the bearer token
 
 [maintenance]
 snapshot_every_ops = 1024
@@ -376,10 +376,14 @@ guessed: `range` must be exactly `[from, to]`, and `as_of` / `valid_from` must
 each be a whole non-negative unix-millisecond number. A malformed one is a tool
 error, not an answer quietly computed without it.
 
-The embedder unlocks the **vector** recall source; with `kind = "none"` (the
-default) recall still answers from lexical, tag, graph and temporal evidence.
-One OpenAI-compatible client covers Ollama, OpenAI, LM Studio, vLLM and
-llama.cpp-server. `$PLUGMEM_EMBEDDER` overrides `[embedder].kind`.
+The embedder unlocks the **vector** recall source; without an active
+`[embedder]`, recall still answers from lexical, tag, graph and temporal
+evidence. The host uses one `OpenAiCompatEmbedder` implementation for
+OpenAI-compatible OpenAI, Ollama, LM Studio, vLLM and llama.cpp-server
+endpoints. Set `enabled = false` to keep the settings but make no embedder
+calls. `$PLUGMEM_EMBEDDER_ENABLED` overrides `[embedder].enabled` with `true`
+or `false`, and `api_key_env` names the environment variable containing the
+bearer token.
 
 `[recall]` and `[index]` are safe to change on an existing memory — reopening
 with different weights is how the ranking changes — while `[engine]` is not.

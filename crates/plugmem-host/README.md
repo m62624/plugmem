@@ -193,7 +193,7 @@ cfg.dim = 768;
 let (db, _report) = Database::builder(cfg)
     // one client covers OpenAI, Ollama, LM Studio, vLLM, llama.cpp-server:
     .embedder(Box::new(OpenAiCompatEmbedder::new(
-        "http://localhost:11434/v1", // Ollama's OpenAI-compatible endpoint
+        "http://localhost:11434/v1/embeddings", // Ollama's full embeddings endpoint
         "nomic-embed-text",
         768,
     )))

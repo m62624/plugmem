@@ -2692,7 +2692,7 @@ mod tests {
         let cfgfile = scratch.0.join("config.toml");
         std::fs::write(
             &cfgfile,
-            "[engine]\ndim = 512\n[embedder]\nkind = \"none\"\n\
+            "[engine]\ndim = 512\n[embedder]\nenabled = false\n\
              [maintenance]\nsnapshot_every_ops = 64\nbatch_size = 200\n",
         )
         .unwrap();

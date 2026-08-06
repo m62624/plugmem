@@ -298,7 +298,7 @@ test("an embedder on this very event loop can answer, and is not locked", async 
   const config = join(dir, "config.toml");
   writeFileSync(
     config,
-    `[engine]\ndim = ${DIM}\n[embedder]\nkind = "openai"\n` +
+    `[engine]\ndim = ${DIM}\n[embedder]\n` +
       `url = "http://127.0.0.1:${port}/v1/embeddings"\nmodel = "mock"\n`,
   );
 
