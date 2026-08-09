@@ -104,7 +104,7 @@ common case. A workspace is for one process serving many independent memories
 | Key | Default | Meaning |
 |---|---:|---|
 | `dir` | unset | Directory of named databases. Setting it is what turns a workspace on. |
-| `max_open` | `16` | Databases kept open at once; the least recently used is closed to make room. Must be between 1 and 240 — one open database costs several file descriptors, so an unbounded value would exhaust them somewhere else in the program. |
+| `max_open` | `16` | Hard limit on open databases. An inactive least-recently-used entry is closed to make room; if every slot is active, another name gets `Busy` immediately. Must be between 1 and 240 — one open database costs several file descriptors, so an unbounded value would exhaust them somewhere else in the program. |
 | `idle_timeout_ms` | `60000` | Close a database unused this long. `0` never closes. |
 
 The layout under `dir` is fixed:

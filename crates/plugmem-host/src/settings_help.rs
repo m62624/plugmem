@@ -270,7 +270,7 @@ const DOCS: &[SettingDoc] = &[
         key: "max_open",
         value_type: "positive integer",
         default: "16",
-        description: "Workspace databases kept open at once; the least recently used is closed",
+        description: "Hard limit on open workspace databases; an inactive least-recently-used entry is closed, all-active returns Busy",
         scope: SettingScope::Shared,
     },
     SettingDoc {

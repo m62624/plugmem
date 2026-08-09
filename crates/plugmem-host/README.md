@@ -301,6 +301,13 @@ exactly one named database inside the directory. The pool bounds how many stay o
 file's exclusive lock — the timeout is a liveness setting, not a memory one.
 
 The core is untouched by any of this: one `Memory` is still one database.
+Rust callers may intentionally keep the `Database` returned by `get`; its RAII
+`Drop` makes that ownership explicit. Garbage-collected language wrappers must
+instead keep only the name and call `Workspace::lease` inside each verb. A
+lease pins one pool entry for that operation, so active entries are never
+evicted or swept; if every `max_open` slot is active, another name receives
+`WorkspaceError::AtCapacity` immediately. `release(name)` closes one inactive
+pooled handle without invalidating logical foreign-language references.
 See [`specs/10-workspace.md`](https://github.com/m62624/plugmem/blob/main/specs/10-workspace.md).
 
 ## Concurrency model
