@@ -180,17 +180,29 @@ res.edges;      // { src, rel, dst, provenance }[] — what the graph walked
 res.truncated;  // true if selection stopped at k or the budget with more left
 ```
 
-`remember` returns the new fact's id **plus any live facts it may duplicate or
-contradict**. The engine never merges or deletes on its own — it surfaces the
-tension and your code decides:
+`remember` stores the new fact and returns its id **plus any live facts it may
+duplicate or contradict**. If a preflight must not write, use
+`rememberGuarded`: the database holds one write scope across its similarity
+check and conditional insertion, so concurrent preflights cannot both pass.
 
 ```typescript
-const out = await db.remember({ text: "the user prefers async-std", entity: "user" });
-for (const s of out.similar) {
-  // s.id, s.score, s.reason: "LexicalOverlap" | "VectorCosine"
-  // → revise it, forget it, or keep both. Your call.
+const decision = await db.rememberGuarded({
+  text: "the user prefers async-std",
+  entity: "user",
+});
+if (decision.status === "blocked") {
+  for (const s of decision.similar) {
+    // revise/forget an old fact, or use ordinary remember to keep both
+    console.log(s.id, s.score, s.reason);
+  }
 }
 ```
+
+`blocked` has no `outcome`: it allocated no id and changed neither indexes nor
+journal. Ordinary `remember` is also a safe complete write; it simply never rejects
+one. Do not use `recall` for this check. Recall returns ranked context and can
+return a weak nearest vector; its fused score is not cosine similarity or a
+conflict threshold.
 
 ## API
 
@@ -202,6 +214,7 @@ only moves arguments and results across the boundary.
 | Method | Does |
 |---|---|
 | `remember(args)` | store a fact; resolves with its id and similar facts |
+| `rememberGuarded(args)` | check similarity and store only if clear, without a check/write race |
 | `rememberMany(args[])` | store a batch: one embedding round-trip, one journal sync |
 | `revise(id, args)` | close a fact and record its successor |
 | `forget(id)` | tombstone a fact; resolves with whether it was live |
@@ -475,7 +488,7 @@ embedder's HTTP round trip or an fsync would freeze every timer, socket and
 callback in the process. Anything that can do that runs on a libuv worker and
 returns a promise instead.
 
-Promises: `Plugmem.open`, `remember`, `rememberMany`, `revise`, `recall`,
+Promises: `Plugmem.open`, `remember`, `rememberGuarded`, `rememberMany`, `revise`, `recall`,
 `forget`, `removeTag`, `listTags`, `link`, `unlink`, `export`, `exportPage`, `verify`, `maintain`,
 `checkpoint`, every database verb on `WorkspaceMemory`, and every registry
 verb on `Workspace`.

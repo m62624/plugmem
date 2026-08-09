@@ -55,9 +55,12 @@ fusion; tags act as filters. What the engine does:
 - **a bounded tag catalogue.** List current tags and their fact counts in stable
   lexical pages, optionally by prefix. Removing a tag revises every affected
   current fact without deleting the facts or their historical tag state.
-- **conflicts surfaced, not resolved.** `remember` returns the live facts a new
-  one may duplicate or contradict. The engine never merges on its own; the
-  caller revises, forgets, or keeps both.
+- **conflicts surfaced, not resolved.** `remember` stores and returns the live
+  facts a new one may duplicate or contradict. `remember_guarded` runs that
+  same bounded detector and stores only when it finds no candidate, without a
+  race between those steps. Ordinary `remember` remains a safe complete write.
+  Recall is ranked context retrieval, not a duplicate threshold. The engine
+  never merges on its own; the caller revises, forgets, or keeps both.
 - **bounded ranked context.** Recall returns structured facts and edges and can
   render text constrained by a token budget; prompt-ready rendering is one
   consumer of the result.

@@ -24,6 +24,10 @@ impl<'a> Memory<'a> {
 
     pub fn remember<S: Storage>(&mut self, s: &mut S, input: RememberInput<'_>)
         -> Result<RememberOutcome, Error>;
+    /// Run the same bounded similarity detector and store only if it finds no
+    /// candidate. The check and possible write are one core operation.
+    pub fn remember_guarded<S: Storage>(&mut self, s: &mut S,
+        input: RememberInput<'_>) -> Result<GuardedRememberOutcome, Error>;
     /// Bulk write: journaled as a sequence of Remember; similar-detection is
     /// skippable (skip_similar) for import speed.
     pub fn remember_batch<S: Storage>(&mut self, s: &mut S,
@@ -111,6 +115,11 @@ pub struct Similar {
     pub id: FactId,
     pub score: f32,
     pub reason: SimilarReason,               // LexicalOverlap | VectorCosine
+}
+
+pub enum GuardedRememberOutcome {
+    Stored { outcome: RememberOutcome },
+    Blocked { similar: Vec<Similar> },
 }
 
 pub struct TagQuery<'a> {
@@ -244,6 +253,7 @@ review policy).
 | Verb | Journal | Effect |
 |---|---|---|
 | remember | yes | a new open fact + indexes + similar hints |
+| remember_guarded | only if stored | the same bounded Jaccard/cosine check followed by a conditional insert, with no observable gap; blocked allocates no id, interns no terms and changes no journal/index |
 | revise | yes | close target (valid_to = new.valid_from), a new fact with revises=target |
 | forget | yes | tombstone immediately (recall hides it), physical purge in maintain |
 | remove_tag | yes | revise every current fact carrying the tag; facts and historical tag state survive |

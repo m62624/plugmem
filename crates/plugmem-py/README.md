@@ -130,17 +130,24 @@ db.remember(
 URI to the real payload goes, or a mime type, or a key in your own system — the
 fact stays short and searchable while the bulk stays wherever you keep bulk.
 
-`remember` returns the new id and any live facts that look like duplicates or
-contradictions:
+`remember` stores and returns the new id plus any live facts that look like
+duplicates or contradictions. Use `remember_guarded` when finding one must
+prevent the write:
 
 ```python
-out = db.remember("the user prefers async-std", entity="user")
-for hint in out.similar:
-    print(hint.id, hint.score, hint.reason)   # 0 0.87 LexicalOverlap
+decision = db.remember_guarded("the user prefers async-std", entity="user")
+if decision.status == "blocked":
+    for hint in decision.similar:
+        print(hint.id, hint.score, hint.reason)   # 0 0.87 LexicalOverlap
 ```
 
-The engine never merges on its own. You decide: `revise` if it changed,
-`forget` if it was wrong, or nothing if both are true at once.
+The database holds one write scope across the similarity check and conditional
+insertion, so two concurrent preflights cannot both pass. `blocked` has no `outcome` and
+creates no id, index entry or journal record. Ordinary `remember` is also an
+safe complete write; it simply always stores. You decide: `revise` if the old fact
+changed, `forget` if it was wrong, or call ordinary `remember` if both are true.
+Do not use `recall` as a preflight: it ranks the best context available and its
+fused score is not a similarity threshold.
 
 ## Two clocks
 
@@ -231,6 +238,7 @@ why that is the right shape and not a limitation.
 |---|---|
 | `Plugmem.open(path=None, *, dim=None, read_only=False, config=None)` | open or create; resolves `PLUGMEM_DB`, then `[database].path`, then the platform data path |
 | `remember(text, *, entity, tags, links, metadata, valid_from, vector)` | store one fact |
+| `remember_guarded(text, *, entity, tags, links, metadata, valid_from, vector)` | check similarity and store only if clear, without a check/write race |
 | `remember_many(facts)` | store a batch — one journal write, one embedding round trip |
 | `revise(id, text, ...)` | close a fact's interval and record the successor |
 | `recall(query=None, *, tags, entities, as_of, range, k, closed, token_budget, ef, graph_depth, vector)` | the ranked answer |
@@ -431,6 +439,7 @@ that can wait on I/O, an embedder, a lock, or database-sized work to
 import asyncio
 
 res = await asyncio.to_thread(db.recall, "tokio", k=5)
+decision = await asyncio.to_thread(db.remember_guarded, "prefers tokio", entity="user")
 page = await asyncio.to_thread(db.list_tags, prefix="project:", limit=64)
 report = await asyncio.to_thread(db.remove_tag, "obsolete")
 vectors = await asyncio.to_thread(db.reembed, 128)
@@ -440,7 +449,7 @@ Use this practical split inside an async application:
 
 | Call directly | Use `await asyncio.to_thread(...)` |
 |---|---|
-| `get`, `tags_of`, `stats`, `generation`, `path`, `config_warnings` | `open`, `remember`, `remember_many`, `revise`, `recall`, `forget`, `remove_tag`, `list_tags`, `link`, `unlink` |
+| `get`, `tags_of`, `stats`, `generation`, `path`, `config_warnings` | `open`, `remember`, `remember_guarded`, `remember_many`, `revise`, `recall`, `forget`, `remove_tag`, `list_tags`, `link`, `unlink` |
 | simple property/result access | `export`, `export_page`, `export_edges`, `verify`, `scrub`, `maintain`, `reembed`, `checkpoint`, `refresh`, `recover` |
 
 The left column only performs bounded in-memory reads and normally returns in

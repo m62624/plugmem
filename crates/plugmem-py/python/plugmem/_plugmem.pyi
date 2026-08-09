@@ -15,6 +15,7 @@ __all__ = [
     "ExportedFact",
     "FactRecord",
     "FactSnapshot",
+    "GuardedRememberOutcome",
     "InternalError",
     "InvalidArgError",
     "InvalidNameError",
@@ -271,6 +272,20 @@ class FactSnapshot:
         """
     def __repr__(self) -> builtins.str: ...
 
+@typing.final
+class GuardedRememberOutcome:
+    r"""
+    Result of `remember_guarded`. `status` is `"stored"` or `"blocked"`;
+    blocked calls have no `outcome` because they allocate no fact id.
+    """
+    @property
+    def outcome(self) -> typing.Optional[RememberOutcome]: ...
+    @property
+    def similar(self) -> builtins.list[Similar]: ...
+    @property
+    def status(self) -> typing.Literal["stored", "blocked"]: ...
+    def __repr__(self) -> builtins.str: ...
+
 class InternalError(PlugmemError):
     r"""
     A bug in this binding. Registered for parity with the other bindings' `PLUGMEM_INTERNAL`; this one has no path that raises it.
@@ -472,6 +487,12 @@ class Plugmem:
         
         The engine never merges on its own: `similar` is the hint, and what to
         do about it — revise, forget, keep both — is the caller's decision.
+        """
+    def remember_guarded(self, text: builtins.str, *, entity: typing.Optional[builtins.str] = None, tags: typing.Optional[typing.Sequence[builtins.str]] = None, links: typing.Optional[typing.Sequence[tuple[builtins.str, builtins.str]]] = None, metadata: typing.Optional[typing.Mapping[builtins.str, builtins.str]] = None, valid_from: typing.Optional[builtins.int] = None, vector: typing.Optional[typing.Sequence[builtins.float]] = None) -> GuardedRememberOutcome:
+        r"""
+        Store only when the same bounded Jaccard/cosine detector used by
+        `remember().similar` finds no candidate. The GIL is released while the
+        automatic embedder and race-free check/conditional-write operation run.
         """
     def remember_many(self, facts: collections.abc.Sequence[collections.abc.Mapping[builtins.str, typing.Any]]) -> builtins.list[RememberOutcome]:
         r"""
@@ -1220,6 +1241,7 @@ class WorkspaceMemory:
         The stable workspace name this reference addresses.
         """
     def remember(self, text: builtins.str, *, entity: typing.Optional[builtins.str] = None, tags: typing.Optional[typing.Sequence[builtins.str]] = None, links: typing.Optional[typing.Sequence[tuple[builtins.str, builtins.str]]] = None, metadata: typing.Optional[typing.Mapping[builtins.str, builtins.str]] = None, valid_from: typing.Optional[builtins.int] = None, vector: typing.Optional[typing.Sequence[builtins.float]] = None) -> RememberOutcome: ...
+    def remember_guarded(self, text: builtins.str, *, entity: typing.Optional[builtins.str] = None, tags: typing.Optional[typing.Sequence[builtins.str]] = None, links: typing.Optional[typing.Sequence[tuple[builtins.str, builtins.str]]] = None, metadata: typing.Optional[typing.Mapping[builtins.str, builtins.str]] = None, valid_from: typing.Optional[builtins.int] = None, vector: typing.Optional[typing.Sequence[builtins.float]] = None) -> GuardedRememberOutcome: ...
     def remember_many(self, facts: collections.abc.Sequence[collections.abc.Mapping[builtins.str, typing.Any]]) -> builtins.list[RememberOutcome]: ...
     def revise(self, id: builtins.int, text: builtins.str, *, entity: typing.Optional[builtins.str] = None, tags: typing.Optional[typing.Sequence[builtins.str]] = None, links: typing.Optional[typing.Sequence[tuple[builtins.str, builtins.str]]] = None, metadata: typing.Optional[typing.Mapping[builtins.str, builtins.str]] = None, valid_from: typing.Optional[builtins.int] = None, vector: typing.Optional[typing.Sequence[builtins.float]] = None) -> RememberOutcome: ...
     def recall(self, query: typing.Optional[builtins.str] = None, *, tags: typing.Optional[typing.Sequence[builtins.str]] = None, entities: typing.Optional[typing.Sequence[builtins.str]] = None, as_of: typing.Optional[builtins.int] = None, range: typing.Optional[tuple[builtins.int, builtins.int]] = None, k: builtins.int = ..., closed: builtins.bool = ..., token_budget: typing.Optional[builtins.int] = None, ef: typing.Optional[builtins.int] = None, graph_depth: typing.Optional[builtins.int] = None, vector: typing.Optional[typing.Sequence[builtins.float]] = None) -> RecallResult: ...

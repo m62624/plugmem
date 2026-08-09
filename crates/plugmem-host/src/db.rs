@@ -46,10 +46,10 @@ use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use memmap2::Mmap;
 use plugmem_core::{
-    Config, Error, FactFault, FactRecord, LinkInput, MaintainReport, MaintenanceMode,
-    MaintenanceOptions, MemStorage, Memory, OpenReport, RecallQuery, RecallResult, RecallScratch,
-    ReembedError, ReembedReport, RememberInput, RememberOutcome, RemoveTagReport, Stats, Storage,
-    TagPage, TagQuery, UnlinkInput,
+    Config, Error, FactFault, FactRecord, GuardedRememberOutcome, LinkInput, MaintainReport,
+    MaintenanceMode, MaintenanceOptions, MemStorage, Memory, OpenReport, RecallQuery, RecallResult,
+    RecallScratch, ReembedError, ReembedReport, RememberInput, RememberOutcome, RemoveTagReport,
+    Stats, Storage, TagPage, TagQuery, UnlinkInput,
 };
 
 thread_local! {
@@ -862,6 +862,37 @@ impl Database {
         }
         let out = engine.with(store, |mem, store| mem.remember(store, input))?;
         self.after_mutation(&mut st, input.now)?;
+        Ok(out)
+    }
+
+    /// Checks the ordinary `remember` similarity thresholds and stores only
+    /// when no live same-entity candidate crosses one. Automatic embedding runs
+    /// before the engine lock; no other write can slip between the check and
+    /// possible journaled mutation because both share one exclusive guard.
+    pub fn remember_guarded(
+        &self,
+        input: RememberInput<'_>,
+    ) -> Result<GuardedRememberOutcome, HostError> {
+        let embedded = match input.vector {
+            Some(_) => None,
+            None => self.embed_one(input.text)?,
+        };
+        let input = RememberInput {
+            vector: embedded
+                .as_ref()
+                .map(|(vector, _)| vector.as_slice())
+                .or(input.vector),
+            ..input
+        };
+        let mut st = self.write_available()?;
+        let vector_space = embedded.as_ref().map(|(_, space)| space.as_str());
+        let State { engine, store, .. } = &mut *st;
+        let out = engine.with(store, |mem, store| {
+            mem.remember_guarded_with_vector_space(store, input, vector_space)
+        })?;
+        if matches!(out, GuardedRememberOutcome::Stored { .. }) {
+            self.after_mutation(&mut st, input.now)?;
+        }
         Ok(out)
     }
 

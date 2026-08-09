@@ -36,9 +36,9 @@ use crate::db::{
 use crate::error::{self, Result};
 use crate::scrub::Scrub;
 use crate::types::{
-    DbEntry, ExportPage, ExportedEdge, ExportedFact, FactSnapshot, MaintainReport, RecallResult,
-    ReembedReport, ReindexReport, RememberOutcome, RemoveTagReport, Stats, TagPage,
-    WorkspaceProblem,
+    DbEntry, ExportPage, ExportedEdge, ExportedFact, FactSnapshot, GuardedRememberOutcome,
+    MaintainReport, RecallResult, ReembedReport, ReindexReport, RememberOutcome, RemoveTagReport,
+    Stats, TagPage, WorkspaceProblem,
 };
 
 /// Shared owner of the host workspace.
@@ -156,6 +156,39 @@ impl WorkspaceMemory {
             })
         })?;
         RememberOutcome::build(py, outcome)
+    }
+
+    #[pyo3(signature = (text, *, entity=None, tags=None, links=None, metadata=None, valid_from=None, vector=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn remember_guarded(
+        &self,
+        py: Python<'_>,
+        text: String,
+        entity: Option<String>,
+        tags: Option<Vec<String>>,
+        links: Option<Vec<(String, String)>>,
+        metadata: Option<BTreeMap<String, String>>,
+        valid_from: Option<u64>,
+        vector: Option<Vec<f32>>,
+    ) -> Result<GuardedRememberOutcome> {
+        let spec = RememberSpec {
+            text,
+            entity,
+            tags: tags.unwrap_or_default(),
+            links: links.unwrap_or_default(),
+            metadata,
+            valid_from,
+            vector: checked_vector(vector)?,
+        };
+        let target = self.target()?;
+        let now = now_ms();
+        let outcome = py.detach(move || {
+            target.with_database(IfMissing::Create, |db| {
+                spec.with_input(now, |input| db.remember_guarded(input))
+                    .map_err(error::engine)
+            })
+        })?;
+        GuardedRememberOutcome::build(py, outcome)
     }
 
     fn remember_many(

@@ -21,7 +21,9 @@ use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
-use plugmem_host::{Config, Database, FactId, ReadOnlyDatabase, RecallQuery, RememberInput};
+use plugmem_host::{
+    Config, Database, FactId, GuardedRememberOutcome, ReadOnlyDatabase, RecallQuery, RememberInput,
+};
 
 /// A unique temp directory per test; removed on drop.
 struct TempDir(PathBuf);
@@ -120,6 +122,48 @@ fn database_and_readonly_are_send_sync() {
     // The whole point of the design: share one handle across reader threads.
     _assert_send_sync::<Database>();
     _assert_send_sync::<ReadOnlyDatabase>();
+}
+
+#[test]
+fn concurrent_guarded_remembers_are_race_free_without_deadlock() {
+    run_with_deadline(10, "concurrent guarded remember", || {
+        let tmp = TempDir::new("guarded-race-free");
+        let (db, _) = Database::open(tmp.db(), Config::default()).unwrap();
+        let barrier = Arc::new(Barrier::new(3));
+        let mut workers = Vec::new();
+        for now in [1_000, 2_000] {
+            let db = db.clone();
+            let barrier = Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                db.remember_guarded(RememberInput {
+                    entity: Some("user"),
+                    ..RememberInput::text(now, "likes green tea every morning")
+                })
+                .unwrap()
+            }));
+        }
+        barrier.wait();
+        let outcomes: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, GuardedRememberOutcome::Stored { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, GuardedRememberOutcome::Blocked { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(db.stats().facts, 1);
+    });
 }
 
 #[test]

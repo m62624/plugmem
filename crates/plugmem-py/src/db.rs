@@ -38,8 +38,8 @@ use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pyme
 use crate::error::{self, Result};
 use crate::scrub::Scrub;
 use crate::types::{
-    ExportPage, ExportedEdge, ExportedFact, FactSnapshot, MaintainReport, RecallResult,
-    RecoverReport, ReembedReport, RememberOutcome, RemoveTagReport, Stats, TagPage,
+    ExportPage, ExportedEdge, ExportedFact, FactSnapshot, GuardedRememberOutcome, MaintainReport,
+    RecallResult, RecoverReport, ReembedReport, RememberOutcome, RemoveTagReport, Stats, TagPage,
 };
 
 /// Keep one native→Python transfer bounded, matching the Node binding's page
@@ -347,6 +347,41 @@ impl Plugmem {
                 .map_err(error::engine)
         })?;
         RememberOutcome::build(py, outcome)
+    }
+
+    /// Store only when the same bounded Jaccard/cosine detector used by
+    /// `remember().similar` finds no candidate. The GIL is released while the
+    /// automatic embedder and race-free check/conditional-write operation run.
+    #[pyo3(signature = (text, *, entity=None, tags=None, links=None, metadata=None, valid_from=None, vector=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn remember_guarded(
+        &self,
+        py: Python<'_>,
+        text: String,
+        entity: Option<String>,
+        tags: Option<Vec<String>>,
+        links: Option<Vec<(String, String)>>,
+        metadata: Option<BTreeMap<String, String>>,
+        valid_from: Option<u64>,
+        vector: Option<Vec<f32>>,
+    ) -> Result<GuardedRememberOutcome> {
+        let spec = RememberSpec {
+            text,
+            entity,
+            tags: tags.unwrap_or_default(),
+            links: links.unwrap_or_default(),
+            metadata,
+            valid_from,
+            vector: checked_vector(vector)?,
+        };
+        let now = now_ms();
+        let outcome = py.detach(|| {
+            let guard = self.handle.read().map_err(|_| error::busy("this memory"))?;
+            let db = writer(&guard)?;
+            spec.with_input(now, |input| db.remember_guarded(input))
+                .map_err(error::engine)
+        })?;
+        GuardedRememberOutcome::build(py, outcome)
     }
 
     /// Store a batch of facts and return one outcome per input.

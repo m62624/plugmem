@@ -210,6 +210,15 @@ export interface RememberOutcome {
    */
   similar: Array<Similar>
 }
+/**
+ * Result of `rememberGuarded`. Blocked results have no `outcome` because no
+ * fact id was allocated.
+ */
+export interface GuardedRememberOutcome {
+  status: 'stored' | 'blocked'
+  outcome?: RememberOutcome
+  similar: Array<Similar>
+}
 /** One recalled fact. */
 export interface RecalledFact {
   /** The fact id. */
@@ -671,6 +680,14 @@ export declare class Plugmem {
    */
   remember(args: RememberArgs): Promise<RememberOutcome>
   /**
+   * Stores only when the same bounded Jaccard/cosine detector used by
+   * `remember().similar` finds no candidate. No other write can slip between
+   * the check and possible write; a blocked result performs no mutation.
+   * Runs on a libuv worker because
+   * automatic embedding and durable writes are blocking work.
+   */
+  rememberGuarded(args: RememberArgs): Promise<GuardedRememberOutcome>
+  /**
    * Stores a batch of facts and resolves with one outcome per input.
    *
    * A batch may call a remote embedder and always performs one journal sync,
@@ -904,6 +921,7 @@ export declare class WorkspaceMemory {
   /** The stable workspace name this reference addresses. */
   name(): string
   remember(args: RememberArgs): Promise<RememberOutcome>
+  rememberGuarded(args: RememberArgs): Promise<GuardedRememberOutcome>
   rememberMany(args: Array<RememberArgs>): Promise<RememberOutcome[]>
   revise(id: number, args: RememberArgs): Promise<RememberOutcome>
   recall(args?: RecallArgs | undefined | null): Promise<RecallResult>

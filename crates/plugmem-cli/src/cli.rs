@@ -98,6 +98,11 @@ pub(crate) enum Command {
         /// `--vector "$(cat vec.txt)"`.
         #[arg(long, value_name = "F32,…", value_delimiter = ',', num_args = 1..)]
         vector: Vec<f32>,
+        /// Store only if the engine's bounded Jaccard/cosine detector finds no
+        /// similar live fact for this entity, without a check/write race. A
+        /// blocked call prints candidates and writes nothing.
+        #[arg(long)]
+        guarded: bool,
     },
     /// Retrieve a ranked, token-budgeted block; sources compose. Each line is
     /// `- [fN] text …`, where `N` is the fact's id — pass it to `forget`,

@@ -5,7 +5,8 @@
 //! unit-tested in `src/index/vecpool.rs`.
 
 use plugmem_core::{
-    Config, Error, FactId, MemStorage, Memory, RecallQuery, RememberInput, Storage,
+    Config, Error, FactId, GuardedRememberOutcome, MemStorage, Memory, RecallQuery, RememberInput,
+    Storage,
 };
 
 fn cfg(dim: usize) -> Config {
@@ -212,6 +213,58 @@ fn vector_similar_detection_fires() {
         out.similar[0].reason,
         plugmem_core::SimilarReason::VectorCosine
     );
+}
+
+#[test]
+fn guarded_vector_detection_matches_remember_and_leaves_no_blocked_slot() {
+    let dim = 64;
+    let mut guarded = (Memory::new(cfg(dim)).unwrap(), MemStorage::new());
+    let mut ordinary = (Memory::new(cfg(dim)).unwrap(), MemStorage::new());
+    let mut rng = Lcg(1234);
+    let base = rng.vector(dim);
+    for pair in [&mut guarded, &mut ordinary] {
+        pair.0
+            .remember(
+                &mut pair.1,
+                RememberInput {
+                    entity: Some("user"),
+                    vector: Some(&base),
+                    ..RememberInput::text(100, "lexically unrelated first")
+                },
+            )
+            .unwrap();
+    }
+    let mut near = base.clone();
+    near[0] += 0.001;
+    let query = RememberInput {
+        entity: Some("user"),
+        vector: Some(&near),
+        ..RememberInput::text(200, "different words entirely")
+    };
+    let blocked = guarded.0.remember_guarded(&mut guarded.1, query).unwrap();
+    let expected = ordinary.0.remember(&mut ordinary.1, query).unwrap().similar;
+    let got = match blocked {
+        GuardedRememberOutcome::Blocked { similar } => similar,
+        other => panic!("near vector must be blocked, got {other:?}"),
+    };
+    assert_eq!(got, expected);
+    assert_eq!(guarded.0.stats().vectors, 1);
+    assert_eq!(guarded.0.stats().facts, 1);
+
+    let orthogonal: Vec<f32> = base.iter().rev().map(|value| -*value).collect();
+    let stored = guarded
+        .0
+        .remember_guarded(
+            &mut guarded.1,
+            RememberInput {
+                entity: Some("user"),
+                vector: Some(&orthogonal),
+                ..RememberInput::text(300, "still unrelated text")
+            },
+        )
+        .unwrap();
+    assert!(matches!(stored, GuardedRememberOutcome::Stored { .. }));
+    assert_eq!(guarded.0.stats().vectors, 2);
 }
 
 #[test]

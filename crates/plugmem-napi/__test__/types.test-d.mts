@@ -13,6 +13,7 @@ import {
   type DbEntry,
   type ExportPage,
   type ExportedFact,
+  type GuardedRememberOutcome,
   type MaintainReport,
   type RecallResult,
   type ReindexReport,
@@ -37,6 +38,11 @@ const remembered: Promise<RememberOutcome> = db.remember({
   text: "prefers tokio",
   entity: "user",
 });
+const guarded: Promise<GuardedRememberOutcome> = db.rememberGuarded({
+  text: "prefers tokio",
+  entity: "user",
+});
+assertType<Exact<GuardedRememberOutcome["status"], "stored" | "blocked">>(true);
 const revised: Promise<RememberOutcome> = db.revise(0, { text: "prefers smol" });
 const recalledLater: Promise<RecallResult> = db.recall({ query: "tokio", k: 8 });
 const recalled: RecallResult = await recalledLater;
@@ -92,6 +98,7 @@ const ws = new Workspace("/srv/memories", { maxOpen: 8, idleTimeoutMs: 60_000 })
 const chat: WorkspaceMemory = ws.memory("chat-42");
 assertType<Exact<ReturnType<Workspace["memory"]>, WorkspaceMemory>>(true);
 const namedRemembered: Promise<RememberOutcome> = chat.remember({ text: "named" });
+const namedGuarded: Promise<GuardedRememberOutcome> = chat.rememberGuarded({ text: "named" });
 const namedRecallDefaultK: Promise<RecallResult> = chat.recall({ query: "named" });
 const namedRecallNoArgs: Promise<RecallResult> = chat.recall();
 const namedStats: Promise<Stats> = chat.stats();
@@ -125,6 +132,7 @@ export const used = {
   reembedded,
   checkpointed,
   rememberedMany,
+  guarded,
   tags,
   tagPage,
   removedTag,
@@ -142,6 +150,7 @@ export const used = {
   windowed,
   chat,
   namedRemembered,
+  namedGuarded,
   namedRecallDefaultK,
   namedRecallNoArgs,
   namedStats,

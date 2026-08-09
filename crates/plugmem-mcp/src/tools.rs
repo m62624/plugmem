@@ -620,6 +620,13 @@ fn remember(db: &Database, id: Value, args: Option<&Value>, revise: Option<FactI
         (Ok(valid_from), Ok(vector)) => (valid_from, vector),
         (Err(message), _) | (_, Err(message)) => return rpc::tool_result(id, message, true),
     };
+    let guarded = match args.and_then(|value| value.get("guarded")) {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => {
+            return rpc::tool_result(id, "`guarded` must be a boolean".into(), true);
+        }
+    };
     let input = RememberInput {
         entity: arg_str(args, "entity"),
         tags: &tag_refs,
@@ -632,13 +639,22 @@ fn remember(db: &Database, id: Value, args: Option<&Value>, revise: Option<FactI
         vector: vector.as_deref(),
         ..RememberInput::text(now_ms(), text)
     };
-    let res = match revise {
-        Some(target) => db.revise(target, input),
-        None => db.remember(input),
-    };
-    match res {
-        Ok(outcome) => rpc::tool_result(id, render(&outcome, format), false),
-        Err(e) => tool_error(id, &e),
+    if let Some(target) = revise {
+        return match db.revise(target, input) {
+            Ok(outcome) => rpc::tool_result(id, render(&outcome, format), false),
+            Err(error) => tool_error(id, &error),
+        };
+    }
+    if guarded {
+        match db.remember_guarded(input) {
+            Ok(outcome) => rpc::tool_result(id, render(&outcome, format), false),
+            Err(error) => tool_error(id, &error),
+        }
+    } else {
+        match db.remember(input) {
+            Ok(outcome) => rpc::tool_result(id, render(&outcome, format), false),
+            Err(error) => tool_error(id, &error),
+        }
     }
 }
 
@@ -849,6 +865,11 @@ fn remember_like(name: &str, description: &str, with_id: bool) -> Value {
     if with_id {
         props["id"] = json!({ "type": "integer", "minimum": 0, "description": messages::ARG_ID });
         required.push(json!("id"));
+    } else {
+        props["guarded"] = json!({
+            "type": "boolean",
+            "description": "Store only when no candidate crosses the configured Jaccard/cosine similarity thresholds, without a race between the check and write. A blocked result writes nothing; ordinary remember is also a safe write and always stores."
+        });
     }
     json!({
         "name": name,
@@ -1764,6 +1785,61 @@ mod tests {
             ))
             .contains("skill")
         );
+    }
+
+    #[test]
+    fn guarded_remember_argument_is_race_free_and_returns_a_typed_decision() {
+        let tmp = TempDir::new("guarded");
+        let (db, _) = Database::open(tmp.db(), Config::default()).unwrap();
+        assert_eq!(
+            remember_def()["inputSchema"]["properties"]["guarded"]["type"],
+            "boolean"
+        );
+
+        let stored = call(
+            &db,
+            json!(1),
+            Some(&params(
+                REMEMBER,
+                json!({
+                    "text": "likes green tea every morning",
+                    "entity": "user",
+                    "guarded": true,
+                }),
+            )),
+        );
+        let stored: Value = serde_json::from_str(&text(&stored)).unwrap();
+        assert_eq!(stored["status"], "stored");
+        assert_eq!(stored["outcome"]["id"], 0);
+
+        let blocked = call(
+            &db,
+            json!(2),
+            Some(&params(
+                REMEMBER,
+                json!({
+                    "text": "likes green tea each morning",
+                    "entity": "user",
+                    "guarded": true,
+                }),
+            )),
+        );
+        let blocked: Value = serde_json::from_str(&text(&blocked)).unwrap();
+        assert_eq!(blocked["status"], "blocked");
+        assert_eq!(blocked["similar"][0]["id"], 0);
+        assert_eq!(db.stats().facts, 1);
+
+        let invalid = call(
+            &db,
+            json!(3),
+            Some(&params(
+                REMEMBER,
+                json!({ "text": "must not be stored", "guarded": "yes" }),
+            )),
+        );
+        assert!(is_error(&invalid));
+        assert!(text(&invalid).contains("must be a boolean"));
+        assert_eq!(db.stats().facts, 1);
     }
 
     #[test]

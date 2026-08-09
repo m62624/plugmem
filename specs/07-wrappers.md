@@ -31,7 +31,7 @@ Commands (all read verbs take `--json`; human output is the default):
 
 | Command | What |
 |---|---|
-| `remember "text" [--entity E] [--tag T]… [--link REL:ENTITY]… [--meta KEY=VALUE]… [--valid-from TS]` | remember; prints id + similar hints. `--meta` is repeatable, last-wins per key |
+| `remember "text" [--guarded] [--entity E] [--tag T]… [--link REL:ENTITY]… [--meta KEY=VALUE]… [--valid-from TS]` | remember; prints id + similar hints. `--guarded` stores only when the similarity detector is clear, without a check/write race. `--meta` is repeatable, last-wins per key |
 | `recall [QUERY] [--tag]… [--entity]… [--as-of TS] [--range A B] [-k N] [--closed]` | recall; human output is the `rendered` block |
 | `revise ID "text" […]` | revise (same flags as remember) |
 | `forget ID` | forget |
@@ -62,8 +62,11 @@ read-only server adds `plugmem_generation` / `plugmem_refresh` (cross-process fr
 and refuses the write verbs. (`scrub` and `recover` are deliberately absent: the server
 is judged by what an agent should be handed, not by what host has — see the wrapper
 parity rule in `AGENTS.md`. `import` is a CLI feature, not a host verb.) Each tool
-takes `format` ("json" default | "human"). `plugmem_remember`'s description says
-outright: "if similar contains a contradiction, decide: plugmem_revise or keep both".
+takes `format` ("json" default | "human"). `plugmem_remember` has an optional
+`guarded` boolean rather than a second tool: false/absent always stores and
+returns hints; true performs the check and conditional store as one operation.
+Its description also says outright that a blocked or similar result is a
+decision for the caller, not an automatic merge.
 
 The server owns one database (path from argument/env as in the CLI), the embedder from
 the same config. With `--workspace DIR` it instead serves a directory of named memories,
@@ -114,6 +117,13 @@ than asserted: `tests/test_parity.py` reads napi's generated `index.d.ts` and
 its `error.rs`, maps camelCase to snake_case, and fails in both directions.
 `Plugmem` 26 verbs, `Scrub` 3, `Workspace` 12, `WorkspaceMemory` 21, plus the
 module functions.
+
+The guarded result has the same runtime shape on both boundaries: `status` is
+exactly `"stored" | "blocked"`, `outcome` is present only for stored, and
+`similar` carries the blocking candidates. napi generates the status enum and
+`index.d.ts`; PyO3 exposes the same strings and the generated stub narrows them
+to `typing.Literal["stored", "blocked"]`. Direct handles and
+`WorkspaceMemory` both expose the verb.
 
 **No async layer, by the same reasoning that produced one in napi.** Node has a
 single thread that runs JavaScript, so the blocking verbs had to move to a libuv

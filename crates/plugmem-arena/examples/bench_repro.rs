@@ -217,9 +217,9 @@ struct Row {
     alloc: Option<AllocStat>,
 }
 
-fn emit(n: usize, rows: &[Row]) {
+fn emit(n: usize, lookups: usize, scan: usize, rows: &[Row]) {
     println!(
-        "bench_repro: N={n}, lookups={LOOKUPS}, scan={SCAN}, reps={REPS} (best kept), \
+        "bench_repro: N={n}, lookups={lookups}, scan={scan}, reps={REPS} (best kept), \
          latency pass: single, clock overhead included in p50"
     );
     // Machine-readable: one `#M <structure> <metric> <value>` line each.
@@ -229,10 +229,10 @@ fn emit(n: usize, rows: &[Row]) {
             m.push(("insert_ns", v as f64 / n as f64));
         }
         if let Some(v) = r.get_ns {
-            m.push(("get_ns", v as f64 / LOOKUPS as f64));
+            m.push(("get_ns", v as f64 / lookups.max(1) as f64));
         }
         if let Some(v) = r.scan_ns {
-            m.push(("scan_ns", v as f64 / SCAN as f64));
+            m.push(("scan_ns", v as f64 / scan.max(1) as f64));
         }
         if let Some(t) = &r.tail {
             m.push(("ins_p50", t.p50 as f64));
@@ -257,14 +257,18 @@ fn main() {
         .nth(1)
         .and_then(|a| a.parse().ok())
         .unwrap_or(100_000);
+    assert!(n > 0, "corpus size must be greater than zero");
     let keys: Vec<u64> = {
         let mut rng = xorshift(0xB0B5_1234_5678_9ABC);
         (0..n).map(|_| rng()).collect()
     };
-    let hit_keys: Vec<u64> = keys.iter().step_by(n / LOOKUPS).copied().collect();
+    let lookup_step = (n / LOOKUPS).max(1);
+    let hit_keys: Vec<u64> = keys.iter().step_by(lookup_step).copied().collect();
     let mut sorted = keys.clone();
     sorted.sort_unstable();
-    let (scan_from, scan_to) = (sorted[n / 2], sorted[n / 2 + SCAN]);
+    let scan_start = n / 2;
+    let scan_width = SCAN.min((n - 1).saturating_sub(scan_start));
+    let (scan_from, scan_to) = (sorted[scan_start], sorted[scan_start + scan_width]);
 
     let mut rows = Vec::new();
 
@@ -670,5 +674,5 @@ fn main() {
         });
     }
 
-    emit(n, &rows);
+    emit(n, hit_keys.len(), scan_width, &rows);
 }

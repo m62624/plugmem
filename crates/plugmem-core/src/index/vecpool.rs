@@ -272,6 +272,21 @@ impl<'a> VecPool<'a> {
         self.encode_slot(fact.0, v, out)
     }
 
+    /// Quantized cosine between a complete encoded query slot and one stored
+    /// slot. Similarity guarding encodes the incoming vector once, then uses
+    /// this for its bounded candidate scan without appending to the pool.
+    pub(crate) fn cosine_encoded_slot(&self, encoded: &[u8], slot: u32) -> f32 {
+        let stride = self.stride();
+        if encoded.len() != stride || slot as usize >= self.len() {
+            return 0.0;
+        }
+        let q_off = HEAD + Self::words(self.dim) * SIG_WORD_BYTES;
+        let stored = self.slot_bytes(slot as usize);
+        let query_scale = f32::from_le_bytes(encoded[FACT_BYTES..HEAD].try_into().unwrap());
+        let dot = dot_i8(&encoded[q_off..stride], &stored[q_off..stride]);
+        query_scale * self.slot_scale(slot as usize) * dot as f32
+    }
+
     /// Quantizes `v` and appends it as `fact`'s slot, returning the slot
     /// index. Ids are not stored sorted — the fact record keeps the index.
     ///

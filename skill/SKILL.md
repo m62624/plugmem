@@ -23,6 +23,8 @@ database (snapshot, journal and lock), with no server. Its main verbs are:
 
 - **remember** — store one durable fact: short text, optional subject entity,
   tags, optional embedding vector, optional `valid_from`.
+- **guarded remember** — check the normal bounded similarity detector and store
+  only if it is clear, with no race between the check and possible write.
 - **recall** — ask for context: text and/or vector and/or tags/entities/time;
   you get a ranked, token-budgeted block (`rendered`) ready for the prompt.
 - **revise** — close an old fact and chain its successor (history survives:
@@ -78,15 +80,26 @@ paste the block, don't re-rank it yourself.
 
 ## The contradiction loop — you decide, never the engine
 
-`remember` returns the new id **plus any similar or potentially-conflicting
-live facts**. The engine never merges, revises or deletes on its own — it
-surfaces the tension and hands you the choice:
+Ordinary `remember` stores the new fact and returns its id **plus any similar or
+potentially-conflicting live facts**. Use guarded remember (`remember
+--guarded` in the CLI, `guarded:true` in MCP) when finding a candidate must
+leave the memory unchanged. Its check and conditional write are one operation,
+so concurrent callers cannot both pass a read-only preflight. A blocked result
+has no new fact id.
+
+Never use `recall` as a duplicate/conflict check. Recall ranks the best context
+available and may return a weak nearest vector; its fused score is neither
+cosine similarity nor the detector threshold.
+
+The engine never merges, revises or deletes on its own — it surfaces the
+tension and hands you the choice:
 
 - **revise** (`revise <id> "<new text>"`) — the fact *changed*. The old fact is
   closed and chained to the successor, so history survives: a later
   `recall --as-of <then>` still sees the old value.
 - **keep both** — the facts are compatible truths (two preferences, two
-  projects). Do nothing; both stay live.
+  projects). After ordinary remember, do nothing; after a guarded block, repeat
+  with ordinary remember to make that choice explicit.
 - **forget** (`forget <id>`) — the old fact was simply *wrong*. It is
   tombstoned immediately and physically purged at the next `maintain`.
 
@@ -248,7 +261,7 @@ MANDATORY.
 
   | Verb | Shape |
   |------|-------|
-  | `remember` | `remember "<text>" [--entity E] [--tag T]… [--link REL:ENTITY]… [--meta K=V]… [--valid-from MS] [--vector F32,…]` |
+  | `remember` | `remember "<text>" [--guarded] [--entity E] [--tag T]… [--link REL:ENTITY]… [--meta K=V]… [--valid-from MS] [--vector F32,…]` |
   | `recall` | `recall ["<query>"] [--tag T]… [--entity E]… [--as-of MS] [--range FROM TO] [-k N] [--closed] [--token-budget N] [--ef N] [--graph-depth N] [--vector F32,…]` |
   | `revise` | `revise <id> "<text>" [same flags as remember]` |
   | `forget` | `forget <id>` |
@@ -332,7 +345,9 @@ MANDATORY.
   non-negative unix-millisecond number. A malformed one is a tool error rather
   than an answer computed without it. `plugmem_remember`, `plugmem_revise` and
   `plugmem_recall` also take an optional `vector` — a precomputed embedding
-  that replaces the configured embedder for that call.
+  that replaces the configured embedder for that call. `plugmem_remember`
+  additionally accepts `guarded:true`: a similarity hit returns `blocked`
+  without allocating an id or changing the memory.
 
 - **Neither →** plugmem is not installed here. Say so; do not fabricate
   memories. Install: https://github.com/m62624/plugmem

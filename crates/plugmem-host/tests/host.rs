@@ -8,9 +8,9 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use plugmem_host::{
-    Config, Database, Embedder, FactId, FsyncPolicy, HostError, LinkInput, NullEmbedder,
-    OpenAiCompatEmbedder, ReadOnlyDatabase, RecallQuery, RememberInput, ShardLayout, TagQuery,
-    UnlinkInput,
+    Config, Database, Embedder, FactId, FsyncPolicy, GuardedRememberOutcome, HostError, LinkInput,
+    NullEmbedder, OpenAiCompatEmbedder, ReadOnlyDatabase, RecallQuery, RememberInput, ShardLayout,
+    TagQuery, UnlinkInput,
 };
 
 /// A unique temp directory per test; removed on drop.
@@ -100,6 +100,36 @@ fn open_remember_reopen_replays_the_journal() {
         })
         .unwrap();
     assert_eq!(historical.edges.len(), 1);
+}
+
+#[test]
+fn guarded_remember_persists_only_the_clear_path() {
+    let tmp = TempDir::new("guarded-roundtrip");
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    let stored = db
+        .remember_guarded(RememberInput {
+            entity: Some("user"),
+            ..RememberInput::text(1_000, "likes green tea every morning")
+        })
+        .unwrap();
+    assert!(matches!(stored, GuardedRememberOutcome::Stored { .. }));
+    let blocked = db
+        .remember_guarded(RememberInput {
+            entity: Some("user"),
+            ..RememberInput::text(2_000, "likes green tea each morning")
+        })
+        .unwrap();
+    let similar = match blocked {
+        GuardedRememberOutcome::Blocked { similar } => similar,
+        other => panic!("near duplicate must be blocked, got {other:?}"),
+    };
+    assert_eq!(similar.len(), 1);
+    assert_eq!(db.stats().facts, 1);
+    drop(db);
+
+    let (reopened, report) = Database::open(tmp.db(), cfg()).unwrap();
+    assert_eq!(report.replayed, 1, "blocked call wrote no journal record");
+    assert_eq!(reopened.stats().facts, 1);
 }
 
 #[test]

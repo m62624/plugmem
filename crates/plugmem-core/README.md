@@ -161,11 +161,15 @@ let report = mem.maintain(&mut store, 3_000).unwrap();
 assert_eq!(report.purged, 1); // the bytes are reclaimed
 ```
 
-**Conflict surfacing on remember.** A new `remember` returns the live
-facts it may duplicate or contradict; the engine never merges on its own.
+**Conflict surfacing and guarded insertion.** A new `remember` stores first and
+returns the live facts it may duplicate or contradict. When the decision must
+happen before a write, `remember_guarded` runs the same bounded Jaccard/cosine
+detector and the possible insertion without a race between those steps. A
+blocked call allocates no fact id, interns no terms and appends no journal
+record. Ordinary `remember` is also a safe complete write; it always stores.
 
 ```rust
-use plugmem_core::{Config, MemStorage, Memory, RememberInput};
+use plugmem_core::{Config, GuardedRememberOutcome, MemStorage, Memory, RememberInput};
 
 let mut store = MemStorage::new();
 let mut mem = Memory::new(Config::default()).unwrap();
@@ -175,15 +179,23 @@ mem.remember(&mut store, RememberInput {
     ..RememberInput::text(1_000, "prefers tokio")
 }).unwrap();
 
-let out = mem.remember(&mut store, RememberInput {
+let decision = mem.remember_guarded(&mut store, RememberInput {
     entity: Some("user"),
     ..RememberInput::text(2_000, "prefers the tokio runtime")
 }).unwrap();
-for hit in &out.similar {
-    // decide yourself: revise the old one, drop this one, or keep both
-    println!("possible conflict with fact {:?}", hit.id);
+
+if let GuardedRememberOutcome::Blocked { similar } = decision {
+    for hit in similar {
+        // decide yourself: revise the old one, use ordinary remember to keep
+        // both compatible facts, or forget an incorrect old fact
+        println!("possible conflict with fact {:?}", hit.id);
+    }
 }
 ```
+
+Do not use `recall` as this preflight. Recall always ranks the best available
+context and may return a weak nearest vector; its fused score is not cosine or
+a conflict threshold.
 
 **Filtered recall — tags, entity, time range.** Sources compose: text
 ranking, a tag filter, an entity anchor and a `recorded_at` window in one
@@ -239,6 +251,7 @@ historical edge indexes.
 | Verb | Effect |
 |---|---|
 | `remember` | new fact + indexes + similar-fact hints (Jaccard term overlap, vector cosine) |
+| `remember_guarded` | check with the same bounded similarity detector and store only when clear, without a check/write race |
 | `recall` | hybrid ranked retrieval, zero allocations after warm-up |
 | `revise` | close the predecessor, record the successor, keep the chain |
 | `forget` | immediate tombstone; physical purge at `maintain` |

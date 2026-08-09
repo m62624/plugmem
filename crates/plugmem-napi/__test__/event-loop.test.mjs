@@ -140,7 +140,7 @@ test("workspace leases never wait on the event loop and capacity fails fast", as
   const ws = new Workspace(dir, { config, maxOpen: 1 });
   let active;
   try {
-    active = ws.memory("active").remember({ text: "holds one scoped lease" });
+    active = ws.memory("active").rememberGuarded({ text: "holds one scoped lease" });
     await requestArrived;
 
     // The mock server itself runs on this event loop, so reaching here already
@@ -157,7 +157,8 @@ test("workspace leases never wait on the event loop and capacity fails fast", as
       loopTurned = true;
       answer();
     });
-    await active;
+    const guarded = await active;
+    assert.equal(guarded.status, "stored");
     assert.equal(loopTurned, true, "the JS loop ran while the lease was active");
     const workspaceReport = await ws.memory("active").reembed(1);
     assert.equal(workspaceReport.newSpace, "mock-space@v1");

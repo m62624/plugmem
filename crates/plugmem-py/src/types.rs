@@ -131,6 +131,56 @@ impl RememberOutcome {
     }
 }
 
+/// Result of `remember_guarded`. `status` is `"stored"` or `"blocked"`;
+/// blocked calls have no `outcome` because they allocate no fact id.
+#[gen_stub_pyclass]
+#[pyclass(frozen, module = "plugmem._plugmem")]
+pub struct GuardedRememberOutcome {
+    status: String,
+    #[pyo3(get)]
+    pub outcome: Option<Py<RememberOutcome>>,
+    #[pyo3(get)]
+    pub similar: Vec<Py<Similar>>,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl GuardedRememberOutcome {
+    #[getter]
+    #[gen_stub(override_return_type(
+        type_repr = "typing.Literal[\"stored\", \"blocked\"]",
+        imports = ("typing")
+    ))]
+    fn status(&self) -> &str {
+        &self.status
+    }
+
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let value = self.status.clone().into_pyobject(py)?;
+        Ok(format!("GuardedRememberOutcome(status={})", value.repr()?))
+    }
+}
+
+impl GuardedRememberOutcome {
+    pub fn build(py: Python<'_>, outcome: plugmem_host::GuardedRememberOutcome) -> PyResult<Self> {
+        match outcome {
+            plugmem_host::GuardedRememberOutcome::Stored { outcome } => Ok(Self {
+                status: "stored".to_owned(),
+                outcome: Some(Py::new(py, RememberOutcome::build(py, outcome)?)?),
+                similar: Vec::new(),
+            }),
+            plugmem_host::GuardedRememberOutcome::Blocked { similar } => Ok(Self {
+                status: "blocked".to_owned(),
+                outcome: None,
+                similar: similar
+                    .into_iter()
+                    .map(|item| Py::new(py, Similar::from(item)))
+                    .collect::<PyResult<Vec<_>>>()?,
+            }),
+        }
+    }
+}
+
 /// One recalled fact.
 #[gen_stub_pyclass]
 #[pyclass(frozen, get_all, module = "plugmem._plugmem")]
@@ -949,6 +999,7 @@ impl SettingsHelpResult {
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Similar>()?;
     module.add_class::<RememberOutcome>()?;
+    module.add_class::<GuardedRememberOutcome>()?;
     module.add_class::<RecalledFact>()?;
     module.add_class::<RecalledEdge>()?;
     module.add_class::<RecallResult>()?;

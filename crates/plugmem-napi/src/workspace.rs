@@ -164,6 +164,14 @@ impl WorkspaceMemory {
         writer_remember_task(self.source()?, args, None)
     }
 
+    #[napi(ts_return_type = "Promise<GuardedRememberOutcome>")]
+    pub fn remember_guarded(
+        &self,
+        args: RememberArgs,
+    ) -> Result<AsyncTask<crate::db::GuardedRememberTask>> {
+        crate::db::writer_guarded_remember_task(self.source()?, args)
+    }
+
     #[napi(ts_return_type = "Promise<RememberOutcome[]>")]
     pub fn remember_many(&self, args: Vec<RememberArgs>) -> Result<AsyncTask<RememberManyTask>> {
         writer_remember_many_task(self.source()?, args)

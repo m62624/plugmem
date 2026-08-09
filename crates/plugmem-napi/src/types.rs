@@ -71,6 +71,33 @@ impl From<plugmem_host::RememberOutcome> for RememberOutcome {
     }
 }
 
+/// Result of `rememberGuarded`. Blocked results have no `outcome` because no
+/// fact id was allocated.
+#[napi(object)]
+pub struct GuardedRememberOutcome {
+    #[napi(ts_type = "'stored' | 'blocked'")]
+    pub status: String,
+    pub outcome: Option<RememberOutcome>,
+    pub similar: Vec<Similar>,
+}
+
+impl From<plugmem_host::GuardedRememberOutcome> for GuardedRememberOutcome {
+    fn from(outcome: plugmem_host::GuardedRememberOutcome) -> Self {
+        match outcome {
+            plugmem_host::GuardedRememberOutcome::Stored { outcome } => Self {
+                status: "stored".to_owned(),
+                outcome: Some(RememberOutcome::from(outcome)),
+                similar: Vec::new(),
+            },
+            plugmem_host::GuardedRememberOutcome::Blocked { similar } => Self {
+                status: "blocked".to_owned(),
+                outcome: None,
+                similar: similar.into_iter().map(Similar::from).collect(),
+            },
+        }
+    }
+}
+
 /// One recalled fact.
 #[napi(object)]
 #[derive(serde::Deserialize)]

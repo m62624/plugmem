@@ -3,8 +3,8 @@
 //! property: replaying the journal reproduces the direct execution.
 
 use plugmem_core::{
-    Config, Error, FactId, LinkInput, MemStorage, Memory, RecallQuery, RememberInput, Storage,
-    TagQuery, UnlinkInput, VALID_TO_OPEN,
+    Config, Error, FactId, GuardedRememberOutcome, LinkInput, MemStorage, Memory, RecallQuery,
+    RememberInput, Storage, TagQuery, UnlinkInput, VALID_TO_OPEN,
 };
 #[cfg(not(target_family = "wasm"))]
 use proptest::prelude::*;
@@ -889,6 +889,128 @@ fn similar_detection_surfaces_conflicts_but_never_acts() {
         !flagged.contains(&first.id),
         "closed facts are history, not conflicts"
     );
+}
+
+#[test]
+fn guarded_remember_blocks_without_mutating_and_stores_when_clear() {
+    let (mut mem, mut store) = engine();
+    let first = mem
+        .remember(
+            &mut store,
+            RememberInput {
+                entity: Some("user"),
+                ..RememberInput::text(100, "alpha beta gamma")
+            },
+        )
+        .unwrap();
+    let before = mem.stats();
+    let journal_before = store.read_journal().unwrap();
+
+    let blocked = mem
+        .remember_guarded(
+            &mut store,
+            RememberInput {
+                entity: Some("user"),
+                // The two unknown terms belong in the Jaccard union but a
+                // blocked read must not intern them.
+                ..RememberInput::text(200, "alpha beta gamma unseen delta")
+            },
+        )
+        .unwrap();
+    let similar = match blocked {
+        GuardedRememberOutcome::Blocked { similar } => similar,
+        other => panic!("near duplicate must be blocked, got {other:?}"),
+    };
+    assert_eq!(similar.len(), 1);
+    assert_eq!(similar[0].id, first.id);
+    assert!((similar[0].score - 0.6).abs() < 1e-6);
+    assert_eq!(mem.stats().facts, before.facts);
+    assert_eq!(mem.stats().next_fact, before.next_fact);
+    assert_eq!(mem.stats().terms, before.terms);
+    assert_eq!(store.read_journal().unwrap(), journal_before);
+
+    let stored = mem
+        .remember_guarded(
+            &mut store,
+            RememberInput {
+                entity: Some("user"),
+                ..RememberInput::text(300, "prefers strong coffee")
+            },
+        )
+        .unwrap();
+    let outcome = match stored {
+        GuardedRememberOutcome::Stored { outcome } => outcome,
+        other => panic!("unrelated fact must be stored, got {other:?}"),
+    };
+    assert_eq!(outcome.id, FactId(1));
+    assert!(outcome.similar.is_empty());
+    assert_eq!(mem.facts_len(), 2);
+    let (reopened, _) = Memory::open(&mut store, cfg()).unwrap();
+    assert_eq!(reopened.facts_len(), 2);
+}
+
+#[test]
+fn guarded_and_unconditional_remember_use_the_same_lexical_detector() {
+    let mut guarded = engine();
+    let mut ordinary = engine();
+    for (at, text) in [
+        (100, "likes green tea every morning"),
+        (200, "works on a storage engine"),
+        (300, "prefers concise technical answers"),
+    ] {
+        let input = RememberInput {
+            entity: Some("user"),
+            ..RememberInput::text(at, text)
+        };
+        guarded.0.remember(&mut guarded.1, input).unwrap();
+        ordinary.0.remember(&mut ordinary.1, input).unwrap();
+    }
+    let query = RememberInput {
+        entity: Some("user"),
+        ..RememberInput::text(400, "likes green tea each morning")
+    };
+    let blocked = guarded.0.remember_guarded(&mut guarded.1, query).unwrap();
+    let expected = ordinary.0.remember(&mut ordinary.1, query).unwrap().similar;
+    let got = match blocked {
+        GuardedRememberOutcome::Blocked { similar } => similar,
+        other => panic!("query must be blocked, got {other:?}"),
+    };
+    assert_eq!(got, expected);
+}
+
+#[test]
+fn blocked_guard_does_not_claim_an_automatic_vector_space() {
+    let mut config = cfg();
+    config.dim = 2;
+    let mut memory = Memory::new(config).unwrap();
+    let mut storage = MemStorage::new();
+    memory
+        .remember(
+            &mut storage,
+            RememberInput {
+                entity: Some("user"),
+                ..RememberInput::text(100, "likes green tea every morning")
+            },
+        )
+        .unwrap();
+    let journal_before = storage.read_journal().unwrap();
+
+    let decision = memory
+        .remember_guarded_with_vector_space(
+            &mut storage,
+            RememberInput {
+                entity: Some("user"),
+                vector: Some(&[1.0, 0.0]),
+                ..RememberInput::text(200, "likes green tea each morning")
+            },
+            Some("model@revision"),
+        )
+        .unwrap();
+
+    assert!(matches!(decision, GuardedRememberOutcome::Blocked { .. }));
+    assert_eq!(memory.vector_space(), None);
+    assert_eq!(storage.read_journal().unwrap(), journal_before);
+    assert_eq!(memory.stats().vectors, 0);
 }
 
 /// The similar-detection prefilter must not change the answer.

@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import plugmem
@@ -96,7 +97,7 @@ def test_remember_releases_the_interpreter(embedder_url: str, tmp_path) -> None:
 
         def writer(index: int) -> None:
             try:
-                db.remember(f"fact number {index}", entity=f"e{index}")
+                db.remember_guarded(f"fact number {index}", entity=f"e{index}")
             except BaseException as exc:  # noqa: BLE001 — reported, not swallowed
                 errors.append(exc)
 
@@ -112,6 +113,26 @@ def test_remember_releases_the_interpreter(embedder_url: str, tmp_path) -> None:
             "across remember(), so nothing else in the process could run"
         )
         assert db.stats().facts == WRITERS
+
+
+def test_parallel_guarded_writes_are_race_free_and_do_not_deadlock(tmp_path) -> None:
+    with plugmem.Plugmem.open(str(tmp_path / "guarded.plugmem")) as db:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(
+                    db.remember_guarded,
+                    "same durable fact",
+                    entity="user",
+                )
+                for _ in range(2)
+            ]
+            outcomes = [future.result(timeout=30) for future in futures]
+
+        assert sorted(outcome.status for outcome in outcomes) == ["blocked", "stored"]
+        blocked = next(outcome for outcome in outcomes if outcome.status == "blocked")
+        assert blocked.outcome is None
+        assert len(blocked.similar) == 1
+        assert db.stats().facts == 1
 
 
 def test_reads_run_concurrently_on_one_handle(tmp_path) -> None:

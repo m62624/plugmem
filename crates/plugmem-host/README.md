@@ -141,6 +141,16 @@ it when a fact was wrong, not when it changed.
 Edges are temporal the same way, so an `as_of` traversal walks the graph as it
 stood then — through relationships that have since been unlinked.
 
+When a caller wants to reject a likely duplicate before writing, use
+`Database::remember_guarded`. It embeds before taking the write guard, then
+holds that guard across the similarity check and conditional insertion. Two
+concurrent preflights therefore cannot both pass. `Blocked` means no id, journal
+record or index mutation was created;
+`Stored` contains the ordinary `RememberOutcome`. Ordinary `remember` is also
+a safe complete write, but it always stores and then returns its similarity hints.
+`recall` is not a substitute: it ranks the best available context even when a
+nearest vector is weak.
+
 ## What `plugmem-host` adds
 
 The retrieval above lives in the engine; this crate adds the OS side:
