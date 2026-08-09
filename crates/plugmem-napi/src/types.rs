@@ -395,7 +395,7 @@ impl From<MaintainMode> for plugmem_host::MaintenanceOptions {
 /// round-trip it would be the wrong direction of dependency.
 #[napi(object)]
 pub struct DbEntry {
-    /// The memory's name — its identity, and what `Workspace.open` takes.
+    /// The memory's name — its identity, and what `Workspace.memory` takes.
     pub db: String,
     /// What it is for.
     pub description: String,

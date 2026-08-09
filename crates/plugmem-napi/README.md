@@ -461,12 +461,13 @@ returns a promise instead.
 
 Promises: `Plugmem.open`, `remember`, `rememberMany`, `revise`, `recall`,
 `forget`, `link`, `unlink`, `export`, `exportPage`, `verify`, `maintain`,
-`checkpoint`, and every `Workspace` verb except `closeIdle`, `openCount` and
-`close`.
+`checkpoint`, every database verb on `WorkspaceMemory`, and every registry
+verb on `Workspace`.
 
-Synchronous: `path`, `get`, `stats`, `tagsOf`, `generation`, `refresh`, `close`.
-These touch mapped memory and return in microseconds, where a promise would be
-pure ceremony.
+Synchronous: the direct handle's `path`, `get`, `stats`, `tagsOf`, `generation`,
+`refresh`, `close`; and `Workspace.memory`, `release`, `closeIdle`, `openCount`,
+`close`. Creating a logical reference touches no file. Its own database verbs
+are promises because acquiring a cold lease may open and replay a file.
 
 Arguments are still checked on your thread: a refused one **throws** at the call
 site rather than rejecting later, so a mistake in your code and a failure in the
@@ -542,13 +543,13 @@ import { Workspace, type DbEntry } from "plugmem";
 
 const ws = new Workspace("/srv/memories");
 
-// The same `Plugmem` class comes back, so a named memory has exactly the verbs
-// a path-opened one has. A first write to an unused name creates it.
-const chat = await ws.open("chat-42");
+// This is only a name plus a weak reference to `ws`: no file is opened and no
+// writer lock is held until a verb runs. A first write creates the memory.
+const chat = ws.memory("chat-42");
 await chat.remember({ text: "prefers tokio" });
 
 // Another name is another memory. They cannot see each other.
-const other = await ws.open("chat-99");
+const other = ws.memory("chat-99");
 (await other.recall({ query: "tokio" })).facts.length;   // 0
 ```
 
@@ -568,10 +569,10 @@ const byOwner: DbEntry[] = await ws.find("ann");            // → the same memo
 ```
 
 A name is `[a-z0-9][a-z0-9_-]*` and **cannot express a path**, so it resolves to
-exactly one named database inside the directory — traversal is not filtered out, it is
-unconstructible. `ws.open(name, false)` refuses a name that does not exist yet,
-which is what a read should do so a typo is diagnosed rather than answered with
-an empty result.
+exactly one named database inside the directory — traversal is not filtered out,
+it is unconstructible. `memory(name)` itself creates nothing. A write verb creates
+an unused name; a read verb refuses it, so a typo is diagnosed rather than
+answered with an empty result.
 
 **Who may reach which memory is not this package's job.** The name comes from
 your code, so the policy belongs there.
@@ -580,7 +581,8 @@ your code, so the policy belongs there.
 
 | Method | Does |
 |---|---|
-| `open(name, create?)` | open (default: create if missing) and hand back a `Plugmem` |
+| `memory(name)` | return a lock-free logical `WorkspaceMemory` reference |
+| `release(name)` | evict one inactive pooled handle; references remain valid |
 | `list()` | every memory in the directory, from the filesystem — including undescribed ones |
 | `entries()` | every described memory, from the registry |
 | `find(query, k?)` | memories whose description or owner best matches |
@@ -592,20 +594,47 @@ your code, so the policy belongs there.
 | `openCount()` | how many are open right now (sync) |
 | `close()` | close every pooled memory and the registry |
 
-`closeIdle()` matters more than it looks. An open memory holds its file's
+`closeIdle()` matters more than it looks. A pooled database holds its file's
 exclusive lock, so a long-running process that never lets go makes its memories
 unreachable from anything else on the machine. Call it on a timer — that is what
-the idle timeout is for, liveness rather than memory. The pool bounds how many
-stay open at once (`maxOpen`, default 16, least-recently-used closed to make
-room):
+the idle timeout is for, liveness rather than memory. The pool is a hard bound on
+open databases (`maxOpen`, default 16): an inactive least-recently-used entry is
+closed to make room. If every slot belongs to an active verb, a different memory
+gets `PLUGMEM_BUSY` immediately instead of waiting or opening a hidden extra
+handle:
 
 ```ts
 const ws = new Workspace("/srv/memories", { maxOpen: 16, idleTimeoutMs: 60_000 });
 setInterval(() => ws.closeIdle(), 30_000);
 ```
 
-A `Plugmem` handed out by `open()` is **not** closed by `ws.close()`: it is its
-own handle holding its own lock until you close it or it is garbage collected.
+Each `WorkspaceMemory` verb takes a scoped lease. While it runs, `release`,
+`closeIdle` and LRU eviction cannot take that entry; after it returns, the entry
+is eligible immediately. `ws.close()` invalidates every logical reference.
+Garbage collection of a `WorkspaceMemory` neither opens nor closes anything.
+
+This lifecycle applies only to workspaces. A direct `Plugmem.open(path)` still
+returns an explicitly owned native handle, and `close()` remains how its writer
+lock is released.
+
+### Migration from the handle-returning workspace API
+
+This is a breaking ownership change:
+
+```ts
+// before: a second native owner whose lifetime depended on JavaScript GC
+const memory = await ws.open("chat-42");
+memory.close();
+
+// now: a stable logical reference; each verb owns one scoped lease
+const memory = ws.memory("chat-42");
+ws.release("chat-42"); // optional: release an inactive pooled lock now
+```
+
+There is no `WorkspaceMemory.close()`: it owns nothing to close. Database reads
+such as `get`, `stats` and `tagsOf` are promises on this class because a cold
+call may have to reopen and replay the file. The same methods on a direct
+`Plugmem` remain synchronous.
 
 `verify()` reports and never repairs, because a workspace is a directory a
 person can edit, and guessing at their intent is how a consistency check loses

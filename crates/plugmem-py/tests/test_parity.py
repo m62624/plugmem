@@ -20,9 +20,7 @@ from pathlib import Path
 import plugmem
 import pytest
 
-NAPI_DTS = (
-    Path(__file__).resolve().parents[2] / "plugmem-napi" / "index.d.ts"
-)
+NAPI_DTS = Path(__file__).resolve().parents[2] / "plugmem-napi" / "index.d.ts"
 
 # Idioms Python demands and JavaScript cannot express. Each is sugar over a verb
 # that IS in the shared surface, never a capability of its own — see the module
@@ -63,7 +61,9 @@ def napi_class_members(source: str, class_name: str) -> set[str]:
     # `name(` or `static name(` at the start of a line, skipping doc comments.
     return {
         camel_to_snake(match.group(1))
-        for match in re.finditer(r"^\s*(?:static\s+)?([a-zA-Z_]\w*)\s*\(", body, re.MULTILINE)
+        for match in re.finditer(
+            r"^\s*(?:static\s+)?([a-zA-Z_]\w*)\s*\(", body, re.MULTILINE
+        )
         if match.group(1) not in {"constructor", "if", "for", "while"}
     }
 
@@ -71,7 +71,9 @@ def napi_class_members(source: str, class_name: str) -> set[str]:
 def napi_functions(source: str) -> set[str]:
     return {
         camel_to_snake(match.group(1))
-        for match in re.finditer(r"^export declare function (\w+)", source, re.MULTILINE)
+        for match in re.finditer(
+            r"^export declare function (\w+)", source, re.MULTILINE
+        )
     }
 
 
@@ -84,7 +86,9 @@ def python_members(cls: type) -> set[str]:
     }
 
 
-@pytest.mark.parametrize("class_name", ["Plugmem", "Scrub", "Workspace"])
+@pytest.mark.parametrize(
+    "class_name", ["Plugmem", "Scrub", "Workspace", "WorkspaceMemory"]
+)
 def test_every_class_names_exactly_what_node_names(class_name: str) -> None:
     source = napi_source()
     node = napi_class_members(source, class_name)
@@ -108,7 +112,8 @@ def test_module_functions_match() -> None:
     python = {
         name
         for name in plugmem.__all__
-        if callable(getattr(plugmem, name)) and not isinstance(getattr(plugmem, name), type)
+        if callable(getattr(plugmem, name))
+        and not isinstance(getattr(plugmem, name), type)
     } - PYTHON_ONLY
     assert node == python
 

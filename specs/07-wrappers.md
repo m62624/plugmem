@@ -80,9 +80,10 @@ the identically-named host verb, and it is the *whole* of `Database`: `exportEdg
 verb at all — JSONL is a format the CLI defines. Inputs/outputs are
 `napi(object)` mapped to hand-written TypeScript interfaces; the heavy verbs
 (`maintain`/`checkpoint`) are async on libuv. Node opens a file directly (real file
-I/O), so there is no JS storage bridge. A `Workspace` class mirrors the host type the
-same way, and its `open(name)` returns the same `Plugmem` class — so a named memory has
-every verb (see `10-workspace.md`). The test suite is `node --test` smoke plus parity
+I/O), so there is no JS storage bridge. `Workspace.memory(name)` returns a
+lock-free logical `WorkspaceMemory`; every database verb obtains a scoped host
+lease on its libuv worker and has the same typed result as the direct writer
+verb (see `10-workspace.md`). The test suite is `node --test` smoke plus parity
 with native (the same scenario → the same rendered block), and a **type-check gate**:
 the generated `index.d.ts` is compiled with a consumer-shaped type test under `strict`
 plus `isolatedModules`, because a surface can be valid Rust and unusable TypeScript.
@@ -101,7 +102,8 @@ purpose — one `export_page` and no `export_each`, one `maintain(mode)` and no
 third surface derived from host would disagree with the second. Verified rather
 than asserted: `tests/test_parity.py` reads napi's generated `index.d.ts` and
 its `error.rs`, maps camelCase to snake_case, and fails in both directions.
-`Plugmem` 23 verbs, `Scrub` 3, `Workspace` 11, plus the module functions.
+`Plugmem` 23 verbs, `Scrub` 3, `Workspace` 12, `WorkspaceMemory` 18, plus the
+module functions.
 
 **No async layer, by the same reasoning that produced one in napi.** Node has a
 single thread that runs JavaScript, so the blocking verbs had to move to a libuv
@@ -114,7 +116,10 @@ Locks appear where napi needs none, and they guard the **handle slot**, not the
 engine: host's `Database` and `Workspace` synchronize themselves, but several
 Python threads share one wrapper object, so `close()` emptying the `Option`
 while another thread is inside a verb would race on that `Option`. `RwLock` on
-`Plugmem` (reads overlap; `refresh`/`close` are exclusive), `Mutex` on `Scrub`.
+`Plugmem` (reads overlap; `refresh`/`close` are exclusive), `RwLock` on the
+`Workspace` owner slot, and `Mutex` on `Scrub`. `WorkspaceMemory` has no handle
+slot: it holds a weak workspace reference plus a name and acquires its lease
+inside `Python::detach`.
 
 Results are hand-mapped, with the host type destructured exhaustively — a new
 field in the engine is a compile error here rather than a value silently not

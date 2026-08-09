@@ -44,14 +44,14 @@ use crate::types::{
 
 /// Keep one native→Python transfer bounded, matching the Node binding's page
 /// grain so a paged export reads the same on both.
-const EXPORT_PAGE_LIMIT: NonZeroUsize = NonZeroUsize::new(128).unwrap();
+pub(crate) const EXPORT_PAGE_LIMIT: NonZeroUsize = NonZeroUsize::new(128).unwrap();
 
 /// Edges handed to the Python callback per `export_edges` batch.
 ///
 /// One call per *edge* would take and release the GIL a million times for a
 /// million-edge dump. One call per batch makes it a thousand, and the walk
 /// itself stays inside `detach` where it belongs.
-const EXPORT_EDGE_BATCH: usize = 1024;
+pub(crate) const EXPORT_EDGE_BATCH: usize = 1024;
 
 /// The system clock in unix milliseconds. The engine keeps no clock: every verb
 /// that records time is told what time it is, exactly as the CLI and the MCP
@@ -109,14 +109,14 @@ pub struct Plugmem {
 
 /// One fact as `remember` / `revise` / `remember_many` take it, with every
 /// string already owned so the work can leave the interpreter behind.
-struct RememberSpec {
-    text: String,
-    entity: Option<String>,
-    tags: Vec<String>,
-    links: Vec<(String, String)>,
-    metadata: Option<BTreeMap<String, String>>,
-    valid_from: Option<u64>,
-    vector: Option<Vec<f32>>,
+pub(crate) struct RememberSpec {
+    pub(crate) text: String,
+    pub(crate) entity: Option<String>,
+    pub(crate) tags: Vec<String>,
+    pub(crate) links: Vec<(String, String)>,
+    pub(crate) metadata: Option<BTreeMap<String, String>>,
+    pub(crate) valid_from: Option<u64>,
+    pub(crate) vector: Option<Vec<f32>>,
 }
 
 impl RememberSpec {
@@ -125,7 +125,7 @@ impl RememberSpec {
     /// Split out because [`RememberInput`] borrows everything: the slices of
     /// `&str` it wants cannot outlive this call, so each caller builds them on
     /// its own stack right before handing the input to the engine.
-    fn with_input<T>(&self, now: u64, f: impl FnOnce(RememberInput<'_>) -> T) -> T {
+    pub(crate) fn with_input<T>(&self, now: u64, f: impl FnOnce(RememberInput<'_>) -> T) -> T {
         let tags: Vec<&str> = self.tags.iter().map(String::as_str).collect();
         let links: Vec<(&str, &str)> = self
             .links
@@ -152,7 +152,7 @@ impl RememberSpec {
     /// Read one fact out of a mapping, for `remember_many`. The keys are the
     /// keyword-argument names of `remember`, so a caller writes the same thing
     /// either way.
-    fn from_mapping(item: &Bound<'_, PyAny>) -> Result<Self> {
+    pub(crate) fn from_mapping(item: &Bound<'_, PyAny>) -> Result<Self> {
         let mapping = item.cast::<PyMapping>().map_err(|_| {
             error::invalid_arg("remember_many takes a sequence of dicts shaped like remember()'s keyword arguments")
         })?;
@@ -194,7 +194,7 @@ impl RememberSpec {
 /// Length is deliberately *not* checked here — that is `dim`, and the engine
 /// already refuses a vector that disagrees with it. Checking it twice would be
 /// a second rule to keep in step.
-fn checked_vector(vector: Option<Vec<f32>>) -> Result<Option<Vec<f32>>> {
+pub(crate) fn checked_vector(vector: Option<Vec<f32>>) -> Result<Option<Vec<f32>>> {
     let Some(vector) = vector else {
         return Ok(None);
     };
@@ -849,25 +849,6 @@ impl Plugmem {
     }
 }
 
-impl Plugmem {
-    /// Wrap a database a workspace already opened.
-    ///
-    /// Not a Python constructor: a memory in a workspace is reached by name
-    /// through `Workspace.open`, which is what keeps a name from ever being a
-    /// path. The class it hands back is this one, so a named memory has every
-    /// verb a path-opened one does and there is no second implementation to
-    /// drift.
-    pub(crate) fn from_database(db: Database, path: PathBuf) -> Self {
-        Self {
-            handle: RwLock::new(Some(Handle::Writer(db))),
-            path,
-            // The workspace reported them once when it loaded the config; a
-            // per-memory copy would repeat the same lines for every open.
-            warnings: Vec::new(),
-        }
-    }
-}
-
 /// The open handle, or the "closed" error.
 fn handle(guard: &Option<Handle>) -> Result<&Handle> {
     guard.as_ref().ok_or_else(error::closed)
@@ -891,7 +872,7 @@ fn reader(guard: &Option<Handle>) -> Result<&ReadOnlyDatabase> {
 
 /// Build every borrowed [`RememberInput`] for a batch and hand them over as one
 /// call, so the whole batch is one write.
-fn with_inputs<T>(
+pub(crate) fn with_inputs<T>(
     specs: &[RememberSpec],
     now: u64,
     f: impl FnOnce(Vec<RememberInput<'_>>) -> T,
@@ -940,7 +921,7 @@ fn with_inputs<T>(
 
 /// Turn the mode string into engine options, naming the accepted values when it
 /// is not one of them.
-fn maintenance_options(mode: &str) -> Result<MaintenanceOptions> {
+pub(crate) fn maintenance_options(mode: &str) -> Result<MaintenanceOptions> {
     let mode = match mode {
         "auto" => return Ok(MaintenanceOptions::auto()),
         "full" => return Ok(MaintenanceOptions::full()),

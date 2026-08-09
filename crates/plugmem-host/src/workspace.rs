@@ -30,7 +30,9 @@
 mod registry;
 
 use std::fmt;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::{Database, HostError};
@@ -213,6 +215,24 @@ pub enum WorkspaceError {
     )]
     Busy {
         /// The database that is held elsewhere.
+        name: DbName,
+    },
+
+    /// Every pooled database is in use, so opening another would exceed the
+    /// configured hard ceiling.
+    #[error(
+        "workspace has {max_open} active databases (the max_open limit); retry after one call finishes or raise the limit"
+    )]
+    AtCapacity {
+        /// The configured effective ceiling.
+        max_open: usize,
+    },
+
+    /// A caller asked to release a database while a scoped operation was using
+    /// it.
+    #[error("database {name} is in use by an active workspace operation")]
+    InUse {
+        /// The memory that cannot be released yet.
         name: DbName,
     },
 
@@ -422,6 +442,52 @@ struct Pooled {
     name: DbName,
     db: Database,
     last_used_ms: u64,
+    /// Scoped callers currently using `db`. An active entry is pinned: LRU,
+    /// the idle sweep and explicit release must leave it in the pool.
+    active: usize,
+    /// Stable identity for a lease even if unrelated Vec entries move.
+    token: u64,
+}
+
+/// A database borrowed from a [`Workspace`] for one operation.
+///
+/// Unlike [`Workspace::get`], this value participates in the pool's ownership
+/// accounting. While it lives, its entry cannot be evicted, swept as idle or
+/// explicitly released. Dropping it first drops the temporary [`Database`]
+/// clone and then marks the pooled entry inactive, so another caller can never
+/// evict the pool owner while an unaccounted clone still holds the file lock.
+///
+/// Language bindings use a lease inside one verb and never store it in their
+/// public objects. A long-lived FFI reference therefore names a memory without
+/// becoming another owner of its open file.
+pub struct WorkspaceLease<'a> {
+    workspace: &'a Workspace,
+    db: Option<Database>,
+    token: u64,
+}
+
+impl Deref for WorkspaceLease<'_> {
+    type Target = Database;
+
+    fn deref(&self) -> &Self::Target {
+        self.db
+            .as_ref()
+            .expect("a live workspace lease always owns its database")
+    }
+}
+
+impl Drop for WorkspaceLease<'_> {
+    fn drop(&mut self) {
+        // Drop the transient Arc before making the pool entry evictable. If the
+        // order were reversed, another thread could remove the pool owner and
+        // race an open against this lease's still-live file lock.
+        drop(self.db.take());
+        let mut pool = self.workspace.pooled();
+        if let Some(slot) = pool.iter_mut().find(|p| p.token == self.token) {
+            debug_assert!(slot.active > 0);
+            slot.active = slot.active.saturating_sub(1);
+        }
+    }
 }
 
 /// Many databases in one directory, opened on demand and kept open for a while.
@@ -466,6 +532,7 @@ pub struct Workspace {
     limits: WorkspaceLimits,
     pool: Mutex<Vec<Pooled>>,
     registry: Mutex<Option<Database>>,
+    next_token: AtomicU64,
 }
 
 impl Workspace {
@@ -477,6 +544,7 @@ impl Workspace {
             limits,
             pool: Mutex::new(Vec::new()),
             registry: Mutex::new(None),
+            next_token: AtomicU64::new(1),
         }
     }
 
@@ -554,6 +622,42 @@ impl Workspace {
         now_ms: u64,
         missing: IfMissing,
     ) -> Result<Database, WorkspaceError> {
+        self.acquire(name, now_ms, missing, false).map(|(db, _)| db)
+    }
+
+    /// Borrows a named database for one scoped operation.
+    ///
+    /// The returned lease dereferences to [`Database`] but, unlike a clone from
+    /// [`Workspace::get`], pins its pool entry until it is dropped. This is the
+    /// safe ownership shape for an FFI call: the language object keeps only the
+    /// name, obtains a lease inside one verb, and cannot accidentally keep the
+    /// file lock alive through garbage-collector reachability.
+    ///
+    /// If every slot is active, this returns [`WorkspaceError::AtCapacity`]
+    /// immediately. It never waits for another operation while holding a pool
+    /// or engine lock.
+    pub fn lease(
+        &self,
+        name: &DbName,
+        now_ms: u64,
+        missing: IfMissing,
+    ) -> Result<WorkspaceLease<'_>, WorkspaceError> {
+        let (db, token) = self.acquire(name, now_ms, missing, true)?;
+        Ok(WorkspaceLease {
+            workspace: self,
+            db: Some(db),
+            token,
+        })
+    }
+
+    /// Resolves one pooled database and optionally pins it for a scoped lease.
+    fn acquire(
+        &self,
+        name: &DbName,
+        now_ms: u64,
+        missing: IfMissing,
+        pin: bool,
+    ) -> Result<(Database, u64), WorkspaceError> {
         // The lock is held across the open, deliberately. Releasing it first
         // would let two callers race to open the same file, and the loser would
         // see a spurious `Busy` — from its own process. An open is bounded
@@ -562,7 +666,10 @@ impl Workspace {
 
         if let Some(slot) = pool.iter_mut().find(|p| &p.name == name) {
             slot.last_used_ms = now_ms;
-            return Ok(slot.db.clone());
+            if pin {
+                slot.active = slot.active.saturating_add(1);
+            }
+            return Ok((slot.db.clone(), slot.token));
         }
 
         let path = self.layout.path_of(name);
@@ -580,7 +687,9 @@ impl Workspace {
         // Make room *before* opening, so the ceiling counts this database too.
         let ceiling = self.limits.ceiling();
         while pool.len() >= ceiling {
-            let lru = Self::least_recently_used(&pool);
+            let Some(lru) = Self::least_recently_used_available(&pool) else {
+                return Err(WorkspaceError::AtCapacity { max_open: ceiling });
+            };
             pool.remove(lru);
         }
 
@@ -588,12 +697,15 @@ impl Workspace {
             HostError::Locked { .. } => WorkspaceError::Busy { name: name.clone() },
             other => WorkspaceError::Host(other),
         })?;
+        let token = self.next_token.fetch_add(1, Ordering::Relaxed);
         pool.push(Pooled {
             name: name.clone(),
             db: db.clone(),
             last_used_ms: now_ms,
+            active: usize::from(pin),
+            token,
         });
-        Ok(db)
+        Ok((db, token))
     }
 
     /// Closes every database unused for longer than the idle timeout, returning
@@ -614,9 +726,31 @@ impl Workspace {
         // rather than closing all of them at once.
         let closing: Vec<Pooled> = self
             .pooled()
-            .extract_if(.., |p| now_ms.saturating_sub(p.last_used_ms) >= timeout)
+            .extract_if(.., |p| {
+                p.active == 0 && now_ms.saturating_sub(p.last_used_ms) >= timeout
+            })
             .collect();
         closing.len()
+    }
+
+    /// Releases one inactive pooled database, returning whether it was open.
+    ///
+    /// Logical references to `name` remain valid: their next operation opens it
+    /// again. An active operation is never interrupted; it returns
+    /// [`WorkspaceError::InUse`] instead.
+    pub fn release(&self, name: &DbName) -> Result<bool, WorkspaceError> {
+        let closing = {
+            let mut pool = self.pooled();
+            let Some(index) = pool.iter().position(|p| &p.name == name) else {
+                return Ok(false);
+            };
+            if pool[index].active > 0 {
+                return Err(WorkspaceError::InUse { name: name.clone() });
+            }
+            pool.remove(index)
+        };
+        drop(closing);
+        Ok(true)
     }
 
     /// Closes every open handle. The pool's copies, that is — see the note on
@@ -635,12 +769,16 @@ impl Workspace {
         self.pool.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Index of the least recently used entry. The pool is never empty here.
-    fn least_recently_used(pool: &[Pooled]) -> usize {
-        let mut oldest = 0;
+    /// Index of the least recently used inactive entry.
+    fn least_recently_used_available(pool: &[Pooled]) -> Option<usize> {
+        let mut oldest: Option<usize> = None;
         for (i, p) in pool.iter().enumerate() {
-            if p.last_used_ms < pool[oldest].last_used_ms {
-                oldest = i;
+            let is_older = match oldest {
+                Some(candidate) => p.last_used_ms < pool[candidate].last_used_ms,
+                None => true,
+            };
+            if p.active == 0 && is_older {
+                oldest = Some(i);
             }
         }
         oldest
@@ -1026,6 +1164,141 @@ mod tests {
         // is the whole point of the timeout, not memory.
         assert_eq!(ws.close_idle(2_000), 1);
         assert_eq!(ws.open_count(), 0);
+        assert!(Database::open(&path, crate::Config::default()).is_ok());
+    }
+
+    #[test]
+    fn a_scoped_lease_cannot_be_swept_released_or_evicted() {
+        let tmp = TempDir::new("pool-lease-pin");
+        let (ws, opens) = workspace(
+            &tmp,
+            WorkspaceLimits {
+                max_open: 1,
+                idle_timeout_ms: 1,
+            },
+        );
+        let a = name("a");
+        let b = name("b");
+        let path = ws.layout().path_of(&a);
+        let lease = ws.lease(&a, 1_000, IfMissing::Create).unwrap();
+
+        // The wall clock may advance past the idle window, but an operation is
+        // not idle and must keep both its pool entry and file lock.
+        assert_eq!(ws.close_idle(u64::MAX), 0);
+        assert!(matches!(
+            ws.release(&a),
+            Err(WorkspaceError::InUse { name }) if name == a
+        ));
+        assert!(matches!(
+            ws.lease(&b, 2_000, IfMissing::Create),
+            Err(WorkspaceError::AtCapacity { max_open: 1 })
+        ));
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            Database::open(&path, crate::Config::default()),
+            Err(HostError::Locked { .. })
+        ));
+
+        drop(lease);
+        assert!(ws.release(&a).unwrap());
+        assert!(!ws.release(&a).unwrap());
+        assert!(Database::open(&path, crate::Config::default()).is_ok());
+    }
+
+    #[test]
+    fn lru_evicts_an_inactive_entry_instead_of_an_active_one() {
+        let tmp = TempDir::new("pool-lease-lru");
+        let (ws, opens) = workspace(
+            &tmp,
+            WorkspaceLimits {
+                max_open: 2,
+                idle_timeout_ms: 0,
+            },
+        );
+        let a = name("a");
+        let b = name("b");
+        let c = name("c");
+        let a_lease = ws.lease(&a, 1_000, IfMissing::Create).unwrap();
+        drop(ws.get(&b, 2_000, IfMissing::Create).unwrap());
+
+        // Although `a` is older, only inactive `b` is eligible to make room.
+        let c_lease = ws.lease(&c, 3_000, IfMissing::Create).unwrap();
+        assert_eq!(ws.open_count(), 2);
+        assert_eq!(opens.load(Ordering::SeqCst), 3);
+        assert_eq!(a_lease.stats().facts, 0);
+        drop(c_lease);
+        drop(a_lease);
+
+        // `a` remained pooled; `b` has to be opened again.
+        drop(ws.get(&a, 4_000, IfMissing::Fail).unwrap());
+        assert_eq!(opens.load(Ordering::SeqCst), 3);
+        drop(ws.get(&b, 5_000, IfMissing::Fail).unwrap());
+        assert_eq!(opens.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn same_name_leases_share_one_slot_until_the_last_drop() {
+        let tmp = TempDir::new("pool-lease-shared");
+        let (ws, opens) = workspace(
+            &tmp,
+            WorkspaceLimits {
+                max_open: 1,
+                idle_timeout_ms: 0,
+            },
+        );
+        let a = name("a");
+        let first = ws.lease(&a, 1_000, IfMissing::Create).unwrap();
+        let second = ws.lease(&a, 2_000, IfMissing::Fail).unwrap();
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
+
+        drop(first);
+        assert!(matches!(ws.release(&a), Err(WorkspaceError::InUse { .. })));
+        assert_eq!(second.stats().facts, 0);
+
+        drop(second);
+        assert!(ws.release(&a).unwrap());
+        assert_eq!(ws.open_count(), 0);
+    }
+
+    #[test]
+    fn dropping_a_lease_after_unwind_makes_the_entry_available_again() {
+        let tmp = TempDir::new("pool-lease-unwind");
+        let (ws, _) = workspace(
+            &tmp,
+            WorkspaceLimits {
+                max_open: 1,
+                idle_timeout_ms: 0,
+            },
+        );
+        let a = name("a");
+        let b = name("b");
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _lease = ws.lease(&a, 1_000, IfMissing::Create).unwrap();
+            panic!("stand in for a binding conversion panic");
+        }));
+        assert!(panicked.is_err());
+
+        // The Drop guard ran during unwinding, so the one-slot pool can evict
+        // `a` and serve `b` instead of remaining permanently busy.
+        assert!(ws.lease(&b, 2_000, IfMissing::Create).is_ok());
+    }
+
+    #[test]
+    fn close_all_may_remove_a_leased_pool_entry_without_breaking_lease_drop() {
+        let tmp = TempDir::new("pool-lease-close-all");
+        let (ws, _) = workspace(&tmp, WorkspaceLimits::default());
+        let a = name("a");
+        let path = ws.layout().path_of(&a);
+        let lease = ws.lease(&a, 1_000, IfMissing::Create).unwrap();
+
+        assert_eq!(ws.close_all(), 1);
+        assert_eq!(ws.open_count(), 0);
+        assert!(matches!(
+            Database::open(&path, crate::Config::default()),
+            Err(HostError::Locked { .. })
+        ));
+        drop(lease);
         assert!(Database::open(&path, crate::Config::default()).is_ok());
     }
 

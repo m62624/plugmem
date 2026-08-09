@@ -38,6 +38,7 @@ __all__ = [
     "Similar",
     "Stats",
     "Workspace",
+    "WorkspaceMemory",
     "WorkspaceProblem",
     "WriterOnlyError",
     "about",
@@ -51,7 +52,7 @@ __all__ = [
 
 class BusyError(PlugmemError):
     r"""
-    The handle cannot do this right now because another operation on it is still running.
+    Local contention: a handle is in use, or every workspace pool slot is leased by an active operation.
     """
     ...
 
@@ -75,7 +76,7 @@ class DbEntry:
     @property
     def db(self) -> builtins.str:
         r"""
-        The memory's name — its identity, and what `Workspace.open` takes.
+        The memory's name — its identity, and what `Workspace.memory` takes.
         """
     @property
     def description(self) -> builtins.str:
@@ -1046,16 +1047,19 @@ class Workspace:
         that never let go would make its memories unreachable from anything else
         on the machine.
         """
-    def open(self, db: builtins.str, *, create: builtins.bool = ...) -> Plugmem:
+    def memory(self, db: builtins.str) -> WorkspaceMemory:
         r"""
-        Open the memory named `db` and return it as a [`Plugmem`] — the same
-        class, and the same verbs, as a memory opened by path.
+        Return a logical reference to the memory named `db`.
         
-        `create` defaults to `True`: a first use of an unused name brings that
-        memory into being, which is what makes a new conversation need no
-        registration step. Pass `False` to require that it already exists, which
-        is what a read should do so a misspelled name is diagnosed rather than
-        answered with nothing.
+        This does not open a file, acquire a lock or create the memory. Read
+        verbs require it to exist; write verbs create it on first use. The
+        reference stays valid across pool eviction and `release()`.
+        """
+    def release(self, db: builtins.str) -> builtins.bool:
+        r"""
+        Evict one inactive memory and release its file lock. Logical references
+        remain valid. If a verb is using this memory, raises
+        `BusyError` immediately instead of waiting.
         """
     def list(self) -> builtins.list[builtins.str]:
         r"""
@@ -1108,7 +1112,9 @@ class Workspace:
         """
     def close(self) -> None:
         r"""
-        Close the workspace and every memory it holds. Calling it twice is fine.
+        Invalidate every logical memory reference and close pooled memories.
+        Calling it twice is fine. An already-running verb releases its scoped
+        handle when that call returns.
         """
     def __enter__(self) -> Workspace:
         r"""
@@ -1118,6 +1124,37 @@ class Workspace:
         r"""
         Closes the workspace when the `with` block ends, however it ends.
         """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class WorkspaceMemory:
+    r"""
+    A logical reference to one named memory. It owns no open database and no
+    file lock. Each verb obtains one scoped
+    lease while the GIL is released. Dropping this Python object has no resource
+    meaning; closing the workspace invalidates every reference.
+    """
+    def name(self) -> builtins.str:
+        r"""
+        The stable workspace name this reference addresses.
+        """
+    def remember(self, text: builtins.str, *, entity: typing.Optional[builtins.str] = None, tags: typing.Optional[typing.Sequence[builtins.str]] = None, links: typing.Optional[typing.Sequence[tuple[builtins.str, builtins.str]]] = None, metadata: typing.Optional[typing.Mapping[builtins.str, builtins.str]] = None, valid_from: typing.Optional[builtins.int] = None, vector: typing.Optional[typing.Sequence[builtins.float]] = None) -> RememberOutcome: ...
+    def remember_many(self, facts: collections.abc.Sequence[collections.abc.Mapping[builtins.str, typing.Any]]) -> builtins.list[RememberOutcome]: ...
+    def revise(self, id: builtins.int, text: builtins.str, *, entity: typing.Optional[builtins.str] = None, tags: typing.Optional[typing.Sequence[builtins.str]] = None, links: typing.Optional[typing.Sequence[tuple[builtins.str, builtins.str]]] = None, metadata: typing.Optional[typing.Mapping[builtins.str, builtins.str]] = None, valid_from: typing.Optional[builtins.int] = None, vector: typing.Optional[typing.Sequence[builtins.float]] = None) -> RememberOutcome: ...
+    def recall(self, query: typing.Optional[builtins.str] = None, *, tags: typing.Optional[typing.Sequence[builtins.str]] = None, entities: typing.Optional[typing.Sequence[builtins.str]] = None, as_of: typing.Optional[builtins.int] = None, range: typing.Optional[tuple[builtins.int, builtins.int]] = None, k: builtins.int = ..., closed: builtins.bool = ..., token_budget: typing.Optional[builtins.int] = None, ef: typing.Optional[builtins.int] = None, graph_depth: typing.Optional[builtins.int] = None, vector: typing.Optional[typing.Sequence[builtins.float]] = None) -> RecallResult: ...
+    def forget(self, id: builtins.int) -> builtins.bool: ...
+    def link(self, src: builtins.str, rel: builtins.str, dst: builtins.str, *, provenance: typing.Optional[builtins.int] = None) -> None: ...
+    def unlink(self, src: builtins.str, rel: builtins.str, dst: builtins.str) -> builtins.bool: ...
+    def get(self, id: builtins.int) -> typing.Optional[FactSnapshot]: ...
+    def tags_of(self, id: builtins.int) -> builtins.list[builtins.str]: ...
+    def stats(self) -> Stats: ...
+    def export(self) -> builtins.list[ExportedFact]: ...
+    def export_page(self, cursor: typing.Optional[builtins.int] = None) -> ExportPage: ...
+    def export_edges(self, on_batch: collections.abc.Callable[[builtins.list[ExportedEdge]], typing.Any]) -> builtins.int: ...
+    def verify(self) -> None: ...
+    def scrub(self, budget: typing.Optional[builtins.int] = None) -> Scrub: ...
+    def maintain(self, mode: builtins.str = ...) -> MaintainReport: ...
+    def checkpoint(self) -> None: ...
     def __repr__(self) -> builtins.str: ...
 
 @typing.final
