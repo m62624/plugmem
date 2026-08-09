@@ -161,13 +161,35 @@ pub fn call(db: &Database, id: Value, params: Option<&Value>) -> Value {
             let dump = export_json(db.export(), edges);
             rpc::tool_result(id, render(&dump, format_arg(args)), false)
         }
-        MAINTAIN => match maintenance_options(args) {
-            Ok(options) => match db.maintain_with_options(now_ms(), options) {
-                Ok(report) => rpc::tool_result(id, render(&report, format_arg(args)), false),
-                Err(e) => tool_error(id, &e),
-            },
-            Err(message) => rpc::tool_result(id, message, true),
-        },
+        MAINTAIN => {
+            if arg_str(args, "mode") == Some("reembed") {
+                let batch_size = args
+                    .and_then(|value| value.get("batch_size"))
+                    .and_then(Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .unwrap_or(plugmem_host::DEFAULT_REEMBED_BATCH_SIZE);
+                if batch_size == 0 {
+                    rpc::tool_result(id, "batch_size must be greater than zero".into(), true)
+                } else {
+                    match db.reembed_with_batch(now_ms(), batch_size) {
+                        Ok(report) => {
+                            rpc::tool_result(id, render(&report, format_arg(args)), false)
+                        }
+                        Err(e) => tool_error(id, &e),
+                    }
+                }
+            } else {
+                match maintenance_options(args) {
+                    Ok(options) => match db.maintain_with_options(now_ms(), options) {
+                        Ok(report) => {
+                            rpc::tool_result(id, render(&report, format_arg(args)), false)
+                        }
+                        Err(e) => tool_error(id, &e),
+                    },
+                    Err(message) => rpc::tool_result(id, message, true),
+                }
+            }
+        }
         CHECKPOINT => match db.checkpoint(now_ms()) {
             Ok(()) => rpc::tool_result(id, render(&json!({ "ok": true }), format_arg(args)), false),
             Err(e) => tool_error(id, &e),
@@ -524,16 +546,16 @@ fn recall_ro(reader: &ReaderShared, id: Value, args: Option<&Value>) -> Value {
     // query text into an owned vector, if we can. No lock is taken: several
     // workers may be waiting on the provider at the same time, which is the
     // whole reason the pool has more than one.
-    let vector = match (explicit, query.as_deref()) {
-        (Some(vector), _) => Some(vector),
+    let (vector, vector_space) = match (explicit, query.as_deref()) {
+        (Some(vector), _) => (Some(vector), None),
         (None, Some(text)) => match reader.embedder.as_ref() {
             Some(e) => match e.embed(&[text]) {
-                Ok(mut v) => v.pop(),
+                Ok(mut v) => (v.pop(), Some(e.space_id().to_owned())),
                 Err(e) => return tool_error(id, &e),
             },
-            None => None,
+            None => (None, None),
         },
-        (None, None) => None,
+        (None, None) => (None, None),
     };
     let tags = arg_str_vec(args, "tags");
     let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
@@ -558,7 +580,11 @@ fn recall_ro(reader: &ReaderShared, id: Value, args: Option<&Value>) -> Value {
         graph_depth: arg_u64(args, "graph_depth").map(|v| v as u32),
     };
     let db = reader.db.read().expect("snapshot lock");
-    match db.recall(q) {
+    let result = match vector_space.as_deref() {
+        Some(space) => db.recall_in_space(q, space),
+        None => db.recall(q),
+    };
+    match result {
         Ok(res) if format == "human" => rpc::tool_result(id, res.rendered, false),
         Ok(res) => rpc::tool_result(id, render(&res, "json"), false),
         Err(e) => tool_error(id, &e),
@@ -980,6 +1006,11 @@ fn maintain_def() -> Value {
                     "enum": MAINTAIN_MODES,
                     "description": messages::ARG_MAINTAIN_MODE
                 },
+                "batch_size": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum fact texts per provider request; used only by reembed."
+                },
                 "format": format_prop()
             }
         }
@@ -988,12 +1019,13 @@ fn maintain_def() -> Value {
 
 /// The `mode` values `plugmem_maintain` accepts, in the order the schema
 /// advertises them.
-const MAINTAIN_MODES: [&str; 5] = [
+const MAINTAIN_MODES: [&str; 6] = [
     "auto",
     "compact",
     "reindex-text",
     "optimize-vectors",
     "full",
+    "reembed",
 ];
 
 /// Reads the optional `mode` argument. Absent means `auto`, which is what the
@@ -1008,6 +1040,9 @@ fn maintenance_options(args: Option<&Value>) -> Result<MaintenanceOptions, Strin
         "compact" => Ok(explicit(MaintenanceMode::Compact)),
         "reindex-text" => Ok(explicit(MaintenanceMode::ReindexText)),
         "optimize-vectors" => Ok(explicit(MaintenanceMode::OptimizeVectors)),
+        "reembed" => {
+            Err("reembed is an explicit vector replacement, not a maintenance policy".into())
+        }
         other => Err(format!(
             "unknown maintenance mode `{other}`; expected one of {}",
             MAINTAIN_MODES.join(", ")
@@ -1302,7 +1337,39 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use plugmem_host::{Config, Database};
+    use plugmem_host::{Config, Database, Embedder, HostError};
+
+    struct StubEmbedder;
+
+    impl Embedder for StubEmbedder {
+        fn space_id(&self) -> &str {
+            "mcp-stub"
+        }
+
+        fn dim(&self) -> usize {
+            3
+        }
+
+        fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, HostError> {
+            Ok(vec![vec![0.1, 0.2, 0.3]; texts.len()])
+        }
+    }
+
+    struct OtherEmbedder;
+
+    impl Embedder for OtherEmbedder {
+        fn space_id(&self) -> &str {
+            "other-space"
+        }
+
+        fn dim(&self) -> usize {
+            3
+        }
+
+        fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, HostError> {
+            Ok(vec![vec![0.1, 0.2, 0.3]; texts.len()])
+        }
+    }
 
     /// A unique temp directory; removed on drop.
     struct TempDir(std::path::PathBuf);
@@ -1692,6 +1759,65 @@ mod tests {
             ))
             .contains("skill")
         );
+    }
+
+    #[test]
+    fn maintain_reembed_is_explicit_and_bounded() {
+        let tmp = TempDir::new("reembed");
+        let mut config = Config::default();
+        config.dim = 3;
+        let (db, _) = Database::builder(config)
+            .embedder(Box::new(StubEmbedder))
+            .open(tmp.db())
+            .unwrap();
+        db.remember(plugmem_host::RememberInput::text(1, "fact"))
+            .unwrap();
+
+        let response = call(
+            &db,
+            json!(1),
+            Some(&params(
+                MAINTAIN,
+                json!({"mode": "reembed", "batch_size": 1}),
+            )),
+        );
+        assert!(!is_error(&response));
+        let report: Value = serde_json::from_str(&text(&response)).unwrap();
+        assert_eq!(report["new_space"], "mcp-stub");
+        assert_eq!(report["embedded"], 1);
+
+        let bad = call(
+            &db,
+            json!(2),
+            Some(&params(
+                MAINTAIN,
+                json!({"mode": "reembed", "batch_size": 0}),
+            )),
+        );
+        assert!(is_error(&bad));
+    }
+
+    #[test]
+    fn readonly_mcp_refuses_a_same_dimension_different_space() {
+        let tmp = TempDir::new("readonly-space");
+        let mut config = Config::default();
+        config.dim = 3;
+        let (db, _) = Database::builder(config.clone())
+            .embedder(Box::new(StubEmbedder))
+            .open(tmp.db())
+            .unwrap();
+        db.remember(plugmem_host::RememberInput::text(1, "stored vector"))
+            .unwrap();
+        db.checkpoint(2).unwrap();
+        let reader = Database::open_readonly(tmp.db(), config).unwrap();
+        let shared = ReaderShared::new(reader, Some(Box::new(OtherEmbedder)));
+        let response = call_ro(
+            &shared,
+            json!(1),
+            Some(&params(RECALL, json!({"query": "stored"}))),
+        );
+        assert!(is_error(&response));
+        assert!(text(&response).contains("vector space"));
     }
 
     #[test]

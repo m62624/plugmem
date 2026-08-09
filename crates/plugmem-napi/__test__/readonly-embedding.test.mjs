@@ -131,6 +131,18 @@ test("a read-only handle embeds the query itself, like the CLI and MCP do", asyn
       );
       assert.equal(res.facts.length, 1);
       ro.close();
+
+      const changed = `${config}.changed`;
+      writeFileSync(
+        changed,
+        `[engine]\ndim = ${DIM}\n[embedder]\nurl = "${base}"\nmodel = "other-model"\n`,
+      );
+      const wrong = await Plugmem.open(path, { config: changed, readOnly: true });
+      await assert.rejects(
+        () => wrong.recall({ query: "deployment" }),
+        (err) => err.code === "PLUGMEM_ENGINE" && /vector space/.test(err.message),
+      );
+      wrong.close();
     });
   });
 });

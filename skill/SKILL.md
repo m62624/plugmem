@@ -257,7 +257,7 @@ MANDATORY.
   | `link` | `link <src> <rel> <dst> [--provenance FACT_ID]` |
   | `unlink` | `unlink <src> <rel> <dst>` |
   | `show` / `stats` | `show <id>` · `stats` |
-  | upkeep | `maintain [--mode M]` · `checkpoint` · `verify` · `scrub` · `recover <dst>` |
+  | upkeep | `maintain [--mode M]` · `maintain --reembed [--batch-size N]` · `checkpoint` · `verify` · `scrub` · `recover <dst>` |
   | bulk | `export` (JSONL: facts then edges, streamed to stdout) · `import <file> [--batch N]` |
 
   Add `--json` to any read verb for machine output; `plugmem-cli --version`
@@ -284,6 +284,15 @@ MANDATORY.
   rebuilt. **No mode ever deletes a fact revision or an edge version** — the
   heavier ones buy bytes and index freshness, never less history. The MCP tool
   takes the same values as an optional `mode` argument.
+
+  **Changing the embedding model.** Never assume a new model is compatible
+  because its dimension matches. plugmem records a readable vector-space id
+  with the file and ordinary writes refuse a mismatch. After changing the
+  configured model, run `maintain --reembed` exactly once; MCP uses
+  `plugmem_maintain {"mode":"reembed"}`. It recomputes every retained fact in
+  bounded batches and publishes atomically. Plain/automatic `maintain` never
+  calls the model. A legacy vector database whose old id was not recorded also
+  needs this explicit transition.
 
   **What `verify` is for.** Opening a database checks that nothing in the file
   can make a read unsafe — it does not check that the graph agrees with itself.

@@ -46,13 +46,18 @@ mod maintain;
 mod migrations;
 mod persist;
 mod recall;
+mod reembed;
 mod shards;
 mod tags;
 
 pub use maintain::{MaintainReport, MaintenanceMode, MaintenanceOptions};
 pub use recall::{RecallQuery, RecallResult, RecallScratch, RecalledEdge, RecalledFact, source};
+pub use reembed::{ReembedError, ReembedReport};
 pub use shards::ShardLayout;
 pub use tags::{DEFAULT_TAG_PAGE_LIMIT, MAX_TAG_PAGE_LIMIT, TagPage, TagQuery, TagSummary};
+
+/// Maximum UTF-8 byte length of a persisted embedding-space identity.
+pub const MAX_VECTOR_SPACE_ID_BYTES: usize = 256;
 
 /// Input of `remember` and `revise`.
 #[derive(Clone, Copy, Debug)]
@@ -304,6 +309,10 @@ pub struct Memory<'a> {
     /// `Config::flat_to_hnsw`. Slots past its `indexed` mark are the flat
     /// tail searched by scan.
     hnsw: HnswGraph<'a>,
+    /// Human-readable identity of the model/vector space that produced every
+    /// slot in `vecs`. `None` is legacy/untracked state, never permission to
+    /// mix a configured model into a non-empty pool.
+    vector_space: Option<String>,
     // -- id allocation (derived from the arenas on load) --
     next_fact: u32,
     next_entity: u32,
@@ -353,6 +362,7 @@ impl<'a> Memory<'a> {
             entity_facts: IdListIndex::new(cfg.shards_entities, cfg.max_bytes)?,
             vecs: VecPool::new(cfg.dim, cfg.max_bytes),
             hnsw: HnswGraph::new(cfg.hnsw_m, cfg.hnsw_m0, cfg.max_bytes)?,
+            vector_space: None,
             next_fact: 0,
             next_entity: 0,
             next_edge: 0,
@@ -533,6 +543,10 @@ impl<'a> Memory<'a> {
                     self.apply_remove_tag(now, tag)?;
                     report.replayed += 1;
                 }
+                Op::SetVectorSpace { space } => {
+                    self.apply_set_vector_space(space)?;
+                    report.replayed += 1;
+                }
                 Op::Maintain {
                     mode,
                     max_hnsw_inserts,
@@ -549,6 +563,87 @@ impl<'a> Memory<'a> {
             }
         }
         Ok(report)
+    }
+
+    /// The semantic identity persisted with the current vector pool.
+    ///
+    /// `None` means either that no automatic vector has been written yet, or
+    /// that this is a legacy image whose old model was not recorded.
+    pub fn vector_space(&self) -> Option<&str> {
+        self.vector_space.as_deref()
+    }
+
+    /// Assigns `space` to an empty vector pool and journals the assignment.
+    /// Repeating the same claim is a no-op; claiming a different or untracked
+    /// non-empty pool is refused. Explicit reembed is the only operation that
+    /// may replace a non-empty pool's identity.
+    pub fn claim_vector_space<S: Storage>(
+        &mut self,
+        store: &mut S,
+        space: &str,
+    ) -> Result<bool, Error> {
+        Self::validate_vector_space(space)?;
+        if let Some(stored) = &self.vector_space {
+            if stored == space {
+                return Ok(false);
+            }
+            if !self.vecs.is_empty() {
+                return Err(Error::VectorSpaceMismatch {
+                    stored: stored.clone(),
+                    requested: space.into(),
+                });
+            }
+        }
+        if !self.vecs.is_empty() {
+            return Err(Error::UntrackedVectorSpace);
+        }
+        let mut entry = Vec::new();
+        Op::SetVectorSpace { space }.encode(&mut entry);
+        store
+            .append_journal(&entry)
+            .map_err(|e| Error::Storage(format!("{e:?}")))?;
+        self.vector_space = Some(space.into());
+        Ok(true)
+    }
+
+    fn apply_set_vector_space(&mut self, space: &str) -> Result<(), Error> {
+        Self::validate_vector_space(space)?;
+        if let Some(stored) = &self.vector_space {
+            if stored == space {
+                return Ok(());
+            }
+            if !self.vecs.is_empty() {
+                return Err(Error::Corrupt(
+                    "journal changes an established vector space",
+                ));
+            }
+        }
+        if !self.vecs.is_empty() {
+            return Err(Error::Corrupt(
+                "journal assigns a vector space after vector records",
+            ));
+        }
+        self.vector_space = Some(space.into());
+        Ok(())
+    }
+
+    pub(super) fn validate_vector_space(space: &str) -> Result<(), Error> {
+        if space.is_empty() {
+            return Err(Error::Invalid("vector space must not be empty"));
+        }
+        if space.len() > MAX_VECTOR_SPACE_ID_BYTES {
+            return Err(Error::TooLarge {
+                what: "vector space",
+                len: space.len(),
+                max: MAX_VECTOR_SPACE_ID_BYTES,
+            });
+        }
+        if space.bytes().any(|b| b < b' ' || b == 0x7f) {
+            return Err(Error::Invalid(
+                "vector space must not contain control bytes",
+            ));
+        }
+        Ok(())
     }
 
     /// Remembers a new fact.

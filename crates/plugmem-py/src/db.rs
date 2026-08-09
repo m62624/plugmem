@@ -39,7 +39,7 @@ use crate::error::{self, Result};
 use crate::scrub::Scrub;
 use crate::types::{
     ExportPage, ExportedEdge, ExportedFact, FactSnapshot, MaintainReport, RecallResult,
-    RecoverReport, RememberOutcome, RemoveTagReport, Stats, TagPage,
+    RecoverReport, ReembedReport, RememberOutcome, RemoveTagReport, Stats, TagPage,
 };
 
 /// Keep one native→Python transfer bounded, matching the Node binding's page
@@ -469,12 +469,15 @@ impl Plugmem {
                         .embed(&[text])
                         .map_err(|e| error::EngineError::new_err(format!("embedding failed: {e}")))?
                         .into_iter()
-                        .next(),
+                        .next()
+                        .map(|vector| (vector, embedder.space_id().to_owned())),
                     None => None,
                 },
                 _ => None,
             };
-            let vector = vector.as_deref().or(embedded.as_deref());
+            let vector = vector
+                .as_deref()
+                .or_else(|| embedded.as_ref().map(|(vector, _)| vector.as_slice()));
 
             let q = RecallQuery {
                 now,
@@ -492,7 +495,11 @@ impl Plugmem {
             };
             match handle(&guard)? {
                 Handle::Writer(db) => db.recall(q).map_err(error::engine),
-                Handle::Reader { db, .. } => db.recall(q).map_err(error::engine),
+                Handle::Reader { db, .. } => match embedded.as_ref() {
+                    Some((_, space)) => db.recall_in_space(q, space),
+                    None => db.recall(q),
+                }
+                .map_err(error::engine),
             }
         })?;
         RecallResult::build(py, result)
@@ -782,6 +789,26 @@ impl Plugmem {
                 .map_err(error::engine)
         })?;
         Ok(MaintainReport::from(report))
+    }
+
+    /// Explicitly replace the complete vector axis with the configured
+    /// embedder. This is separate from `maintain`; `auto` never invokes it.
+    /// The GIL is released for the provider and snapshot work. In async code,
+    /// use `await asyncio.to_thread(db.reembed)` like every other synchronous
+    /// database verb that may take noticeable wall time.
+    #[pyo3(signature = (batch_size=plugmem_host::DEFAULT_REEMBED_BATCH_SIZE))]
+    fn reembed(&self, py: Python<'_>, batch_size: usize) -> Result<ReembedReport> {
+        if batch_size == 0 {
+            return Err(error::invalid_arg("batch_size must be greater than zero"));
+        }
+        let now = now_ms();
+        let report = py.detach(|| {
+            let guard = self.handle.read().map_err(|_| error::busy("this memory"))?;
+            writer(&guard)?
+                .reembed_with_batch(now, batch_size)
+                .map_err(error::engine)
+        })?;
+        Ok(ReembedReport::from(report))
     }
 
     /// Publish a snapshot and truncate the journal.

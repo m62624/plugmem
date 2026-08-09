@@ -15,7 +15,7 @@
 //! panics by design) sound on arbitrary input: after a successful load no
 //! persisted id can violate a contract.
 
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
 use plugmem_arena::{
     Arena, ArenaCfg, BlobHeap, BlobHeapCfg, ChunkPool, ChunkPoolCfg, Interner, ShardMode, Slot,
@@ -103,6 +103,8 @@ mod kind {
     pub const BM25_DOCLEN_POOL: u16 = 59;
     /// Sorted `(TermId, current fact count)` tag catalog.
     pub const TAG_CATALOG: u16 = 60;
+    /// UTF-8 identity of the model/semantic space that produced `VEC_POOL`.
+    pub const VECTOR_SPACE: u16 = 61;
 }
 
 /// The callback [`Memory::emit_sections_from`] drives once per snapshot
@@ -162,6 +164,22 @@ fn arena_sections<T: Slot>(a: &Arena<'_, T>) -> (Vec<u8>, Vec<u8>) {
 fn section<'a>(snap: &Snapshot<'a>, kind: u16) -> Result<&'a [u8], Error> {
     snap.section(kind)
         .ok_or(Error::Corrupt("snapshot is missing a required section"))
+}
+
+/// Decodes the optional vector-space section. Its absence is the legacy
+/// migration state; an empty current section means a database that has never
+/// committed automatic vectors.
+fn decode_vector_space(bytes: Option<&[u8]>) -> Result<Option<String>, Error> {
+    let Some(bytes) = bytes else {
+        return Ok(None);
+    };
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    let space =
+        core::str::from_utf8(bytes).map_err(|_| Error::Corrupt("vector space is not UTF-8"))?;
+    Memory::validate_vector_space(space).map_err(|_| Error::Corrupt("vector space is invalid"))?;
+    Ok(Some(space.into()))
 }
 
 /// The eight current-format edge sections.
@@ -452,7 +470,12 @@ impl<'a> Memory<'a> {
     /// two borrowed pieces (`base`, `tail`) with no owned copy. Called twice by
     /// the writer (size/hash pass, then write pass), so it must be deterministic
     /// and side-effect free.
-    fn emit_sections_from(&self, s: &Sections<'_, '_>, f: &mut SectionFn<'_>) -> Result<(), Error> {
+    fn emit_sections_from(
+        &self,
+        s: &Sections<'_, '_>,
+        vector_space: Option<&str>,
+        f: &mut SectionFn<'_>,
+    ) -> Result<(), Error> {
         for (mk, pk, arena) in [
             (kind::FACTS_META, kind::FACTS_POOL, arena_sections(s.facts)),
             (kind::AUX_META, kind::AUX_POOL, arena_sections(s.fact_aux)),
@@ -527,6 +550,7 @@ impl<'a> Memory<'a> {
         f(kind::TAGS_CHUNKS_META, &[&cm])?;
         f(kind::TAGS_CHUNKS_POOL, &[&cp])?;
         f(kind::TAG_CATALOG, &[&self.tag_catalog.dump(&self.terms)])?;
+        f(kind::VECTOR_SPACE, &[vector_space.unwrap_or("").as_bytes()])?;
         let [hm, hp, cm, cp] = s.entity_facts.dump_sections();
         f(kind::ENTFACTS_HANDLES_META, &[&hm])?;
         f(kind::ENTFACTS_HANDLES_POOL, &[&hp])?;
@@ -582,13 +606,33 @@ impl<'a> Memory<'a> {
         &self,
         s: &Sections<'_, '_>,
         created_at: u64,
+        sink: impl SnapshotSink,
+    ) -> Result<(), Error> {
+        self.write_snapshot_reconfigured(
+            s,
+            &self.cfg,
+            self.vector_space.as_deref(),
+            created_at,
+            sink,
+        )
+    }
+
+    /// Snapshot writer used by explicit reembed: every non-vector section is
+    /// borrowed from `self`, while `s`, `cfg` and `vector_space` describe the
+    /// replacement fact/vector/HNSW axis.
+    pub(crate) fn write_snapshot_reconfigured(
+        &self,
+        s: &Sections<'_, '_>,
+        cfg: &Config,
+        vector_space: Option<&str>,
+        created_at: u64,
         mut sink: impl SnapshotSink,
     ) -> Result<(), Error> {
         let mut cfg_bytes = Vec::new();
-        let mut cfg = self.cfg.clone();
-        s.layout.apply(&mut cfg);
-        cfg.encode(&mut cfg_bytes);
-        let flags = if self.cfg.dim > 0 {
+        let mut stored_cfg = cfg.clone();
+        s.layout.apply(&mut stored_cfg);
+        stored_cfg.encode(&mut cfg_bytes);
+        let flags = if stored_cfg.dim > 0 {
             crate::snapshot::FLAG_VECTORS
         } else {
             0
@@ -596,7 +640,7 @@ impl<'a> Memory<'a> {
 
         // Pass 1: (kind, len, hash) for every section — small and bounded.
         let mut metas: Vec<SectionMeta> = Vec::new();
-        self.emit_sections_from(s, &mut |kind, pieces| {
+        self.emit_sections_from(s, vector_space, &mut |kind, pieces| {
             let mut h = Xxh3::new();
             let mut len = 0u64;
             for p in pieces {
@@ -629,7 +673,7 @@ impl<'a> Memory<'a> {
         // Pass 2: section bodies + alignment padding, into sink and hash.
         let zero = [0u8; 64]; // ALIGN — padding is always shorter than this.
         let mut idx = 0usize;
-        self.emit_sections_from(s, &mut |_, pieces| {
+        self.emit_sections_from(s, vector_space, &mut |_, pieces| {
             for p in pieces {
                 sink.write(p)?;
                 file_hash.update(p);
@@ -766,6 +810,7 @@ impl<'a> Memory<'a> {
             Some(bytes) => super::tags::TagCatalog::load(bytes, &mem.terms)?,
             None => super::tags::TagCatalog::new(),
         };
+        mem.vector_space = decode_vector_space(snap.section(kind::VECTOR_SPACE))?;
         mem.entity_facts = IdListIndex::load_sections(
             cfg.shards_entities,
             cfg.max_bytes,
@@ -887,6 +932,7 @@ impl<'a> Memory<'a> {
             Some(bytes) => super::tags::TagCatalog::load(bytes, &mem.terms)?,
             None => super::tags::TagCatalog::new(),
         };
+        mem.vector_space = decode_vector_space(snap.section(kind::VECTOR_SPACE))?;
         mem.entity_facts = IdListIndex::load_sections_borrowed(
             cfg.shards_entities,
             cfg.max_bytes,
@@ -917,9 +963,13 @@ impl<'a> Memory<'a> {
     /// paths.
     fn reconcile_config(snap: &Snapshot<'_>, mut cfg: Config) -> Result<Config, Error> {
         let stored = Config::decode(snap.config())?;
-        if stored.dim != cfg.dim {
-            return Err(Error::ConfigMismatch("stored dim differs"));
-        }
+        // Dimension describes the persisted vector stride. An existing file is
+        // authoritative: adopting it lets a host open the old generation with
+        // a newly configured embedder and then run the *explicit* reembed that
+        // changes the stride atomically. Merely opening/maintaining never
+        // rewrites it; provider compatibility is enforced by the host's stored
+        // vector-space identity.
+        cfg.dim = stored.dim;
         // The shard counts are how this file is laid out, not something the
         // caller gets a say in: the loader needs the stored ones to read the
         // arena metadata at all, and the caller's are irrelevant to that. So

@@ -242,6 +242,7 @@ why that is the right shape and not a limitation.
 | `export()` / `export_page(cursor)` / `export_edges(on_batch)` | dump facts, dump them in pages, stream edges |
 | `verify()` / `scrub(budget=None)` | logical check; byte-level check |
 | `maintain(mode="auto")` / `checkpoint()` | housekeeping; publish a snapshot |
+| `reembed(batch_size=128)` | explicitly recompute every retained vector with the configured model and publish atomically; `maintain("auto")` never invokes it |
 | `generation()` / `refresh()` | read-only handles: which snapshot, and move to the newest |
 | `config_warnings()` / `path()` / `close()` | config typos, the resolved file, release it |
 
@@ -429,6 +430,7 @@ import asyncio
 res = await asyncio.to_thread(db.recall, "tokio", k=5)
 page = await asyncio.to_thread(db.list_tags, prefix="project:", limit=64)
 report = await asyncio.to_thread(db.remove_tag, "obsolete")
+vectors = await asyncio.to_thread(db.reembed, 128)
 ```
 
 Use this practical split inside an async application:
@@ -436,7 +438,7 @@ Use this practical split inside an async application:
 | Call directly | Use `await asyncio.to_thread(...)` |
 |---|---|
 | `get`, `tags_of`, `stats`, `generation`, `path`, `config_warnings` | `open`, `remember`, `remember_many`, `revise`, `recall`, `forget`, `remove_tag`, `list_tags`, `link`, `unlink` |
-| simple property/result access | `export`, `export_page`, `export_edges`, `verify`, `scrub`, `maintain`, `checkpoint`, `refresh`, `recover` |
+| simple property/result access | `export`, `export_page`, `export_edges`, `verify`, `scrub`, `maintain`, `reembed`, `checkpoint`, `refresh`, `recover` |
 
 The left column only performs bounded in-memory reads and normally returns in
 microseconds. The right column may open files, wait for another process, call an

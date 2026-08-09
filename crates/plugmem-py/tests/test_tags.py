@@ -6,7 +6,9 @@ import plugmem
 import pytest
 
 
-def test_direct_catalog_pages_prefixes_and_removes_without_deleting_facts(tmp_path) -> None:
+def test_direct_catalog_pages_prefixes_and_removes_without_deleting_facts(
+    tmp_path,
+) -> None:
     path = str(tmp_path / "tags.plugmem")
     with plugmem.Plugmem.open(path) as db:
         db.remember_many(
@@ -27,7 +29,10 @@ def test_direct_catalog_pages_prefixes_and_removes_without_deleting_facts(tmp_pa
 
         report = db.remove_tag("drop")
         assert report.affected == 2
-        assert [item.name for item in db.list_tags().items] == ["keep", "project:plugmem"]
+        assert [item.name for item in db.list_tags().items] == [
+            "keep",
+            "project:plugmem",
+        ]
         assert len(db.export()) == 3
         with pytest.raises(plugmem.StaleCursorError) as raised:
             db.list_tags(cursor=first.next_cursor)

@@ -38,7 +38,7 @@ Commands (all read verbs take `--json`; human output is the default):
 | `link SRC REL DST` | upsert a typed edge |
 | `show ID` | a fact's full card (both time axes, state, metadata) |
 | `stats` | sizes, counters, identity |
-| `maintain` / `checkpoint` | explicit maintenance / flush the journal to a fresh snapshot |
+| `maintain [--reembed]` / `checkpoint` | policy maintenance or an explicit full vector replacement / flush the journal |
 | `verify` / `scrub` | content integrity / byte-level container integrity |
 | `recover DST` | salvage a content-corrupt database into a clean copy at DST |
 | `export` / `import FILE [--batch N]` | dump/load facts as JSONL (backup, portability) |
@@ -92,6 +92,9 @@ verb (see `10-workspace.md`). The test suite is `node --test` smoke plus parity
 with native (the same scenario → the same rendered block), and a **type-check gate**:
 the generated `index.d.ts` is compiled with a consumer-shaped type test under `strict`
 plus `isolatedModules`, because a surface can be valid Rust and unusable TypeScript.
+`reembed(batchSize?)` is likewise a libuv task; `maintain('auto')` never invokes
+it. It returns `ReembedReport`, keeps the event loop live during provider work,
+and exposes the same method on `WorkspaceMemory` through one scoped lease.
 
 ## Python extension (`plugmem-py`)
 
@@ -107,7 +110,7 @@ purpose — one `export_page` and no `export_each`, one `maintain(mode)` and no
 third surface derived from host would disagree with the second. Verified rather
 than asserted: `tests/test_parity.py` reads napi's generated `index.d.ts` and
 its `error.rs`, maps camelCase to snake_case, and fails in both directions.
-`Plugmem` 25 verbs, `Scrub` 3, `Workspace` 12, `WorkspaceMemory` 20, plus the
+`Plugmem` 26 verbs, `Scrub` 3, `Workspace` 12, `WorkspaceMemory` 21, plus the
 module functions.
 
 **No async layer, by the same reasoning that produced one in napi.** Node has a
@@ -118,6 +121,9 @@ is to release it: every verb is synchronous with its body inside
 `ThreadPoolExecutor` correct without a runtime to bridge. `list_tags` and the
 O(database) `remove_tag` follow the same rule, so even bulk tag removal does not
 hold the GIL or starve an asyncio loop that delegates it with `to_thread`.
+The same applies to `reembed(batch_size=128)`: it is synchronous Python API,
+releases the GIL for all native/model work, and async applications call
+`await asyncio.to_thread(db.reembed, batch_size)`.
 
 Locks appear where napi needs none, and they guard the **handle slot**, not the
 engine: host's `Database` and `Workspace` synchronize themselves, but several

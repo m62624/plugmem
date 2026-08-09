@@ -29,6 +29,7 @@ __all__ = [
     "RecalledEdge",
     "RecalledFact",
     "RecoverReport",
+    "ReembedReport",
     "ReindexReport",
     "RememberOutcome",
     "RemoveTagReport",
@@ -589,6 +590,14 @@ class Plugmem:
         `mode` is one of `"auto"` (the default: only pending work, cheap to run
         often), `"compact"`, `"reindex-text"`, `"optimize-vectors"` or `"full"`.
         """
+    def reembed(self, batch_size: builtins.int = ...) -> ReembedReport:
+        r"""
+        Explicitly replace the complete vector axis with the configured
+        embedder. This is separate from `maintain`; `auto` never invokes it.
+        The GIL is released for the provider and snapshot work. In async code,
+        use `await asyncio.to_thread(db.reembed)` like every other synchronous
+        database verb that may take noticeable wall time.
+        """
     def checkpoint(self) -> None:
         r"""
         Publish a snapshot and truncate the journal.
@@ -767,6 +776,29 @@ class RecoverReport:
         r"""
         Dropped: the metadata blob did not decode to a well-formed map.
         """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class ReembedReport:
+    r"""
+    The report of an explicit complete vector-axis replacement.
+    """
+    @property
+    def previous_space(self) -> typing.Optional[builtins.str]: ...
+    @property
+    def new_space(self) -> builtins.str: ...
+    @property
+    def previous_dim(self) -> builtins.int: ...
+    @property
+    def new_dim(self) -> builtins.int: ...
+    @property
+    def embedded(self) -> builtins.int: ...
+    @property
+    def tombstones_skipped(self) -> builtins.int: ...
+    @property
+    def vector_bytes(self) -> builtins.int: ...
+    @property
+    def hnsw_indexed(self) -> builtins.int: ...
     def __repr__(self) -> builtins.str: ...
 
 @typing.final
@@ -1205,6 +1237,7 @@ class WorkspaceMemory:
     def verify(self) -> None: ...
     def scrub(self, budget: typing.Optional[builtins.int] = None) -> Scrub: ...
     def maintain(self, mode: builtins.str = ...) -> MaintainReport: ...
+    def reembed(self, batch_size: builtins.int = ...) -> ReembedReport: ...
     def checkpoint(self) -> None: ...
     def __repr__(self) -> builtins.str: ...
 

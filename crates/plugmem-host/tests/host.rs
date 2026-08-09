@@ -339,6 +339,7 @@ fn auto_embedding_end_to_end() {
 /// (slot 0 = text length) keep recall reproducible.
 struct CountingEmbedder {
     dim: usize,
+    space: &'static str,
     calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     texts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -347,13 +348,25 @@ impl CountingEmbedder {
     fn new(dim: usize) -> Self {
         Self {
             dim,
+            space: "test-counting",
             calls: Default::default(),
             texts: Default::default(),
+        }
+    }
+
+    fn in_space(dim: usize, space: &'static str) -> Self {
+        Self {
+            space,
+            ..Self::new(dim)
         }
     }
 }
 
 impl Embedder for CountingEmbedder {
+    fn space_id(&self) -> &str {
+        self.space
+    }
+
     fn dim(&self) -> usize {
         self.dim
     }
@@ -366,11 +379,280 @@ impl Embedder for CountingEmbedder {
             .iter()
             .map(|t| {
                 let mut v = vec![0.0f32; self.dim];
-                v[0] = t.len() as f32;
+                v[0] = t.len().max(1) as f32;
                 v
             })
             .collect())
     }
+}
+
+#[test]
+fn explicit_reembed_changes_space_and_dimension_but_not_knowledge() {
+    let tmp = TempDir::new("reembed");
+    let mut config = cfg();
+    config.dim = 4;
+    let (db, _) = Database::builder(config)
+        .embedder(Box::new(CountingEmbedder::in_space(4, "old-model")))
+        .open(tmp.db())
+        .unwrap();
+
+    let first = db
+        .remember(RememberInput {
+            tags: &["project", "rust"],
+            ..RememberInput::text(1, "plugmem is written in rust")
+        })
+        .unwrap()
+        .id;
+    db.revise(
+        first,
+        RememberInput {
+            tags: &["project", "database"],
+            ..RememberInput::text(2, "plugmem is an embedded database")
+        },
+    )
+    .unwrap();
+
+    let report = db
+        .reembed_with(3, Box::new(CountingEmbedder::in_space(6, "new-model")), 1)
+        .unwrap();
+    assert_eq!(report.previous_space.as_deref(), Some("old-model"));
+    assert_eq!(report.new_space, "new-model");
+    assert_eq!((report.previous_dim, report.new_dim), (4, 6));
+    assert_eq!(report.embedded, 2, "closed history is reembedded too");
+    assert_eq!(db.tags_of(plugmem_host::FactId(1)), ["project", "database"]);
+
+    // Auto maintenance is structurally incapable of invoking a model-space
+    // transition, and it preserves the tag API added in the preceding PR.
+    db.maintain(4).unwrap();
+    let tags = db
+        .list_tags(TagQuery::default())
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|tag| tag.name)
+        .collect::<Vec<_>>();
+    assert_eq!(tags, ["database", "project"]);
+    let out = db
+        .recall(RecallQuery::text(5, "embedded database"))
+        .unwrap();
+    assert!(out.rendered.contains("embedded database"));
+
+    drop(db);
+    let mut target_config = cfg();
+    target_config.dim = 6;
+    let (reopened, _) = Database::builder(target_config)
+        .embedder(Box::new(CountingEmbedder::in_space(6, "new-model")))
+        .open(tmp.db())
+        .unwrap();
+    assert!(reopened.recall(RecallQuery::text(6, "plugmem")).is_ok());
+}
+
+struct WrongDimensionEmbedder;
+
+impl Embedder for WrongDimensionEmbedder {
+    fn space_id(&self) -> &str {
+        "broken-model"
+    }
+
+    fn dim(&self) -> usize {
+        6
+    }
+
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, HostError> {
+        Ok(vec![vec![1.0; 5]; texts.len()])
+    }
+}
+
+#[test]
+fn failed_reembed_keeps_the_old_generation_writable() {
+    let tmp = TempDir::new("reembed-failure");
+    let mut config = cfg();
+    config.dim = 4;
+    let (db, _) = Database::builder(config)
+        .embedder(Box::new(CountingEmbedder::in_space(4, "old-model")))
+        .open(tmp.db())
+        .unwrap();
+    db.remember(RememberInput::text(1, "first fact")).unwrap();
+    assert!(!tmp.db().exists(), "the journal has not been published yet");
+
+    assert!(
+        db.reembed_with(2, Box::new(WrongDimensionEmbedder), 1)
+            .is_err()
+    );
+    assert!(
+        !tmp.db().exists(),
+        "failure must not publish even an intermediate checkpoint"
+    );
+    assert_eq!(db.stats().facts, 1);
+    db.remember(RememberInput::text(3, "write after failure"))
+        .unwrap();
+    assert_eq!(db.stats().facts, 2);
+}
+
+#[test]
+fn an_empty_database_can_establish_its_target_space() {
+    let tmp = TempDir::new("reembed-empty");
+    let mut config = cfg();
+    config.dim = 4;
+    let (db, _) = Database::builder(config)
+        .embedder(Box::new(CountingEmbedder::in_space(4, "empty-target")))
+        .open(tmp.db())
+        .unwrap();
+    let report = db.reembed(1).unwrap();
+    assert_eq!(report.embedded, 0);
+    assert_eq!(report.new_space, "empty-target");
+    db.remember(RememberInput::text(2, "first fact after reembed"))
+        .unwrap();
+}
+
+#[test]
+fn reembed_requires_a_provider_and_a_nonzero_batch() {
+    let tmp = TempDir::new("reembed-validation");
+    let (db, _) = Database::builder(cfg()).open(tmp.db()).unwrap();
+    assert!(matches!(db.reembed(1), Err(HostError::Embed(_))));
+
+    let error = db
+        .reembed_with(1, Box::new(CountingEmbedder::new(8)), 0)
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        HostError::Engine(plugmem_host::Error::Invalid(_))
+    ));
+    assert!(
+        db.remember(RememberInput::text(2, "still writable"))
+            .is_ok()
+    );
+}
+
+#[test]
+fn changed_embedder_never_turns_auto_maintain_into_reembed() {
+    let tmp = TempDir::new("reembed-never-auto");
+    let mut old_config = cfg();
+    old_config.dim = 4;
+    let (db, _) = Database::builder(old_config)
+        .embedder(Box::new(CountingEmbedder::in_space(4, "old-model")))
+        .open(tmp.db())
+        .unwrap();
+    db.remember(RememberInput::text(1, "old vector space"))
+        .unwrap();
+    db.checkpoint(2).unwrap();
+    drop(db);
+
+    // A new target may open the old file so the caller can explicitly
+    // reembed it. Merely opening it, and ordinary Auto maintenance, retain the
+    // stored dimension/space and make no provider call.
+    let target = CountingEmbedder::in_space(6, "new-model");
+    let calls = target.calls.clone();
+    let mut target_config = cfg();
+    target_config.dim = 6;
+    let (db, _) = Database::builder(target_config.clone())
+        .embedder(Box::new(target))
+        .open(tmp.db())
+        .unwrap();
+    db.maintain(3).unwrap();
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    let reader = Database::open_readonly(tmp.db(), target_config).unwrap();
+    let query_vector = [1.0f32; 6];
+    let reader_error = reader
+        .recall_in_space(
+            RecallQuery {
+                vector: Some(&query_vector),
+                ..RecallQuery::text(4, "old vector space")
+            },
+            "new-model",
+        )
+        .unwrap_err();
+    assert!(matches!(
+        reader_error,
+        HostError::Engine(plugmem_host::Error::VectorSpaceMismatch { .. })
+    ));
+
+    let error = db
+        .recall(RecallQuery::text(4, "old vector space"))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        HostError::Engine(plugmem_host::Error::VectorSpaceMismatch { .. })
+    ));
+    db.reembed(5).unwrap();
+    assert!(calls.load(std::sync::atomic::Ordering::SeqCst) > 0);
+}
+
+struct BlockingEmbedder {
+    gate: std::sync::Arc<(std::sync::Mutex<(bool, bool)>, std::sync::Condvar)>,
+}
+
+impl Embedder for BlockingEmbedder {
+    fn space_id(&self) -> &str {
+        "slow-new-model"
+    }
+
+    fn dim(&self) -> usize {
+        6
+    }
+
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, HostError> {
+        let (lock, wake) = &*self.gate;
+        let mut state = lock.lock().unwrap();
+        state.0 = true;
+        wake.notify_all();
+        while !state.1 {
+            state = wake.wait(state).unwrap();
+        }
+        Ok(vec![vec![1.0; self.dim()]; texts.len()])
+    }
+}
+
+#[test]
+fn reembed_leaves_reads_live_and_makes_writes_fail_fast() {
+    let tmp = TempDir::new("reembed-concurrency");
+    let mut config = cfg();
+    config.dim = 4;
+    let (db, _) = Database::builder(config)
+        .embedder(Box::new(CountingEmbedder::in_space(4, "old-model")))
+        .open(tmp.db())
+        .unwrap();
+    let id = db
+        .remember(RememberInput::text(1, "readable during reembed"))
+        .unwrap()
+        .id;
+
+    let gate = std::sync::Arc::new((
+        std::sync::Mutex::new((false, false)),
+        std::sync::Condvar::new(),
+    ));
+    let worker_db = db.clone();
+    let worker_gate = gate.clone();
+    let worker = std::thread::spawn(move || {
+        worker_db.reembed_with(2, Box::new(BlockingEmbedder { gate: worker_gate }), 1)
+    });
+    {
+        let (lock, wake) = &*gate;
+        let mut state = lock.lock().unwrap();
+        while !state.0 {
+            state = wake.wait(state).unwrap();
+        }
+    }
+
+    assert_eq!(db.get(id).unwrap().text, "readable during reembed");
+    let explicit = [1.0f32; 4];
+    let error = db
+        .remember(RememberInput {
+            vector: Some(&explicit),
+            ..RememberInput::text(3, "must not cross the frozen generation")
+        })
+        .unwrap_err();
+    assert!(matches!(error, HostError::ReembedBusy));
+
+    {
+        let (lock, wake) = &*gate;
+        let mut state = lock.lock().unwrap();
+        state.1 = true;
+        wake.notify_all();
+    }
+    worker.join().unwrap().unwrap();
+    assert_eq!(db.stats().facts, 1);
 }
 
 #[test]

@@ -223,6 +223,7 @@ println!("{}", out.rendered);
 ```text
 cargo run -p plugmem-host --example edge_lifecycle
 cargo run -p plugmem-host --example maintain_modes
+cargo run -p plugmem-host --example reembed
 cargo run -p plugmem-host --example tag_catalog -- /tmp/tag-catalog.plugmem
 cargo run --release -p plugmem-host --example bench_database -- 100000 --diagnose-recall | tee database-benchmark-100k.tsv
 cargo run --release -p plugmem-host --example bench_database -- 1000000 --diagnose-recall | tee database-benchmark-1m.tsv
@@ -508,15 +509,29 @@ The same selection is exposed by `plugmem maintain --mode <mode>`, the
 `mode` argument of the MCP `plugmem_maintain` tool, and `maintain(mode?)` in
 the Node bindings.
 
+Changing an embedding model is a separate explicit operation:
+`Database::reembed()` uses the configured provider, while `reembed_with(...)`
+accepts a replacement provider and bounded batch size. It freezes a source
+generation, releases the database lock during every model call, streams and
+validates the replacement vectors, rebuilds HNSW, and publishes atomically.
+Reads remain live; writes fail immediately with `ReembedBusy`. No maintenance
+mode — especially `Auto` — can trigger this operation.
+
 ## Embedders
 
-The `Embedder` trait is two methods (`dim`, batched `embed`).
+The `Embedder` trait is three methods (`space_id`, `dim`, batched `embed`).
 `OpenAiCompatEmbedder` speaks the `/v1/embeddings` shape that OpenAI,
 Ollama, LM Studio, vLLM and llama.cpp-server share — there is no
 provider-specific client because there is no provider-specific
 protocol. The dimension is configured explicitly (no startup probe);
 a server answering with a different one is a typed error. Tests run
 against a local mock — no network in CI.
+
+`space_id` is the readable semantic identity persisted in the snapshot (the
+built-in HTTP embedder uses its model name). It detects same-dimension model
+changes that a dimension check cannot. Old experimental images without this
+section still open as untracked and require one explicit reembed; the snapshot
+format version remains 1.
 
 `embed` takes **`&self`**, and the trait requires `Send + Sync`, because an
 embedder is a client of a remote service rather than a piece of mutable state.

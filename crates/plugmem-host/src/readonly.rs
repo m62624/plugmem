@@ -72,7 +72,8 @@ use std::sync::Mutex;
 use memmap2::Mmap;
 use plugmem_core::snapshot::{DEFAULT_SCRUB_BUDGET, ScrubCursor, ScrubProgress, Snapshot};
 use plugmem_core::{
-    Config, FactId, Memory, RecallQuery, RecallResult, RecallScratch, Stats, TagPage, TagQuery,
+    Config, Error, FactId, Memory, RecallQuery, RecallResult, RecallScratch, Stats, TagPage,
+    TagQuery,
 };
 
 thread_local! {
@@ -205,6 +206,31 @@ impl ReadOnlyDatabase {
                 Ok(out)
             })
         })
+    }
+
+    /// Runs a recall whose vector was produced automatically by the named
+    /// semantic space outside this read-only handle.
+    ///
+    /// Explicit caller-supplied vectors continue to use [`Self::recall`]; this
+    /// check is for wrappers that own an embedder the zero-copy handle cannot
+    /// carry. Equal dimensions are insufficient: a different or legacy
+    /// untracked space is refused before cosine search.
+    pub fn recall_in_space(
+        &self,
+        q: RecallQuery<'_>,
+        requested_space: &str,
+    ) -> Result<RecallResult, HostError> {
+        self.with_mem(|mem| match mem.vector_space() {
+            Some(stored) if stored == requested_space => Ok(()),
+            Some(_) if mem.stats().vectors == 0 => Ok(()),
+            Some(stored) => Err(HostError::Engine(Error::VectorSpaceMismatch {
+                stored: stored.into(),
+                requested: requested_space.into(),
+            })),
+            None if mem.stats().vectors != 0 => Err(HostError::Engine(Error::UntrackedVectorSpace)),
+            None => Ok(()),
+        })?;
+        self.recall(q)
     }
 
     /// An owned copy of one fact, or `None` for unknown/tombstoned ids.

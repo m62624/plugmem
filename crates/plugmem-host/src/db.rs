@@ -38,7 +38,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as EmbedderLock};
 #[cfg(feature = "counters")]
 use std::sync::{Mutex, MutexGuard};
 #[cfg(not(feature = "counters"))]
@@ -48,8 +48,8 @@ use memmap2::Mmap;
 use plugmem_core::{
     Config, Error, FactFault, FactRecord, LinkInput, MaintainReport, MaintenanceMode,
     MaintenanceOptions, MemStorage, Memory, OpenReport, RecallQuery, RecallResult, RecallScratch,
-    RememberInput, RememberOutcome, RemoveTagReport, Stats, Storage, TagPage, TagQuery,
-    UnlinkInput,
+    ReembedError, ReembedReport, RememberInput, RememberOutcome, RemoveTagReport, Stats, Storage,
+    TagPage, TagQuery, UnlinkInput,
 };
 
 thread_local! {
@@ -63,6 +63,13 @@ use crate::embedder::Embedder;
 use crate::error::HostError;
 use crate::readonly::{ReadOnlyDatabase, Scrub};
 use crate::storage::{FileScratch, FileStorage, FsyncPolicy};
+
+/// Default maximum number of fact texts sent to the embedding provider in one
+/// explicit reembed request.
+pub const DEFAULT_REEMBED_BATCH_SIZE: usize = 128;
+
+/// Automatically produced vectors plus the provider identity that owns them.
+type EmbeddedBatch = (Vec<Vec<f32>>, String);
 
 self_cell::self_cell!(
     /// Owns the memory map and the overlay [`Memory`] that borrows it — the
@@ -385,16 +392,18 @@ impl DatabaseBuilder {
         }
         let mut store = FileStorage::open(path, self.fsync)?;
         let (engine, report) = open_engine(&mut store, &self.cfg)?;
+        let actual_cfg = engine.read(|mem| mem.cfg().clone());
         let db = Database {
             inner: Arc::new(Inner {
                 state: StateLock::new(State {
                     engine,
                     store,
+                    cfg: actual_cfg,
                     ops: 0,
                     forgets: 0,
+                    reembedding: false,
                 }),
-                embedder: self.embedder,
-                cfg: self.cfg,
+                embedder: EmbedderLock::new(self.embedder.map(Arc::from)),
                 snapshot_every_ops: self.snapshot_every_ops,
                 snapshot_journal_bytes: self.snapshot_journal_bytes,
                 maintain_every_forgets: self.maintain_every_forgets,
@@ -421,9 +430,7 @@ struct Inner {
     /// inside the provider at once. That is the point — the round trip is the
     /// slow part of a write, and a lock here would queue every concurrent
     /// caller behind one HTTP request.
-    embedder: Option<Box<dyn Embedder>>,
-    /// Kept to rebuild the overlay engine after a re-map on snapshot.
-    cfg: Config,
+    embedder: EmbedderLock<Option<Arc<dyn Embedder>>>,
     snapshot_every_ops: u64,
     snapshot_journal_bytes: u64,
     maintain_every_forgets: Option<u64>,
@@ -432,10 +439,16 @@ struct Inner {
 struct State {
     engine: Engine,
     store: FileStorage,
+    /// Actual persisted structural configuration. `dim` may differ from the
+    /// target settings while an explicit reembed is pending.
+    cfg: Config,
     /// Mutations since the last snapshot.
     ops: u64,
     /// Forgets since the last maintain.
     forgets: u64,
+    /// A reembed releases this lock during model calls; the flag makes every
+    /// competing write fail fast instead of changing its frozen source.
+    reembedding: bool,
 }
 
 /// A clonable, thread-safe handle to one local database. See the module
@@ -515,17 +528,212 @@ impl Database {
         self.inner.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// A short write guard for ordinary mutations. Reembed deliberately drops
+    /// the guard during model calls, so the flag — not lock waiting — protects
+    /// its frozen source generation.
+    fn write_available(&self) -> Result<impl std::ops::DerefMut<Target = State> + '_, HostError> {
+        let guard = self.write();
+        if guard.reembedding {
+            return Err(HostError::ReembedBusy);
+        }
+        Ok(guard)
+    }
+
+    fn embedder(&self) -> Option<Arc<dyn Embedder>> {
+        self.inner
+            .embedder
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn check_vector_space(&self, requested: &str) -> Result<(), HostError> {
+        self.read().engine.read(|mem| match mem.vector_space() {
+            Some(stored) if stored == requested => Ok(()),
+            Some(_) if mem.stats().vectors == 0 => Ok(()),
+            Some(stored) => Err(HostError::Engine(Error::VectorSpaceMismatch {
+                stored: stored.into(),
+                requested: requested.into(),
+            })),
+            None if mem.stats().vectors != 0 => Err(HostError::Engine(Error::UntrackedVectorSpace)),
+            None => Ok(()),
+        })
+    }
+
+    /// Replaces the complete vector axis with the currently configured
+    /// embedder, in bounded provider batches.
+    ///
+    /// This operation is deliberately separate from [`Database::maintain`]:
+    /// neither `Auto` nor any other maintenance mode can invoke a model. The
+    /// source generation remains readable while the provider runs. Competing
+    /// writes fail immediately with [`HostError::ReembedBusy`], and the new
+    /// generation becomes visible in one atomic publication step.
+    pub fn reembed(&self, now: u64) -> Result<ReembedReport, HostError> {
+        self.reembed_with_batch(now, DEFAULT_REEMBED_BATCH_SIZE)
+    }
+
+    /// As [`Database::reembed`], with an explicit provider batch bound.
+    pub fn reembed_with_batch(
+        &self,
+        now: u64,
+        batch_size: usize,
+    ) -> Result<ReembedReport, HostError> {
+        let embedder = self.embedder().ok_or_else(|| {
+            HostError::Embed("reembed requires a configured embedding provider".into())
+        })?;
+        self.reembed_arc(now, embedder, batch_size, false)
+    }
+
+    /// Replaces the vector axis with `target`, then installs that embedder on
+    /// this handle after a successful atomic publication.
+    ///
+    /// `batch_size` bounds both the request body and the temporary vectors
+    /// held in RAM. A provider output is validated against [`Embedder::dim`]
+    /// for every fact; callers do not separately supply a database dimension.
+    pub fn reembed_with(
+        &self,
+        now: u64,
+        target: Box<dyn Embedder>,
+        batch_size: usize,
+    ) -> Result<ReembedReport, HostError> {
+        self.reembed_arc(now, Arc::from(target), batch_size, true)
+    }
+
+    fn reembed_arc(
+        &self,
+        now: u64,
+        target: Arc<dyn Embedder>,
+        batch_size: usize,
+        install_target: bool,
+    ) -> Result<ReembedReport, HostError> {
+        if batch_size == 0 {
+            return Err(HostError::Engine(Error::Invalid(
+                "reembed batch size must be nonzero",
+            )));
+        }
+
+        // Freeze every acknowledged mutation into a private, unpublished
+        // source image, reserve the next generation, and then release the
+        // state lock before the first model call.
+        let (source, source_cfg, base_path, mut staged) = {
+            let mut st = self.write_available()?;
+            st.reembedding = true;
+            let setup = (|| {
+                let source = {
+                    let State { engine, store, .. } = &mut *st;
+                    store.stage_reembed_source(|sink| {
+                        engine
+                            .read(|mem| mem.write_snapshot_to(now, &mut *sink))
+                            .map_err(HostError::from)
+                    })?
+                };
+                let source_cfg = st.cfg.clone();
+                let base_path = st.store.path().to_path_buf();
+                let staged = st.store.begin_detached_snapshot()?;
+                Ok::<_, HostError>((source, source_cfg, base_path, staged))
+            })();
+            match setup {
+                Ok(setup) => setup,
+                Err(error) => {
+                    st.reembedding = false;
+                    return Err(error);
+                }
+            }
+        };
+
+        let build = (|| {
+            let source_path = source.path()?;
+            let file = File::open(source_path).map_err(|e| HostError::io(source_path, e))?;
+            // SAFETY: snapshot generations are immutable. The writer lock is
+            // held for this Database's lifetime and the reembed barrier keeps
+            // this generation current until publication.
+            let source_map =
+                unsafe { Mmap::map(&file) }.map_err(|e| HostError::io(source_path, e))?;
+            let source = Memory::from_bytes_borrowed(&source_map, &[], source_cfg.clone())?;
+            let scratch_path = tmp_sibling(&base_path, "reembed-vectors");
+            let mut vec_scratch = FileScratch::create(scratch_path)?;
+            let report = source
+                .write_reembedded_snapshot(
+                    now,
+                    target.dim(),
+                    target.space_id(),
+                    batch_size,
+                    &mut vec_scratch,
+                    &mut staged,
+                    |texts| target.embed(texts),
+                )
+                .map_err(|error| match error {
+                    ReembedError::Engine(error) => HostError::Engine(error),
+                    ReembedError::Embedder(error) => error,
+                })?;
+            Ok::<_, HostError>((report, staged.prepare()?))
+        })();
+
+        let (report, prepared) = match build {
+            Ok(done) => done,
+            Err(error) => {
+                self.write().reembedding = false;
+                return Err(error);
+            }
+        };
+
+        // The expensive work is complete. Publication, journal clear and
+        // re-map are short and serialized with readers/writers.
+        let journal_clear = {
+            let mut st = self.write();
+            if let Err(error) = st.store.commit_detached_snapshot(prepared) {
+                st.reembedding = false;
+                return Err(error);
+            }
+            let journal_clear = st.store.clear_journal();
+            let mut target_cfg = st.cfg.clone();
+            target_cfg.dim = target.dim();
+            let (engine, _) = match open_engine(&mut st.store, &target_cfg) {
+                Ok(opened) => opened,
+                Err(error) => {
+                    // The new generation is already durable. Keep writes
+                    // blocked rather than journal against an older in-memory
+                    // image; reopening the Database recovers normally.
+                    return Err(error);
+                }
+            };
+            st.engine = engine;
+            st.cfg = target_cfg;
+            st.ops = 0;
+            st.forgets = 0;
+            st.reembedding = false;
+            journal_clear
+        };
+        if install_target {
+            *self
+                .inner
+                .embedder
+                .write()
+                .unwrap_or_else(|e| e.into_inner()) = Some(target);
+        }
+        journal_clear?;
+        Ok(report)
+    }
+
     /// Embeds `text` outside the state lock, when an embedder is
     /// configured. `None` = leave the input as it was.
-    fn embed_one(&self, text: &str) -> Result<Option<Vec<f32>>, HostError> {
-        let Some(embedder) = &self.inner.embedder else {
+    fn embed_one(&self, text: &str) -> Result<Option<(Vec<f32>, String)>, HostError> {
+        let Some(embedder) = self.embedder() else {
             return Ok(None);
         };
         if embedder.dim() == 0 {
             return Ok(None);
         }
+        let space = embedder.space_id().to_owned();
+        self.check_vector_space(&space)?;
         let mut vs = embedder.embed(&[text])?;
-        Ok(Some(vs.remove(0)))
+        if vs.len() != 1 {
+            return Err(HostError::Embed(format!(
+                "expected 1 embedding, got {}",
+                vs.len()
+            )));
+        }
+        Ok(Some((vs.remove(0), space)))
     }
 
     /// Embeds a whole batch of texts in a **single** embedder call — outside the
@@ -534,17 +742,27 @@ impl Database {
     /// `texts` (the provider contract, checked by [`OpenAiCompatEmbedder`]). An
     /// empty `texts` yields an empty vector without a round-trip. This is the one
     /// HTTP that [`remember_many`](Self::remember_many) makes for a bulk write.
-    fn embed_many(&self, texts: &[&str]) -> Result<Option<Vec<Vec<f32>>>, HostError> {
-        let Some(embedder) = &self.inner.embedder else {
+    fn embed_many(&self, texts: &[&str]) -> Result<Option<EmbeddedBatch>, HostError> {
+        let Some(embedder) = self.embedder() else {
             return Ok(None);
         };
         if embedder.dim() == 0 {
             return Ok(None);
         }
         if texts.is_empty() {
-            return Ok(Some(Vec::new()));
+            return Ok(Some((Vec::new(), embedder.space_id().to_owned())));
         }
-        Ok(Some(embedder.embed(texts)?))
+        let space = embedder.space_id().to_owned();
+        self.check_vector_space(&space)?;
+        let vectors = embedder.embed(texts)?;
+        if vectors.len() != texts.len() {
+            return Err(HostError::Embed(format!(
+                "expected {} embeddings, got {}",
+                texts.len(),
+                vectors.len()
+            )));
+        }
+        Ok(Some((vectors, space)))
     }
 
     /// Writes a full snapshot and re-maps the fresh file.
@@ -570,7 +788,7 @@ impl Database {
         // Drop the current map before the rename: park a cheap empty engine.
         // It is replaced by the fresh overlay below — or, if the commit fails,
         // rebuilt from the intact on-disk snapshot + journal.
-        st.engine = Engine::Owned(Box::new(Memory::new(self.inner.cfg.clone())?));
+        st.engine = Engine::Owned(Box::new(Memory::new(st.cfg.clone())?));
         let write = st
             .store
             .commit_snapshot()
@@ -579,7 +797,8 @@ impl Database {
         // untouched old file + journal (journal replay is idempotent, so a
         // failed `clear_journal` does not corrupt state). Then surface the
         // commit error, if any.
-        let (engine, _) = open_engine(&mut st.store, &self.inner.cfg)?;
+        let cfg = st.cfg.clone();
+        let (engine, _) = open_engine(&mut st.store, &cfg)?;
         st.engine = engine;
         write
     }
@@ -630,11 +849,17 @@ impl Database {
             None => self.embed_one(input.text)?,
         };
         let input = RememberInput {
-            vector: embedded.as_deref().or(input.vector),
+            vector: embedded
+                .as_ref()
+                .map(|(v, _)| v.as_slice())
+                .or(input.vector),
             ..input
         };
-        let mut st = self.write();
+        let mut st = self.write_available()?;
         let State { engine, store, .. } = &mut *st;
+        if let Some((_, space)) = &embedded {
+            engine.with(store, |mem, store| mem.claim_vector_space(store, space))?;
+        }
         let out = engine.with(store, |mem, store| mem.remember(store, input))?;
         self.after_mutation(&mut st, input.now)?;
         Ok(out)
@@ -677,7 +902,11 @@ impl Database {
             self.embed_many(&to_embed)?
         };
 
-        let mut st = self.write();
+        let mut st = self.write_available()?;
+        if let Some((_, space)) = &embedded {
+            let State { engine, store, .. } = &mut *st;
+            engine.with(store, |mem, store| mem.claim_vector_space(store, space))?;
+        }
         // Batch mode: journal appends skip their per-record fsync; one
         // `sync_journal` at the end makes the whole batch durable at once.
         st.store.set_batch(true);
@@ -689,8 +918,8 @@ impl Database {
             latest = latest.max(input.now);
             let vector = if input.vector.is_some() {
                 input.vector
-            } else if let Some(embedded) = &embedded {
-                let v = embedded[cursor].as_slice();
+            } else if let Some((vectors, _)) = &embedded {
+                let v = vectors[cursor].as_slice();
                 cursor += 1;
                 Some(v)
             } else {
@@ -729,7 +958,7 @@ impl Database {
             _ => None,
         };
         let q = RecallQuery {
-            vector: embedded.as_deref().or(q.vector),
+            vector: embedded.as_ref().map(|(v, _)| v.as_slice()).or(q.vector),
             ..q
         };
         // A shared guard: concurrent recalls run in parallel. `recall_into`
@@ -756,11 +985,17 @@ impl Database {
             None => self.embed_one(input.text)?,
         };
         let input = RememberInput {
-            vector: embedded.as_deref().or(input.vector),
+            vector: embedded
+                .as_ref()
+                .map(|(v, _)| v.as_slice())
+                .or(input.vector),
             ..input
         };
-        let mut st = self.write();
+        let mut st = self.write_available()?;
         let State { engine, store, .. } = &mut *st;
+        if let Some((_, space)) = &embedded {
+            engine.with(store, |mem, store| mem.claim_vector_space(store, space))?;
+        }
         let out = engine.with(store, |mem, store| mem.revise(store, target, input))?;
         self.after_mutation(&mut st, input.now)?;
         Ok(out)
@@ -768,7 +1003,7 @@ impl Database {
 
     /// Tombstones a fact.
     pub fn forget(&self, now: u64, id: plugmem_core::FactId) -> Result<bool, HostError> {
-        let mut st = self.write();
+        let mut st = self.write_available()?;
         let State { engine, store, .. } = &mut *st;
         let fresh = engine.with(store, |mem, store| mem.forget(store, now, id))?;
         st.forgets += 1;
@@ -778,7 +1013,7 @@ impl Database {
 
     /// Upserts a typed edge.
     pub fn link(&self, input: LinkInput<'_>) -> Result<(), HostError> {
-        let mut st = self.write();
+        let mut st = self.write_available()?;
         let State { engine, store, .. } = &mut *st;
         engine.with(store, |mem, store| mem.link(store, input))?;
         self.after_mutation(&mut st, input.now)?;
@@ -787,7 +1022,7 @@ impl Database {
 
     /// Closes a typed edge. Returns `false` when the edge is already absent.
     pub fn unlink(&self, input: UnlinkInput<'_>) -> Result<bool, HostError> {
-        let mut st = self.write();
+        let mut st = self.write_available()?;
         let State { engine, store, .. } = &mut *st;
         let fresh = engine.with(store, |mem, store| mem.unlink(store, input))?;
         self.after_mutation(&mut st, input.now)?;
@@ -828,7 +1063,7 @@ impl Database {
 
     /// Removes a tag from every current fact by creating successor revisions.
     pub fn remove_tag(&self, now: u64, tag: &str) -> Result<RemoveTagReport, HostError> {
-        let mut st = self.write();
+        let mut st = self.write_available()?;
         let State { engine, store, .. } = &mut *st;
         let report = engine.with(store, |mem, store| mem.remove_tag(store, now, tag))?;
         if report.affected != 0 {
@@ -916,7 +1151,7 @@ impl Database {
         now: u64,
         options: MaintenanceOptions,
     ) -> Result<MaintainReport, HostError> {
-        let mut st = self.write();
+        let mut st = self.write_available()?;
         // The image size is the current snapshot generation's, not the tiny
         // manifest at the base path.
         let snap_len = |store: &FileStorage| -> usize {
@@ -984,11 +1219,12 @@ impl Database {
         // Drop the current map before the rename (park a cheap empty engine),
         // commit, clear the journal, then re-map the compacted file — exactly
         // the `resnapshot` dance, so the map is never renamed over on Windows.
-        st.engine = Engine::Owned(Box::new(Memory::new(self.inner.cfg.clone())?));
+        st.engine = Engine::Owned(Box::new(Memory::new(st.cfg.clone())?));
         st.store
             .commit_snapshot()
             .and_then(|()| st.store.clear_journal())?;
-        let (engine, _) = open_engine(&mut st.store, &self.inner.cfg)?;
+        let cfg = st.cfg.clone();
+        let (engine, _) = open_engine(&mut st.store, &cfg)?;
         st.engine = engine;
         st.forgets = 0;
         st.ops = 0;
@@ -1002,7 +1238,7 @@ impl Database {
     /// Writes a full snapshot and clears the journal now (re-mapping the
     /// fresh file — see `Database::resnapshot`).
     pub fn checkpoint(&self, now: u64) -> Result<(), HostError> {
-        let mut st = self.write();
+        let mut st = self.write_available()?;
         self.resnapshot(&mut st, now)?;
         st.ops = 0;
         Ok(())

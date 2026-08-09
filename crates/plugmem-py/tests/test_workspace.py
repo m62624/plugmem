@@ -169,10 +169,13 @@ def test_active_capacity_is_busy_without_waiting_or_losing_the_lease(tmp_path) -
 
     ws = plugmem.Workspace(str(tmp_path), config=str(config), max_open=1)
     errors: list[BaseException] = []
+    reports: list[plugmem.ReembedReport] = []
 
     def hold_lease() -> None:
         try:
-            ws.memory("active").remember("holds the scoped lease")
+            memory = ws.memory("active")
+            memory.remember("holds the scoped lease")
+            reports.append(memory.reembed(1))
         except BaseException as exc:  # noqa: BLE001 — asserted below
             errors.append(exc)
 
@@ -193,6 +196,8 @@ def test_active_capacity_is_busy_without_waiting_or_losing_the_lease(tmp_path) -
 
     assert not worker.is_alive(), "the active workspace verb deadlocked"
     assert not errors
+    assert reports[0].new_space == "test"
+    assert reports[0].embedded == 1
 
 
 def test_close_invalidates_references_and_releases_the_lock(tmp_path) -> None:

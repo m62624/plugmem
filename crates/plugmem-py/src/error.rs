@@ -181,6 +181,7 @@ pub fn engine(e: HostError) -> PyErr {
         HostError::Engine(plugmem_host::Error::StaleCursor) => {
             StaleCursorError::new_err(e.to_string())
         }
+        HostError::ReembedBusy => BusyError::new_err(e.to_string()),
         _ => EngineError::new_err(e.to_string()),
     }
 }

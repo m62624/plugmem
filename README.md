@@ -184,6 +184,12 @@ prefers tokio" answers a query for `tokio` but not one for `which runtime?` —
 anchor on the entity, or add an embedder, and it does. Configure one in
 `[embedder]`; delete the section and everything else keeps working.
 
+The model name is persisted with its vectors. Changing it never makes routine
+or automatic maintenance call the new model: run the explicit
+`plugmem-cli maintain --reembed` operation to recompute every retained fact and
+atomically publish the new vector space. Equal dimensions alone are not treated
+as compatibility.
+
 ## Many memories in one directory (optional)
 
 **Default: one logical memory backed by a local database layout.** Point `--db` at it and nothing below applies.

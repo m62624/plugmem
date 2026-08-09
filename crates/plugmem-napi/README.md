@@ -229,10 +229,17 @@ only moves arguments and results across the boundary.
 | Method | Does |
 |---|---|
 | `maintain(mode?)` | `"auto"` (default), `"compact"`, `"reindex-text"`, `"optimize-vectors"`, `"full"`. No mode ever drops a revision or an edge version |
+| `reembed(batchSize?)` | explicitly recompute every retained vector with the configured model and publish atomically; never invoked by `maintain('auto')` |
 | `checkpoint()` | flush the journal into a fresh snapshot |
 | `verify()` | full content-integrity sweep; rejects on the first inconsistency |
 | `scrub(options?)` | start a resumable byte-level check of the snapshot |
 | `recover(src, dst, options?)` | module function: salvage a damaged file into a clean copy |
+
+The snapshot stores the model's readable vector-space identity, not only its
+dimension. A changed model makes ordinary automatic embedding reject instead
+of mixing incompatible vectors. `reembed` is the deliberate transition; it
+runs on a libuv worker, leaves the JavaScript event loop responsive, keeps reads
+live and makes concurrent writes reject with `PLUGMEM_BUSY`.
 
 **Read-only handles** (`{ readOnly: true }`) observe another process's writer
 over a published snapshot. The read verbs answer, the write verbs throw, and two

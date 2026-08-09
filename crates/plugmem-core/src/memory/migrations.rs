@@ -18,6 +18,7 @@
 //! | edges keyed by triple | the time-ordered history key | every version re-keyed by `valid_from`; current edges re-derived from the open ones |
 //! | 8-byte per-document BM25 records | the term-set summary | widened, marked unknown; `maintain` fills them from the postings |
 //! | no tag-catalog section | bounded tag discovery index | rebuilt from authoritative tag postings and current facts |
+//! | no vector-space section | identity of the model that produced vectors | left untracked; explicit reembed establishes it safely |
 //!
 //! The legacy record layouts live here as their own [`Slot`] types. They are
 //! deliberately duplicated rather than shared with [`crate::model`]: the

@@ -62,6 +62,9 @@ fn sample_ops() -> Vec<Op<'static>> {
             now: 600,
             tag: "obsolete",
         },
+        Op::SetVectorSpace {
+            space: "text-embedding-3-small",
+        },
     ]
 }
 

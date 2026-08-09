@@ -350,6 +350,20 @@ impl From<plugmem_host::ExportPage> for ExportPage {
     }
 }
 
+/// The report of an explicit complete vector-axis replacement.
+#[napi(object)]
+#[derive(serde::Deserialize)]
+pub struct ReembedReport {
+    pub previous_space: Option<String>,
+    pub new_space: String,
+    pub previous_dim: f64,
+    pub new_dim: f64,
+    pub embedded: f64,
+    pub tombstones_skipped: f64,
+    pub vector_bytes: f64,
+    pub hnsw_indexed: f64,
+}
+
 /// The report of a `maintain` pass.
 #[napi(object)]
 #[derive(serde::Deserialize)]

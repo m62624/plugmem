@@ -15,9 +15,13 @@ guards against is a hard stall, not slowness.
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import plugmem
+import pytest
 
 FACTS = 400
 RECALLS = 12
@@ -151,3 +155,98 @@ def test_bulk_tag_removal_does_not_stall_the_loop(tmp_path) -> None:
     db.close()
     assert affected == 2_000
     assert beats > 0, "the event loop stalled while remove_tag revised the tagged facts"
+
+
+def test_reembed_uses_to_thread_without_stalling_the_loop(tmp_path) -> None:
+    dim = 8
+    provider_entered = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self) -> None:
+            provider_entered.set()
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            inputs = json.loads(body).get("input", [])
+            time.sleep(0.05)
+            payload = json.dumps(
+                {
+                    "data": [
+                        {"index": i, "embedding": [0.1] * dim}
+                        for i, _text in enumerate(inputs)
+                    ]
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    config = tmp_path / "reembed.toml"
+    config.write_text(
+        f"[engine]\ndim = {dim}\n[embedder]\n"
+        f'url = "http://127.0.0.1:{server.server_port}/v1/embeddings"\n'
+        'model = "async-test"\n',
+        encoding="utf-8",
+    )
+    db = plugmem.Plugmem.open(str(tmp_path / "reembed.plugmem"), config=str(config))
+    db.remember_many([{"text": f"fact {i}"} for i in range(8)])
+    provider_entered.clear()
+
+    async def main() -> tuple[int, plugmem.ReembedReport]:
+        beats = 0
+        done = asyncio.Event()
+
+        async def heartbeat() -> None:
+            nonlocal beats
+            while not done.is_set():
+                beats += 1
+                await asyncio.sleep(0)
+
+        pulse = asyncio.create_task(heartbeat())
+        reembedding = asyncio.create_task(asyncio.to_thread(db.reembed, 2))
+        assert await asyncio.to_thread(provider_entered.wait, 10)
+        with pytest.raises(plugmem.BusyError):
+            await asyncio.to_thread(
+                db.remember,
+                "cannot cross frozen source",
+                vector=[0.1] * dim,
+            )
+        report = await reembedding
+        done.set()
+        await pulse
+        return beats, report
+
+    try:
+        beats, report = asyncio.run(main())
+        assert report.new_space == "async-test"
+        assert report.embedded == 8
+        assert beats > 0, "the event loop stalled while reembed called the model"
+
+        changed = tmp_path / "changed.toml"
+        changed.write_text(
+            f"[engine]\ndim = {dim}\n[embedder]\n"
+            f'url = "http://127.0.0.1:{server.server_port}/v1/embeddings"\n'
+            'model = "other-model"\n',
+            encoding="utf-8",
+        )
+        reader = plugmem.Plugmem.open(
+            str(tmp_path / "reembed.plugmem"),
+            config=str(changed),
+            read_only=True,
+        )
+        try:
+            with pytest.raises(plugmem.EngineError, match="vector space"):
+                reader.recall("fact")
+        finally:
+            reader.close()
+    finally:
+        db.close()
+        server.shutdown()
+        server.server_close()
