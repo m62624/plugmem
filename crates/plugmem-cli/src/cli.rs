@@ -178,6 +178,23 @@ pub(crate) enum Command {
         /// `show`, or a `remember`/`revise` confirmation.
         id: u32,
     },
+    /// List current tags with counts in stable lexical order.
+    Tags {
+        /// Exact, case-sensitive prefix to scan from.
+        #[arg(long)]
+        prefix: Option<String>,
+        /// Opaque cursor returned by the previous page.
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Page size (default 64, maximum 256).
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
+    },
+    /// Remove a tag from every current fact while preserving fact history.
+    RemoveTag {
+        /// Tag to remove verbatim.
+        tag: String,
+    },
     /// Upsert a typed edge between two entities.
     Link {
         /// Source entity.

@@ -58,6 +58,10 @@ fn sample_ops() -> Vec<Op<'static>> {
             mode: 0,
             max_hnsw_inserts: u32::MAX,
         },
+        Op::RemoveTag {
+            now: 600,
+            tag: "obsolete",
+        },
     ]
 }
 

@@ -4,7 +4,7 @@
 
 use plugmem_core::{
     Config, Error, FactId, LinkInput, MemStorage, Memory, RecallQuery, RememberInput, Storage,
-    UnlinkInput, VALID_TO_OPEN,
+    TagQuery, UnlinkInput, VALID_TO_OPEN,
 };
 #[cfg(not(target_family = "wasm"))]
 use proptest::prelude::*;
@@ -16,6 +16,285 @@ fn cfg() -> Config {
 
 fn engine() -> (Memory<'static>, MemStorage) {
     (Memory::new(cfg()).unwrap(), MemStorage::new())
+}
+
+#[test]
+fn tag_catalog_pages_prefixes_and_rejects_stale_cursors() {
+    let (mut mem, mut store) = engine();
+    for (at, tags) in [
+        (1, &["zeta", "project"] as &[&str]),
+        (2, &["alpha", "project"] as &[&str]),
+        (3, &["project:plugmem"] as &[&str]),
+    ] {
+        mem.remember(
+            &mut store,
+            RememberInput {
+                tags,
+                ..RememberInput::text(at, "tagged")
+            },
+        )
+        .unwrap();
+    }
+
+    let first = mem
+        .list_tags(TagQuery {
+            limit: 2,
+            ..TagQuery::default()
+        })
+        .unwrap();
+    assert_eq!(
+        first
+            .items
+            .iter()
+            .map(|item| (item.name.as_str(), item.count))
+            .collect::<Vec<_>>(),
+        [("alpha", 1), ("project", 2)]
+    );
+    let cursor = first.next_cursor.as_deref().unwrap();
+    let second = mem
+        .list_tags(TagQuery {
+            cursor: Some(cursor),
+            limit: 2,
+            ..TagQuery::default()
+        })
+        .unwrap();
+    assert_eq!(
+        second
+            .items
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect::<Vec<_>>(),
+        ["project:plugmem", "zeta"]
+    );
+    assert!(second.next_cursor.is_none());
+
+    let prefixed = mem
+        .list_tags(TagQuery {
+            prefix: Some("project"),
+            ..TagQuery::default()
+        })
+        .unwrap();
+    assert_eq!(
+        prefixed
+            .items
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect::<Vec<_>>(),
+        ["project", "project:plugmem"]
+    );
+
+    mem.remember(
+        &mut store,
+        RememberInput {
+            tags: &["new"],
+            ..RememberInput::text(4, "changes the catalog")
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        mem.list_tags(TagQuery {
+            cursor: Some(cursor),
+            limit: 2,
+            ..TagQuery::default()
+        }),
+        Err(Error::StaleCursor)
+    );
+}
+
+#[test]
+fn tag_cursor_cannot_cross_an_unnamed_database_with_different_term_ids() {
+    let (mut first, mut first_store) = engine();
+    first
+        .remember(
+            &mut first_store,
+            RememberInput {
+                tags: &["alpha", "beta"],
+                ..RememberInput::text(1, "one two three four")
+            },
+        )
+        .unwrap();
+    let page = first
+        .list_tags(TagQuery {
+            limit: 1,
+            ..TagQuery::default()
+        })
+        .unwrap();
+    let cursor = page.next_cursor.unwrap();
+
+    let (mut second, mut second_store) = engine();
+    second
+        .remember(
+            &mut second_store,
+            RememberInput {
+                tags: &["alpha", "beta"],
+                ..RememberInput::text(1, "one")
+            },
+        )
+        .unwrap();
+    second
+        .remember(
+            &mut second_store,
+            RememberInput::text(2, "two three four five six"),
+        )
+        .unwrap();
+    assert_eq!(
+        first.list_tags(TagQuery::default()).unwrap(),
+        second.list_tags(TagQuery::default()).unwrap(),
+        "the visible catalogues intentionally match"
+    );
+    assert_eq!(
+        second.list_tags(TagQuery {
+            cursor: Some(&cursor),
+            limit: 1,
+            ..TagQuery::default()
+        }),
+        Err(Error::StaleCursor)
+    );
+}
+
+#[test]
+fn tag_catalog_merges_multiple_overlay_runs_without_duplicates() {
+    let (mut mem, mut store) = engine();
+    for i in (0..150).rev() {
+        let tag = format!("tag-{i:03}");
+        mem.remember(
+            &mut store,
+            RememberInput {
+                tags: &[&tag],
+                ..RememberInput::text(i + 1, "tagged")
+            },
+        )
+        .unwrap();
+    }
+
+    let mut cursor = None;
+    let mut names = Vec::new();
+    loop {
+        let page = mem
+            .list_tags(TagQuery {
+                cursor: cursor.as_deref(),
+                limit: 17,
+                ..TagQuery::default()
+            })
+            .unwrap();
+        names.extend(page.items.into_iter().map(|item| item.name));
+        let Some(next) = page.next_cursor else { break };
+        cursor = Some(next);
+    }
+    assert_eq!(names.len(), 150);
+    assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(names.first().map(String::as_str), Some("tag-000"));
+    assert_eq!(names.last().map(String::as_str), Some("tag-149"));
+
+    assert!(matches!(
+        mem.list_tags(TagQuery {
+            limit: plugmem_core::MAX_TAG_PAGE_LIMIT + 1,
+            ..TagQuery::default()
+        }),
+        Err(Error::TooLarge { .. })
+    ));
+    assert_eq!(
+        mem.list_tags(TagQuery {
+            cursor: Some("not-a-cursor"),
+            ..TagQuery::default()
+        }),
+        Err(Error::Invalid("malformed tag cursor"))
+    );
+}
+
+#[test]
+fn tag_catalog_page_skips_many_zero_count_base_overrides_once() {
+    let (mut original, mut journal) = engine();
+    for i in 0..150u32 {
+        let tag = format!("tag-{i:03}");
+        original
+            .remember(
+                &mut journal,
+                RememberInput {
+                    tags: &[&tag],
+                    ..RememberInput::text(u64::from(i) + 1, "tagged")
+                },
+            )
+            .unwrap();
+    }
+    let snapshot = original.snapshot_bytes(200);
+    let (mut loaded, _) = Memory::from_bytes(Some(&snapshot), &[], cfg()).unwrap();
+    let mut mutations = MemStorage::new();
+    for id in (0..150u32).step_by(2) {
+        loaded
+            .forget(&mut mutations, 300 + u64::from(id), FactId(id))
+            .unwrap();
+    }
+
+    let mut cursor = None;
+    let mut names = Vec::new();
+    loop {
+        let page = loaded
+            .list_tags(TagQuery {
+                cursor: cursor.as_deref(),
+                limit: 13,
+                ..TagQuery::default()
+            })
+            .unwrap();
+        names.extend(page.items.into_iter().map(|item| item.name));
+        let Some(next) = page.next_cursor else { break };
+        cursor = Some(next);
+    }
+    assert_eq!(names.len(), 75);
+    assert_eq!(names.first().map(String::as_str), Some("tag-001"));
+    assert_eq!(names.last().map(String::as_str), Some("tag-149"));
+    assert!(
+        names
+            .iter()
+            .all(|name| { name.rsplit_once('-').unwrap().1.parse::<u32>().unwrap() % 2 == 1 })
+    );
+}
+
+#[test]
+fn remove_tag_revises_current_facts_and_preserves_history() {
+    let (mut mem, mut store) = engine();
+    for text in ["one", "two"] {
+        mem.remember(
+            &mut store,
+            RememberInput {
+                tags: &["remove-me", "keep"],
+                ..RememberInput::text(100, text)
+            },
+        )
+        .unwrap();
+    }
+    let report = mem.remove_tag(&mut store, 200, "remove-me").unwrap();
+    assert_eq!(report.affected, 2);
+    assert_eq!(mem.stats().next_fact, 4);
+
+    let page = mem.list_tags(TagQuery::default()).unwrap();
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|item| (item.name.as_str(), item.count))
+            .collect::<Vec<_>>(),
+        [("keep", 2)]
+    );
+    let current = mem
+        .recall(RecallQuery {
+            tags: &["remove-me"],
+            ..RecallQuery::text(300, "one two")
+        })
+        .unwrap();
+    assert!(current.facts.is_empty());
+    let historical = mem
+        .recall(RecallQuery {
+            tags: &["remove-me"],
+            as_of: Some(150),
+            include_closed: true,
+            ..RecallQuery::text(300, "one two")
+        })
+        .unwrap();
+    assert_eq!(historical.facts.len(), 2);
+
+    let (replayed, _) = Memory::open(&mut store, cfg()).unwrap();
+    assert_eq!(replayed.list_tags(TagQuery::default()).unwrap(), page);
+    assert_eq!(replayed.stats().next_fact, 4);
 }
 
 #[test]

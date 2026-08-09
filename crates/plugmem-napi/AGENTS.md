@@ -8,14 +8,14 @@
 
 ## Public boundary
 
-`Plugmem` has **no JavaScript constructor**: it is opened with the static, asynchronous `Plugmem.open(path?, options?)`. A constructor must evaluate to its object immediately, so it cannot hand the open — the exclusive lock, the journal replay, the snapshot mapping — to a worker thread; a static method returning a promise can. `Workspace` keeps its constructor, which only reads `config.toml` and builds a struct; every database it touches opens lazily through its (async) verbs. Do not reintroduce a synchronous open. Methods cover remember, remember-many, revise, recall, forget, link, get, tags, collected and paged export, verify, maintain, checkpoint, generation, refresh, and close.
+`Plugmem` has **no JavaScript constructor**: it is opened with the static, asynchronous `Plugmem.open(path?, options?)`. A constructor must evaluate to its object immediately, so it cannot hand the open — the exclusive lock, the journal replay, the snapshot mapping — to a worker thread; a static method returning a promise can. `Workspace` keeps its constructor, which only reads `config.toml` and builds a struct; every database it touches opens lazily through its (async) verbs. Do not reintroduce a synchronous open. Methods cover remember, remember-many, revise, recall, forget, link, get, per-fact tags, bounded tag listing, global tag removal, collected and paged export, verify, maintain, checkpoint, generation, refresh, and close.
 
 The wrapper has two internal modes:
 
 - writer: owns `plugmem_host::Database`;
 - reader: owns `ReadOnlyDatabase` and must reject write operations.
 
-`remember`, `revise`, `recall`, `rememberMany`, `exportPage`, `maintain`, and `checkpoint` use napi-rs async tasks/libuv. The rule for which verbs are async is *blocking work*, not verb size: with an `[embedder]` configured, `remember`/`revise`/`recall` each cost an HTTP round trip, and Node has one thread for all JavaScript — running that on it stalls the whole process. Verbs that only touch mapped memory stay synchronous. Do not move a verb across that line without the same reasoning. Preserve the rule that the task owns the necessary database handle and that errors cross the boundary as JS exceptions/promises rather than panics. Paged export is pull-based and item-bounded; do not replace it with an unbounded threadsafe-function callback queue or wait for JavaScript while holding the host read lock.
+`remember`, `revise`, `recall`, `rememberMany`, `listTags`, `removeTag`, `exportPage`, `maintain`, and `checkpoint` use napi-rs async tasks/libuv. The rule for which verbs are async is *blocking work*, not verb size: with an `[embedder]` configured, `remember`/`revise`/`recall` each cost an HTTP round trip; `removeTag` can revise many facts; and Node has one thread for all JavaScript — running that work on it stalls the whole process. Verbs that only touch mapped memory stay synchronous. Do not move a verb across that line without the same reasoning. Preserve the rule that the task owns the necessary database handle and that errors cross the boundary as JS exceptions/promises rather than panics. Paged export and tag listing are pull-based and item-bounded; do not replace them with an unbounded threadsafe-function callback queue or wait for JavaScript while holding the host read lock.
 
 ## Type and error rules
 

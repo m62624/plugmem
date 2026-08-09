@@ -108,6 +108,13 @@ create_exception!(
      alone can judge. The message is the host's own."
 );
 
+create_exception!(
+    plugmem._plugmem,
+    StaleCursorError,
+    PlugmemError,
+    "A tag page cursor no longer names the current catalogue snapshot."
+);
+
 // Nothing here raises `InternalError` today: every result is hand-mapped with
 // the host type destructured field by field, so there is no "could not shape
 // the result" path to fail on — the Node binding has one because it converts
@@ -146,6 +153,8 @@ pub mod code {
     pub const WRITER_ONLY: &str = "PLUGMEM_WRITER_ONLY";
     /// Local handle or workspace-pool contention.
     pub const BUSY: &str = "PLUGMEM_BUSY";
+    /// A tag page cursor is stale after the catalogue changed.
+    pub const STALE_CURSOR: &str = "PLUGMEM_STALE_CURSOR";
     /// The engine reported a failure.
     pub const ENGINE: &str = "PLUGMEM_ENGINE";
     /// A bug in this binding.
@@ -168,7 +177,12 @@ pub fn invalid_name(e: WorkspaceError) -> PyErr {
 /// An engine failure from inside a verb: the host's own message, under the one
 /// class that says "this was not your call, it was the engine".
 pub fn engine(e: HostError) -> PyErr {
-    EngineError::new_err(e.to_string())
+    match &e {
+        HostError::Engine(plugmem_host::Error::StaleCursor) => {
+            StaleCursorError::new_err(e.to_string())
+        }
+        _ => EngineError::new_err(e.to_string()),
+    }
 }
 
 /// A workspace failure from inside a verb.
@@ -232,7 +246,7 @@ pub fn busy(what: &str) -> PyErr {
 /// thrown `Error`.
 pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = module.py();
-    let classes: [(&str, Bound<'_, PyAny>, Option<&str>); 13] = [
+    let classes: [(&str, Bound<'_, PyAny>, Option<&str>); 14] = [
         (
             "PlugmemError",
             py.get_type::<PlugmemError>().into_any(),
@@ -292,6 +306,11 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
             "EngineError",
             py.get_type::<EngineError>().into_any(),
             Some(code::ENGINE),
+        ),
+        (
+            "StaleCursorError",
+            py.get_type::<StaleCursorError>().into_any(),
+            Some(code::STALE_CURSOR),
         ),
         (
             "InternalError",

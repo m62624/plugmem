@@ -39,7 +39,7 @@ use crate::error::{self, Result};
 use crate::scrub::Scrub;
 use crate::types::{
     ExportPage, ExportedEdge, ExportedFact, FactSnapshot, MaintainReport, RecallResult,
-    RecoverReport, RememberOutcome, Stats,
+    RecoverReport, RememberOutcome, RemoveTagReport, Stats, TagPage,
 };
 
 /// Keep one native→Python transfer bounded, matching the Node binding's page
@@ -582,6 +582,40 @@ impl Plugmem {
                 Handle::Reader { db, .. } => db.tags_of(FactId(id)),
             })
         })
+    }
+
+    /// One bounded page of current tags in lexical order.
+    #[pyo3(signature = (*, prefix=None, cursor=None, limit=0))]
+    fn list_tags(
+        &self,
+        py: Python<'_>,
+        prefix: Option<String>,
+        cursor: Option<String>,
+        limit: usize,
+    ) -> Result<TagPage> {
+        let page = py.detach(|| {
+            let guard = self.handle.read().map_err(|_| error::busy("this memory"))?;
+            let query = plugmem_host::TagQuery {
+                prefix: prefix.as_deref(),
+                cursor: cursor.as_deref(),
+                limit,
+            };
+            match handle(&guard)? {
+                Handle::Writer(db) => db.list_tags(query).map_err(error::engine),
+                Handle::Reader { db, .. } => db.list_tags(query).map_err(error::engine),
+            }
+        })?;
+        TagPage::build(py, page)
+    }
+
+    /// Remove a tag from all current facts, preserving historical revisions.
+    fn remove_tag(&self, py: Python<'_>, tag: String) -> Result<RemoveTagReport> {
+        let now = now_ms();
+        let report = py.detach(|| {
+            let guard = self.handle.read().map_err(|_| error::busy("this memory"))?;
+            writer(&guard)?.remove_tag(now, &tag).map_err(error::engine)
+        })?;
+        Ok(RemoveTagReport::from(report))
     }
 
     /// Engine size counters.

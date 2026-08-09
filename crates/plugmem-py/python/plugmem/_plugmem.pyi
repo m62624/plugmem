@@ -31,12 +31,16 @@ __all__ = [
     "RecoverReport",
     "ReindexReport",
     "RememberOutcome",
+    "RemoveTagReport",
     "Scrub",
     "ScrubProgress",
     "SettingHelpItem",
     "SettingsHelpResult",
     "Similar",
+    "StaleCursorError",
     "Stats",
+    "TagPage",
+    "TagSummary",
     "Workspace",
     "WorkspaceMemory",
     "WorkspaceProblem",
@@ -521,6 +525,14 @@ class Plugmem:
         r"""
         A fact's tags, as strings.
         """
+    def list_tags(self, *, prefix: typing.Optional[builtins.str] = None, cursor: typing.Optional[builtins.str] = None, limit: builtins.int = ...) -> TagPage:
+        r"""
+        One bounded page of current tags in lexical order.
+        """
+    def remove_tag(self, tag: builtins.str) -> RemoveTagReport:
+        r"""
+        Remove a tag from all current facts, preserving historical revisions.
+        """
     def stats(self) -> Stats:
         r"""
         Engine size counters.
@@ -805,6 +817,15 @@ class RememberOutcome:
     def __repr__(self) -> builtins.str: ...
 
 @typing.final
+class RemoveTagReport:
+    r"""
+    Result of removing one tag from all current facts.
+    """
+    @property
+    def affected(self) -> builtins.int: ...
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
 class Scrub:
     r"""
     A resumable byte-level check of one snapshot generation.
@@ -956,6 +977,12 @@ class Similar:
         """
     def __repr__(self) -> builtins.str: ...
 
+class StaleCursorError(PlugmemError):
+    r"""
+    A tag page cursor no longer names the current catalogue snapshot.
+    """
+    ...
+
 @typing.final
 class Stats:
     r"""
@@ -1021,6 +1048,28 @@ class Stats:
         r"""
         Total bytes held by the engine's pools.
         """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class TagPage:
+    r"""
+    One bounded page of current tags.
+    """
+    @property
+    def items(self) -> builtins.list[TagSummary]: ...
+    @property
+    def next_cursor(self) -> typing.Optional[builtins.str]: ...
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class TagSummary:
+    r"""
+    One active tag and the number of current facts carrying it.
+    """
+    @property
+    def name(self) -> builtins.str: ...
+    @property
+    def count(self) -> builtins.int: ...
     def __repr__(self) -> builtins.str: ...
 
 @typing.final
@@ -1147,6 +1196,8 @@ class WorkspaceMemory:
     def unlink(self, src: builtins.str, rel: builtins.str, dst: builtins.str) -> builtins.bool: ...
     def get(self, id: builtins.int) -> typing.Optional[FactSnapshot]: ...
     def tags_of(self, id: builtins.int) -> builtins.list[builtins.str]: ...
+    def list_tags(self, *, prefix: typing.Optional[builtins.str] = None, cursor: typing.Optional[builtins.str] = None, limit: builtins.int = ...) -> TagPage: ...
+    def remove_tag(self, tag: builtins.str) -> RemoveTagReport: ...
     def stats(self) -> Stats: ...
     def export(self) -> builtins.list[ExportedFact]: ...
     def export_page(self, cursor: typing.Optional[builtins.int] = None) -> ExportPage: ...

@@ -17,6 +17,7 @@ p50 / p99 after warm-up.
 | `recall` + vector (Flat) | < 500 µs | < 1.5 ms | — | at/below threshold |
 | `recall` + vector (HNSW) | < 500 µs | < 1.5 ms | < 1 ms | ef=64 |
 | `get(id)` | < 2 µs | < 5 µs | < 2 µs | |
+| `list_tags` | bounded by page + overlay runs | same | same | default 64, hard max 256; no fact scan |
 | cold open | file read + < 5 ms | memcpy + < 5 ms | + < 20 ms | validation is O(metadata) |
 | `snapshot()` | < 50 ms | < 100 ms | < 500 ms | no fsync |
 | `maintain` full | < 1 s | < 3 s | < 10 s | the only O(database) operation |
@@ -76,6 +77,15 @@ grows only on new size maxima). Mechanism: a global counting allocator in the te
 harness, a reference scenario on corpus M, assert 0. `remember`: ≤ 8 allocations
 (amortized pool growth is counted separately).
 
+Tag discovery does not add a string table. Its checkpointed base is one compact
+8-byte `(TermId, count)` record per active tag; names remain in the common
+interner. Writes update a small sorted buffer (at most 64 entries), then merge it
+into binary-counter runs. This makes catalogue maintenance amortized logarithmic
+in the number of tags changed since the checkpoint rather than O(all tags) per
+fact. `list_tags` merges the base and those few runs until its bounded page is
+full. `remove_tag` is intentionally O(affected facts): preserving temporal
+history requires one successor per affected current fact.
+
 ## Deterministic work counters (CI gates)
 
 Wall-clock lies in CI; the gates are on counters (feature `counters`, off in release
@@ -99,11 +109,15 @@ exercises both recall semantics and quantization). API: `Corpus::generate(seed, 
 ## Coverage and correctness — mandate
 
 - **Coverage**: the target is 100% executable lines for `plugmem-arena` and
-  `plugmem-core`; the **hard gate is ≥ 90%**. Tarpaulin mis-attributes some
-  non-executable lines (struct-literal fields, macro-call lines, const-folded branches)
-  — those are audited by hand in review (that the surrounding statement is exercised),
-  never dismissed silently. Wrappers: ≥ 90%. Always paired with `cargo fmt` + `cargo
-  clippy` (0 warnings) before each commit.
+  `plugmem-core`; the **hard gate is ≥ 90% both for Rust core and for the
+  aggregate measured Rust workspace**. Tarpaulin
+  mis-attributes some non-executable lines (struct-literal fields, macro-call
+  lines, const-folded branches) — those are audited by hand in review (that the
+  surrounding statement is exercised), never dismissed silently. N-API and
+  Python are exercised through their real Node/CPython runtimes, including
+  event-loop/GIL progress tests; they do not carry a synthetic line-coverage
+  percentage. Always pair the suites with every language's formatter/linter and
+  `cargo clippy` with zero warnings before committing.
 - **Property tests (proptest)** — per structure, equivalence to a reference model
   (listed in specs 01–04).
 - **miri** — all of plugmem-arena plus the core unsafe paths, on any PR touching unsafe.

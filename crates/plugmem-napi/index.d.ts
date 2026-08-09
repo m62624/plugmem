@@ -133,6 +133,15 @@ export interface LinkArgs {
    */
   provenance?: number
 }
+/** Bounded tag-catalog options. Omitted fields select the first 64 entries. */
+export interface TagListOptions {
+  /** Exact, case-sensitive prefix. */
+  prefix?: string
+  /** Opaque cursor returned by the previous page. */
+  cursor?: string
+  /** Page size (maximum 256). */
+  limit?: number
+}
 /** Options for [`recover`]. */
 export interface RecoverOptions {
   /**
@@ -372,6 +381,20 @@ export interface ExportPage {
   facts: Array<ExportedFact>
   /** Pass this opaque cursor to the next call; absent when the scan is done. */
   nextCursor?: number
+}
+/** One active tag and the number of current facts carrying it. */
+export interface TagSummary {
+  name: string
+  count: number
+}
+/** One bounded, stable page of current tags. */
+export interface TagPage {
+  items: Array<TagSummary>
+  nextCursor?: string
+}
+/** Result of removing one tag from all current facts. */
+export interface RemoveTagReport {
+  affected: number
 }
 /** The report of a `maintain` pass. */
 export interface MaintainReport {
@@ -756,6 +779,17 @@ export declare class Plugmem {
   /** One fact's tags, or an empty array for an unknown or tombstoned id. */
   tagsOf(id: number): Array<string>
   /**
+   * One bounded page of current tags. Runs on a libuv worker so neither a
+   * mapped-page fault nor host locking can pause the JavaScript event loop.
+   */
+  listTags(options?: TagListOptions | undefined | null): Promise<TagPage>
+  /**
+   * Removes a tag from every current fact by creating successor revisions.
+   * The bulk write and journal sync run on a libuv worker.
+   * @throws synchronously in read-only mode.
+   */
+  removeTag(tag: string): Promise<RemoveTagReport>
+  /**
    * Content-integrity check; rejects on the first inconsistency found.
    *
    * **Async**: this is a full sweep — every fact's text and metadata, the
@@ -862,6 +896,8 @@ export declare class WorkspaceMemory {
   exportEdges(onBatch: (edges: ExportedEdge[]) => void): Promise<number>
   scrub(options?: ScrubOptions | undefined | null): Promise<Scrub>
   tagsOf(id: number): Promise<string[]>
+  listTags(options?: TagListOptions | undefined | null): Promise<TagPage>
+  removeTag(tag: string): Promise<RemoveTagReport>
   verify(): Promise<void>
   maintain(mode?: 'auto' | 'compact' | 'reindex-text' | 'optimize-vectors' | 'full'): Promise<MaintainReport>
   checkpoint(): Promise<void>

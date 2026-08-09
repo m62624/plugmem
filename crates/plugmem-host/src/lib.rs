@@ -60,9 +60,10 @@ pub use workspace::{
 // embedders need only this crate.
 pub use plugmem_core::snapshot::{DEFAULT_SCRUB_BUDGET, ScrubProgress};
 pub use plugmem_core::{
-    Config, EdgeId, EntityId, Error, FactId, FactRecord, LinkInput, MaintainReport,
-    MaintenanceMode, MaintenanceOptions, OpenReport, RecallQuery, RecallResult, RecallScratch,
-    RecalledEdge, RecalledFact, RememberInput, RememberOutcome, ShardLayout, Similar,
-    SimilarReason, Stats, UnlinkInput, VALID_TO_OPEN, fact_flags,
+    Config, DEFAULT_TAG_PAGE_LIMIT, EdgeId, EntityId, Error, FactId, FactRecord, LinkInput,
+    MAX_TAG_PAGE_LIMIT, MaintainReport, MaintenanceMode, MaintenanceOptions, OpenReport,
+    RecallQuery, RecallResult, RecallScratch, RecalledEdge, RecalledFact, RememberInput,
+    RememberOutcome, RemoveTagReport, ShardLayout, Similar, SimilarReason, Stats, TagPage,
+    TagQuery, TagSummary, UnlinkInput, VALID_TO_OPEN, fact_flags,
 };
 pub use plugmem_core::{MemScratch, Scratch};

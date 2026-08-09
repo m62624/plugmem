@@ -79,6 +79,29 @@ fn recall_by_vector_surfaces_the_match() {
 }
 
 #[test]
+fn remove_tag_copies_the_quantized_vector_to_the_successor() {
+    let dim = 8;
+    let vector = [0.1, 0.2, 0.3, 0.4, -0.1, -0.2, -0.3, -0.4];
+    let (mut mem, mut store) = (Memory::new(cfg(dim)).unwrap(), MemStorage::new());
+    let old = mem
+        .remember(
+            &mut store,
+            RememberInput {
+                tags: &["drop"],
+                vector: Some(&vector),
+                ..RememberInput::text(1, "vector fact")
+            },
+        )
+        .unwrap();
+    assert_eq!(mem.remove_tag(&mut store, 2, "drop").unwrap().affected, 1);
+
+    let result = mem.recall(vquery(3, &vector, 1)).unwrap();
+    assert_eq!(result.facts.len(), 1);
+    assert_ne!(result.facts[0].id, old.id);
+    assert_eq!(result.facts[0].id, FactId(1));
+}
+
+#[test]
 fn flat_recall_matches_bruteforce() {
     let dim = 128;
     let n = 300u64;

@@ -54,6 +54,8 @@ pub mod code {
     /// Local contention: a handle is in use, or every workspace pool slot is
     /// leased by an active operation.
     pub const BUSY: &str = "PLUGMEM_BUSY";
+    /// A tag page cursor no longer names the current catalogue snapshot.
+    pub const STALE_CURSOR: &str = "PLUGMEM_STALE_CURSOR";
     /// The engine reported a failure — IO, a capacity limit, a rejected input
     /// it alone can judge (a vector that disagrees with `dim`). The message is
     /// the host's own.
@@ -76,7 +78,11 @@ pub fn invalid_arg(message: impl Into<String>) -> Error {
 /// An engine failure from inside a verb: the host's own message, under the one
 /// code that says "this was not your call, it was the engine".
 pub fn engine(e: HostError) -> Error {
-    coded(code::ENGINE, e.to_string())
+    let status = match &e {
+        HostError::Engine(plugmem_host::Error::StaleCursor) => code::STALE_CURSOR,
+        _ => code::ENGINE,
+    };
+    coded(status, e.to_string())
 }
 
 /// A workspace failure from inside a verb.

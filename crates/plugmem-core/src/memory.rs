@@ -14,7 +14,7 @@
 //! lands separately.
 
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use plugmem_arena::{
@@ -47,10 +47,12 @@ mod migrations;
 mod persist;
 mod recall;
 mod shards;
+mod tags;
 
 pub use maintain::{MaintainReport, MaintenanceMode, MaintenanceOptions};
 pub use recall::{RecallQuery, RecallResult, RecallScratch, RecalledEdge, RecalledFact, source};
 pub use shards::ShardLayout;
+pub use tags::{DEFAULT_TAG_PAGE_LIMIT, MAX_TAG_PAGE_LIMIT, TagPage, TagQuery, TagSummary};
 
 /// Input of `remember` and `revise`.
 #[derive(Clone, Copy, Debug)]
@@ -138,6 +140,15 @@ pub struct RememberOutcome {
     /// the candidates, the agent judges: `revise`, keep both, or
     /// `forget`.
     pub similar: Vec<Similar>,
+}
+
+/// Result of removing one tag from every current fact.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct RemoveTagReport {
+    /// Current facts superseded by an otherwise-identical revision without
+    /// the tag.
+    pub affected: u32,
 }
 
 /// One similar-fact hint.
@@ -284,6 +295,8 @@ pub struct Memory<'a> {
     // -- indexes --
     bm25: Bm25Index<'a>,
     tags_idx: IdListIndex<'a>,
+    /// Current tag counts: merged snapshot base plus changes since it.
+    tag_catalog: tags::TagCatalog,
     entity_facts: IdListIndex<'a>,
     /// Quantized vectors (empty and inert when `cfg.dim == 0`).
     vecs: VecPool<'a>,
@@ -336,6 +349,7 @@ impl<'a> Memory<'a> {
             tag_lists: ChunkPool::new(ChunkPoolCfg::new().with_max_bytes(cfg.max_bytes)),
             bm25: Bm25Index::new(cfg.shards_postings, cfg.max_bytes)?,
             tags_idx: IdListIndex::new(cfg.shards_postings, cfg.max_bytes)?,
+            tag_catalog: tags::TagCatalog::new(),
             entity_facts: IdListIndex::new(cfg.shards_entities, cfg.max_bytes)?,
             vecs: VecPool::new(cfg.dim, cfg.max_bytes),
             hnsw: HnswGraph::new(cfg.hnsw_m, cfg.hnsw_m0, cfg.max_bytes)?,
@@ -483,6 +497,7 @@ impl<'a> Memory<'a> {
                             metadata: (!metadata.is_empty()).then_some(metadata.as_slice()),
                         },
                         revises,
+                        None,
                     )?;
                     if let Some(target) = revises.some() {
                         self.close_target(target, valid_from);
@@ -514,6 +529,10 @@ impl<'a> Memory<'a> {
                     self.apply_unlink(now, src, rel, dst)?;
                     report.replayed += 1;
                 }
+                Op::RemoveTag { now, tag } => {
+                    self.apply_remove_tag(now, tag)?;
+                    report.replayed += 1;
+                }
                 Op::Maintain {
                     mode,
                     max_hnsw_inserts,
@@ -539,7 +558,7 @@ impl<'a> Memory<'a> {
         input: RememberInput<'_>,
     ) -> Result<RememberOutcome, Error> {
         self.validate_input(&input)?;
-        let mut outcome = self.apply_remember(&input, FactId::NONE)?;
+        let mut outcome = self.apply_remember(&input, FactId::NONE, None)?;
         self.find_similar(&mut outcome);
         self.journal_remember(store, &input, FactId::NONE, outcome.id)?;
         Ok(outcome)
@@ -561,7 +580,7 @@ impl<'a> Memory<'a> {
         let mut out = Vec::with_capacity(inputs.len());
         for input in inputs {
             self.validate_input(input)?;
-            let mut outcome = self.apply_remember(input, FactId::NONE)?;
+            let mut outcome = self.apply_remember(input, FactId::NONE, None)?;
             if !skip_similar {
                 self.find_similar(&mut outcome);
             }
@@ -739,7 +758,7 @@ impl<'a> Memory<'a> {
         // fact exists, so a mid-operation failure (capacity) never leaves
         // a closed fact without its successor.
         self.check_revisable(target)?;
-        let outcome = self.apply_remember(&input, target)?;
+        let outcome = self.apply_remember(&input, target, None)?;
         let valid_from = input.valid_from.unwrap_or(input.now);
         self.close_target(target, valid_from);
         self.journal_remember(store, &input, target, outcome.id)?;
@@ -762,6 +781,33 @@ impl<'a> Memory<'a> {
             .append_journal(&entry)
             .map_err(|e| Error::Storage(format!("{e:?}")))?;
         Ok(fresh)
+    }
+
+    /// Removes `tag` from every current fact without deleting knowledge.
+    ///
+    /// Each affected fact is closed and replaced by an otherwise-identical
+    /// successor without the tag. Historical `as_of` queries keep seeing the
+    /// old classification; current recall and [`Memory::list_tags`] stop
+    /// seeing it immediately. The interned string is stable historical residue
+    /// and is not physically reclaimed.
+    pub fn remove_tag<S: Storage>(
+        &mut self,
+        store: &mut S,
+        now: u64,
+        tag: &str,
+    ) -> Result<RemoveTagReport, Error> {
+        if tag.is_empty() {
+            return Err(Error::Invalid("empty tag"));
+        }
+        let report = self.apply_remove_tag(now, tag)?;
+        if report.affected != 0 {
+            let mut entry = Vec::new();
+            Op::RemoveTag { now, tag }.encode(&mut entry);
+            store
+                .append_journal(&entry)
+                .map_err(|e| Error::Storage(format!("{e:?}")))?;
+        }
+        Ok(report)
     }
 
     /// Upserts a typed edge between two entities (created lazily);
@@ -840,6 +886,16 @@ impl<'a> Memory<'a> {
                 out.push(TermId(u32::from_be_bytes(raw.try_into().unwrap())));
             }
         }
+    }
+
+    /// Returns one bounded, stable page of current tags in lexical order.
+    ///
+    /// A cursor is tied to the tag catalog state and prefix. If a concurrent
+    /// mutation changes any current tag count, continuing returns
+    /// [`Error::StaleCursor`] rather than silently skipping or duplicating a
+    /// tag.
+    pub fn list_tags(&self, query: TagQuery<'_>) -> Result<TagPage, Error> {
+        self.tag_catalog.page(&self.terms, self.cfg.db_uuid, query)
     }
 
     /// Fills `out` with the fact's metadata as key→value pairs in canonical
@@ -974,6 +1030,7 @@ impl<'a> Memory<'a> {
                 + self.tag_lists.pool_bytes()
                 + self.bm25.pool_bytes()
                 + self.tags_idx.pool_bytes()
+                + self.tag_catalog.pool_bytes()
                 + self.entity_facts.pool_bytes()
                 + self.vecs.pool_bytes()
                 + self.hnsw.pool_bytes(),
@@ -1055,6 +1112,7 @@ impl<'a> Memory<'a> {
         let flags = record.flags | fact_flags::CLOSED;
         payload[4..6].copy_from_slice(&flags.to_be_bytes());
         payload[36..44].copy_from_slice(&valid_to.to_be_bytes());
+        self.change_catalog_for_fact(target, -1);
     }
 
     /// The one execution path of a new fact — called by the public verbs
@@ -1063,6 +1121,7 @@ impl<'a> Memory<'a> {
         &mut self,
         input: &RememberInput<'_>,
         revises: FactId,
+        copy_vector: Option<u32>,
     ) -> Result<RememberOutcome, Error> {
         let id = FactId(self.next_fact);
         let entity = match input.entity {
@@ -1139,9 +1198,14 @@ impl<'a> Memory<'a> {
         // Vector: quantized into the flat pool; the fact keeps the slot
         // index. Pushed before the record so a capacity failure aborts the
         // whole op (replay rebuilds consistently, like the other indexes).
-        let (vector, flags) = match input.vector {
-            Some(v) => (self.vecs.push(id, v)?, fact_flags::HAS_VECTOR),
-            None => (NONE_U32, 0),
+        let (vector, flags) = match (input.vector, copy_vector) {
+            (Some(v), None) => (self.vecs.push(id, v)?, fact_flags::HAS_VECTOR),
+            (None, Some(source)) => (
+                self.vecs.clone_slot_for_fact(id, source)?,
+                fact_flags::HAS_VECTOR,
+            ),
+            (None, None) => (NONE_U32, 0),
+            (Some(_), Some(_)) => unreachable!("retag does not provide a raw vector"),
         };
 
         let recorded_at = input.now;
@@ -1162,6 +1226,9 @@ impl<'a> Memory<'a> {
             recorded_at,
             fact: id,
         })?;
+        for &term in &seen_tags[..seen_cnt] {
+            self.tag_catalog.change(&self.terms, TermId(term), 1);
+        }
         self.next_fact += 1;
         Ok(RememberOutcome {
             id,
@@ -1182,7 +1249,100 @@ impl<'a> Memory<'a> {
         let flags = record.flags | fact_flags::TOMBSTONE;
         payload[4..6].copy_from_slice(&flags.to_be_bytes());
         self.tombstones += 1;
+        if !record.is_closed() {
+            self.change_catalog_for_fact(id, -1);
+        }
         Ok(true)
+    }
+
+    fn apply_remove_tag(&mut self, now: u64, tag: &str) -> Result<RemoveTagReport, Error> {
+        let Some(term) = self.terms.lookup(tag) else {
+            return Ok(RemoveTagReport::default());
+        };
+        let targets: Vec<FactId> = self
+            .tags_idx
+            .entries(term.0)
+            .map(|(id, _)| id)
+            .filter(|&id| {
+                self.fact(id)
+                    .is_some_and(|record| !record.is_tombstone() && !record.is_closed())
+            })
+            .collect();
+        let mut affected = 0u32;
+        for target in targets {
+            self.retag_without(now, target, tag)?;
+            affected = affected.saturating_add(1);
+        }
+        Ok(RemoveTagReport { affected })
+    }
+
+    fn retag_without(&mut self, now: u64, target: FactId, removed: &str) -> Result<(), Error> {
+        let record = self.fact(target).ok_or(Error::NotFound(target))?;
+        let view = self.get(target).ok_or(Error::NotFound(target))?;
+        let text = view.text.to_string();
+        let entity = record
+            .entity
+            .some()
+            .and_then(|id| self.entity_name(id))
+            .map(ToString::to_string);
+
+        let mut tag_terms = Vec::new();
+        self.tags_of(target, &mut tag_terms);
+        let tags: Vec<String> = tag_terms
+            .into_iter()
+            .map(|term| self.term(term))
+            .filter(|name| *name != removed)
+            .map(ToString::to_string)
+            .collect();
+        let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
+
+        let mut metadata = Vec::new();
+        self.metadata_of(target, &mut metadata);
+        let metadata: Vec<(String, String)> = metadata
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        let metadata_refs: Vec<(&str, &str)> = metadata
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        let vector = (record.flags & fact_flags::HAS_VECTOR != 0).then_some(record.vector);
+        let input = RememberInput {
+            now,
+            text: &text,
+            entity: entity.as_deref(),
+            tags: &tag_refs,
+            links: &[],
+            vector: None,
+            valid_from: Some(now),
+            metadata: (!metadata_refs.is_empty()).then_some(metadata_refs.as_slice()),
+        };
+        self.apply_remember(&input, target, vector)?;
+        self.close_target(target, now);
+        Ok(())
+    }
+
+    /// Applies one current-count change for every tag attached to `id`.
+    /// Facts accept at most 32 distinct tags, so this uses fixed stack storage
+    /// and never allocates on revise/forget.
+    fn change_catalog_for_fact(&mut self, id: FactId, delta: i32) {
+        let Some(aux) = self.fact_aux.get(&id.0.to_be_bytes()) else {
+            return;
+        };
+        let mut ids = [NONE_U32; 32];
+        let mut len = 0usize;
+        for chunk in self.tag_lists.iter(&aux.tags) {
+            for raw in chunk.chunks_exact(4) {
+                if len == ids.len() {
+                    break;
+                }
+                ids[len] = u32::from_be_bytes(raw.try_into().unwrap());
+                len += 1;
+            }
+        }
+        for &term in &ids[..len] {
+            self.tag_catalog.change(&self.terms, TermId(term), delta);
+        }
     }
 
     fn apply_link(

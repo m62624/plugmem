@@ -5,8 +5,10 @@ this way; this document says *what is in the bytes*, down to the offset, so a
 third-party reader can be written from it and a format change can be reviewed
 against it.
 
-Everything here is **format version 1**, which is not frozen: it may break
-freely before the first public tag (`03-snapshot.md`, "Versioning and
+Everything here is **format version 1**, which is not frozen. During public
+testing, current binaries still open published legacy v1 shapes through the
+explicit migrations in `memory/migrations.rs`; the next checkpoint writes the
+current canonical v1 representation (`03-snapshot.md`, "Versioning and
 migrations"). Where this document and the code disagree, the code is right and
 this document is a bug.
 
@@ -170,12 +172,19 @@ because only the pools are borrowed zero-copy from an mmap.
 | 54, 55 | `EDGE_HIST_OUT_META`, `EDGE_HIST_OUT_POOL` | edge history keyed `[a \| valid_from \| edge]` (§4.6) |
 | 56, 57 | `EDGE_HIST_IN_META`, `EDGE_HIST_IN_POOL` | the mirrored history |
 | 58, 59 | `BM25_DOCLEN_META`, `BM25_DOCLEN_POOL` | per-document BM25 records with the term-set summary |
+| 60 | `TAG_CATALOG` | sorted `[TermId u32 LE, current_fact_count u32 LE]` entries |
 
 The eight edge sections (50–57) are written together. All absent means an empty
 database or one written before the history layout, which `migrate_edges`
 rebuilds; present but incomplete is corruption.
 
 Sections 37–43 are the vector layer and appear only when `FLAG_VECTORS` is set.
+
+`TAG_CATALOG` is derived: facts, their tag lists and tag postings remain the
+source of truth. A v1 image written before kind 60 is valid; `migrations.rs`
+rebuilds the catalogue on open and the next checkpoint persists it. Zero-count
+entries are omitted. The shared interner may retain unused tag strings as
+historical residue.
 
 ## 4. Record slots
 
@@ -371,6 +380,7 @@ wasm32 process.
 | 4 | Link | `now`, `src`, `rel`, `dst`, `provenance` FactId (`NONE` if absent) |
 | 5 | Maintain | `now`, `mode u8`, `max_hnsw_inserts u32` (`u32::MAX` = unlimited) |
 | 6 | Unlink | `now`, `src`, `rel`, `dst` |
+| 7 | RemoveTag | `now`, `tag` |
 
 **The vector is journaled as raw f32, before quantization.** Replay re-quantizes
 with the same pure function and reproduces every slot byte for byte; journaling

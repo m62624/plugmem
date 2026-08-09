@@ -25,11 +25,12 @@ use plugmem_host::{DbName, Description, IfMissing, Settings, WorkspaceIssue};
 
 use crate::db::{
     CheckpointTask, ExportEdgesTask, ExportPageTask, LinkArgs, MaintainTask, ReadTask, RecallArgs,
-    RecallTask, RememberArgs, RememberManyTask, RememberTask, WriteTask, WriterGetTask,
-    WriterSource, WriterStatsTask, WriterTagsTask, now_ms, writer_checkpoint_task,
-    writer_export_edges_task, writer_export_page_task, writer_export_task, writer_forget_task,
-    writer_link_task, writer_maintain_task, writer_recall_task, writer_remember_many_task,
-    writer_remember_task, writer_scrub_task, writer_unlink_task, writer_verify_task,
+    RecallTask, RememberArgs, RememberManyTask, RememberTask, RemoveTagTask, TagListOptions,
+    TagPageTask, WriteTask, WriterGetTask, WriterSource, WriterStatsTask, WriterTagsTask, now_ms,
+    writer_checkpoint_task, writer_export_edges_task, writer_export_page_task, writer_export_task,
+    writer_forget_task, writer_link_task, writer_maintain_task, writer_recall_task,
+    writer_remember_many_task, writer_remember_task, writer_remove_tag_task, writer_scrub_task,
+    writer_tag_page_task, writer_unlink_task, writer_verify_task,
 };
 use crate::error::{self, Produced, Result, code};
 use crate::scrub::{ScrubOpenTask, ScrubOptions};
@@ -228,6 +229,16 @@ impl WorkspaceMemory {
     #[napi(ts_return_type = "Promise<string[]>")]
     pub fn tags_of(&self, id: u32) -> Result<AsyncTask<WriterTagsTask>> {
         Ok(AsyncTask::new(WriterTagsTask::new(self.source()?, id)))
+    }
+
+    #[napi(ts_return_type = "Promise<TagPage>")]
+    pub fn list_tags(&self, options: Option<TagListOptions>) -> Result<AsyncTask<TagPageTask>> {
+        Ok(writer_tag_page_task(self.source()?, options))
+    }
+
+    #[napi(ts_return_type = "Promise<RemoveTagReport>")]
+    pub fn remove_tag(&self, tag: String) -> Result<AsyncTask<RemoveTagTask>> {
+        Ok(writer_remove_tag_task(self.source()?, tag))
     }
 
     #[napi(ts_return_type = "Promise<void>")]

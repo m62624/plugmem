@@ -123,3 +123,31 @@ def test_a_thread_pool_and_the_loop_can_share_one_handle(tmp_path) -> None:
     # the case those do not: four threads sharing one handle through a pool
     # complete every call, with no `BusyError` and nothing lost.
     assert len(seen) == 100
+
+
+def test_bulk_tag_removal_does_not_stall_the_loop(tmp_path) -> None:
+    db = plugmem.Plugmem.open(str(tmp_path / "remove-tag.plugmem"))
+    db.remember_many(
+        [{"text": f"tagged fact {i}", "tags": ["bulk"]} for i in range(2_000)]
+    )
+
+    async def main() -> tuple[int, int]:
+        beats = 0
+        done = asyncio.Event()
+
+        async def heartbeat() -> None:
+            nonlocal beats
+            while not done.is_set():
+                beats += 1
+                await asyncio.sleep(0)
+
+        pulse = asyncio.create_task(heartbeat())
+        report = await asyncio.to_thread(db.remove_tag, "bulk")
+        done.set()
+        await pulse
+        return beats, report.affected
+
+    beats, affected = asyncio.run(main())
+    db.close()
+    assert affected == 2_000
+    assert beats > 0, "the event loop stalled while remove_tag revised the tagged facts"

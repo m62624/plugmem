@@ -9,7 +9,8 @@ use std::path::PathBuf;
 
 use plugmem_host::{
     Config, Database, Embedder, FactId, FsyncPolicy, HostError, LinkInput, NullEmbedder,
-    OpenAiCompatEmbedder, ReadOnlyDatabase, RecallQuery, RememberInput, ShardLayout, UnlinkInput,
+    OpenAiCompatEmbedder, ReadOnlyDatabase, RecallQuery, RememberInput, ShardLayout, TagQuery,
+    UnlinkInput,
 };
 
 /// A unique temp directory per test; removed on drop.
@@ -2133,5 +2134,51 @@ fn export_edges_each_streams_the_current_graph_on_both_handles() {
     assert_eq!(
         from_reader, from_writer,
         "both handles export the same edges"
+    );
+}
+
+#[test]
+fn tag_catalog_and_bulk_removal_match_on_writer_and_pinned_reader() {
+    let tmp = TempDir::new("tags");
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    for (text, tags) in [("one", &["drop", "keep"][..]), ("two", &["drop"][..])] {
+        db.remember(RememberInput {
+            tags,
+            ..RememberInput::text(1, text)
+        })
+        .unwrap();
+    }
+    let first = db
+        .list_tags(TagQuery {
+            limit: 1,
+            ..TagQuery::default()
+        })
+        .unwrap();
+    assert_eq!(
+        (first.items[0].name.as_str(), first.items[0].count),
+        ("drop", 2)
+    );
+    let second = db
+        .list_tags(TagQuery {
+            cursor: first.next_cursor.as_deref(),
+            limit: 1,
+            ..TagQuery::default()
+        })
+        .unwrap();
+    assert_eq!(
+        (second.items[0].name.as_str(), second.items[0].count),
+        ("keep", 1)
+    );
+
+    assert_eq!(db.remove_tag(2, "drop").unwrap().affected, 2);
+    assert_eq!(db.remove_tag(3, "drop").unwrap().affected, 0);
+    db.checkpoint(4).unwrap();
+    let ro = Database::open_readonly(tmp.db(), cfg()).unwrap();
+    assert_eq!(
+        ro.list_tags(TagQuery::default()).unwrap().items,
+        [plugmem_host::TagSummary {
+            name: "keep".into(),
+            count: 1
+        }]
     );
 }

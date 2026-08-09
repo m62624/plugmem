@@ -6,8 +6,8 @@ use plugmem_arena::{Arena, ArenaCfg, ShardMode, Slot};
 use plugmem_core::model::EdgeHistorySlot;
 use plugmem_core::{
     Config, EdgeSlot, Error, FactId, LinkInput, MAX_SHARDS, MaintenanceOptions, MemScratch,
-    MemStorage, Memory, RecallQuery, RememberInput, Scratch, Storage, UnlinkInput,
-    snapshot::{Snapshot, SnapshotWriter},
+    MemStorage, Memory, RecallQuery, RememberInput, Scratch, Storage, TagQuery, UnlinkInput,
+    snapshot::{FORMAT_VERSION, Snapshot, SnapshotWriter},
 };
 
 fn cfg() -> Config {
@@ -61,6 +61,7 @@ const LEGACY_KIND_EDGE_HIST_IN_META: u16 = 48;
 const LEGACY_KIND_EDGE_HIST_IN_POOL: u16 = 49;
 const KIND_BM25_DOCLEN_META: u16 = 58;
 const KIND_BM25_DOCLEN_POOL: u16 = 59;
+const KIND_TAG_CATALOG: u16 = 60;
 const LEGACY_KIND_BM25_DOCLEN_META: u16 = 26;
 const LEGACY_KIND_BM25_DOCLEN_POOL: u16 = 27;
 const STATE_V2_LEN: usize = 32;
@@ -174,6 +175,56 @@ fn snapshot_roundtrip_is_canonical_and_complete() {
         .remember(&mut store, RememberInput::text(200 * DAY, "fresh"))
         .unwrap();
     assert_eq!(out.id.0 as usize, mem.facts_len());
+}
+
+#[test]
+fn legacy_snapshot_without_tag_catalog_is_migrated_and_next_snapshot_persists_it() {
+    let (mut mem, mut store) = (Memory::new(cfg()).unwrap(), MemStorage::new());
+    mem.remember(
+        &mut store,
+        RememberInput {
+            tags: &["project", "rust"],
+            ..RememberInput::text(1, "tagged")
+        },
+    )
+    .unwrap();
+    mem.remember(
+        &mut store,
+        RememberInput {
+            tags: &["project"],
+            ..RememberInput::text(2, "also tagged")
+        },
+    )
+    .unwrap();
+    let current = mem.snapshot_bytes(3);
+    let legacy = omit_sections(&current, &[KIND_TAG_CATALOG]);
+    assert_eq!(u16::from_le_bytes(legacy[4..6].try_into().unwrap()), 1);
+    assert_eq!(FORMAT_VERSION, 1);
+    assert!(
+        Snapshot::parse(&legacy)
+            .unwrap()
+            .section(KIND_TAG_CATALOG)
+            .is_none()
+    );
+
+    let (migrated, _) = Memory::from_bytes(Some(&legacy), &[], cfg()).unwrap();
+    let page = migrated.list_tags(TagQuery::default()).unwrap();
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|item| (item.name.as_str(), item.count))
+            .collect::<Vec<_>>(),
+        [("project", 2), ("rust", 1)]
+    );
+    let upgraded = migrated.snapshot_bytes(4);
+    assert_eq!(u16::from_le_bytes(upgraded[4..6].try_into().unwrap()), 1);
+    assert!(
+        Snapshot::parse(&upgraded)
+            .unwrap()
+            .section(KIND_TAG_CATALOG)
+            .is_some(),
+        "the next checkpoint writes the current derived section"
+    );
 }
 
 #[test]
@@ -949,6 +1000,35 @@ fn rewrite_sections(bytes: &[u8], replacements: &[(u16, Vec<u8>)]) -> Vec<u8> {
         flags,
         created_at,
         "0.2.0",
+    )
+}
+
+/// Rebuilds a valid v1 image without selected optional/legacy sections.
+fn omit_sections(bytes: &[u8], omitted: &[u16]) -> Vec<u8> {
+    let flags = u16::from_le_bytes(bytes[SNAP_FLAGS_AT..SNAP_FLAGS_AT + 2].try_into().unwrap());
+    let config_len = u32::from_le_bytes(
+        bytes[SNAP_CONFIG_LEN_AT..SNAP_CONFIG_LEN_AT + 4]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    let created_at = u64::from_le_bytes(
+        bytes[SNAP_CREATED_AT..SNAP_CREATED_AT + 8]
+            .try_into()
+            .unwrap(),
+    );
+    let mut writer = SnapshotWriter::new();
+    for (_, kind, offset, len) in section_entries(bytes) {
+        if !omitted.contains(&kind) {
+            writer
+                .section(kind, bytes[offset..offset + len].to_vec())
+                .unwrap();
+        }
+    }
+    writer.finish(
+        &bytes[SNAP_HEADER..SNAP_HEADER + config_len],
+        flags,
+        created_at,
+        "legacy-test",
     )
 }
 

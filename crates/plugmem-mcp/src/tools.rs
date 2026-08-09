@@ -13,7 +13,8 @@ use std::sync::RwLock;
 
 use plugmem_host::{
     Database, DbEntry, DbName, Embedder, FactId, HostError, IfMissing, LinkInput, MaintenanceMode,
-    MaintenanceOptions, ReadOnlyDatabase, RecallQuery, RememberInput, UnlinkInput, Workspace,
+    MaintenanceOptions, ReadOnlyDatabase, RecallQuery, RememberInput, TagQuery, UnlinkInput,
+    Workspace,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -54,6 +55,8 @@ const REMEMBER: &str = "plugmem_remember";
 const RECALL: &str = "plugmem_recall";
 const REVISE: &str = "plugmem_revise";
 const FORGET: &str = "plugmem_forget";
+const TAGS: &str = "plugmem_tags";
+const REMOVE_TAG: &str = "plugmem_remove_tag";
 const LINK: &str = "plugmem_link";
 const UNLINK: &str = "plugmem_unlink";
 const SHOW: &str = "plugmem_show";
@@ -79,10 +82,12 @@ pub fn definitions() -> Vec<Value> {
         recall_def(),
         revise_def(),
         forget_def(),
+        remove_tag_def(),
         link_def(),
         unlink_def(),
         show_def(),
         stats_def(),
+        tags_def(),
         export_def(),
         maintain_def(),
         checkpoint_def(),
@@ -100,8 +105,8 @@ const STATELESS_TOOLS: &[&str] = &[VERSION, ABOUT, SETTINGS_HELP];
 
 /// Tools that act on one database.
 const DATABASE_TOOLS: &[&str] = &[
-    REMEMBER, RECALL, REVISE, FORGET, LINK, UNLINK, SHOW, STATS, EXPORT, MAINTAIN, CHECKPOINT,
-    VERIFY,
+    REMEMBER, RECALL, REVISE, FORGET, REMOVE_TAG, LINK, UNLINK, SHOW, STATS, TAGS, EXPORT,
+    MAINTAIN, CHECKPOINT, VERIFY,
 ];
 
 /// Answers the tools that need no database, or `None` for anything else.
@@ -144,10 +149,12 @@ pub fn call(db: &Database, id: Value, params: Option<&Value>) -> Value {
         RECALL => recall(db, id, args),
         REVISE => revise(db, id, args),
         FORGET => forget(db, id, args),
+        REMOVE_TAG => remove_tag(db, id, args),
         LINK => link(db, id, args),
         UNLINK => unlink(db, id, args),
         SHOW => show(db, id, args),
         STATS => rpc::tool_result(id, render(&db.stats(), format_arg(args)), false),
+        TAGS => tags(db, id, args),
         EXPORT => {
             let mut edges = Vec::new();
             db.export_edges_each(|s, r, d, p| edges.push(edge_json(s, r, d, p)));
@@ -182,6 +189,7 @@ pub fn definitions_ro() -> Vec<Value> {
         recall_def(),
         show_def(),
         stats_def(),
+        tags_def(),
         export_def(),
         verify_def(),
         format_only_def(GENERATION, messages::GENERATION_TOOL),
@@ -217,6 +225,10 @@ pub fn call_ro(reader: &ReaderShared, id: Value, params: Option<&Value>) -> Valu
         STATS => {
             let stats = reader.db.read().expect("snapshot lock").stats();
             rpc::tool_result(id, render(&stats, format_arg(args)), false)
+        }
+        TAGS => {
+            let db = reader.db.read().expect("snapshot lock");
+            tags_ro(&db, id, args)
         }
         EXPORT => {
             let db = reader.db.read().expect("snapshot lock");
@@ -625,6 +637,23 @@ fn forget(db: &Database, id: Value, args: Option<&Value>) -> Value {
     }
 }
 
+fn remove_tag(db: &Database, id: Value, args: Option<&Value>) -> Value {
+    let Some(tag) = arg_str(args, "tag") else {
+        return rpc::tool_result(id, "missing required `tag`".into(), true);
+    };
+    match db.remove_tag(now_ms(), tag) {
+        Ok(report) => rpc::tool_result(
+            id,
+            render(
+                &json!({ "tag": tag, "affected": report.affected }),
+                format_arg(args),
+            ),
+            false,
+        ),
+        Err(e) => tool_error(id, &e),
+    }
+}
+
 fn link(db: &Database, id: Value, args: Option<&Value>) -> Value {
     let (Some(src), Some(rel), Some(dst)) = (
         arg_str(args, "src"),
@@ -731,6 +760,28 @@ fn show(db: &Database, id: Value, args: Option<&Value>) -> Value {
     }
 }
 
+fn tag_query(args: Option<&Value>) -> TagQuery<'_> {
+    TagQuery {
+        prefix: arg_str(args, "prefix"),
+        cursor: arg_str(args, "cursor"),
+        limit: arg_u64(args, "limit").unwrap_or(0) as usize,
+    }
+}
+
+fn tags(db: &Database, id: Value, args: Option<&Value>) -> Value {
+    match db.list_tags(tag_query(args)) {
+        Ok(page) => rpc::tool_result(id, render(&page, format_arg(args)), false),
+        Err(e) => tool_error(id, &e),
+    }
+}
+
+fn tags_ro(db: &ReadOnlyDatabase, id: Value, args: Option<&Value>) -> Value {
+    match db.list_tags(tag_query(args)) {
+        Ok(page) => rpc::tool_result(id, render(&page, format_arg(args)), false),
+        Err(e) => tool_error(id, &e),
+    }
+}
+
 // ── Definitions ───────────────────────────────────────────────────────────
 
 fn remember_def() -> Value {
@@ -822,6 +873,37 @@ fn recall_def() -> Value {
 
 fn forget_def() -> Value {
     id_only_def(FORGET, messages::FORGET_TOOL)
+}
+
+fn remove_tag_def() -> Value {
+    json!({
+        "name": REMOVE_TAG,
+        "description": messages::REMOVE_TAG_TOOL,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tag": { "type": "string", "minLength": 1 },
+                "format": format_prop()
+            },
+            "required": ["tag"]
+        }
+    })
+}
+
+fn tags_def() -> Value {
+    json!({
+        "name": TAGS,
+        "description": messages::TAGS_TOOL,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prefix": { "type": "string", "description": "Exact, case-sensitive prefix." },
+                "cursor": { "type": "string", "description": "Opaque next_cursor from the previous page." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 256, "default": 64 },
+                "format": format_prop()
+            }
+        }
+    })
 }
 
 fn show_def() -> Value {
@@ -1345,10 +1427,53 @@ mod tests {
         let w = names(definitions());
         assert_eq!(w[0], REMEMBER);
         assert!(w.iter().any(|n| n == UNLINK));
+        assert!(w.iter().any(|n| n == TAGS) && w.iter().any(|n| n == REMOVE_TAG));
         assert!(w.iter().any(|n| n == MAINTAIN) && w.iter().any(|n| n == CHECKPOINT));
         let ro = names(definitions_ro());
         assert!(ro.iter().any(|n| n == REFRESH) && ro.iter().any(|n| n == GENERATION));
+        assert!(ro.iter().any(|n| n == TAGS));
         assert!(!ro.iter().any(|n| n == REMEMBER)); // no write verbs
+        assert!(!ro.iter().any(|n| n == REMOVE_TAG));
+    }
+
+    #[test]
+    fn tag_tools_page_and_remove_without_deleting_facts() {
+        let tmp = TempDir::new("tag-tools");
+        let (db, _) = Database::open(tmp.db(), Config::default()).unwrap();
+        for text in ["one", "two"] {
+            let response = call(
+                &db,
+                json!(1),
+                Some(&params(
+                    REMEMBER,
+                    json!({ "text": text, "tags": ["drop", "keep"] }),
+                )),
+            );
+            assert!(!is_error(&response));
+        }
+
+        let page: Value = serde_json::from_str(&text(&call(
+            &db,
+            json!(2),
+            Some(&params(TAGS, json!({ "limit": 1 }))),
+        )))
+        .unwrap();
+        assert_eq!(page["items"][0]["name"], "drop");
+        assert_eq!(page["items"][0]["count"], 2);
+        assert!(page["next_cursor"].is_string());
+
+        let removed: Value = serde_json::from_str(&text(&call(
+            &db,
+            json!(3),
+            Some(&params(REMOVE_TAG, json!({ "tag": "drop" }))),
+        )))
+        .unwrap();
+        assert_eq!(removed["affected"], 2);
+        assert_eq!(db.export().len(), 2);
+        let after: Value =
+            serde_json::from_str(&text(&call(&db, json!(4), Some(&params(TAGS, json!({}))))))
+                .unwrap();
+        assert_eq!(after["items"][0]["name"], "keep");
     }
 
     #[test]
@@ -1721,6 +1846,11 @@ mod tests {
             json!(6),
             Some(&params("plugmem_verify", json!({})))
         )));
+        assert!(!is_error(&call_ro(
+            &reader,
+            json!(6),
+            Some(&params(TAGS, json!({})))
+        )));
 
         // freshness meta.
         assert!(
@@ -1763,6 +1893,7 @@ mod tests {
             "plugmem_remember",
             "plugmem_revise",
             "plugmem_forget",
+            "plugmem_remove_tag",
             "plugmem_link",
             "plugmem_unlink",
             "plugmem_maintain",

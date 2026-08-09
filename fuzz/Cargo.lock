@@ -261,7 +261,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "plugmem-arena"
-version = "0.2.0"
+version = "0.8.0"
 dependencies = [
  "thiserror",
  "xxhash-rust",
@@ -269,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "plugmem-core"
-version = "0.2.0"
+version = "0.8.0"
 dependencies = [
  "hashbrown",
  "icu_casemap",

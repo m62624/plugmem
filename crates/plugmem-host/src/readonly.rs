@@ -71,7 +71,9 @@ use std::sync::Mutex;
 
 use memmap2::Mmap;
 use plugmem_core::snapshot::{DEFAULT_SCRUB_BUDGET, ScrubCursor, ScrubProgress, Snapshot};
-use plugmem_core::{Config, FactId, Memory, RecallQuery, RecallResult, RecallScratch, Stats};
+use plugmem_core::{
+    Config, FactId, Memory, RecallQuery, RecallResult, RecallScratch, Stats, TagPage, TagQuery,
+};
 
 thread_local! {
     /// Per-thread recall scratch — the read-only analog of the one in
@@ -231,6 +233,12 @@ impl ReadOnlyDatabase {
                 .map(|term| mem.term(*term).to_string())
                 .collect()
         })
+    }
+
+    /// One bounded, cursor-stable page of current tags in this pinned snapshot.
+    pub fn list_tags(&self, query: TagQuery<'_>) -> Result<TagPage, HostError> {
+        self.with_mem(|mem| mem.list_tags(query))
+            .map_err(Into::into)
     }
 
     /// Runs the on-demand integrity check — the equivalent of

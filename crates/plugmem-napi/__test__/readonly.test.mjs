@@ -36,6 +36,7 @@ test("read-only observes a writer's checkpointed snapshot", async () => {
     assert.ok(Array.isArray((await ro.recall({ query: "sky" })).facts));
     assert.match(ro.get(0).text, /sky/);
     assert.deepEqual(ro.tagsOf(0), ["color"]);
+    assert.deepEqual((await ro.listTags()).items, [{ name: "color", count: 1 }]);
     assert.equal(ro.stats().facts, 1);
     assert.equal((await ro.export()).length, 1);
     const page = await ro.exportPage();
@@ -51,6 +52,7 @@ test("read-only observes a writer's checkpointed snapshot", async () => {
     assert.throws(() => ro.remember({ text: "x" }), /read-only/);
     assert.throws(() => ro.revise(0, { text: "x" }), /read-only/);
     assert.throws(() => ro.forget(0), /read-only/);
+    assert.throws(() => ro.removeTag("color"), /read-only/);
     assert.throws(() => ro.link({ src: "a", rel: "r", dst: "b" }), /read-only/);
     assert.throws(() => ro.unlink({ src: "a", rel: "r", dst: "b" }), /read-only/);
     assert.throws(() => ro.checkpoint(), /read-only/);

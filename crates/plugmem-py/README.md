@@ -54,6 +54,10 @@ db.remember("the release ships on friday", entity="release")
 res = db.recall("tokio", k=5)
 print(res.rendered)
 
+page = db.list_tags(prefix="pre", limit=64)
+print(page.items)            # [TagSummary(name='pref', count=1)]
+# db.remove_tag("pref")      # global: revises every current fact carrying it
+
 db.close()
 ```
 
@@ -231,8 +235,10 @@ why that is the right shape and not a limitation.
 | `revise(id, text, ...)` | close a fact's interval and record the successor |
 | `recall(query=None, *, tags, entities, as_of, range, k, closed, token_budget, ef, graph_depth, vector)` | the ranked answer |
 | `forget(id)` | tombstone a fact; `maintain` purges it later |
+| `remove_tag(tag)` | remove a tag from every current fact while preserving facts/history |
 | `link(src, rel, dst, *, provenance)` / `unlink(src, rel, dst)` | open or close a typed edge |
 | `get(id)` / `tags_of(id)` / `stats()` | one fact's card, its tags, engine counters |
+| `list_tags(*, prefix=None, cursor=None, limit=0)` | bounded lexical page of current tags and counts |
 | `export()` / `export_page(cursor)` / `export_edges(on_batch)` | dump facts, dump them in pages, stream edges |
 | `verify()` / `scrub(budget=None)` | logical check; byte-level check |
 | `maintain(mode="auto")` / `checkpoint()` | housekeeping; publish a snapshot |
@@ -406,21 +412,37 @@ sensible to print. Read it once after opening and log it your own way.
 
 ## Threads and the GIL
 
-**Every verb releases the GIL for the duration of the work.** While a `recall`
-is inside the engine no bytecode executes on that thread's behalf, so the
-interpreter is free and other threads run.
+The Python API is deliberately synchronous. In ordinary Python code, call every
+method directly. **Every verb releases the GIL while native work runs**, so
+other Python threads can continue and a shared handle is safe to use from a
+`ThreadPoolExecutor`.
 
-That is why the API is synchronous and has no `async def`. The thing an async
-API would buy — not blocking everything else — is already true:
+Releasing the GIL does not move the call to another thread. If a synchronous
+method is called directly from an `async def`, that event-loop thread remains
+occupied until the method returns. Async applications should send operations
+that can wait on I/O, an embedder, a lock, or database-sized work to
+`asyncio.to_thread`:
 
 ```python
 import asyncio
 
 res = await asyncio.to_thread(db.recall, "tokio", k=5)
+page = await asyncio.to_thread(db.list_tags, prefix="project:", limit=64)
+report = await asyncio.to_thread(db.remove_tag, "obsolete")
 ```
 
-`to_thread` works correctly here *because* the GIL is released. An `async`
-layer would add a runtime and a scheduler to reach the same place.
+Use this practical split inside an async application:
+
+| Call directly | Use `await asyncio.to_thread(...)` |
+|---|---|
+| `get`, `tags_of`, `stats`, `generation`, `path`, `config_warnings` | `open`, `remember`, `remember_many`, `revise`, `recall`, `forget`, `remove_tag`, `list_tags`, `link`, `unlink` |
+| simple property/result access | `export`, `export_page`, `export_edges`, `verify`, `scrub`, `maintain`, `checkpoint`, `refresh`, `recover` |
+
+The left column only performs bounded in-memory reads and normally returns in
+microseconds. The right column may open files, wait for another process, call an
+embedding provider, flush storage, or scan data. Using `to_thread` is the async
+bridge; the binding does not add a second runtime or pretend native work can be
+cancelled after it has started.
 
 A handle is safe to share across threads. Reads genuinely overlap; `refresh`
 and `close` take the handle exclusively, so a reader never observes it

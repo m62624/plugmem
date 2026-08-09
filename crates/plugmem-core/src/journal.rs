@@ -162,6 +162,13 @@ pub enum Op<'a> {
         /// Destination entity name.
         dst: &'a str,
     },
+    /// Op 7: remove one tag from every current fact by creating revisions.
+    RemoveTag {
+        /// Host timestamp used as every successor's validity start.
+        now: u64,
+        /// Verbatim tag name.
+        tag: &'a str,
+    },
 }
 
 /// Appends a length-prefixed string (`u32 LE` + bytes).
@@ -316,6 +323,11 @@ impl<'a> Op<'a> {
                 payload.extend_from_slice(&max_hnsw_inserts.to_le_bytes());
                 5
             }
+            Op::RemoveTag { now, tag } => {
+                payload.extend_from_slice(&now.to_le_bytes());
+                put_str(&mut payload, tag);
+                7
+            }
         };
         encode_entry(out, op, &payload);
     }
@@ -429,6 +441,11 @@ impl<'a> Op<'a> {
                 let rel = take_str(payload, at)?;
                 let dst = take_str(payload, at)?;
                 Op::Unlink { now, src, rel, dst }
+            }
+            7 => {
+                let now = take_u64(payload, at)?;
+                let tag = take_str(payload, at)?;
+                Op::RemoveTag { now, tag }
             }
             _ => return Err(Error::Corrupt("unknown journal op")),
         };

@@ -191,6 +191,8 @@ sets `isError: true` so the model can read and react to it.
 | `plugmem_recall` | ranked, token-budgeted recall (`query`, `tags[]`, `entities[]`, `as_of`, `range [from,to]`, `k`, `closed`, `token_budget`, `ef`) |
 | `plugmem_revise` | close fact `id`, record the successor (same args as remember + `id`) |
 | `plugmem_forget` | tombstone fact `id` (purged at the next maintain) |
+| `plugmem_tags` | bounded lexical page of current tags and counts (`prefix`, opaque `cursor`, `limit` up to 256) |
+| `plugmem_remove_tag` | remove one tag from every current fact while preserving facts and historical tag state |
 | `plugmem_link` | upsert a typed edge `src -rel-> dst`, optionally with `provenance`: the fact id the edge follows from, which graph recall returns |
 | `plugmem_unlink` | close the current typed edge `src -rel-> dst` while preserving `as_of` history |
 | `plugmem_show` | one fact's full card by `id` |
@@ -202,7 +204,7 @@ sets `isError: true` so the model can read and react to it.
 | `plugmem_version` / `plugmem_about` | the running version; a pointer to the plugmem skill |
 
 **Read-only mode** (`--read-only` — observe another process's writer over a
-shared snapshot): `plugmem_recall`, `plugmem_show`, `plugmem_stats`,
+shared snapshot): `plugmem_recall`, `plugmem_show`, `plugmem_stats`, `plugmem_tags`,
 `plugmem_export`, `plugmem_verify`, plus `plugmem_generation` (the pinned
 snapshot generation) and `plugmem_refresh` (advance to the writer's latest
 published checkpoint). Write tools are refused with a tool-level error.

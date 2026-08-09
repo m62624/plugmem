@@ -48,7 +48,8 @@ use memmap2::Mmap;
 use plugmem_core::{
     Config, Error, FactFault, FactRecord, LinkInput, MaintainReport, MaintenanceMode,
     MaintenanceOptions, MemStorage, Memory, OpenReport, RecallQuery, RecallResult, RecallScratch,
-    RememberInput, RememberOutcome, Stats, Storage, UnlinkInput,
+    RememberInput, RememberOutcome, RemoveTagReport, Stats, Storage, TagPage, TagQuery,
+    UnlinkInput,
 };
 
 thread_local! {
@@ -815,6 +816,25 @@ impl Database {
             mem.tags_of(id, &mut terms);
             terms.iter().map(|t| mem.term(*t).to_string()).collect()
         })
+    }
+
+    /// One bounded, cursor-stable page of current tags.
+    pub fn list_tags(&self, query: TagQuery<'_>) -> Result<TagPage, HostError> {
+        self.read()
+            .engine
+            .read(|mem| mem.list_tags(query))
+            .map_err(Into::into)
+    }
+
+    /// Removes a tag from every current fact by creating successor revisions.
+    pub fn remove_tag(&self, now: u64, tag: &str) -> Result<RemoveTagReport, HostError> {
+        let mut st = self.write();
+        let State { engine, store, .. } = &mut *st;
+        let report = engine.with(store, |mem, store| mem.remove_tag(store, now, tag))?;
+        if report.affected != 0 {
+            self.after_mutation(&mut st, now)?;
+        }
+        Ok(report)
     }
 
     /// Engine size counters.

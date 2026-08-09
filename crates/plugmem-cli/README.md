@@ -133,6 +133,8 @@ engine keeps no clock, so `now` comes from the system clock at each call.
 | `recall [QUERY] [--tag T]… [--entity E]… [--as-of TS] [--range FROM TO] [-k N] [--closed] [--token-budget N] [--ef N] [--graph-depth N] [--vector F32,…]` | ranked, token-budgeted block; sources compose. Each line is `- [fN] text …` — `N` is the fact's id (see below). `--token-budget` caps the block (default 512), `--ef` widens the vector search beam, `--graph-depth` sets how far the graph walks from an anchor (default 2; `0` disables expansion) |
 | `revise <ID> <TEXT> [same flags as remember]` | close the old fact, record the successor |
 | `forget <ID>` | tombstone a fact (purged physically at the next `maintain`) |
+| `tags [--prefix P] [--cursor C] [--limit N]` | list one stable lexical page of current tags and counts; pass the returned cursor to continue |
+| `remove-tag <TAG>` | remove a tag from every current fact while preserving facts and historical tag state |
 | `link <SRC> <REL> <DST> [--provenance FACT_ID]` | upsert a typed edge between entities. `--provenance` records the fact the edge follows from, and graph recall returns it |
 | `unlink <SRC> <REL> <DST>` | close the current typed edge while preserving `--as-of` history |
 | `show <ID>` | one fact's full card — text, both time axes, state |
@@ -160,7 +162,7 @@ value as a plain `"id"` field on each fact. You don't guess an id — you read i
 back from a `recall` (or `show`), then act on it, the usual "find, then change"
 flow.
 
-Read-only commands (`recall`, `show`, `stats`, `export`) open the snapshot
+Read-only commands (`recall`, `show`, `stats`, `tags`, `export`) open the snapshot
 **zero-copy over an mmap** (a shared lock, so several may run at once and
 the whole file is not loaded) — falling back to a normal open if the
 journal is un-checkpointed. `recall` uses that fast path only when no

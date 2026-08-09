@@ -17,7 +17,9 @@ import {
   type RecallResult,
   type ReindexReport,
   type RememberOutcome,
+  type RemoveTagReport,
   type Stats,
+  type TagPage,
   type WorkspaceProblem,
 } from "../index.js";
 
@@ -56,6 +58,8 @@ const rememberedMany: Promise<RememberOutcome[]> = db.rememberMany([
   { text: "batch", tags: ["example"] },
 ]);
 const tags: string[] = db.tagsOf(id);
+const tagPage: Promise<TagPage> = db.listTags({ prefix: "proj", limit: 64 });
+const removedTag: Promise<RemoveTagReport> = db.removeTag("obsolete");
 const exported: Promise<ExportedFact[]> = db.export();
 const verified: Promise<void> = db.verify();
 const forgotten: Promise<boolean> = db.forget(id);
@@ -91,6 +95,8 @@ const namedRecallDefaultK: Promise<RecallResult> = chat.recall({ query: "named" 
 const namedRecallNoArgs: Promise<RecallResult> = chat.recall();
 const namedStats: Promise<Stats> = chat.stats();
 const namedPage: Promise<ExportPage> = chat.exportPage();
+const namedTags: Promise<TagPage> = chat.listTags();
+const namedRemovedTag: Promise<RemoveTagReport> = chat.removeTag("obsolete");
 const released: boolean = ws.release("chat-42");
 
 const names: Promise<string[]> = ws.list();
@@ -118,6 +124,8 @@ export const used = {
   checkpointed,
   rememberedMany,
   tags,
+  tagPage,
+  removedTag,
   exportedPage,
   exportedPageAfter,
   exported,
@@ -136,6 +144,8 @@ export const used = {
   namedRecallNoArgs,
   namedStats,
   namedPage,
+  namedTags,
+  namedRemovedTag,
   released,
   names,
   entries,

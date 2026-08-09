@@ -295,6 +295,52 @@ pub struct ExportPage {
     pub next_cursor: Option<f64>,
 }
 
+/// One active tag and the number of current facts carrying it.
+#[napi(object)]
+pub struct TagSummary {
+    pub name: String,
+    pub count: f64,
+}
+
+impl From<plugmem_host::TagSummary> for TagSummary {
+    fn from(value: plugmem_host::TagSummary) -> Self {
+        Self {
+            name: value.name,
+            count: f64::from(value.count),
+        }
+    }
+}
+
+/// One bounded, stable page of current tags.
+#[napi(object)]
+pub struct TagPage {
+    pub items: Vec<TagSummary>,
+    pub next_cursor: Option<String>,
+}
+
+impl From<plugmem_host::TagPage> for TagPage {
+    fn from(value: plugmem_host::TagPage) -> Self {
+        Self {
+            items: value.items.into_iter().map(TagSummary::from).collect(),
+            next_cursor: value.next_cursor,
+        }
+    }
+}
+
+/// Result of removing one tag from all current facts.
+#[napi(object)]
+pub struct RemoveTagReport {
+    pub affected: f64,
+}
+
+impl From<plugmem_host::RemoveTagReport> for RemoveTagReport {
+    fn from(value: plugmem_host::RemoveTagReport) -> Self {
+        Self {
+            affected: f64::from(value.affected),
+        }
+    }
+}
+
 impl From<plugmem_host::ExportPage> for ExportPage {
     fn from(page: plugmem_host::ExportPage) -> Self {
         Self {

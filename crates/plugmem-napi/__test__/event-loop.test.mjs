@@ -189,6 +189,14 @@ test("no verb holds the JS thread for database-sized work", async () => {
       ["maintain('full')", () => db.maintain("full")],
       ["checkpoint", () => db.checkpoint()],
       ["verify", () => db.verify()],
+      ["listTags sweep", async () => {
+        let cursor;
+        do {
+          const page = await db.listTags({ cursor, limit: 1 });
+          cursor = page.nextCursor;
+        } while (cursor !== undefined);
+      }],
+      ["removeTag", () => db.removeTag("t0")],
       [
         "exportPage sweep",
         async () => {

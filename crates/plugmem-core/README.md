@@ -10,6 +10,9 @@ local-first applications and agents** — a library that runs inside the process
 Callers use `remember / recall / revise / forget`; recall returns ranked facts
 and edges plus an optional rendered block constrained by a token budget. That
 block is useful for prompts, but it is not the only consumer of the result.
+`list_tags` exposes a bounded lexical catalogue with current-fact counts;
+`remove_tag` removes one classification from all current facts by revising them,
+so facts and historical `as_of` answers survive.
 It keeps a whole database image in a snapshot plus an append-only journal when
 the host supplies persistence; storage is flat byte arenas, so the memory image
 *is* the snapshot format (loading is a bounds-check plus adopt, replay is deterministic to
@@ -239,6 +242,8 @@ historical edge indexes.
 | `recall` | hybrid ranked retrieval, zero allocations after warm-up |
 | `revise` | close the predecessor, record the successor, keep the chain |
 | `forget` | immediate tombstone; physical purge at `maintain` |
+| `list_tags` | bounded lexical page of current tags and current-fact counts |
+| `remove_tag` | revise all affected current facts without the tag; preserve history |
 | `link` | upsert a typed edge between entities |
 | `unlink` | close the current typed edge while preserving `as_of` history |
 | `maintain` | policy-driven maintenance: no-op, compaction, text reindex, vector optimization or full rebuild |
@@ -547,8 +552,11 @@ truncated). See [WebAssembly 2.0 and 3.0](#webassembly-20-and-30).
   pending, compacts tombstones when present, reindexes text only when tokenizer
   semantics require it, and advances HNSW with a bounded insertion budget.
   `MaintenanceMode::Full` remains the explicit offline rebuild path.
-- The snapshot format is not yet frozen (pre-1.0): a new version may
-  require re-importing, not migrating.
+- The snapshot format is not yet frozen (pre-1.0), but current binaries migrate
+  the legacy v1 layouts published during testing: old bytes are rebuilt into the
+  current structures on open and the next snapshot persists the canonical form.
+  Compatibility is forward; an older experimental binary need not open a newer
+  v1 image.
 
 ## Features and targets
 
