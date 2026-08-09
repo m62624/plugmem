@@ -9,6 +9,7 @@
 import {
   Plugmem,
   Workspace,
+  WorkspaceMemory,
   type DbEntry,
   type ExportPage,
   type ExportedFact,
@@ -81,10 +82,16 @@ const windowed: Promise<RecallResult> = db.recall({ range: [0, Date.now()], asOf
 
 const ws = new Workspace("/srv/memories", { maxOpen: 8, idleTimeoutMs: 60_000 });
 
-// `open` hands back the same class, so a named memory has the same verbs. This
-// is the assertion that would catch the binding drifting into a second type.
-const chat: Promise<Plugmem> = ws.open("chat-42");
-assertType<Exact<ReturnType<Workspace["open"]>, Promise<Plugmem>>>(true);
+// A named memory is a logical reference, not a native file handle. Constructing
+// one is synchronous and opens nothing; every database verb is still async.
+const chat: WorkspaceMemory = ws.memory("chat-42");
+assertType<Exact<ReturnType<Workspace["memory"]>, WorkspaceMemory>>(true);
+const namedRemembered: Promise<RememberOutcome> = chat.remember({ text: "named" });
+const namedRecallDefaultK: Promise<RecallResult> = chat.recall({ query: "named" });
+const namedRecallNoArgs: Promise<RecallResult> = chat.recall();
+const namedStats: Promise<Stats> = chat.stats();
+const namedPage: Promise<ExportPage> = chat.exportPage();
+const released: boolean = ws.release("chat-42");
 
 const names: Promise<string[]> = ws.list();
 const entries: Promise<DbEntry[]> = ws.entries();
@@ -102,10 +109,6 @@ const rebuilt: Promise<ReindexReport> = ws.reindex();
 const problems: Promise<WorkspaceProblem[]> = ws.verify();
 const closed: number = ws.closeIdle();
 const open: number = ws.openCount();
-
-// `create` is optional and boolean; the second argument is not a path or an
-// options bag, which is exactly the confusion a name-shaped API invites.
-const strict: Promise<Plugmem> = ws.open("chat-42", false);
 
 // Everything above is referenced so `noUnusedLocals` keeps this file honest.
 export const used = {
@@ -128,6 +131,12 @@ export const used = {
   resolvedPath,
   windowed,
   chat,
+  namedRemembered,
+  namedRecallDefaultK,
+  namedRecallNoArgs,
+  namedStats,
+  namedPage,
+  released,
   names,
   entries,
   hits,
@@ -137,5 +146,4 @@ export const used = {
   problems,
   closed,
   open,
-  strict,
 };

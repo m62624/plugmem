@@ -51,8 +51,8 @@ pub mod code {
     pub const READ_ONLY: &str = "PLUGMEM_READ_ONLY";
     /// A read-only-only verb (`generation`, `refresh`) was called on a writer.
     pub const WRITER_ONLY: &str = "PLUGMEM_WRITER_ONLY";
-    /// The handle cannot do this right now because another operation on it is
-    /// still running.
+    /// Local contention: a handle is in use, or every workspace pool slot is
+    /// leased by an active operation.
     pub const BUSY: &str = "PLUGMEM_BUSY";
     /// The engine reported a failure — IO, a capacity limit, a rejected input
     /// it alone can judge (a vector that disagrees with `dim`). The message is
@@ -79,9 +79,19 @@ pub fn engine(e: HostError) -> Error {
     coded(code::ENGINE, e.to_string())
 }
 
-/// A workspace failure from inside a verb, coded like [`engine`].
+/// A workspace failure from inside a verb.
+///
+/// An external writer lock is the same recoverable condition as a direct open;
+/// pool capacity and an explicitly released active memory are local contention.
 pub fn workspace(e: WorkspaceError) -> Error {
-    coded(code::ENGINE, e.to_string())
+    let status = match &e {
+        WorkspaceError::Busy { .. } | WorkspaceError::Host(HostError::Locked { .. }) => {
+            code::LOCKED
+        }
+        WorkspaceError::AtCapacity { .. } | WorkspaceError::InUse { .. } => code::BUSY,
+        _ => code::ENGINE,
+    };
+    coded(status, e.to_string())
 }
 
 /// A failure while opening a database — always synchronous, so the caller gets
@@ -186,5 +196,26 @@ mod tests {
         let refused = invalid_arg("asOf must be a finite, non-negative number");
         assert_eq!(refused.status, code::INVALID_ARG);
         assert_ne!(refused.status, code::ENGINE);
+    }
+
+    #[test]
+    fn workspace_contention_keeps_its_typed_code() {
+        let name = plugmem_host::DbName::parse("chat").unwrap();
+        assert_eq!(
+            workspace(WorkspaceError::Busy { name: name.clone() }).status,
+            code::LOCKED
+        );
+        assert_eq!(
+            workspace(WorkspaceError::Host(HostError::Locked {
+                path: "/tmp/registry.plugmem".into(),
+            }))
+            .status,
+            code::LOCKED
+        );
+        assert_eq!(
+            workspace(WorkspaceError::AtCapacity { max_open: 1 }).status,
+            code::BUSY
+        );
+        assert_eq!(workspace(WorkspaceError::InUse { name }).status, code::BUSY);
     }
 }

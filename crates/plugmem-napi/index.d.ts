@@ -448,7 +448,7 @@ export const enum MaintainMode {
  * round-trip it would be the wrong direction of dependency.
  */
 export interface DbEntry {
-  /** The memory's name — its identity, and what `Workspace.open` takes. */
+  /** The memory's name — its identity, and what `Workspace.memory` takes. */
   db: string
   /** What it is for. */
   description: string
@@ -838,9 +838,34 @@ export declare class Scrub {
   active(): boolean
 }
 /**
- * A directory of named memories — the napi mirror of
- * [`plugmem_host::Workspace`].
+ * A logical reference to one named memory.
+ *
+ * It owns no open database and no file lock. Each verb obtains a scoped
+ * workspace lease on a libuv worker, and dropping this JavaScript object has
+ * no resource-management meaning. The workspace is the owner; closing it
+ * invalidates every reference.
  */
+export declare class WorkspaceMemory {
+  /** The stable workspace name this reference addresses. */
+  name(): string
+  remember(args: RememberArgs): Promise<RememberOutcome>
+  rememberMany(args: Array<RememberArgs>): Promise<RememberOutcome[]>
+  revise(id: number, args: RememberArgs): Promise<RememberOutcome>
+  recall(args?: RecallArgs | undefined | null): Promise<RecallResult>
+  forget(id: number): Promise<boolean>
+  link(args: LinkArgs): Promise<void>
+  unlink(args: LinkArgs): Promise<boolean>
+  get(id: number): Promise<FactSnapshot | null>
+  stats(): Promise<Stats>
+  export(): Promise<ExportedFact[]>
+  exportPage(cursor?: number | undefined | null): Promise<ExportPage>
+  exportEdges(onBatch: (edges: ExportedEdge[]) => void): Promise<number>
+  scrub(options?: ScrubOptions | undefined | null): Promise<Scrub>
+  tagsOf(id: number): Promise<string[]>
+  verify(): Promise<void>
+  maintain(mode?: 'auto' | 'compact' | 'reindex-text' | 'optimize-vectors' | 'full'): Promise<MaintainReport>
+  checkpoint(): Promise<void>
+}
 export declare class Workspace {
   /**
    * Opens the workspace rooted at `root`. Creates nothing: the directories
@@ -850,22 +875,22 @@ export declare class Workspace {
    */
   constructor(root: string, options?: WorkspaceOptions | undefined | null)
   /**
-   * Opens the memory named `db` and returns it as a [`Plugmem`] — the same
-   * class, and the same verbs, as a memory opened by path.
+   * Returns a logical reference to the memory named `db`.
    *
-   * `create` defaults to `true`: a first use of an unused name brings that
-   * memory into being, which is what makes a new conversation need no
-   * registration step. Pass `false` to require that it already exists, which
-   * is what a read should do so a misspelled name is diagnosed rather than
-   * answered with nothing.
-   *
-   * @throws if the name is not a usable memory name, if it does not exist and
-   * `create` is false, or if another process holds it.
-   * **Async**: a first open replays the memory's journal and maps its
-   * snapshot, and making room in the pool closes another memory — file work
-   * that the one thread running JavaScript must not be holding.
+   * This does not open a file, acquire a lock or create the memory. Read
+   * verbs require it to exist; write verbs create it on first use. The
+   * returned object stays valid across pool eviction and `release()` and
+   * transparently reopens the memory on its next verb.
    */
-  open(db: string, create?: boolean | undefined | null): Promise<Plugmem>
+  memory(db: string): WorkspaceMemory
+  /**
+   * Evicts one inactive memory from the pool and releases its file lock.
+   *
+   * Logical references remain valid. A later verb reopens the memory. If a
+   * verb is currently using it, this throws a typed `BUSY` error instead of
+   * waiting.
+   */
+  release(db: string): boolean
   /**
    * Every memory in the directory, sorted by name.
    *
@@ -934,12 +959,10 @@ export declare class Workspace {
   /** How many memories are open right now. */
   openCount(): number
   /**
-   * Closes every pooled memory and the registry, releasing their file locks,
-   * and closes the workspace. Every method then throws.
-   *
-   * A [`Plugmem`] handed out by `open()` is **not** closed by this: it is its
-   * own handle and holds its own lock until it is closed or garbage
-   * collected.
+   * Invalidates every [`WorkspaceMemory`] reference, closes inactive pooled
+   * memories and the registry, and closes the workspace. A verb already in
+   * flight finishes with its scoped handle; its lock is released when that
+   * verb returns. Every later call throws `CLOSED`.
    */
   close(): void
 }

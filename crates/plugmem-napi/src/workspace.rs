@@ -6,25 +6,34 @@
 //! and wants them to stay independent.
 //!
 //! The same rule as [`crate::db`]: every method wraps the identically-named host
-//! verb, and the engine logic is 100 % `plugmem-host`. [`Workspace::open`] hands
-//! back a [`Plugmem`] over a pooled handle, so a named memory has exactly the
-//! verbs a path-opened one has, with no second implementation to drift.
+//! verb, and the engine logic is 100 % `plugmem-host`. [`Workspace::memory`]
+//! hands back a logical [`WorkspaceMemory`] reference. It owns no database
+//! handle or file lock; every verb borrows one from the pool for that call.
 //!
 //! Three host methods are deliberately not here: `registry()` (handing out the
 //! raw registry database invites writing into it by hand), `entry(name)`
 //! (`entries()` already answers it), and the path helpers (`path_of`, `exists`)
 //! — a caller that has a name never needs the path.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Weak};
 
 use napi::bindgen_prelude::AsyncTask;
-use napi::{Env, Task};
+use napi::{Env, JsFunction, Task};
 use napi_derive::napi;
 use plugmem_host::{DbName, Description, IfMissing, Settings, WorkspaceIssue};
 
-use crate::db::{Plugmem, now_ms};
+use crate::db::{
+    CheckpointTask, ExportEdgesTask, ExportPageTask, LinkArgs, MaintainTask, ReadTask, RecallArgs,
+    RecallTask, RememberArgs, RememberManyTask, RememberTask, WriteTask, WriterGetTask,
+    WriterSource, WriterStatsTask, WriterTagsTask, now_ms, writer_checkpoint_task,
+    writer_export_edges_task, writer_export_page_task, writer_export_task, writer_forget_task,
+    writer_link_task, writer_maintain_task, writer_recall_task, writer_remember_many_task,
+    writer_remember_task, writer_scrub_task, writer_unlink_task, writer_verify_task,
+};
 use crate::error::{self, Produced, Result, code};
-use crate::types::{DbEntry, ReindexReport, WorkspaceProblem};
+use crate::scrub::{ScrubOpenTask, ScrubOptions};
+use crate::types::{DbEntry, MaintainMode, ReindexReport, WorkspaceProblem};
 
 /// Options for [`Workspace::new`].
 #[napi(object)]
@@ -64,6 +73,183 @@ pub struct DescribeArgs {
 
 /// A directory of named memories — the napi mirror of
 /// [`plugmem_host::Workspace`].
+pub(crate) struct WorkspaceState {
+    host: plugmem_host::Workspace,
+    closed: AtomicBool,
+}
+
+impl WorkspaceState {
+    fn new(host: plugmem_host::Workspace) -> Self {
+        Self {
+            host,
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    fn host(&self) -> Result<&plugmem_host::Workspace> {
+        if self.closed.load(Ordering::Acquire) {
+            Err(workspace_closed_error())
+        } else {
+            Ok(&self.host)
+        }
+    }
+
+    fn close(&self) {
+        if !self.closed.swap(true, Ordering::AcqRel) {
+            self.host.close_all();
+            self.host.close_registry();
+        }
+    }
+}
+
+/// One scheduled operation against a named memory.
+#[derive(Clone)]
+pub(crate) struct NamedMemoryTarget {
+    state: Arc<WorkspaceState>,
+    name: DbName,
+}
+
+impl NamedMemoryTarget {
+    pub(crate) fn with_database<T>(
+        &self,
+        missing: IfMissing,
+        f: impl FnOnce(&plugmem_host::Database) -> Result<T>,
+    ) -> Result<T> {
+        let host = self.state.host()?;
+        let lease = host
+            .lease(&self.name, now_ms(), missing)
+            .map_err(error::workspace)?;
+        f(&lease)
+    }
+}
+
+/// A logical reference to one named memory.
+///
+/// It owns no open database and no file lock. Each verb obtains a scoped
+/// workspace lease on a libuv worker, and dropping this JavaScript object has
+/// no resource-management meaning. The workspace is the owner; closing it
+/// invalidates every reference.
+#[napi]
+pub struct WorkspaceMemory {
+    workspace: Weak<WorkspaceState>,
+    name: DbName,
+}
+
+impl WorkspaceMemory {
+    fn source(&self) -> Result<WriterSource> {
+        let state = self
+            .workspace
+            .upgrade()
+            .ok_or_else(workspace_closed_error)?;
+        state.host()?;
+        Ok(WriterSource::Named(NamedMemoryTarget {
+            state,
+            name: self.name.clone(),
+        }))
+    }
+}
+
+#[napi]
+impl WorkspaceMemory {
+    /// The stable workspace name this reference addresses.
+    #[napi]
+    pub fn name(&self) -> String {
+        self.name.to_string()
+    }
+
+    #[napi(ts_return_type = "Promise<RememberOutcome>")]
+    pub fn remember(&self, args: RememberArgs) -> Result<AsyncTask<RememberTask>> {
+        writer_remember_task(self.source()?, args, None)
+    }
+
+    #[napi(ts_return_type = "Promise<RememberOutcome[]>")]
+    pub fn remember_many(&self, args: Vec<RememberArgs>) -> Result<AsyncTask<RememberManyTask>> {
+        writer_remember_many_task(self.source()?, args)
+    }
+
+    #[napi(ts_return_type = "Promise<RememberOutcome>")]
+    pub fn revise(&self, id: u32, args: RememberArgs) -> Result<AsyncTask<RememberTask>> {
+        writer_remember_task(self.source()?, args, Some(plugmem_host::FactId(id)))
+    }
+
+    #[napi(ts_return_type = "Promise<RecallResult>")]
+    pub fn recall(&self, args: Option<RecallArgs>) -> Result<AsyncTask<RecallTask>> {
+        writer_recall_task(self.source()?, args)
+    }
+
+    #[napi(ts_return_type = "Promise<boolean>")]
+    pub fn forget(&self, id: u32) -> Result<AsyncTask<WriteTask>> {
+        Ok(writer_forget_task(self.source()?, id))
+    }
+
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn link(&self, args: LinkArgs) -> Result<AsyncTask<WriteTask>> {
+        Ok(writer_link_task(self.source()?, args))
+    }
+
+    #[napi(ts_return_type = "Promise<boolean>")]
+    pub fn unlink(&self, args: LinkArgs) -> Result<AsyncTask<WriteTask>> {
+        Ok(writer_unlink_task(self.source()?, args))
+    }
+
+    #[napi(ts_return_type = "Promise<FactSnapshot | null>")]
+    pub fn get(&self, id: u32) -> Result<AsyncTask<WriterGetTask>> {
+        Ok(AsyncTask::new(WriterGetTask::new(self.source()?, id)))
+    }
+
+    #[napi(ts_return_type = "Promise<Stats>")]
+    pub fn stats(&self) -> Result<AsyncTask<WriterStatsTask>> {
+        Ok(AsyncTask::new(WriterStatsTask::new(self.source()?)))
+    }
+
+    #[napi(ts_return_type = "Promise<ExportedFact[]>")]
+    pub fn export(&self) -> Result<AsyncTask<ReadTask>> {
+        Ok(writer_export_task(self.source()?))
+    }
+
+    #[napi(ts_return_type = "Promise<ExportPage>")]
+    pub fn export_page(&self, cursor: Option<u32>) -> Result<AsyncTask<ExportPageTask>> {
+        Ok(writer_export_page_task(self.source()?, cursor))
+    }
+
+    #[napi(ts_return_type = "Promise<number>")]
+    pub fn export_edges(
+        &self,
+        #[napi(ts_arg_type = "(edges: ExportedEdge[]) => void")] on_batch: JsFunction,
+    ) -> Result<AsyncTask<ExportEdgesTask>> {
+        writer_export_edges_task(self.source()?, on_batch)
+    }
+
+    #[napi(ts_return_type = "Promise<Scrub>")]
+    pub fn scrub(&self, options: Option<ScrubOptions>) -> Result<AsyncTask<ScrubOpenTask>> {
+        writer_scrub_task(self.source()?, options)
+    }
+
+    #[napi(ts_return_type = "Promise<string[]>")]
+    pub fn tags_of(&self, id: u32) -> Result<AsyncTask<WriterTagsTask>> {
+        Ok(AsyncTask::new(WriterTagsTask::new(self.source()?, id)))
+    }
+
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn verify(&self) -> Result<AsyncTask<ReadTask>> {
+        Ok(writer_verify_task(self.source()?))
+    }
+
+    #[napi(ts_return_type = "Promise<MaintainReport>")]
+    pub fn maintain(
+        &self,
+        #[napi(ts_arg_type = "'auto' | 'compact' | 'reindex-text' | 'optimize-vectors' | 'full'")]
+        mode: Option<MaintainMode>,
+    ) -> Result<AsyncTask<MaintainTask>> {
+        Ok(writer_maintain_task(self.source()?, mode))
+    }
+
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn checkpoint(&self) -> Result<AsyncTask<CheckpointTask>> {
+        Ok(writer_checkpoint_task(self.source()?))
+    }
+}
+
 #[napi]
 pub struct Workspace {
     /// `None` once `close()`d — every method then throws "workspace is closed".
@@ -71,7 +257,7 @@ pub struct Workspace {
     /// Behind an `Arc` because [`plugmem_host::Workspace`] owns the handle pool
     /// and is deliberately not clonable, while the async verbs need something
     /// that outlives the call on a libuv thread.
-    inner: Option<Arc<plugmem_host::Workspace>>,
+    inner: Option<Arc<WorkspaceState>>,
 }
 
 #[napi]
@@ -113,37 +299,35 @@ impl Workspace {
             .open_workspace(std::path::Path::new(&root))
             .map_err(error::workspace)?;
         Ok(Self {
-            inner: Some(Arc::new(inner)),
+            inner: Some(Arc::new(WorkspaceState::new(inner))),
         })
     }
 
-    /// Opens the memory named `db` and returns it as a [`Plugmem`] — the same
-    /// class, and the same verbs, as a memory opened by path.
+    /// Returns a logical reference to the memory named `db`.
     ///
-    /// `create` defaults to `true`: a first use of an unused name brings that
-    /// memory into being, which is what makes a new conversation need no
-    /// registration step. Pass `false` to require that it already exists, which
-    /// is what a read should do so a misspelled name is diagnosed rather than
-    /// answered with nothing.
-    ///
-    /// @throws if the name is not a usable memory name, if it does not exist and
-    /// `create` is false, or if another process holds it.
-    /// **Async**: a first open replays the memory's journal and maps its
-    /// snapshot, and making room in the pool closes another memory — file work
-    /// that the one thread running JavaScript must not be holding.
-    #[napi(ts_return_type = "Promise<Plugmem>")]
-    pub fn open(&self, db: String, create: Option<bool>) -> Result<AsyncTask<OpenTask>> {
+    /// This does not open a file, acquire a lock or create the memory. Read
+    /// verbs require it to exist; write verbs create it on first use. The
+    /// returned object stays valid across pool eviction and `release()` and
+    /// transparently reopens the memory on its next verb.
+    #[napi]
+    pub fn memory(&self, db: String) -> Result<WorkspaceMemory> {
         let name = parse_name(&db)?;
-        Ok(AsyncTask::new(OpenTask {
-            workspace: self.shared()?,
-            missing: if create.unwrap_or(true) {
-                IfMissing::Create
-            } else {
-                IfMissing::Fail
-            },
+        let workspace = self.shared()?;
+        Ok(WorkspaceMemory {
+            workspace: Arc::downgrade(&workspace),
             name,
-            now: now_ms(),
-        }))
+        })
+    }
+
+    /// Evicts one inactive memory from the pool and releases its file lock.
+    ///
+    /// Logical references remain valid. A later verb reopens the memory. If a
+    /// verb is currently using it, this throws a typed `BUSY` error instead of
+    /// waiting.
+    #[napi]
+    pub fn release(&self, db: String) -> Result<bool> {
+        let name = parse_name(&db)?;
+        self.workspace()?.release(&name).map_err(error::workspace)
     }
 
     /// Every memory in the directory, sorted by name.
@@ -244,17 +428,14 @@ impl Workspace {
         Ok(self.workspace()?.open_count() as u32)
     }
 
-    /// Closes every pooled memory and the registry, releasing their file locks,
-    /// and closes the workspace. Every method then throws.
-    ///
-    /// A [`Plugmem`] handed out by `open()` is **not** closed by this: it is its
-    /// own handle and holds its own lock until it is closed or garbage
-    /// collected.
+    /// Invalidates every [`WorkspaceMemory`] reference, closes inactive pooled
+    /// memories and the registry, and closes the workspace. A verb already in
+    /// flight finishes with its scoped handle; its lock is released when that
+    /// verb returns. Every later call throws `CLOSED`.
     #[napi]
     pub fn close(&mut self) {
-        if let Some(ws) = &self.inner {
-            ws.close_all();
-            ws.close_registry();
+        if let Some(state) = &self.inner {
+            state.close();
         }
         self.inner = None;
     }
@@ -272,49 +453,26 @@ impl Workspace {
 
     /// The open workspace, or a "closed" error.
     fn workspace(&self) -> Result<&plugmem_host::Workspace> {
-        Ok(self.shared_ref()?.as_ref())
+        self.shared_ref()?.host()
     }
 
     /// A shared handle for a task that runs off the main thread.
-    fn shared(&self) -> Result<Arc<plugmem_host::Workspace>> {
+    fn shared(&self) -> Result<Arc<WorkspaceState>> {
         Ok(Arc::clone(self.shared_ref()?))
     }
 
-    fn shared_ref(&self) -> Result<&Arc<plugmem_host::Workspace>> {
-        self.inner.as_ref().ok_or_else(|| {
-            error::coded(
-                code::CLOSED,
-                "workspace is closed (close() was called on this instance)",
-            )
-        })
+    fn shared_ref(&self) -> Result<&Arc<WorkspaceState>> {
+        let state = self.inner.as_ref().ok_or_else(workspace_closed_error)?;
+        state.host()?;
+        Ok(state)
     }
 }
 
-/// Opening a named memory, off the JS thread.
-pub struct OpenTask {
-    workspace: Arc<plugmem_host::Workspace>,
-    name: DbName,
-    missing: IfMissing,
-    now: u64,
-}
-
-impl Task for OpenTask {
-    type Output = Produced<(plugmem_host::Database, std::path::PathBuf)>;
-    type JsValue = Plugmem;
-
-    fn compute(&mut self) -> napi::Result<Self::Output> {
-        let path = self.workspace.layout().path_of(&self.name);
-        Ok(self
-            .workspace
-            .get(&self.name, self.now, self.missing)
-            .map(|db| (db, path))
-            .map_err(error::workspace))
-    }
-
-    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        let (db, path) = output.map_err(|e| error::to_js(env, e))?;
-        Ok(Plugmem::from_database(db, path))
-    }
+fn workspace_closed_error() -> error::Error {
+    error::coded(
+        code::CLOSED,
+        "workspace is closed (close() was called on this instance)",
+    )
 }
 
 /// One thing to ask the registry.
@@ -340,7 +498,7 @@ pub enum RegistryOutput {
 /// registry is itself a plugmem memory, so listing, searching, describing and
 /// archiving all open, read or write a database.
 pub struct RegistryTask {
-    workspace: Arc<plugmem_host::Workspace>,
+    workspace: Arc<WorkspaceState>,
     what: Registry,
     now: u64,
 }
@@ -368,9 +526,10 @@ impl RegistryTask {
     /// The registry work itself, with its error still coded.
     fn run(&mut self) -> Produced<RegistryOutput> {
         let failed = error::workspace;
+        let workspace = self.workspace.host()?;
         match &self.what {
             Registry::List => Ok(RegistryOutput::Names(
-                self.workspace
+                workspace
                     .layout()
                     .list()
                     .map_err(failed)?
@@ -379,7 +538,7 @@ impl RegistryTask {
                     .collect(),
             )),
             Registry::Entries => Ok(RegistryOutput::Entries(
-                self.workspace
+                workspace
                     .entries()
                     .map_err(failed)?
                     .iter()
@@ -387,7 +546,7 @@ impl RegistryTask {
                     .collect(),
             )),
             Registry::Find { query, k } => Ok(RegistryOutput::Entries(
-                self.workspace
+                workspace
                     .find(query, *k, self.now)
                     .map_err(failed)?
                     .iter()
@@ -402,7 +561,7 @@ impl RegistryTask {
                     .iter()
                     .map(String::as_str)
                     .collect();
-                self.workspace
+                workspace
                     .describe(
                         name,
                         self.now,
@@ -415,8 +574,7 @@ impl RegistryTask {
                     .map_err(failed)?;
                 Ok(RegistryOutput::Done)
             }
-            Registry::Archive { name } => self
-                .workspace
+            Registry::Archive { name } => workspace
                 .archive(name, self.now)
                 .map(RegistryOutput::Changed)
                 .map_err(failed),
@@ -426,7 +584,7 @@ impl RegistryTask {
 
 /// The libuv-thread body of [`Workspace::reindex`].
 pub struct ReindexTask {
-    workspace: Arc<plugmem_host::Workspace>,
+    workspace: Arc<WorkspaceState>,
     now: u64,
 }
 
@@ -435,7 +593,11 @@ impl Task for ReindexTask {
     type JsValue = ReindexReport;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        Ok(self.workspace.reindex(self.now).map_err(error::workspace))
+        let workspace = match self.workspace.host() {
+            Ok(workspace) => workspace,
+            Err(e) => return Ok(Err(e)),
+        };
+        Ok(workspace.reindex(self.now).map_err(error::workspace))
     }
 
     fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
@@ -450,7 +612,7 @@ impl Task for ReindexTask {
 
 /// The libuv-thread body of [`Workspace::verify`].
 pub struct VerifyTask {
-    workspace: Arc<plugmem_host::Workspace>,
+    workspace: Arc<WorkspaceState>,
     now: u64,
 }
 
@@ -459,7 +621,11 @@ impl Task for VerifyTask {
     type JsValue = Vec<WorkspaceProblem>;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        Ok(self.workspace.verify(self.now).map_err(error::workspace))
+        let workspace = match self.workspace.host() {
+            Ok(workspace) => workspace,
+            Err(e) => return Ok(Err(e)),
+        };
+        Ok(workspace.verify(self.now).map_err(error::workspace))
     }
 
     fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {

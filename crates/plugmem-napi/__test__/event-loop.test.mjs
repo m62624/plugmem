@@ -27,7 +27,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const require = createRequire(import.meta.url);
-const { Plugmem, recover } = require("../index.js");
+const { Plugmem, Workspace, recover } = require("../index.js");
 
 const ms = (t0) => Number(process.hrtime.bigint() - t0) / 1e6;
 
@@ -103,6 +103,70 @@ test("the instrument can tell a blocked thread from a busy one", async () => {
     idle.held < blocked.held / 4,
     `sleeping must not register as held: ${idle.held.toFixed(0)} ms vs a blocked ${blocked.held.toFixed(0)} ms`,
   );
+});
+
+test("workspace leases never wait on the event loop and capacity fails fast", async () => {
+  const dir = tempdir("workspace-lease");
+  const DIM = 8;
+  let answer;
+  let arrived;
+  const requestArrived = new Promise((resolve) => (arrived = resolve));
+  const mayAnswer = new Promise((resolve) => (answer = resolve));
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", async () => {
+      arrived();
+      await mayAnswer;
+      const inputs = JSON.parse(body).input;
+      res.writeHead(200, { "content-type": "application/json", connection: "close" });
+      res.end(
+        JSON.stringify({
+          data: inputs.map((_text, index) => ({ index, embedding: Array(DIM).fill(0.1) })),
+        }),
+      );
+    });
+  });
+  const port = await new Promise((resolve) =>
+    server.listen(0, "127.0.0.1", () => resolve(server.address().port)),
+  );
+  const config = join(dir, "config.toml");
+  writeFileSync(
+    config,
+    `[engine]\ndim = ${DIM}\n[embedder]\n` +
+      `url = "http://127.0.0.1:${port}/v1/embeddings"\nmodel = "mock"\n`,
+  );
+
+  const ws = new Workspace(dir, { config, maxOpen: 1 });
+  let active;
+  try {
+    active = ws.memory("active").remember({ text: "holds one scoped lease" });
+    await requestArrived;
+
+    // The mock server itself runs on this event loop, so reaching here already
+    // proves the active native verb did not hold it. A different memory cannot
+    // secretly open a second writer past maxOpen and cannot wait for this one.
+    await assert.rejects(
+      () => ws.memory("other").remember({ text: "must fail immediately" }),
+      (err) => err.code === "PLUGMEM_BUSY",
+    );
+    assert.throws(() => ws.release("active"), (err) => err.code === "PLUGMEM_BUSY");
+
+    let loopTurned = false;
+    setImmediate(() => {
+      loopTurned = true;
+      answer();
+    });
+    await active;
+    assert.equal(loopTurned, true, "the JS loop ran while the lease was active");
+    assert.equal(ws.release("active"), true);
+  } finally {
+    answer();
+    if (active) await active.catch(() => {});
+    ws.close();
+    server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("no verb holds the JS thread for database-sized work", async () => {

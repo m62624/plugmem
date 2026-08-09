@@ -185,7 +185,9 @@ impl Task for ScrubOpenTask {
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
         Ok(match &self.source {
-            ExportSource::Writer(db) => db.scrub_with_budget(self.budget),
+            ExportSource::Writer(source) => {
+                return Ok(source.read(|db| db.scrub_with_budget(self.budget).map_err(error::open)));
+            }
             ExportSource::Reader(db) => db.scrub_with_budget(self.budget),
         }
         .map_err(error::open))

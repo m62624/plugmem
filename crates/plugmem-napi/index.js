@@ -310,12 +310,13 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { Plugmem, recover, Scrub, MaintainMode, Workspace, version, about, settingsHelp, skill, skillFull, skillVersion } = nativeBinding
+const { Plugmem, recover, Scrub, MaintainMode, WorkspaceMemory, Workspace, version, about, settingsHelp, skill, skillFull, skillVersion } = nativeBinding
 
 module.exports.Plugmem = Plugmem
 module.exports.recover = recover
 module.exports.Scrub = Scrub
 module.exports.MaintainMode = MaintainMode
+module.exports.WorkspaceMemory = WorkspaceMemory
 module.exports.Workspace = Workspace
 module.exports.version = version
 module.exports.about = about

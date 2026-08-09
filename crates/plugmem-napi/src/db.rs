@@ -42,6 +42,7 @@ use crate::types::{
     self, ExportPage, ExportedEdge, ExportedFact, FactSnapshot, MaintainMode, MaintainReport,
     RecallResult, RecoverReport, RememberOutcome, Stats,
 };
+use crate::workspace::NamedMemoryTarget;
 
 /// Keep one native→JS transfer bounded. This matches the workspace's existing
 /// conservative batch grain (CLI import) without exposing a tuning knob that
@@ -238,6 +239,35 @@ pub enum Handle {
     },
 }
 
+/// A writer used by one async task: either a directly-opened handle or a named
+/// workspace target that obtains a scoped lease inside the worker.
+#[derive(Clone)]
+pub(crate) enum WriterSource {
+    Direct(Database),
+    Named(NamedMemoryTarget),
+}
+
+impl WriterSource {
+    fn with<T>(
+        &self,
+        missing: plugmem_host::IfMissing,
+        f: impl FnOnce(&Database) -> Result<T>,
+    ) -> Result<T> {
+        match self {
+            Self::Direct(db) => f(db),
+            Self::Named(target) => target.with_database(missing, f),
+        }
+    }
+
+    pub(crate) fn read<T>(&self, f: impl FnOnce(&Database) -> Result<T>) -> Result<T> {
+        self.with(plugmem_host::IfMissing::Fail, f)
+    }
+
+    pub(crate) fn write<T>(&self, f: impl FnOnce(&Database) -> Result<T>) -> Result<T> {
+        self.with(plugmem_host::IfMissing::Create, f)
+    }
+}
+
 /// A memory over one plugmem file — the napi mirror of [`plugmem_host::Database`]
 /// (writer) or [`plugmem_host::ReadOnlyDatabase`] (with `{ readOnly: true }`).
 /// Construct it, call the verbs, and `close()` it to release the file when done.
@@ -323,22 +353,6 @@ impl Plugmem {
         })
     }
 
-    /// Wraps a database handle a workspace already opened.
-    ///
-    /// Not a JS constructor: a memory in a workspace is reached by name through
-    /// `Workspace.open`, which is what keeps a name from ever being a path.
-    /// The class it hands back is this one, so a named memory has every verb a
-    /// path-opened one does and there is no second implementation to drift.
-    pub(crate) fn from_database(db: Database, path: PathBuf) -> Self {
-        Self {
-            handle: Some(Handle::Writer(db)),
-            path,
-            // The workspace reported them once when it loaded the config; a
-            // per-memory copy would repeat the same lines for every open.
-            warnings: Vec::new(),
-        }
-    }
-
     /// What `config.toml` said that nothing claimed — a misspelled key, a
     /// misspelled section — one human-readable line each, empty when the file
     /// was clean.
@@ -386,7 +400,7 @@ impl Plugmem {
     /// so it runs on napi-rs' libuv worker pool.
     #[napi(ts_return_type = "Promise<RememberOutcome[]>")]
     pub fn remember_many(&self, args: Vec<RememberArgs>) -> Result<AsyncTask<RememberManyTask>> {
-        let db = self.writer()?.clone();
+        let source = self.writer_source()?;
         // Validated here, on the JS thread, not inside `compute`: an argument
         // this wrapper refuses has to throw where the caller stands, and a
         // coded error cannot cross the `Task` boundary anyway (see `error`).
@@ -406,7 +420,7 @@ impl Plugmem {
             .map(|(i, input)| checked_vector(input.vector.as_ref(), &format!("[{i}].vector")))
             .collect::<Result<Vec<_>>>()?;
         Ok(AsyncTask::new(RememberManyTask {
-            db,
+            source,
             args,
             valid_from,
             vectors,
@@ -440,7 +454,7 @@ impl Plugmem {
         let as_of = args.as_of.map(|v| checked_ms(v, "asOf")).transpose()?;
         let vector = checked_vector(args.vector.as_ref(), "vector")?;
         let source = match self.handle()? {
-            Handle::Writer(db) => RecallSource::Writer(db.clone()),
+            Handle::Writer(db) => RecallSource::Writer(WriterSource::Direct(db.clone())),
             Handle::Reader { db, embedder } => RecallSource::Reader {
                 db: Arc::clone(db),
                 embedder: embedder.clone(),
@@ -535,7 +549,7 @@ impl Plugmem {
     #[napi(ts_return_type = "Promise<ExportPage>")]
     pub fn export_page(&self, cursor: Option<u32>) -> Result<AsyncTask<ExportPageTask>> {
         let source = match self.handle()? {
-            Handle::Writer(db) => ExportSource::Writer(db.clone()),
+            Handle::Writer(db) => ExportSource::Writer(WriterSource::Direct(db.clone())),
             Handle::Reader { db, .. } => ExportSource::Reader(Arc::clone(db)),
         };
         Ok(AsyncTask::new(ExportPageTask {
@@ -572,7 +586,7 @@ impl Plugmem {
         #[napi(ts_arg_type = "(edges: ExportedEdge[]) => void")] on_batch: JsFunction,
     ) -> Result<AsyncTask<ExportEdgesTask>> {
         let source = match self.handle()? {
-            Handle::Writer(db) => ExportSource::Writer(db.clone()),
+            Handle::Writer(db) => ExportSource::Writer(WriterSource::Direct(db.clone())),
             Handle::Reader { db, .. } => ExportSource::Reader(Arc::clone(db)),
         };
         // Created here, on the JS thread, because it needs the function value;
@@ -607,7 +621,7 @@ impl Plugmem {
     #[napi(ts_return_type = "Promise<Scrub>")]
     pub fn scrub(&self, options: Option<ScrubOptions>) -> Result<AsyncTask<ScrubOpenTask>> {
         let source = match self.handle()? {
-            Handle::Writer(db) => ExportSource::Writer(db.clone()),
+            Handle::Writer(db) => ExportSource::Writer(WriterSource::Direct(db.clone())),
             Handle::Reader { db, .. } => ExportSource::Reader(Arc::clone(db)),
         };
         Ok(AsyncTask::new(ScrubOpenTask::new(source, options)?))
@@ -655,7 +669,7 @@ impl Plugmem {
         mode: Option<MaintainMode>,
     ) -> Result<AsyncTask<MaintainTask>> {
         Ok(AsyncTask::new(MaintainTask {
-            db: self.writer()?.clone(),
+            source: self.writer_source()?,
             now: now_ms(),
             options: mode.unwrap_or(MaintainMode::Auto).into(),
         }))
@@ -667,7 +681,7 @@ impl Plugmem {
     #[napi(ts_return_type = "Promise<void>")]
     pub fn checkpoint(&self) -> Result<AsyncTask<CheckpointTask>> {
         Ok(AsyncTask::new(CheckpointTask {
-            db: self.writer()?.clone(),
+            source: self.writer_source()?,
             now: now_ms(),
         }))
     }
@@ -707,7 +721,7 @@ impl Plugmem {
     /// The libuv task behind a small write.
     fn write_task(&self, what: Write) -> Result<AsyncTask<WriteTask>> {
         Ok(AsyncTask::new(WriteTask {
-            db: self.writer()?.clone(),
+            source: self.writer_source()?,
             what,
             now: now_ms(),
         }))
@@ -716,7 +730,7 @@ impl Plugmem {
     /// What a whole-database read runs against.
     fn read_source(&self) -> Result<RecallSource> {
         Ok(match self.handle()? {
-            Handle::Writer(db) => RecallSource::Writer(db.clone()),
+            Handle::Writer(db) => RecallSource::Writer(WriterSource::Direct(db.clone())),
             Handle::Reader { db, .. } => RecallSource::Reader {
                 db: Arc::clone(db),
                 embedder: None,
@@ -731,14 +745,14 @@ impl Plugmem {
         args: RememberArgs,
         revise: Option<FactId>,
     ) -> Result<AsyncTask<RememberTask>> {
-        let db = self.writer()?.clone();
+        let source = self.writer_source()?;
         let valid_from = args
             .valid_from
             .map(|value| checked_ms(value, "validFrom"))
             .transpose()?;
         let vector = checked_vector(args.vector.as_ref(), "vector")?;
         Ok(AsyncTask::new(RememberTask {
-            db,
+            source,
             args,
             valid_from,
             vector,
@@ -765,6 +779,10 @@ impl Plugmem {
         }
     }
 
+    fn writer_source(&self) -> Result<WriterSource> {
+        Ok(WriterSource::Direct(self.writer()?.clone()))
+    }
+
     /// The read-only handle, or a writer / closed error.
     fn reader(&self) -> Result<&ReadOnlyDatabase> {
         match self.handle()? {
@@ -774,11 +792,252 @@ impl Plugmem {
     }
 }
 
+// ── named workspace memory task factories ────────────────────────────────
+
+pub(crate) fn writer_remember_task(
+    source: WriterSource,
+    args: RememberArgs,
+    revise: Option<FactId>,
+) -> Result<AsyncTask<RememberTask>> {
+    let valid_from = args
+        .valid_from
+        .map(|value| checked_ms(value, "validFrom"))
+        .transpose()?;
+    let vector = checked_vector(args.vector.as_ref(), "vector")?;
+    Ok(AsyncTask::new(RememberTask {
+        source,
+        args,
+        valid_from,
+        vector,
+        revise,
+        now: now_ms(),
+    }))
+}
+
+pub(crate) fn writer_remember_many_task(
+    source: WriterSource,
+    args: Vec<RememberArgs>,
+) -> Result<AsyncTask<RememberManyTask>> {
+    let valid_from = args
+        .iter()
+        .enumerate()
+        .map(|(i, input)| {
+            input
+                .valid_from
+                .map(|value| checked_ms(value, &format!("[{i}].validFrom")))
+                .transpose()
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let vectors = args
+        .iter()
+        .enumerate()
+        .map(|(i, input)| checked_vector(input.vector.as_ref(), &format!("[{i}].vector")))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(AsyncTask::new(RememberManyTask {
+        source,
+        args,
+        valid_from,
+        vectors,
+        now: now_ms(),
+    }))
+}
+
+pub(crate) fn writer_recall_task(
+    source: WriterSource,
+    args: Option<RecallArgs>,
+) -> Result<AsyncTask<RecallTask>> {
+    let args = args.unwrap_or_default();
+    let range = args.window()?;
+    let as_of = args.as_of.map(|v| checked_ms(v, "asOf")).transpose()?;
+    let vector = checked_vector(args.vector.as_ref(), "vector")?;
+    Ok(AsyncTask::new(RecallTask {
+        source: RecallSource::Writer(source),
+        args,
+        range,
+        as_of,
+        vector,
+        now: now_ms(),
+    }))
+}
+
+pub(crate) fn writer_forget_task(source: WriterSource, id: u32) -> AsyncTask<WriteTask> {
+    AsyncTask::new(WriteTask {
+        source,
+        what: Write::Forget(FactId(id)),
+        now: now_ms(),
+    })
+}
+
+pub(crate) fn writer_link_task(source: WriterSource, args: LinkArgs) -> AsyncTask<WriteTask> {
+    AsyncTask::new(WriteTask {
+        source,
+        what: Write::Link(args),
+        now: now_ms(),
+    })
+}
+
+pub(crate) fn writer_unlink_task(source: WriterSource, args: LinkArgs) -> AsyncTask<WriteTask> {
+    AsyncTask::new(WriteTask {
+        source,
+        what: Write::Unlink(args),
+        now: now_ms(),
+    })
+}
+
+pub(crate) fn writer_export_task(source: WriterSource) -> AsyncTask<ReadTask> {
+    AsyncTask::new(ReadTask {
+        source: RecallSource::Writer(source),
+        what: Read::Export,
+    })
+}
+
+pub(crate) fn writer_verify_task(source: WriterSource) -> AsyncTask<ReadTask> {
+    AsyncTask::new(ReadTask {
+        source: RecallSource::Writer(source),
+        what: Read::Verify,
+    })
+}
+
+pub(crate) fn writer_export_page_task(
+    source: WriterSource,
+    cursor: Option<u32>,
+) -> AsyncTask<ExportPageTask> {
+    AsyncTask::new(ExportPageTask {
+        source: ExportSource::Writer(source),
+        cursor: cursor.unwrap_or(0),
+    })
+}
+
+pub(crate) fn writer_export_edges_task(
+    source: WriterSource,
+    on_batch: JsFunction,
+) -> Result<AsyncTask<ExportEdgesTask>> {
+    let sink: ThreadsafeFunction<Vec<ExportedEdge>, ErrorStrategy::Fatal> = on_batch
+        .create_threadsafe_function(EXPORT_EDGE_QUEUE, |ctx| Ok(vec![ctx.value]))
+        .map_err(|e| error::internal(format!("cannot bridge the callback to a worker: {e}")))?;
+    Ok(AsyncTask::new(ExportEdgesTask {
+        source: ExportSource::Writer(source),
+        sink: Some(sink),
+    }))
+}
+
+pub(crate) fn writer_scrub_task(
+    source: WriterSource,
+    options: Option<ScrubOptions>,
+) -> Result<AsyncTask<ScrubOpenTask>> {
+    Ok(AsyncTask::new(ScrubOpenTask::new(
+        ExportSource::Writer(source),
+        options,
+    )?))
+}
+
+pub(crate) fn writer_maintain_task(
+    source: WriterSource,
+    mode: Option<MaintainMode>,
+) -> AsyncTask<MaintainTask> {
+    AsyncTask::new(MaintainTask {
+        source,
+        now: now_ms(),
+        options: mode.unwrap_or(MaintainMode::Auto).into(),
+    })
+}
+
+pub(crate) fn writer_checkpoint_task(source: WriterSource) -> AsyncTask<CheckpointTask> {
+    AsyncTask::new(CheckpointTask {
+        source,
+        now: now_ms(),
+    })
+}
+
+pub struct WriterGetTask {
+    source: WriterSource,
+    id: FactId,
+}
+
+impl WriterGetTask {
+    pub(crate) fn new(source: WriterSource, id: u32) -> Self {
+        Self {
+            source,
+            id: FactId(id),
+        }
+    }
+}
+
+impl Task for WriterGetTask {
+    type Output = Produced<Option<plugmem_host::FactSnapshot>>;
+    type JsValue = Option<FactSnapshot>;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        Ok(self.source.read(|db| Ok(db.get(self.id))))
+    }
+
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        output
+            .map_err(|e| error::to_js(env, e))?
+            .as_ref()
+            .map(types::to_typed)
+            .transpose()
+            .map_err(error::into_napi)
+    }
+}
+
+pub struct WriterStatsTask {
+    source: WriterSource,
+}
+
+impl WriterStatsTask {
+    pub(crate) fn new(source: WriterSource) -> Self {
+        Self { source }
+    }
+}
+
+impl Task for WriterStatsTask {
+    type Output = Produced<plugmem_host::Stats>;
+    type JsValue = Stats;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        Ok(self.source.read(|db| Ok(db.stats())))
+    }
+
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        output
+            .map_err(|e| error::to_js(env, e))
+            .and_then(|stats| types::to_typed(&stats).map_err(error::into_napi))
+    }
+}
+
+pub struct WriterTagsTask {
+    source: WriterSource,
+    id: FactId,
+}
+
+impl WriterTagsTask {
+    pub(crate) fn new(source: WriterSource, id: u32) -> Self {
+        Self {
+            source,
+            id: FactId(id),
+        }
+    }
+}
+
+impl Task for WriterTagsTask {
+    type Output = Produced<Vec<String>>;
+    type JsValue = Vec<String>;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        Ok(self.source.read(|db| Ok(db.tags_of(self.id))))
+    }
+
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        output.map_err(|e| error::to_js(env, e))
+    }
+}
+
 /// The libuv-thread body of [`Plugmem::maintain`]: holds a cloned `Database`
 /// handle (cheap — an `Arc`) and the call-time clock, runs the pass off the main
 /// thread, and resolves with the typed report.
 pub struct MaintainTask {
-    db: Database,
+    source: WriterSource,
     now: u64,
     options: MaintenanceOptions,
 }
@@ -788,10 +1047,10 @@ impl Task for MaintainTask {
     type JsValue = MaintainReport;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        Ok(self
-            .db
-            .maintain_with_options(self.now, self.options)
-            .map_err(error::engine))
+        Ok(self.source.write(|db| {
+            db.maintain_with_options(self.now, self.options)
+                .map_err(error::engine)
+        }))
     }
 
     fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
@@ -804,7 +1063,7 @@ impl Task for MaintainTask {
 /// The libuv-thread body of [`Plugmem::checkpoint`] — writes and fsyncs a fresh
 /// snapshot off the main thread.
 pub struct CheckpointTask {
-    db: Database,
+    source: WriterSource,
     now: u64,
 }
 
@@ -813,7 +1072,9 @@ impl Task for CheckpointTask {
     type JsValue = ();
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        Ok(self.db.checkpoint(self.now).map_err(error::engine))
+        Ok(self
+            .source
+            .write(|db| db.checkpoint(self.now).map_err(error::engine)))
     }
 
     fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
@@ -823,7 +1084,7 @@ impl Task for CheckpointTask {
 
 /// The libuv-thread body of [`Plugmem::remember_many`].
 pub struct RememberManyTask {
-    db: Database,
+    source: WriterSource,
     args: Vec<RememberArgs>,
     /// One pre-validated `validFrom` per input, checked before the task was
     /// scheduled (see [`Plugmem::remember_many`]).
@@ -881,7 +1142,9 @@ impl Task for RememberManyTask {
             })
             .collect();
 
-        Ok(self.db.remember_many(inputs).map_err(error::engine))
+        Ok(self
+            .source
+            .write(|db| db.remember_many(inputs).map_err(error::engine)))
     }
 
     fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
@@ -1012,7 +1275,7 @@ impl Task for RecoverTask {
 /// Which handle a path-level read runs against. Shared with [`crate::scrub`],
 /// whose verbs exist on both.
 pub(crate) enum ExportSource {
-    Writer(Database),
+    Writer(WriterSource),
     Reader(Arc<ReadOnlyDatabase>),
 }
 
@@ -1023,18 +1286,20 @@ pub struct ExportPageTask {
 }
 
 impl Task for ExportPageTask {
-    type Output = plugmem_host::ExportPage;
+    type Output = Produced<plugmem_host::ExportPage>;
     type JsValue = ExportPage;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
         Ok(match &self.source {
-            ExportSource::Writer(db) => db.export_page(self.cursor, EXPORT_PAGE_LIMIT),
-            ExportSource::Reader(db) => db.export_page(self.cursor, EXPORT_PAGE_LIMIT),
+            ExportSource::Writer(source) => {
+                source.read(|db| Ok(db.export_page(self.cursor, EXPORT_PAGE_LIMIT)))
+            }
+            ExportSource::Reader(db) => Ok(db.export_page(self.cursor, EXPORT_PAGE_LIMIT)),
         })
     }
 
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        Ok(ExportPage::from(output))
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(ExportPage::from(output.map_err(|e| error::to_js(env, e))?))
     }
 }
 
@@ -1053,9 +1318,9 @@ impl ExportEdgesTask {
     ///
     /// The host's visitor is per-edge; batching happens here, in Rust, so the
     /// per-edge cost stays a `push` and only the batch crosses to JavaScript.
-    fn run(&mut self) -> usize {
+    fn run(&mut self) -> (usize, Option<Error>) {
         let Some(sink) = self.sink.take() else {
-            return 0;
+            return (0, None);
         };
         // Delivery receipts. A threadsafe-function call only *queues* work for
         // the JS thread, so without these the promise could resolve while
@@ -1104,7 +1369,18 @@ impl ExportEdgesTask {
             }
         };
         match &self.source {
-            ExportSource::Writer(db) => db.export_edges_each(&mut visit),
+            ExportSource::Writer(source) => {
+                if let Err(e) = source.read(|db| {
+                    db.export_edges_each(&mut visit);
+                    Ok(())
+                }) {
+                    // Export-edge failures can only occur while resolving a
+                    // named workspace target. `run` has no error channel yet;
+                    // the Task implementation below carries it.
+                    drop(sink);
+                    return (total, Some(e));
+                }
+            }
             ExportSource::Reader(db) => db.export_edges_each(&mut visit),
         }
         if !batch.is_empty() {
@@ -1124,20 +1400,21 @@ impl ExportEdgesTask {
         // Explicit, because it is load-bearing rather than housekeeping: this
         // is the release that lets Node exit.
         drop(sink);
-        total
+        (total, None)
     }
 }
 
 impl Task for ExportEdgesTask {
-    type Output = usize;
+    type Output = Produced<usize>;
     type JsValue = f64;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        Ok(self.run())
+        let (total, error) = self.run();
+        Ok(error.map_or(Ok(total), Err))
     }
 
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        Ok(output as f64)
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output.map_err(|e| error::to_js(env, e))? as f64)
     }
 }
 
@@ -1211,7 +1488,7 @@ impl OpenTask {
 /// already checked — a refused argument threw on the JS thread, because a coded
 /// error cannot cross this boundary (see [`crate::error`]).
 pub struct RememberTask {
-    db: Database,
+    source: WriterSource,
     args: RememberArgs,
     valid_from: Option<u64>,
     vector: Option<Vec<f32>>,
@@ -1254,11 +1531,13 @@ impl Task for RememberTask {
             vector: self.vector.as_deref(),
             ..RememberInput::text(self.now, &self.args.text)
         };
-        Ok(match self.revise {
-            Some(target) => self.db.revise(target, input),
-            None => self.db.remember(input),
-        }
-        .map_err(error::engine))
+        Ok(self.source.write(|db| {
+            match self.revise {
+                Some(target) => db.revise(target, input),
+                None => db.remember(input),
+            }
+            .map_err(error::engine)
+        }))
     }
 
     fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
@@ -1289,7 +1568,7 @@ pub enum WriteOutput {
 /// belongs in one place: the journal sync, and the host's post-write policy,
 /// which can fire a maintenance pass or a reshard from inside any of them.
 pub struct WriteTask {
-    db: Database,
+    source: WriterSource,
     what: Write,
     now: u64,
 }
@@ -1299,14 +1578,12 @@ impl Task for WriteTask {
     type JsValue = napi::bindgen_prelude::Either<bool, ()>;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        Ok(match &self.what {
-            Write::Forget(id) => self
-                .db
+        Ok(self.source.write(|db| match &self.what {
+            Write::Forget(id) => db
                 .forget(self.now, *id)
                 .map(WriteOutput::Changed)
                 .map_err(error::engine),
-            Write::Link(args) => self
-                .db
+            Write::Link(args) => db
                 .link(LinkInput {
                     now: self.now,
                     src: &args.src,
@@ -1316,8 +1593,7 @@ impl Task for WriteTask {
                 })
                 .map(|()| WriteOutput::Done)
                 .map_err(error::engine),
-            Write::Unlink(args) => self
-                .db
+            Write::Unlink(args) => db
                 .unlink(UnlinkInput {
                     now: self.now,
                     src: &args.src,
@@ -1326,7 +1602,7 @@ impl Task for WriteTask {
                 })
                 .map(WriteOutput::Changed)
                 .map_err(error::engine),
-        })
+        }))
     }
 
     fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
@@ -1362,15 +1638,18 @@ impl Task for ReadTask {
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
         Ok(match (&self.what, &self.source) {
-            (Read::Verify, RecallSource::Writer(db)) => db
-                .verify()
-                .map(|()| ReadOutput::Verified)
-                .map_err(error::engine),
+            (Read::Verify, RecallSource::Writer(source)) => source.read(|db| {
+                db.verify()
+                    .map(|()| ReadOutput::Verified)
+                    .map_err(error::engine)
+            }),
             (Read::Verify, RecallSource::Reader { db, .. }) => db
                 .verify()
                 .map(|()| ReadOutput::Verified)
                 .map_err(error::engine),
-            (Read::Export, RecallSource::Writer(db)) => Ok(ReadOutput::Exported(db.export())),
+            (Read::Export, RecallSource::Writer(source)) => {
+                source.read(|db| Ok(ReadOutput::Exported(db.export())))
+            }
             (Read::Export, RecallSource::Reader { db, .. }) => {
                 Ok(ReadOutput::Exported(db.export()))
             }
@@ -1390,7 +1669,7 @@ impl Task for ReadTask {
 /// What a [`RecallTask`] reads: a writer, or a reader plus the embedder the
 /// engine cannot carry for it.
 enum RecallSource {
-    Writer(Database),
+    Writer(WriterSource),
     Reader {
         db: Arc<ReadOnlyDatabase>,
         embedder: Option<SharedEmbedder>,
@@ -1452,7 +1731,9 @@ impl Task for RecallTask {
             graph_depth: self.args.graph_depth,
         };
         Ok(match &self.source {
-            RecallSource::Writer(db) => db.recall(q),
+            RecallSource::Writer(source) => {
+                return Ok(source.read(|db| db.recall(q).map_err(error::engine)));
+            }
             RecallSource::Reader { db, .. } => db.recall(q),
         }
         .map_err(error::engine))
