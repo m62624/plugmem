@@ -96,8 +96,8 @@ create_exception!(
     plugmem._plugmem,
     BusyError,
     PlugmemError,
-    "The handle cannot do this right now because another operation on it is \
-     still running."
+    "Local contention: a handle is in use, or every workspace pool slot is \
+     leased by an active operation."
 );
 
 create_exception!(
@@ -144,7 +144,7 @@ pub mod code {
     pub const READ_ONLY: &str = "PLUGMEM_READ_ONLY";
     /// A read-only-only verb was called on a writer.
     pub const WRITER_ONLY: &str = "PLUGMEM_WRITER_ONLY";
-    /// Another operation on this handle is still running.
+    /// Local handle or workspace-pool contention.
     pub const BUSY: &str = "PLUGMEM_BUSY";
     /// The engine reported a failure.
     pub const ENGINE: &str = "PLUGMEM_ENGINE";
@@ -171,9 +171,17 @@ pub fn engine(e: HostError) -> PyErr {
     EngineError::new_err(e.to_string())
 }
 
-/// A workspace failure from inside a verb, classified like [`engine`].
+/// A workspace failure from inside a verb.
 pub fn workspace(e: WorkspaceError) -> PyErr {
-    EngineError::new_err(e.to_string())
+    match &e {
+        WorkspaceError::Busy { .. } | WorkspaceError::Host(HostError::Locked { .. }) => {
+            LockedError::new_err(e.to_string())
+        }
+        WorkspaceError::AtCapacity { .. } | WorkspaceError::InUse { .. } => {
+            BusyError::new_err(e.to_string())
+        }
+        _ => EngineError::new_err(e.to_string()),
+    }
 }
 
 /// A failure while opening a database. `Locked` and `NeedsCheckpoint` are the

@@ -47,6 +47,7 @@ from ._plugmem import (
     Similar,
     Stats,
     Workspace,
+    WorkspaceMemory,
     WorkspaceProblem,
     WriterOnlyError,
     # Module functions
@@ -60,7 +61,7 @@ from ._plugmem import (
 )
 
 
-def export_pages(db: Plugmem) -> Iterator[ExportPage]:
+def export_pages(db: Plugmem | WorkspaceMemory) -> Iterator[ExportPage]:
     """Walk every open fact one bounded page at a time.
 
     Sugar over `Plugmem.export_page`, not a second export: it calls the same
@@ -116,6 +117,7 @@ __all__ = [
     "Similar",
     "Stats",
     "Workspace",
+    "WorkspaceMemory",
     "WorkspaceProblem",
     "WriterOnlyError",
     "about",

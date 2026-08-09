@@ -475,8 +475,8 @@ tenant, per project — address them by name instead:
 ```python
 ws = plugmem.Workspace("~/bot-data")
 
-db = ws.open("conversation-42")            # first use creates it
-db.remember("the user prefers dark mode", entity="user")
+memory = ws.memory("conversation-42")      # opens nothing and holds no lock
+memory.remember("the user prefers dark mode", entity="user")  # first write creates
 
 ws.describe("conversation-42", "support thread about billing", owner="ann")
 for entry in ws.find("billing"):
@@ -489,10 +489,38 @@ resolves to exactly one database inside the directory. `describe` is what makes
 edge, so `find("ann")` returns what Ann owns even though no description
 mentions her.
 
-The workspace keeps a bounded pool of open memories and closes the least
-recently used to make room. `close_idle()` closes those idle past the
-configured timeout, which matters because an open memory holds that database's
-exclusive lock.
+The workspace owns a bounded pool of real database handles. A
+`WorkspaceMemory` owns only its name plus a weak reference to the workspace;
+each verb obtains a scoped handle while the GIL is released. An inactive
+least-recently-used database is closed to make room, while active verbs are
+never evicted. If every `max_open` slot is active, a call for a different memory
+raises `BusyError` immediately instead of waiting or opening a hidden extra
+handle.
+
+`release(name)` closes one inactive pooled handle without invalidating logical
+references; their next verb reopens it. `close_idle()` closes entries idle past
+the configured timeout. Both matter because a pooled writer holds that
+database's exclusive OS lock. `Workspace.close()` invalidates every
+`WorkspaceMemory`; garbage-collecting a logical reference closes nothing.
+
+This does not change the ordinary API: `Plugmem.open(path)` is still an
+explicitly owned database handle, and its `close()` releases that direct lock.
+
+This replaces the old handle-returning call and is intentionally breaking:
+
+```python
+# before
+memory = ws.open("conversation-42")
+memory.close()
+
+# now
+memory = ws.memory("conversation-42")
+ws.release("conversation-42")  # optional immediate release when inactive
+```
+
+`WorkspaceMemory` has no `close()` because it owns no native resource. All its
+verbs are ordinary synchronous Python calls whose engine work runs without the
+GIL.
 
 ## What it is not for
 

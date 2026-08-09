@@ -146,6 +146,7 @@ fn _plugmem(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<db::Plugmem>()?;
     module.add_class::<scrub::Scrub>()?;
     module.add_class::<workspace::Workspace>()?;
+    module.add_class::<workspace::WorkspaceMemory>()?;
 
     types::register(module)?;
     error::register(module)?;

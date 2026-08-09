@@ -716,7 +716,7 @@ impl From<plugmem_host::MaintainReport> for MaintainReport {
 #[gen_stub_pyclass]
 #[pyclass(frozen, get_all, module = "plugmem._plugmem")]
 pub struct DbEntry {
-    /// The memory's name — its identity, and what `Workspace.open` takes.
+    /// The memory's name — its identity, and what `Workspace.memory` takes.
     pub db: String,
     /// What it is for.
     pub description: String,
