@@ -1133,7 +1133,7 @@ fn an_open_never_panics_through_access_and_verify_catches_corruption() {
 
 #[test]
 fn verify_accepts_a_clean_image_and_reports_deferred_text_corruption() {
-    // `verify()` is the on-demand integrity check (SQLite's `integrity_check`):
+    // `verify()` is the on-demand full content-integrity check:
     // a clean image passes; a stored text corrupted past the (skipped) checksums
     // opens fine and is caught by `verify()`, while `get` hides the fact and
     // nothing panics.

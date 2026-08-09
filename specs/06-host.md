@@ -112,8 +112,10 @@ startup network call; a mismatch with the server's response is a typed error). H
 `ureq` (blocking, small — the core is synchronous, no async is needed), JSON is
 `serde_json`. A built-in local embedder (candle, e5-small) is v1.1.
 
-The model name is also the built-in embedder's readable `space_id` and is
-persisted beside the vectors. Opening an existing database with new target
+The built-in embedder's readable `space_id` defaults to its model name and can
+be overridden with `OpenAiCompatEmbedder::with_space_id` or
+`[embedder].space_id`. The id is a local declaration, never a network probe,
+and is persisted beside the vectors. Opening an existing database with new target
 settings adopts the stored dimension for normal reads; automatic embedding
 then returns `VectorSpaceMismatch` until the caller explicitly reembeds.
 

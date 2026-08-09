@@ -115,6 +115,7 @@ impl Embedder for SharedEmbedder {
 pub struct OpenAiCompatEmbedder {
     url: String,
     model: String,
+    space_id: String,
     api_key: Option<String>,
     dim: usize,
     agent: ureq::Agent,
@@ -124,14 +125,17 @@ impl OpenAiCompatEmbedder {
     /// Creates a client for the exact embeddings `endpoint_url` (e.g.
     /// `https://api.openai.com/v1/embeddings` or
     /// `http://localhost:11434/v1/embeddings`), a model name and the expected
-    /// dimension. The URL is used as supplied; this constructor does not
-    /// append or otherwise rewrite a path. The dimension is explicit — no
-    /// startup probe request, and a server disagreeing with it is a typed
-    /// error, not a silently reconfigured database.
+    /// dimension. The model name is also the default semantic-space id; use
+    /// [`Self::with_space_id`] to declare a stable revision or digest instead.
+    /// The URL is used as supplied; this constructor does not append or
+    /// otherwise rewrite a path. The dimension and identity are explicit — no
+    /// startup probe request, and a server disagreeing with the dimension is a
+    /// typed error, not a silently reconfigured database.
     pub fn new(endpoint_url: &str, model: &str, dim: usize) -> Self {
         Self {
             url: endpoint_url.to_string(),
             model: model.to_string(),
+            space_id: model.to_string(),
             api_key: None,
             dim,
             agent: ureq::Agent::new_with_defaults(),
@@ -144,11 +148,24 @@ impl OpenAiCompatEmbedder {
         self.api_key = Some(key.into());
         self
     }
+
+    /// Overrides the semantic vector-space identity persisted in the
+    /// database. By default this is the model name passed to [`Self::new`].
+    ///
+    /// Use an explicit id when the provider's request model is an alias, or
+    /// when two differently named endpoints are known to produce compatible
+    /// vectors. Plugmem trusts this declaration and never probes the provider
+    /// to infer it. Invalid ids are rejected when the database first uses the
+    /// embedder.
+    pub fn with_space_id(mut self, space_id: impl Into<String>) -> Self {
+        self.space_id = space_id.into();
+        self
+    }
 }
 
 impl Embedder for OpenAiCompatEmbedder {
     fn space_id(&self) -> &str {
-        &self.model
+        &self.space_id
     }
 
     fn dim(&self) -> usize {

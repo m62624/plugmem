@@ -6,9 +6,9 @@ result and assembles a compact context under a token budget.
 
 ## 1. Tokenizer (in the core: needed on wasm too)
 
-The tokenizer is the stack the top lexical engines converge on (Lucene ICU/Standard,
-SQLite FTS5 `unicode61`), built from pure `core` unicode-rs crates (+163 KiB of
-tables in the wasm binary, accepted):
+The tokenizer uses Unicode word boundaries, normalization and case mapping,
+built from pure `core` unicode-rs crates (+163 KiB of tables in the wasm binary,
+accepted):
 
 1. **NFKC normalization** of the input (fullwidth → ASCII, ligatures ﬁ → fi,
    decomposed marks recombined). Pure ASCII takes an identity fast path (~35%).

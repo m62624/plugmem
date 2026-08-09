@@ -246,8 +246,8 @@ pub(crate) enum Command {
     /// shared-lock open) can proceed without a dirty-journal `NeedsCheckpoint`.
     Checkpoint,
     /// Check the integrity an open defers: text UTF-8, metadata, vector↔fact
-    /// consistency, and that the edge graph agrees with itself — the on-demand
-    /// equivalent of SQLite's `integrity_check`. Exit 2 on damage.
+    /// consistency, and that the edge graph agrees with itself. Exit 2 on
+    /// damage.
     Verify,
     /// Scrub the snapshot's byte-level container integrity (per-section and
     /// whole-file checksums), a slice at a time. Requires a checkpointed

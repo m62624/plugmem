@@ -219,5 +219,10 @@ mod tests {
                 .iter()
                 .any(|setting| setting.section == "database" && setting.key == "path")
         );
+        assert!(
+            help.settings
+                .iter()
+                .any(|setting| setting.section == "embedder" && setting.key == "space_id")
+        );
     }
 }

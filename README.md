@@ -25,8 +25,8 @@
 
 ## What plugmem is
 
-An embeddable **memory database for local-first applications and agents** — you
-link it into your program like SQLite, in-process and file-backed. plugmem stores short
+An embeddable **memory database for local-first applications and agents** — an
+in-process, file-backed engine linked directly into your program. plugmem stores short
 **facts** — with a subject entity, tags, optional metadata, an optional
 embedding and two time axes — and answers a query with a ranked,
 token-budgeted result with structured facts and edges plus an optional bounded
@@ -135,7 +135,7 @@ are for narrower needs.
 | A memory in **Python** | [`plugmem-py`](crates/plugmem-py) | The engine as a CPython extension (PyO3), in-process and typed. Every call releases the GIL. On PyPI as `plugmem`. |
 
 Rust programs use the library (`host`, or `core` for specialists) — embedded
-in-process, like linking SQLite. Other languages and agents come in through
+directly in-process. Other languages and agents come in through
 `mcp` (or `napi` for Node/TS) — not the CLI, which is the human/scripting door.
 
 **One thing lives only in the CLI: the JSONL file format.** `export` streams
@@ -184,11 +184,12 @@ prefers tokio" answers a query for `tokio` but not one for `which runtime?` —
 anchor on the entity, or add an embedder, and it does. Configure one in
 `[embedder]`; delete the section and everything else keeps working.
 
-The model name is persisted with its vectors. Changing it never makes routine
-or automatic maintenance call the new model: run the explicit
-`plugmem-cli maintain --reembed` operation to recompute every retained fact and
-atomically publish the new vector space. Equal dimensions alone are not treated
-as compatibility.
+The configured embedding `space_id` is persisted with its vectors; it defaults
+to `model`, and can name an exact revision when the server-side model is an
+alias. Changing it never makes routine or automatic maintenance call the new
+model: run the explicit `plugmem-cli maintain --reembed` operation to recompute
+every retained fact and atomically publish the new vector space. Equal
+dimensions alone are not treated as compatibility.
 
 ## Many memories in one directory (optional)
 

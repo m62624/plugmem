@@ -1160,8 +1160,8 @@ impl<'a> Memory<'a> {
         Ok(())
     }
 
-    /// Runs the integrity checks that `open` **defers** for speed and memory
-    /// — the on-demand equivalent of SQLite's `integrity_check`.
+    /// Runs the full content-integrity checks that `open` **defers** for speed
+    /// and memory.
     ///
     /// A load (owned, overlay or read-only) validates only what an accessor
     /// could be unsafe without: every stored id is in range, so nothing can

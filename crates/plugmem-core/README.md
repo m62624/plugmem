@@ -397,16 +397,15 @@ walked, every invariant the hot path relies on re-established.
 
 ### Integrity and recovery
 
-Loading is **trust/sparse by default** (the SQLite model): it validates the
+Loading is **trust/sparse by default**: it validates the
 metadata but does **not** read the container checksums or scan the two large
 byte pools, so a big database opens without faulting them in. The accessors
 tolerate bad bytes on their own — invalid text hides a fact, a bad vector slot
 is skipped — so a corrupt image never panics. Integrity is then on demand, in
 layers:
 
-- `Memory::verify()` — content consistency: every stored text is valid UTF-8
-  and the fact↔vector-slot bijection holds (the equivalent of SQLite's
-  `integrity_check`).
+- `Memory::verify()` — full content consistency: every stored text is valid
+  UTF-8 and the fact↔vector-slot bijection holds.
 - a resumable byte-level **container scrub** (per-section and whole-file xxh3),
   exposed by the host as `ReadOnlyDatabase::scrub()` — the bitrot detector.
 - `Memory::faulty_facts()` — the per-fact salvage predicate the host's

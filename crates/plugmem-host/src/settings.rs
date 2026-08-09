@@ -67,7 +67,8 @@ pub(crate) const RECALL_SETTING_KEYS: &[&str] = &[
 pub(crate) const INDEX_SETTING_KEYS: &[&str] = &["hnsw_ef_construction", "flat_to_hnsw"];
 pub(crate) const DATABASE_SETTING_KEYS: &[&str] = &["path"];
 pub(crate) const WORKSPACE_SETTING_KEYS: &[&str] = &["dir", "max_open", "idle_timeout_ms"];
-pub(crate) const EMBEDDER_SETTING_KEYS: &[&str] = &["enabled", "url", "model", "api_key_env"];
+pub(crate) const EMBEDDER_SETTING_KEYS: &[&str] =
+    &["enabled", "url", "model", "space_id", "api_key_env"];
 pub(crate) const MAINTENANCE_SETTING_KEYS: &[&str] = &[
     "snapshot_every_ops",
     "snapshot_journal_bytes",
@@ -505,6 +506,7 @@ struct EmbedderCfg {
     enabled: Option<bool>,
     url: Option<String>,
     model: Option<String>,
+    space_id: Option<String>,
     api_key_env: Option<String>,
 }
 
@@ -524,6 +526,9 @@ impl EmbedderCfg {
             self.model = Some(v);
         }
         if let Some(v) = s(t, EMBEDDER_SETTING_KEYS[3]) {
+            self.space_id = Some(v);
+        }
+        if let Some(v) = s(t, EMBEDDER_SETTING_KEYS[4]) {
             self.api_key_env = Some(v);
         }
         Ok(())
@@ -555,6 +560,9 @@ impl EmbedderCfg {
             ));
         }
         let mut e = OpenAiCompatEmbedder::new(&url, &model, dim);
+        if let Some(space_id) = &self.space_id {
+            e = e.with_space_id(space_id);
+        }
         if let Some(env) = &self.api_key_env
             && let Some(key) = std::env::var_os(env)
         {
@@ -647,6 +655,7 @@ mod tests {
             "enabled = true",
             r#"url = "http://localhost:11434/v1/embeddings""#,
             r#"model = "nomic-embed-text""#,
+            r#"space_id = "nomic-embed-text@v1""#,
             r#"api_key_env = "SOME_ENV""#,
             "[engine]",
             "dim = 8",
@@ -654,7 +663,9 @@ mod tests {
         // The shared OpenAI-compatible client builds with a url, model and
         // dim > 0; the server may be OpenAI, Ollama or another compatible one.
         let s = Settings::from_table(Some(&table)).unwrap();
-        assert!(s.embedder.is_some());
+        let embedder = s.embedder.unwrap();
+        assert_eq!(embedder.space_id(), "nomic-embed-text@v1");
+        assert_eq!(embedder.dim(), 8);
     }
 
     #[test]
@@ -687,6 +698,7 @@ mod tests {
             enabled: Some(true),
             url: Some("http://127.0.0.1:0/v1/embeddings".into()),
             model: Some("m".into()),
+            space_id: None,
             api_key_env: None,
         }
         .build(8)
@@ -856,6 +868,7 @@ mod tests {
             enabled: Some(true),
             url: Some("http://x/v1/embeddings".into()),
             model: Some("m".into()),
+            space_id: None,
             api_key_env: None,
         };
         assert!(matches!(zero_dim.build(0), Err(SettingsError::Config(_))));
@@ -863,6 +876,7 @@ mod tests {
             enabled: None,
             url: Some("http://x/v1/embeddings".into()),
             model: Some("m".into()),
+            space_id: None,
             api_key_env: Some("PLUGMEM_TEST_KEY_UNSET".into()),
         };
         assert!(ok.build(384).unwrap().is_some());

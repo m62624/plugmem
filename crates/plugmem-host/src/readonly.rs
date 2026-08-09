@@ -267,8 +267,8 @@ impl ReadOnlyDatabase {
             .map_err(Into::into)
     }
 
-    /// Runs the on-demand integrity check — the equivalent of
-    /// SQLite's `integrity_check`. A read-only open validates only the metadata
+    /// Runs the on-demand full content-integrity check. A read-only open
+    /// validates only the metadata
     /// (the mapped text and vector pools stay non-resident); this sweeps them
     /// and reports any latent corruption. Reads the whole image, so it residents
     /// the pools it checks.

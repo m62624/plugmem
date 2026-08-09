@@ -375,12 +375,19 @@ enabled = false                # keep settings but do not create/use the embedde
 # To enable it, set [engine].dim > 0, change this to true (or omit it), and add:
 # url = "http://localhost:11434/v1/embeddings"
 # model = "nomic-embed-text"
+# space_id = "nomic-embed-text@v1" # optional; defaults to model, never probed
 # api_key_env = "OPENAI_API_KEY" # env var containing the bearer token
 
 [maintenance]
 snapshot_every_ops = 1024
 snapshot_journal_bytes = 4194304
 ```
+
+`space_id` is the persisted semantic identity of the vectors. It defaults to
+`model`; set it to an exact revision or digest when the provider model is an
+alias. Plugmem trusts the value and never probes the provider to discover it.
+Changing it for an existing vector database requires an explicit reembed;
+routine and automatic maintenance never calls the model.
 
 `[engine]` is what a database is built with — changing one of those on an
 existing memory is refused. `[recall]` and `[index]` are the opposite: reopening

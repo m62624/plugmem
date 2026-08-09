@@ -86,7 +86,7 @@ that is a test, not an aspiration.
 
 The file hash covers **the whole file with the hash field (offset 20) zeroed**,
 so `flags`, the section table and the config block are all under it. It is
-**not** verified on open — opening trusts the file, the SQLite model, so a large
+**not** verified on open — opening trusts the file, so a large
 database opens sparse. Integrity is on demand: `scrub()` checks these hashes in
 resumable slices, `verify()` checks content-level agreement.
 

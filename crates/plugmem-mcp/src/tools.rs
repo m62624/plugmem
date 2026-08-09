@@ -1561,6 +1561,11 @@ mod tests {
                 .iter()
                 .any(|setting| { setting["section"] == "database" && setting["key"] == "path" })
         );
+        assert!(
+            value["settings"].as_array().unwrap().iter().any(|setting| {
+                setting["section"] == "embedder" && setting["key"] == "space_id"
+            })
+        );
     }
 
     #[test]

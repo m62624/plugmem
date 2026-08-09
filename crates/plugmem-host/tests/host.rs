@@ -334,6 +334,39 @@ fn auto_embedding_end_to_end() {
     server.join().unwrap();
 }
 
+#[test]
+fn explicit_space_id_decouples_provider_alias_from_vector_identity() {
+    let dim = 8;
+    let (url, server) = spawn_mock_embedder(dim, 2);
+    let tmp = TempDir::new("space-alias");
+    let mut config = cfg();
+    config.dim = dim;
+
+    {
+        let provider = OpenAiCompatEmbedder::new(&url, "provider-alias-a", dim)
+            .with_space_id("embedding-family@revision");
+        let (db, _) = Database::builder(config.clone())
+            .embedder(Box::new(provider))
+            .open(tmp.db())
+            .unwrap();
+        db.remember(RememberInput::text(1, "first fact")).unwrap();
+    }
+
+    // A differently named request model may reopen and append only because
+    // the caller explicitly declared that both aliases produce the same
+    // semantic space. Opening itself performs no provider request; the mock
+    // receives exactly the two remember calls in this test.
+    let provider = OpenAiCompatEmbedder::new(&url, "provider-alias-b", dim)
+        .with_space_id("embedding-family@revision");
+    let (db, _) = Database::builder(config)
+        .embedder(Box::new(provider))
+        .open(tmp.db())
+        .unwrap();
+    db.remember(RememberInput::text(2, "second fact")).unwrap();
+    assert_eq!(db.stats().facts, 2);
+    server.join().unwrap();
+}
+
 /// An in-process embedder that counts calls and texts, so a test can prove a
 /// batch of K texts costs **one** embed call (not K). Deterministic vectors
 /// (slot 0 = text length) keep recall reproducible.
@@ -1203,7 +1236,13 @@ fn embedder_edge_cases() {
 
     // Empty input short-circuits without a network call.
     let e = OpenAiCompatEmbedder::new("http://127.0.0.1:1/v1/embeddings", "m", 4);
+    assert_eq!(e.space_id(), "m", "the model remains the default space id");
     assert!(e.embed(&[]).unwrap().is_empty());
+
+    let named = OpenAiCompatEmbedder::new("http://127.0.0.1:1/v1/embeddings", "alias", 4)
+        .with_space_id("model-family@revision");
+    assert_eq!(named.space_id(), "model-family@revision");
+    assert!(named.embed(&[]).unwrap().is_empty());
 
     // The api-key path sends and succeeds against the mock.
     let (url, server) = spawn_mock_embedder(4, 1);

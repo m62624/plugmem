@@ -467,6 +467,14 @@ const DOCS: &[SettingDoc] = &[
     },
     SettingDoc {
         section: "embedder",
+        key: "space_id",
+        value_type: "string",
+        default: "model",
+        description: "Stable semantic-space identity; change it only for incompatible vectors and reembed explicitly",
+        scope: SettingScope::Shared,
+    },
+    SettingDoc {
+        section: "embedder",
         key: "api_key_env",
         value_type: "string",
         default: "unset",

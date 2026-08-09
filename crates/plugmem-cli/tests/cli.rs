@@ -706,13 +706,17 @@ fn the_fsync_policy_is_settable_from_the_config_file() {
 }
 
 #[test]
-fn settings_help_lists_the_fsync_policy() {
+fn settings_help_lists_shared_settings() {
     let tmp = TempDir::new("settings-fsync");
     let out = plugmem(&tmp.db(), &["help", "settings"]);
     let text = stdout(&out);
     assert!(
         text.contains("fsync"),
         "the settings catalogue documents every key it parses"
+    );
+    assert!(
+        text.contains("space_id"),
+        "the CLI must expose the shared embedding-space setting"
     );
 }
 

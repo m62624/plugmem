@@ -134,7 +134,7 @@ test("workspace leases never wait on the event loop and capacity fails fast", as
   writeFileSync(
     config,
     `[engine]\ndim = ${DIM}\n[embedder]\n` +
-      `url = "http://127.0.0.1:${port}/v1/embeddings"\nmodel = "mock"\n`,
+      `url = "http://127.0.0.1:${port}/v1/embeddings"\nmodel = "mock"\nspace_id = "mock-space@v1"\n`,
   );
 
   const ws = new Workspace(dir, { config, maxOpen: 1 });
@@ -160,7 +160,7 @@ test("workspace leases never wait on the event loop and capacity fails fast", as
     await active;
     assert.equal(loopTurned, true, "the JS loop ran while the lease was active");
     const workspaceReport = await ws.memory("active").reembed(1);
-    assert.equal(workspaceReport.newSpace, "mock");
+    assert.equal(workspaceReport.newSpace, "mock-space@v1");
     assert.equal(workspaceReport.embedded, 1);
     assert.equal(ws.release("active"), true);
   } finally {
@@ -376,7 +376,7 @@ test("an embedder on this very event loop can answer, and is not locked", async 
   writeFileSync(
     config,
     `[engine]\ndim = ${DIM}\n[embedder]\n` +
-      `url = "http://127.0.0.1:${port}/v1/embeddings"\nmodel = "mock"\n`,
+      `url = "http://127.0.0.1:${port}/v1/embeddings"\nmodel = "mock"\nspace_id = "mock-space@v1"\n`,
   );
 
   try {
@@ -394,7 +394,7 @@ test("an embedder on this very event loop can answer, and is not locked", async 
     );
 
     const reembedded = await heldFor(() => db.reembed(1));
-    assert.equal(reembedded.value.newSpace, "mock");
+    assert.equal(reembedded.value.newSpace, "mock-space@v1");
     assert.equal(reembedded.value.embedded, 1);
     assert.ok(
       reembedded.held <= budget(reembedded.total, floor),

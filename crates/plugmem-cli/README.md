@@ -348,6 +348,7 @@ flat_to_hnsw = 50000   # vectors before maintenance builds the HNSW graph
 enabled = true         # false keeps settings but makes no embedder calls
 url = "http://localhost:11434/v1/embeddings"
 model = "nomic-embed-text"
+space_id = "nomic-embed-text@v1" # optional; defaults to model
 api_key_env = "OPENAI_API_KEY"   # env var holding the bearer token
 
 [maintenance]
@@ -408,7 +409,7 @@ Scriptable as a gate:
 Each invocation is a **short-lived process**: it opens the database file,
 runs one command, and exits — the process *is* the session boundary, so
 there is no explicit open/close and nothing to keep open between calls.
-This is the same model as `sqlite3`, `git` and most file-backed tools:
+This is the usual model for command-line file-backed tools:
 run → one operation → done. Two invocations that happen to overlap in that
 brief window collide on the lock (the second gets exit `1`); back to back,
 they never do.

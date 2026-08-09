@@ -124,7 +124,7 @@ A snapshot can come from anywhere (a wasm host, a foreign file). The loader cont
   arena as the length of its per-shard vectors, so `validate` bounds them by
   `MAX_SHARDS` — a ceiling derived from the 32-bit page arithmetic and the per-arena
   metadata budget, and set high enough that no database a pool can hold ever reaches it;
-- **open trusts the file by default** (the SQLite model): the container xxh3 is not
+- **open trusts the file by default**: the container xxh3 is not
   read on open, so a large database opens sparse. Integrity is on demand: `scrub()` is
   byte-level (per-section + file_hash xxh3, resumable), `verify()` is content-level
   (text UTF-8, fact↔slot bijection, metadata well-formedness);
