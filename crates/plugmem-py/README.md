@@ -1,6 +1,6 @@
 # plugmem
 
-> ⚠️ Experimental. plugmem is mostly an AI-built experiment — written with
+> ⚠️ Experimental. plugmem is mostly an AI-built experiment, written with
 > the help of a small local model (Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf) and various
 > Claude models, in roughly equal measure. Expect non-professional design
 > choices, rough edges, broken behavior, or mistakes. Use it at your own risk.
@@ -74,25 +74,24 @@ with plugmem.Plugmem.open("agent.plugmem") as db:
 ```
 
 `open` is a static method rather than a constructor because it takes the file's
-exclusive lock, replays the journal and maps the snapshot — work proportional
-to what is on disk, and worth naming rather than hiding behind `Plugmem(...)`.
+exclusive lock, replays the journal and maps the snapshot. That work is
+proportional to what is on disk and should not be hidden in `Plugmem(...)`.
 
 ## Do you need an embedder?
 
-No, and it is worth being precise about what that costs, because the answer
-decides how you should write your queries.
+No. The tradeoff determines how you should write queries.
 
 **Without one**, three sources answer: BM25 over the text, the entity graph,
 and time. That is a working memory with no model, no API key, no network call
 and no per-query cost. What you lose is matching by *meaning*: BM25 needs
 shared words, so the query above finds the fact because both say "tokio".
-Ask it the way a person would —
+Ask a question that shares no terms with the stored fact:
 
 ```python
 db.recall("which runtime?", k=5)   # → no facts: no word in common
 ```
 
-— and you get nothing back, because "runtime" appears nowhere in "the user
+It returns nothing because "runtime" appears nowhere in "the user
 prefers tokio". Anchor on an entity (`entities=["user"]`) or use the words the
 fact uses, and it answers.
 
@@ -458,7 +457,7 @@ embedding provider, flush storage, or scan data. Using `to_thread` is the async
 bridge; the binding does not add a second runtime or pretend native work can be
 cancelled after it has started.
 
-A handle is safe to share across threads. Reads genuinely overlap; `refresh`
+A handle is safe to share across threads. Reads can overlap; `refresh`
 and `close` take the handle exclusively, so a reader never observes it
 half-swapped.
 
@@ -574,7 +573,7 @@ search. For those, use a dedicated system — [Qdrant](https://qdrant.tech),
 
 ## Other ways in
 
-The same engine ships five ways. This package is the Python one.
+plugmem also ships interfaces for Rust, Node, agents and the terminal.
 
 | You are | Use |
 |---|---|
@@ -585,7 +584,7 @@ The same engine ships five ways. This package is the Python one.
 | a person at a terminal | [`plugmem-cli`](https://docs.rs/plugmem-cli/latest) |
 
 **Working with an LLM agent?** There is a companion
-[skill](https://github.com/m62624/plugmem/blob/main/skill/SKILL.md) describing
+[skill](https://github.com/m62624/plugmem/blob/main/skills/plugmem/SKILL.md) describing
 the remember/recall loop, the contradiction workflow and the verbs. This
 package ships it: `skill()` returns the text and `skill_version()` the version
 it was written against.

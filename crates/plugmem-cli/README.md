@@ -1,12 +1,12 @@
 # plugmem-cli
 
-> ⚠️ Experimental. plugmem is mostly an AI-built experiment — written with
+> ⚠️ Experimental. plugmem is mostly an AI-built experiment, written with
 > the help of a small local model (Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf) and various
 > Claude models, in roughly equal measure. Expect non-professional design
 > choices, rough edges, broken behavior, or mistakes. Use it at your own risk.
 
 `plugmem-cli` is the command-line surface over the plugmem
-[temporal-memory engine](https://docs.rs/plugmem-core/latest) — a thin shell around
+[temporal-memory engine](https://docs.rs/plugmem-core/latest). It is a thin shell around
 [`plugmem-host`](https://docs.rs/plugmem-host/latest) that lets you (or an agent's
 launcher) keep a logical memory in a local database from a terminal or a shell script. Each
 one-shot command parses arguments, calls one engine verb, and prints the result
@@ -23,8 +23,7 @@ words, entities and time.
 ## Install
 
 Prebuilt for **Linux, Windows and macOS (x64 & arm64)** on every tagged release.
-**Pick one method — you don't need more than one; they install the same
-`plugmem-cli` binary.**
+Choose one method. Each installs the same `plugmem-cli` binary.
 
 ### Homebrew (macOS / Linux)
 
@@ -60,7 +59,8 @@ uninstalls.
 ### `cargo binstall`
 
 [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) downloads the
-prebuilt binary instead of compiling — it just works on every OS/arch above:
+prebuilt binary instead of compiling and supports every OS/architecture listed
+above:
 
 ```console
 $ cargo binstall plugmem-cli

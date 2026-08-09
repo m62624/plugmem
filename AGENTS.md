@@ -231,7 +231,7 @@ wrapper can offer. Adding a knob means adding it there, not in four places.
 ## Release versioning
 
 - Keep the workspace, Cargo manifests, `Cargo.lock`, and npm metadata at the
-  current development version between releases. The `skill/SKILL.md` marker is
+  current development version between releases. The `skills/plugmem/SKILL.md` marker is
   the one version string a human edits by hand.
 - Do not manually bump package versions in a feature or performance PR. The
   release workflow derives the release version from the pushed `vX.Y.Z` tag,
@@ -242,7 +242,7 @@ wrapper can offer. Adding a knob means adding it there, not in four places.
   heading for in whichever PR before that release is a natural place for it.
   No rule reserves it for a release branch.
 - The marker exists so the skill cannot quietly fall behind the engine.
-  `skill/SKILL.md` is what an agent reads instead of the source, so a release
+  `skills/plugmem/SKILL.md` is what an agent reads instead of the source, so a release
   that changed verbs, flags or behavior has to be checked against it: read the
   skill, confirm it still describes what shipped, update it if not, then set
   the marker. The release gate compares the marker with the tag-derived

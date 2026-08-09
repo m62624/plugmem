@@ -29,8 +29,8 @@ pub use db::recover;
 
 /// The companion skill, embedded so a consumer can persist it next to the
 /// engine without a second download. Single source of truth: the repo-root
-/// `skill/SKILL.md`.
-const SKILL_MD: &str = include_str!("../../../skill/SKILL.md");
+/// `skills/plugmem/SKILL.md`.
+const SKILL_MD: &str = include_str!("../../../skills/plugmem/SKILL.md");
 
 /// Version-free pointer to the skill (the version lives in [`version`]).
 const ABOUT: &str = "plugmem is an embedded bitemporal memory and retrieval engine for \

@@ -1,7 +1,7 @@
 # `plugmem-linux-x64-gnu`
 
 The prebuilt **x86_64-unknown-linux-gnu** (Linux x64 (glibc)) native addon for
-[`plugmem`](https://www.npmjs.com/package/plugmem) — an embedded long-term
+[`plugmem`](https://www.npmjs.com/package/plugmem). It is an embedded long-term
 memory engine for local-first applications and agents (remember / recall / revise / forget over one
 local database).
 
@@ -14,7 +14,7 @@ npm install plugmem
 ```
 
 `plugmem` lists every `plugmem-*` binary in its `optionalDependencies`, and npm
-installs only the one matching your OS and CPU — this package is the one picked
+installs only the one matching your OS and CPU. This package is the one picked
 on **Linux x64 (glibc)**. You never depend on it by name.
 
 ## Links

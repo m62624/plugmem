@@ -1,12 +1,12 @@
 # plugmem-core
 
-> ⚠️ Experimental. plugmem is mostly an AI-built experiment — written with
+> ⚠️ Experimental. plugmem is mostly an AI-built experiment, written with
 > the help of a small local model (Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf) and various
 > Claude models, in roughly equal measure. Expect non-professional design
 > choices, rough edges, broken behavior, or mistakes. Use it at your own risk.
 
 `plugmem-core` is an embedded **bitemporal memory and retrieval engine for
-local-first applications and agents** — a library that runs inside the process.
+local-first applications and agents**. The library runs inside the process.
 Callers use `remember / recall / revise / forget`; recall returns ranked facts
 and edges plus an optional rendered block constrained by a token budget. That
 block is useful for prompts, but it is not the only consumer of the result.
@@ -18,7 +18,7 @@ the host supplies persistence; storage is flat byte arenas, so the memory image
 *is* the snapshot format (loading is a bounds-check plus adopt, replay is deterministic to
 the byte, and the same file opens on native, wasm32 and wasm64 unchanged).
 
-It is **not** a vector database. Recall fuses four sources by [reciprocal-rank
+Recall fuses four sources by [reciprocal-rank
 fusion](https://dl.acm.org/doi/10.1145/1571941.1572114) with a recency boost
 (tags filter; they are not a source):
 
@@ -29,8 +29,8 @@ fusion](https://dl.acm.org/doi/10.1145/1571941.1572114) with a recency boost
 | **Graph** | entity graph with typed edges, breadth-first from query anchors | relational knowledge |
 | **Temporal** | range scans over a `recorded_at`-ordered index; bitemporal validity | "what was true *then*", time windows |
 
-On top of that: **bitemporal
-facts** (`revise`/`forget`, "what was true *then*", revision chains,
+The data model adds **bitemporal facts** (`revise`/`forget`, "what was true
+*then*", revision chains,
 physical erasure), and **conflict surfacing** — a new `remember` returns
 the live facts it may duplicate or contradict, and the engine never merges
 on its own; the caller decides.
@@ -51,7 +51,7 @@ and nothing else.
 
 **Most Rust programs want [`plugmem-host`](https://docs.rs/plugmem-host/latest),
 not this crate** — it wraps this engine with files, locking, mmap and embedders,
-so you never manage storage yourself. Reach for `plugmem-core` directly only
+so you never manage storage yourself. Use `plugmem-core` directly only
 when you need `no_std` or your own persistence.
 
 | You want | Use | Why |

@@ -88,35 +88,36 @@ jobs:
       - name: SKILL.md skill-version must equal the workspace version
         run: |
           CARGO_VER="$(grep -m1 '^version' Cargo.toml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
-          MARKER="$(grep -oE 'skill-version:[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+' skill/SKILL.md \
+          MARKER="$(grep -oE 'skill-version:[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+' skills/plugmem/SKILL.md \
                     | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"
           echo "workspace=$CARGO_VER  skill-marker=${MARKER:-<none>}"
           if [ -z "$MARKER" ]; then
-            echo "::error file=skill/SKILL.md::missing '<!-- skill-version: X.Y.Z -->' marker"
+            echo "::error file=skills/plugmem/SKILL.md::missing '<!-- skill-version: X.Y.Z -->' marker"
             exit 1
           fi
           if [ "$MARKER" != "$CARGO_VER" ]; then
-            echo "::error file=skill/SKILL.md::skill-version $MARKER != release $CARGO_VER — bump the SKILL.md marker (and its docs) for this release"
+            echo "::error file=skills/plugmem/SKILL.md::skill-version $MARKER != release $CARGO_VER — bump the SKILL.md marker (and its docs) for this release"
             exit 1
           fi
           echo "OK: SKILL.md documents $MARKER, matching the release."
-      - name: SKILL.md frontmatter must fit Agent Skills limits
-        # Anthropic Agent Skills limits (mirrored by Claude Code and other
-        # hosts): name <= 64 chars, description <= 1024 chars. The description
+      - name: SKILL.md must fit the Agent Skills specification
+        # Agent Skills requires the name to match the parent directory and sets
+        # name <= 64 chars, description <= 1024 chars. The description
         # is the only part loaded for skill *selection*, so a host will reject
         # an over-long one. Ruby is preinstalled on the runner.
         run: |
           ruby -ryaml <<'RUBY'
-          content = File.read("skill/SKILL.md")
-          fm = content.split(/^---\s*$/, 3)[1] or abort "::error file=skill/SKILL.md::missing YAML frontmatter"
+          content = File.read("skills/plugmem/SKILL.md")
+          fm = content.split(/^---\s*$/, 3)[1] or abort "::error file=skills/plugmem/SKILL.md::missing YAML frontmatter"
           d = YAML.safe_load(fm)
           name = d["name"].to_s
           desc = d["description"].to_s
           errs = []
+          errs << "name #{name.inspect} must match parent directory \"plugmem\"" if name != "plugmem"
           errs << "name is #{name.length} chars (max 64)" if name.length > 64
           errs << "description is #{desc.length} chars (max 1024)" if desc.length > 1024
           if errs.any?
-            errs.each { |e| warn "::error file=skill/SKILL.md::#{e}" }
+            errs.each { |e| warn "::error file=skills/plugmem/SKILL.md::#{e}" }
             exit 1
           end
           puts "OK: name #{name.length}/64, description #{desc.length}/1024"
@@ -229,7 +230,7 @@ jobs:
         run: |
           TAG="${{ needs.prepare.outputs.tag }}"
           # --clobber keeps this idempotent if the release job is re-run.
-          gh release upload "$TAG" skill/SKILL.md --clobber
+          gh release upload "$TAG" skills/plugmem/SKILL.md --clobber
 
   # Publish only after the draft has its final changelog and companion skill.
   # The binaries and installers were already uploaded by `dist`; changing the
@@ -447,14 +448,14 @@ jobs:
         # `pyproject.toml` explains what each is for; the short version is that
         # both live outside this crate, `include` refuses a path containing
         # `..`, and so the only way in is a copy under the crate. The licence
-        # decides whether PyPI accepts the upload; `skill/SKILL.md` decides
+        # decides whether PyPI accepts the upload; `skills/plugmem/SKILL.md` decides
         # whether the upload can then be compiled. `ci.yml` builds this same
         # archive and installs from it, so a third such file fails there first.
         shell: bash
         run: |
           cp LICENSE crates/plugmem-py/LICENSE
-          mkdir -p crates/plugmem-py/skill
-          cp skill/SKILL.md crates/plugmem-py/skill/SKILL.md
+          mkdir -p crates/plugmem-py/skills/plugmem
+          cp skills/plugmem/SKILL.md crates/plugmem-py/skills/plugmem/SKILL.md
       - uses: PyO3/maturin-action@v1
         with:
           command: sdist
