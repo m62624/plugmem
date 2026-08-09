@@ -104,7 +104,8 @@ identity is its name and never an id.
 ## The handle pool
 
 `Workspace` keeps at most `max_open` databases open, evicting the least recently
-used, and closes anything idle for `idle_timeout_ms`.
+used **inactive** entry, and closes inactive entries idle for
+`idle_timeout_ms`.
 
 The idle timeout is a **liveness** setting, not a memory setting. An open writer
 holds the file's exclusive lock, so a long-running server that never let go
@@ -113,14 +114,37 @@ derived ceiling (`MAX_OPEN_CEILING`): it can arrive from a config file, and a
 process that runs out of file descriptors fails at some unrelated `open`
 elsewhere, which is the worst place to learn about it.
 
-Two consequences are documented rather than hidden:
+The pool owns the real writer handles, and those handles keep the existing OS
+file lock. The lease design does **not** remove locking: a CLI or another
+process trying to write the same file still gets `Locked` immediately, so two
+writers cannot race over the journal or snapshot.
+
+A **lease** is a scoped borrow of one pooled database for one operation. It is
+counted active from acquisition until `Drop`, including unwind. An active entry
+cannot be evicted, swept by `close_idle`, or explicitly `release`d. Several
+operations on the same name share the one pool entry and the database's own
+mutex serializes their writes.
+
+When the pool is full, acquisition first evicts the inactive LRU. If every slot
+belongs to active operations on other names, it returns `AtCapacity`
+immediately. It never waits for capacity and never opens a handle beyond
+`max_open`; increasing parallelism therefore requires an explicit larger
+limit.
+
+Four consequences are documented rather than hidden:
 
 - the pool lock is held across an open, so two callers cannot race to open the
   same file and have the loser told it is busy by its own process. An open never
   waits on the file lock, so the cost is a short queue;
-- a handle handed out **outlives its pool entry**. `Database` is an `Arc`;
-  eviction drops one clone and the lock goes when the last does. A caller that
-  parks a handle for hours keeps that memory locked for hours.
+- `release(name)` removes one inactive entry and releases its file lock. It
+  returns `InUse` for an active entry and does not interrupt the operation;
+- a Rust caller may still use `get` and own a cloned `Database`. Rust has
+  deterministic `Drop`, so this is explicit RAII and the clone may intentionally
+  outlive the pool entry;
+- an FFI wrapper must use `lease`, never expose the clone returned by `get`.
+  JavaScript and Python objects are garbage-collected, so letting such an object
+  own a clone would turn `max_open` and idle eviction into hints: the pool would
+  drop its owner while the foreign object silently kept the file lock.
 
 ## Surfaces
 
@@ -175,13 +199,37 @@ in a shell with no workspace configured, where a bare name would mean a file in
 the current directory. The line is shell-specific (`export` for `sh`,
 `$env:` for PowerShell); `--json` is the portable form.
 
-### napi
+### napi and Python
 
-`Workspace` is the class mirror of the host type, and `open(name)` returns the
-same `Plugmem` class a path-opened memory does — a named memory therefore has
-every verb, with no second implementation.
+`Workspace.memory(name)` returns `WorkspaceMemory`, a logical reference holding
+only the validated name and a weak reference to its workspace. Constructing it
+does no I/O, creates no database, and takes no file lock. Every database verb
+acquires one lease inside its worker call; write verbs create a missing memory,
+while read verbs refuse one. Pool eviction and `release(name)` do not invalidate
+the reference — its next verb transparently reopens the database.
 
-`reindex()` and `verify()` are promises (they read every memory in the
+`Workspace.close()` marks the workspace closed and invalidates every logical
+reference. A verb already holding a lease finishes and releases it normally;
+later verbs fail with `PLUGMEM_CLOSED`. Garbage collection of a
+`WorkspaceMemory` has no lifecycle effect. A direct `Plugmem.open(path)` is
+unchanged: it remains an explicitly owned physical handle with explicit
+`close()`.
+
+Node database verbs run on libuv workers. Python exposes the same verbs
+synchronously but obtains and uses the lease inside `Python::detach`, so
+`asyncio.to_thread` and thread pools do not hold the GIL while a same-database
+write waits for the engine mutex. `AtCapacity` and `release` of an active entry
+are `PLUGMEM_BUSY`; another process's writer lock is `PLUGMEM_LOCKED` on both
+surfaces.
+
+This is a breaking wrapper migration: `await workspace.open(name)` becomes
+`workspace.memory(name)`; the returned class is `WorkspaceMemory`, not
+`Plugmem`. Per-memory `close()` disappears because the reference owns no
+resource. `workspace.release(name)` is the explicit way to drop one inactive
+pooled lock without invalidating references. Direct path-based `Plugmem` APIs
+do not change.
+
+In Node, `reindex()` and `verify()` are promises (they read every memory in the
 directory). A pool limit arriving from JS is range-checked like one arriving
 from a config file, and an idle timeout is checked for finiteness before it is
 cast, because a JS number is an `f64`.
