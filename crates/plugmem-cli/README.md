@@ -1,12 +1,12 @@
 # plugmem-cli
 
-> ⚠️ Experimental. plugmem is mostly an AI-built experiment — written with
+> ⚠️ Experimental. plugmem is mostly an AI-built experiment, written with
 > the help of a small local model (Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf) and various
 > Claude models, in roughly equal measure. Expect non-professional design
 > choices, rough edges, broken behavior, or mistakes. Use it at your own risk.
 
 `plugmem-cli` is the command-line surface over the plugmem
-[temporal-memory engine](https://docs.rs/plugmem-core/latest) — a thin shell around
+[temporal-memory engine](https://docs.rs/plugmem-core/latest). It is a thin shell around
 [`plugmem-host`](https://docs.rs/plugmem-host/latest) that lets you (or an agent's
 launcher) keep a logical memory in a local database from a terminal or a shell script. Each
 one-shot command parses arguments, calls one engine verb, and prints the result
@@ -23,8 +23,7 @@ words, entities and time.
 ## Install
 
 Prebuilt for **Linux, Windows and macOS (x64 & arm64)** on every tagged release.
-**Pick one method — you don't need more than one; they install the same
-`plugmem-cli` binary.**
+Choose one method. Each installs the same `plugmem-cli` binary.
 
 ### Homebrew (macOS / Linux)
 
@@ -60,7 +59,8 @@ uninstalls.
 ### `cargo binstall`
 
 [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) downloads the
-prebuilt binary instead of compiling — it just works on every OS/arch above:
+prebuilt binary instead of compiling and supports every OS/architecture listed
+above:
 
 ```console
 $ cargo binstall plugmem-cli
@@ -129,7 +129,7 @@ engine keeps no clock, so `now` comes from the system clock at each call.
 
 | command | what it does |
 |---|---|
-| `remember <TEXT> [--entity E] [--tag T]… [--link REL:ENTITY]… [--meta KEY=VALUE]… [--valid-from TS] [--vector F32,…]` | store a fact; prints its id and any similar/conflicting facts. `--meta` is repeatable (opaque key→value, e.g. a URI; last value wins per key) |
+| `remember <TEXT> [--guarded] [--entity E] [--tag T]… [--link REL:ENTITY]… [--meta KEY=VALUE]… [--valid-from TS] [--vector F32,…]` | store a fact; prints its id and any similar/conflicting facts. `--guarded` checks similarity and writes only if clear, without a race between those steps. `--meta` is repeatable (opaque key→value, e.g. a URI; last value wins per key) |
 | `recall [QUERY] [--tag T]… [--entity E]… [--as-of TS] [--range FROM TO] [-k N] [--closed] [--token-budget N] [--ef N] [--graph-depth N] [--vector F32,…]` | ranked, token-budgeted block; sources compose. Each line is `- [fN] text …` — `N` is the fact's id (see below). `--token-budget` caps the block (default 512), `--ef` widens the vector search beam, `--graph-depth` sets how far the graph walks from an anchor (default 2; `0` disables expansion) |
 | `revise <ID> <TEXT> [same flags as remember]` | close the old fact, record the successor |
 | `forget <ID>` | tombstone a fact (purged physically at the next `maintain`) |

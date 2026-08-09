@@ -188,7 +188,7 @@ needs editing:
 4. **snapshot equivalence**: the wasm-probe run natively, on wasm32 and on wasm64
    (memory64, built on nightly with build-std) must print a byte-identical snapshot hash
    — one green run proves the format is pointer-width independent.
-5. **skill structure**: `skill/SKILL.md` exists, carries a well-formed
+5. **skill structure**: `skills/plugmem/SKILL.md` exists, carries a well-formed
    `<!-- skill-version -->` marker and the wasm-strip fence, and fits the Agent Skills
    frontmatter limits.
 6. **napi npm build**: build the addon (`npx napi build`) and smoke-test it through Node.

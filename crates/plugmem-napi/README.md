@@ -1,6 +1,6 @@
 # plugmem
 
-> ⚠️ Experimental. plugmem is mostly an AI-built experiment — written with
+> ⚠️ Experimental. plugmem is mostly an AI-built experiment, written with
 > the help of a small local model (Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf) and various
 > Claude models, in roughly equal measure. Expect non-professional design
 > choices, rough edges, broken behavior, or mistakes. Use it at your own risk.
@@ -54,8 +54,8 @@ console.log(tags.items);     // [{ name: "pref", count: 1 }]
 db.close();
 ```
 
-The query is `"tokio"` and not `"which runtime?"` for a reason worth knowing up
-front: with no embedder configured, recall matches on **words**, and "runtime"
+The query is `"tokio"` rather than `"which runtime?"` because recall matches on
+**words** when no embedder is configured, and "runtime"
 appears nowhere in that fact, so the more natural question returns nothing.
 Reach it through the graph instead with `entities: ["user"]`, or configure an
 [embedder](#configuration-and-embeddings) and the meaning matches too. Only one
@@ -120,16 +120,16 @@ the second query has something to answer with.
 
 `asOf` moves **both** clocks: a fact answers only if it was valid at that
 instant *and* had already been recorded by then. The second half is the one
-people trip over — an `asOf` earlier than a fact's `recordedAt` sees nothing,
-because the memory genuinely knew nothing then. Answering with today's knowledge
+people trip over: an `asOf` earlier than a fact's `recordedAt` sees nothing,
+because the memory had not recorded the fact yet. Answering with today's knowledge
 would be the wrong answer to "what did I hold".
 
 `validFrom` is the other half: a statement that became true before you heard of
 it. Recording today that someone moved a week ago closes the previous interval a
-week ago rather than now, so a query as of three days back finds **neither** —
-the old fact had stopped being true, and the new one was not yet known. That is
-not a hole in the model; it is the honest answer for that instant, and it is
-what a single timestamp cannot express.
+week ago rather than now, so a query as of three days back finds **neither**.
+The old fact had stopped being true, and the new one was not yet known. That
+result follows directly from the two clocks; a single timestamp cannot express
+it.
 
 Two more queries over the same axes:
 
@@ -180,17 +180,29 @@ res.edges;      // { src, rel, dst, provenance }[] — what the graph walked
 res.truncated;  // true if selection stopped at k or the budget with more left
 ```
 
-`remember` returns the new fact's id **plus any live facts it may duplicate or
-contradict**. The engine never merges or deletes on its own — it surfaces the
-tension and your code decides:
+`remember` stores the new fact and returns its id **plus any live facts it may
+duplicate or contradict**. If a preflight must not write, use
+`rememberGuarded`: the database holds one write scope across its similarity
+check and conditional insertion, so concurrent preflights cannot both pass.
 
 ```typescript
-const out = await db.remember({ text: "the user prefers async-std", entity: "user" });
-for (const s of out.similar) {
-  // s.id, s.score, s.reason: "LexicalOverlap" | "VectorCosine"
-  // → revise it, forget it, or keep both. Your call.
+const decision = await db.rememberGuarded({
+  text: "the user prefers async-std",
+  entity: "user",
+});
+if (decision.status === "blocked") {
+  for (const s of decision.similar) {
+    // revise/forget an old fact, or use ordinary remember to keep both
+    console.log(s.id, s.score, s.reason);
+  }
 }
 ```
+
+`blocked` has no `outcome`: it allocated no id and changed neither indexes nor
+journal. Ordinary `remember` is also a safe complete write; it simply never rejects
+one. Do not use `recall` for this check. Recall returns ranked context and can
+return a weak nearest vector; its fused score is not cosine similarity or a
+conflict threshold.
 
 ## API
 
@@ -202,6 +214,7 @@ only moves arguments and results across the boundary.
 | Method | Does |
 |---|---|
 | `remember(args)` | store a fact; resolves with its id and similar facts |
+| `rememberGuarded(args)` | check similarity and store only if clear, without a check/write race |
 | `rememberMany(args[])` | store a batch: one embedding round-trip, one journal sync |
 | `revise(id, args)` | close a fact and record its successor |
 | `forget(id)` | tombstone a fact; resolves with whether it was live |
@@ -475,7 +488,7 @@ embedder's HTTP round trip or an fsync would freeze every timer, socket and
 callback in the process. Anything that can do that runs on a libuv worker and
 returns a promise instead.
 
-Promises: `Plugmem.open`, `remember`, `rememberMany`, `revise`, `recall`,
+Promises: `Plugmem.open`, `remember`, `rememberGuarded`, `rememberMany`, `revise`, `recall`,
 `forget`, `removeTag`, `listTags`, `link`, `unlink`, `export`, `exportPage`, `verify`, `maintain`,
 `checkpoint`, every database verb on `WorkspaceMemory`, and every registry
 verb on `Workspace`.
@@ -672,7 +685,7 @@ search. For those, use a dedicated system — [Qdrant](https://qdrant.tech),
 
 ## Other ways in
 
-The same engine ships five ways. This package is the Node one.
+plugmem also ships interfaces for Rust, Python, agents and the terminal.
 
 | You are | Use |
 |---|---|
@@ -683,7 +696,7 @@ The same engine ships five ways. This package is the Node one.
 | a person at a terminal | [`plugmem-cli`](https://docs.rs/plugmem-cli/latest) |
 
 **Working with an LLM agent?** There is a companion
-[skill](https://github.com/m62624/plugmem/blob/main/skill/SKILL.md) describing
+[skill](https://github.com/m62624/plugmem/blob/main/skills/plugmem/SKILL.md) describing
 the remember/recall loop, the contradiction workflow and the verbs. This package
 ships it: `skill()` returns the text and `skillVersion()` the version it was
 written against.

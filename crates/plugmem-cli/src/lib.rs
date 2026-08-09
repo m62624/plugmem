@@ -25,9 +25,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 use plugmem_host::{
-    Database, ExportedFact, FactId, HostError, LinkInput, MaintenanceMode, MaintenanceOptions,
-    ReadOnlyDatabase, RecallQuery, RecallResult, RememberInput, RememberOutcome, Settings, Stats,
-    TagPage, TagQuery, UnlinkInput, VALID_TO_OPEN,
+    Database, ExportedFact, FactId, GuardedRememberOutcome, HostError, LinkInput, MaintenanceMode,
+    MaintenanceOptions, ReadOnlyDatabase, RecallQuery, RecallResult, RememberInput,
+    RememberOutcome, Settings, Stats, TagPage, TagQuery, UnlinkInput, VALID_TO_OPEN,
 };
 use serde_json::json;
 
@@ -412,20 +412,36 @@ fn execute(
             meta,
             valid_from,
             vector,
+            guarded,
         } => {
-            let outcome = do_remember(
-                db,
-                now,
-                text,
-                entity,
-                tags,
-                links,
-                meta,
-                *valid_from,
-                vector,
-                None,
-            )?;
-            render_remember(&outcome, json, out);
+            if *guarded {
+                let outcome = do_guarded_remember(
+                    db,
+                    now,
+                    text,
+                    entity,
+                    tags,
+                    links,
+                    meta,
+                    *valid_from,
+                    vector,
+                )?;
+                render_guarded_remember(&outcome, json, out);
+            } else {
+                let outcome = do_remember(
+                    db,
+                    now,
+                    text,
+                    entity,
+                    tags,
+                    links,
+                    meta,
+                    *valid_from,
+                    vector,
+                    None,
+                )?;
+                render_remember(&outcome, json, out);
+            }
             Ok(0)
         }
         Command::Revise {
@@ -558,7 +574,20 @@ fn execute(
                     batch_size.unwrap_or(plugmem_host::DEFAULT_REEMBED_BATCH_SIZE),
                 )?;
                 if json {
-                    writeln!(out, "{}", serde_json::to_string(&report).unwrap()).ok();
+                    writeln!(
+                        out,
+                        "{}",
+                        json!({
+                            "embedded": report.embedded,
+                            "previous_dim": report.previous_dim,
+                            "new_dim": report.new_dim,
+                            "previous_space": report.previous_space,
+                            "new_space": report.new_space,
+                            "vector_bytes": report.vector_bytes,
+                            "hnsw_indexed": report.hnsw_indexed,
+                        })
+                    )
+                    .ok();
                 } else {
                     writeln!(
                         out,
@@ -1602,6 +1631,42 @@ fn do_remember(
     }
 }
 
+/// Guarded counterpart of [`do_remember`]. Kept separate at the final
+/// dispatch so `revise` cannot accidentally acquire conditional semantics.
+#[allow(clippy::too_many_arguments)]
+fn do_guarded_remember(
+    db: &Database,
+    now: u64,
+    text: &str,
+    entity: &Option<String>,
+    tags: &[String],
+    links: &[String],
+    meta: &[String],
+    valid_from: Option<u64>,
+    vector: &[f32],
+) -> Result<GuardedRememberOutcome, CliError> {
+    let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
+    let link_pairs = parse_links(links)?;
+    let link_refs: Vec<(&str, &str)> = link_pairs
+        .iter()
+        .map(|(relation, target)| (relation.as_str(), target.as_str()))
+        .collect();
+    let meta_map = parse_meta(meta)?;
+    let meta_refs: Vec<(&str, &str)> = meta_map
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    Ok(db.remember_guarded(RememberInput {
+        entity: entity.as_deref(),
+        tags: &tag_refs,
+        links: &link_refs,
+        metadata: (!meta_refs.is_empty()).then_some(meta_refs.as_slice()),
+        valid_from,
+        vector: (!vector.is_empty()).then_some(vector),
+        ..RememberInput::text(now, text)
+    })?)
+}
+
 /// Parses `--meta KEY=VALUE` strings into a sorted, deduped map (last value per
 /// key wins).
 fn parse_meta(meta: &[String]) -> Result<BTreeMap<String, String>, CliError> {
@@ -1656,6 +1721,60 @@ fn render_remember(outcome: &RememberOutcome, json: bool, out: &mut impl Write) 
                 s.id.0, s.reason, s.score
             )
             .ok();
+        }
+    }
+}
+
+fn render_guarded_remember(outcome: &GuardedRememberOutcome, json: bool, out: &mut impl Write) {
+    match outcome {
+        GuardedRememberOutcome::Stored { outcome } => {
+            if json {
+                writeln!(
+                    out,
+                    "{}",
+                    json!({
+                        "status": "stored",
+                        "outcome": {
+                            "id": outcome.id.0,
+                            "entity": outcome.entity.map(|entity| entity.0),
+                            "similar": [],
+                        }
+                    })
+                )
+                .ok();
+            } else {
+                writeln!(out, "remembered fact {}", outcome.id.0).ok();
+            }
+        }
+        GuardedRememberOutcome::Blocked { similar } => {
+            if json {
+                let similar: Vec<_> = similar
+                    .iter()
+                    .map(|item| {
+                        json!({
+                            "id": item.id.0,
+                            "score": item.score,
+                            "reason": format!("{:?}", item.reason),
+                        })
+                    })
+                    .collect();
+                writeln!(
+                    out,
+                    "{}",
+                    json!({ "status": "blocked", "similar": similar })
+                )
+                .ok();
+            } else {
+                writeln!(out, "not remembered: similar facts require a decision").ok();
+                for item in similar {
+                    writeln!(
+                        out,
+                        "  ~ fact {} ({:?}, {:.2})",
+                        item.id.0, item.reason, item.score
+                    )
+                    .ok();
+                }
+            }
         }
     }
 }
@@ -1949,6 +2068,7 @@ mod tests {
             meta: Vec::new(),
             valid_from: None,
             vector: Vec::new(),
+            guarded: false,
         }
     }
 
@@ -1961,7 +2081,33 @@ mod tests {
             meta: meta.iter().map(|m| (*m).into()).collect(),
             valid_from: None,
             vector: Vec::new(),
+            guarded: false,
         }
+    }
+
+    #[test]
+    fn guarded_remember_flag_reports_blocked_without_a_write() {
+        let (db, _temp) = TempDb::open();
+        let mut first = remember("likes green tea every morning", Some("user"), &[]);
+        let Command::Remember { guarded, .. } = &mut first else {
+            unreachable!()
+        };
+        *guarded = true;
+        let (_, stored) = run_cmd(&db, &first, true, 1_000);
+        let stored: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(stored["status"], "stored");
+        assert_eq!(stored["outcome"]["id"], 0);
+
+        let mut second = remember("likes green tea each morning", Some("user"), &[]);
+        let Command::Remember { guarded, .. } = &mut second else {
+            unreachable!()
+        };
+        *guarded = true;
+        let (_, blocked) = run_cmd(&db, &second, true, 2_000);
+        let blocked: serde_json::Value = serde_json::from_str(&blocked).unwrap();
+        assert_eq!(blocked["status"], "blocked");
+        assert_eq!(blocked["similar"][0]["id"], 0);
+        assert_eq!(db.stats().facts, 1);
     }
 
     #[test]
@@ -2280,6 +2426,7 @@ mod tests {
             meta: Vec::new(),
             valid_from: None,
             vector: Vec::new(),
+            guarded: false,
         };
         let mut buf = Vec::new();
         let err = execute(&db, &cmd, false, 1_000, &mut buf).unwrap_err();
@@ -2429,6 +2576,7 @@ mod tests {
                 meta: Vec::new(),
                 valid_from: None,
                 vector: Vec::new(),
+                guarded: false,
             };
             run_cmd(&db, &cmd, false, 1_000 + i as u64);
         }
@@ -2740,6 +2888,7 @@ mod tests {
                 meta: Vec::new(),
                 valid_from: None,
                 vector: Vec::new(),
+                guarded: false,
             },
         };
         let mut buf = Vec::new();
@@ -2783,6 +2932,7 @@ mod tests {
                 meta: vec!["uri=s3://b/x".into(), "src=chat".into()],
                 valid_from: Some(500),
                 vector: Vec::new(),
+                guarded: false,
             },
             false,
             1_000,
@@ -2963,6 +3113,7 @@ mod tests {
                 meta: Vec::new(),
                 valid_from: None,
                 vector: Vec::new(),
+                guarded: false,
             },
         };
         assert_eq!(run_parsed(remember, &mut Vec::new()), 0);

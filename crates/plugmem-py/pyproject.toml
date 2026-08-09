@@ -92,17 +92,17 @@ module-name = "plugmem._plugmem"
 #   * `LICENSE` — the repository has one, at its root, and PEP 639 wants the
 #     path inside the project. PyPI rejects an upload whose `License-File`
 #     metadata names a file the archive does not contain.
-#   * `skill/SKILL.md` — `src/lib.rs` embeds it with
-#     `include_str!("../../../skill/SKILL.md")`. In the archive that path
-#     resolves to `skill/SKILL.md` at the root, so the copy has to sit in a
-#     `skill/` directory here to land there. Without it the sdist uploads
+#   * `skills/plugmem/SKILL.md` — `src/lib.rs` embeds it with
+#     `include_str!("../../../skills/plugmem/SKILL.md")`. In the archive that
+#     path resolves to `skills/plugmem/SKILL.md` at the root, so the copy has to
+#     sit in that directory here to land there. Without it the sdist uploads
 #     cleanly and then fails to compile on the first machine that has no wheel.
 #
 # A parent-relative pattern would be the obvious alternative and maturin
 # refuses it outright: "include/exclude pattern must not contain `..`".
 include = [
     { path = "LICENSE", format = "sdist" },
-    { path = "skill/SKILL.md", format = "sdist" },
+    { path = "skills/plugmem/SKILL.md", format = "sdist" },
 ]
 # `extension-module` tells PyO3 not to link libpython, which is required for a
 # wheel and wrong for `cargo test` — hence here and not in Cargo.toml.

@@ -18,9 +18,10 @@ __pycache__/
 
 # Copied in by whatever builds the sdist, for the same reason and by the same
 # rule as the licence above: `pyproject.toml` can only include paths under this
-# directory, and `src/lib.rs` embeds the repository-root `skill/SKILL.md`. The
+# directory, and `src/lib.rs` embeds the repository-root
+# `skills/plugmem/SKILL.md`. The
 # original is the only copy that is ever edited.
-/skill/
+/skills/
 
 # The CI job builds into a local virtualenv (maturin develop needs one).
 /.venv/

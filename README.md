@@ -14,7 +14,7 @@
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT licence"></a>
 </p>
 
-> ⚠️ Experimental. plugmem is mostly an AI-built experiment — written with
+> ⚠️ Experimental. plugmem is mostly an AI-built experiment, written with
 > the help of a small local model (Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf) and various
 > Claude models, in roughly equal measure. Expect non-professional design
 > choices, rough edges, broken behavior, or mistakes. Use it at your own risk.
@@ -25,10 +25,10 @@
 
 ## What plugmem is
 
-An embeddable **memory database for local-first applications and agents** — an
-in-process, file-backed engine linked directly into your program. plugmem stores short
-**facts** — with a subject entity, tags, optional metadata, an optional
-embedding and two time axes — and answers a query with a ranked,
+An embeddable **memory database for local-first applications and agents**.
+It is an in-process, file-backed engine linked directly into your program.
+plugmem stores short **facts** with a subject entity, tags, optional metadata,
+an optional embedding and two time axes, then answers a query with a ranked,
 token-budgeted result with structured facts and edges plus an optional bounded
 rendered block. It runs in-process from a manifest, immutable snapshot
 generations, an append-only journal and a lock — no server, no daemon, one machine.
@@ -38,9 +38,9 @@ It is meant for a local-first application or agent on your own device or inside
 your own project — one process, one local database — not a multi-tenant service fielding
 queries from many users.
 
-It is **not** a vector database. A vector is one of four recall sources —
-lexical (BM25), vector, entity graph and time — fused with reciprocal-rank
-fusion; tags act as filters. What the engine does:
+Recall combines four sources: lexical (BM25), vector, entity graph and time.
+Reciprocal-rank fusion merges their rankings, while tags act as filters. What
+the engine does:
 
 - **two clocks per fact.** `valid_from`/`valid_to` say when a statement was
   true, `recorded_at` says when the memory learned it. `revise` closes an
@@ -55,9 +55,12 @@ fusion; tags act as filters. What the engine does:
 - **a bounded tag catalogue.** List current tags and their fact counts in stable
   lexical pages, optionally by prefix. Removing a tag revises every affected
   current fact without deleting the facts or their historical tag state.
-- **conflicts surfaced, not resolved.** `remember` returns the live facts a new
-  one may duplicate or contradict. The engine never merges on its own; the
-  caller revises, forgets, or keeps both.
+- **conflicts surfaced, not resolved.** `remember` stores and returns the live
+  facts a new one may duplicate or contradict. `remember_guarded` runs that
+  same bounded detector and stores only when it finds no candidate, without a
+  race between those steps. Ordinary `remember` remains a safe complete write.
+  Recall is ranked context retrieval, not a duplicate threshold. The engine
+  never merges on its own; the caller revises, forgets, or keeps both.
 - **bounded ranked context.** Recall returns structured facts and edges and can
   render text constrained by a token budget; prompt-ready rendering is one
   consumer of the result.
@@ -92,15 +95,15 @@ removed tag "project:old" from 3 current facts
 
 `as_of` moves **both** clocks: a fact answers only if it was valid at that
 instant *and* had already been recorded by then. That second half is the one
-people trip over — `as_of` before a fact was written returns nothing, because
-the memory genuinely knew nothing then, and reporting today's knowledge would be
+people trip over: `as_of` before a fact was written returns nothing, because
+the memory had not recorded the fact yet. Reporting today's knowledge would be
 the wrong answer to "what did I hold".
 
 `--valid-from` is the other half: a statement that became true before you heard
 of it. Recording on March 10th that someone moved on March 1st closes the old
 interval at March 1st, so a query as of March 5th finds neither — the old fact
 was no longer true, and the new one was not yet known. That is not a gap in the
-model, it is the honest answer for that instant.
+model. It is the only answer consistent with both clocks.
 
 **Where it fits — and where it doesn't.** plugmem is for local-first applications,
 agent memory and embedded systems: one process, one local database, no service to operate. Its interactive
@@ -209,7 +212,7 @@ name creates that memory — no registration step. Each memory can describe what
 it is for, and `workspace find` searches those descriptions when the caller does
 not know the name.
 
-Two things worth knowing before you build on it:
+Two constraints matter when building on it:
 
 - **results are never merged across memories.** Measured: asking the right
   memory answers 98–99 % of questions well, while asking all of them and fusing
@@ -353,8 +356,7 @@ Two binaries — the `plugmem-cli` CLI (crate `plugmem-cli`) and the `plugmem-mc
 server (crate `plugmem-mcp`) — built for **Linux, Windows and macOS (x64 &
 arm64)** on every tagged release.
 
-**Pick the one method that's convenient — you don't need more than one.** They all
-install the *same* binaries. Quick guide:
+Choose one installation method. Each installs the same binaries.
 
 | If you… | Use |
 |---|---|
@@ -406,12 +408,25 @@ If you prefer a script over a GUI installer:
 
 [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) downloads the
 prebuilt binary instead of compiling. It reads the release's cargo-dist
-manifest, so it just works on every OS/arch above — no extra config:
+manifest and supports every OS/architecture listed above without extra config:
 
 ```console
 $ cargo binstall plugmem-cli     # the `plugmem-cli` binary
 $ cargo binstall plugmem-mcp     # the `plugmem-mcp` binary
 ```
+
+### Agent skill
+
+The repository also ships an [Agent Skill](skills/plugmem/SKILL.md) with the
+remember/recall workflow and API conventions. With GitHub CLI 2.90 or newer:
+
+```console
+$ gh skill install m62624/plugmem plugmem
+```
+
+This installs the skill instructions, not the plugmem binaries. The command is
+currently in public preview; see the
+[`gh skill install` manual](https://cli.github.com/manual/gh_skill_install).
 
 ### From source
 

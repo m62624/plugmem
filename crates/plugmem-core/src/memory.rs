@@ -147,6 +147,31 @@ pub struct RememberOutcome {
     pub similar: Vec<Similar>,
 }
 
+/// Result of [`Memory::remember_guarded`].
+///
+/// The two variants are intentionally disjoint: a blocked call has no fact id
+/// because it did not allocate one, mutate an index, or append a journal
+/// record. A caller that decides the candidates are compatible can make that
+/// choice explicit by following with ordinary [`Memory::remember`].
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(tag = "status", rename_all = "snake_case"))]
+pub enum GuardedRememberOutcome {
+    /// No candidate crossed the configured similarity thresholds; the fact was
+    /// stored normally.
+    Stored {
+        /// The committed fact.
+        outcome: RememberOutcome,
+    },
+    /// At least one live same-entity fact crossed a similarity threshold; no
+    /// mutation was made.
+    Blocked {
+        /// Similar / potentially conflicting live facts, best match first
+        /// (at most eight).
+        similar: Vec<Similar>,
+    },
+}
+
 /// Result of removing one tag from every current fact.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -179,6 +204,40 @@ pub enum SimilarReason {
     /// Same subject entity and a quantized-vector cosine above the
     /// configured `similar_cos` threshold.
     VectorCosine,
+}
+
+/// Reusable write-side buffers for similarity detection. Kept outside the
+/// persistent pools: after warm-up guarded writes do not allocate scratch on
+/// every call, and none of these bytes enters a snapshot.
+#[derive(Debug, Default)]
+struct SimilarityScratch {
+    /// Incoming terms already present in the interner.
+    new_terms: Vec<u32>,
+    /// Unknown incoming tokens concatenated for exact deduplication without
+    /// growing the interner during a read-only guard check.
+    unknown: String,
+    /// Byte ranges in `unknown`, one per distinct unknown token.
+    unknown_ranges: Vec<(usize, usize)>,
+    /// Candidate term ids, reused across the bounded scan.
+    candidate_terms: Vec<u32>,
+    /// Quantized incoming vector slot, never appended to the vector pool.
+    vector: Vec<u8>,
+}
+
+#[derive(Clone, Copy)]
+enum SimilarVector<'s> {
+    None,
+    Stored(u32),
+    Encoded(&'s [u8]),
+}
+
+#[derive(Clone, Copy)]
+struct SimilarityQuery<'s> {
+    entity: EntityId,
+    exclude: Option<FactId>,
+    terms: &'s [u32],
+    term_count: usize,
+    vector: SimilarVector<'s>,
 }
 
 /// A read view of one fact.
@@ -324,6 +383,7 @@ pub struct Memory<'a> {
     tokenizer: Tokenizer,
     tf_scratch: Vec<(u32, u8)>,
     name_scratch: String,
+    similarity_scratch: SimilarityScratch,
 }
 
 impl<'a> Memory<'a> {
@@ -371,6 +431,7 @@ impl<'a> Memory<'a> {
             tokenizer: Tokenizer::new(),
             tf_scratch: Vec::new(),
             name_scratch: String::new(),
+            similarity_scratch: SimilarityScratch::default(),
             cfg,
         })
     }
@@ -582,6 +643,22 @@ impl<'a> Memory<'a> {
         store: &mut S,
         space: &str,
     ) -> Result<bool, Error> {
+        let needs_claim = self.check_vector_space_claim(space)?;
+        if !needs_claim {
+            return Ok(false);
+        }
+        let mut entry = Vec::new();
+        Op::SetVectorSpace { space }.encode(&mut entry);
+        store
+            .append_journal(&entry)
+            .map_err(|e| Error::Storage(format!("{e:?}")))?;
+        self.vector_space = Some(space.into());
+        Ok(true)
+    }
+
+    /// Validates a vector-space claim without changing state. `true` means an
+    /// empty pool needs its first persisted identity.
+    fn check_vector_space_claim(&self, space: &str) -> Result<bool, Error> {
         Self::validate_vector_space(space)?;
         if let Some(stored) = &self.vector_space {
             if stored == space {
@@ -597,12 +674,6 @@ impl<'a> Memory<'a> {
         if !self.vecs.is_empty() {
             return Err(Error::UntrackedVectorSpace);
         }
-        let mut entry = Vec::new();
-        Op::SetVectorSpace { space }.encode(&mut entry);
-        store
-            .append_journal(&entry)
-            .map_err(|e| Error::Storage(format!("{e:?}")))?;
-        self.vector_space = Some(space.into());
         Ok(true)
     }
 
@@ -659,6 +730,50 @@ impl<'a> Memory<'a> {
         Ok(outcome)
     }
 
+    /// Stores a fact only when the ordinary `remember` similarity detector
+    /// finds no live same-entity candidate above its configured lexical or
+    /// vector threshold.
+    ///
+    /// The check and possible mutation are one engine operation. A blocked
+    /// call does not allocate a fact id, touch an index, or append to the
+    /// journal. The detector is exactly the one that fills
+    /// [`RememberOutcome::similar`] after an unconditional [`remember`](Self::remember);
+    /// hybrid [`recall`](Self::recall) ranking is deliberately not involved.
+    pub fn remember_guarded<S: Storage>(
+        &mut self,
+        store: &mut S,
+        input: RememberInput<'_>,
+    ) -> Result<GuardedRememberOutcome, Error> {
+        self.remember_guarded_with_vector_space(store, input, None)
+    }
+
+    /// Host integration for [`remember_guarded`](Self::remember_guarded):
+    /// claims an automatic embedder's semantic vector space only if the fact
+    /// will actually be stored. A blocked call therefore remains entirely
+    /// non-mutating, including vector-space metadata and its journal record.
+    #[doc(hidden)]
+    pub fn remember_guarded_with_vector_space<S: Storage>(
+        &mut self,
+        store: &mut S,
+        input: RememberInput<'_>,
+        vector_space: Option<&str>,
+    ) -> Result<GuardedRememberOutcome, Error> {
+        self.validate_input(&input)?;
+        if let Some(space) = vector_space {
+            self.check_vector_space_claim(space)?;
+        }
+        let similar = self.find_similar_input(&input)?;
+        if !similar.is_empty() {
+            return Ok(GuardedRememberOutcome::Blocked { similar });
+        }
+        if let Some(space) = vector_space {
+            self.claim_vector_space(store, space)?;
+        }
+        let outcome = self.apply_remember(&input, FactId::NONE, None)?;
+        self.journal_remember(store, &input, FactId::NONE, outcome.id)?;
+        Ok(GuardedRememberOutcome::Stored { outcome })
+    }
+
     /// Batch import: a sequence of remembers in one call, journaled
     /// individually. `skip_similar` turns off the
     /// similar-detection pass — imports don't need hints, and skipping
@@ -685,6 +800,103 @@ impl<'a> Memory<'a> {
         Ok(out)
     }
 
+    /// Runs similarity detection against an incoming, not-yet-stored fact.
+    /// Unknown tokens are counted in the Jaccard union but never interned:
+    /// a blocked call is observationally a read and cannot grow vocabulary.
+    fn find_similar_input(&mut self, input: &RememberInput<'_>) -> Result<Vec<Similar>, Error> {
+        let Some(name) = input.entity else {
+            return Ok(Vec::new());
+        };
+        let Some(entity) = self.lookup_entity_name(name) else {
+            return Ok(Vec::new());
+        };
+
+        let mut scratch = core::mem::take(&mut self.similarity_scratch);
+        scratch.new_terms.clear();
+        scratch.unknown.clear();
+        scratch.unknown_ranges.clear();
+        scratch.candidate_terms.clear();
+        scratch.vector.clear();
+
+        let terms = &self.terms;
+        let new_terms = &mut scratch.new_terms;
+        let unknown = &mut scratch.unknown;
+        let unknown_ranges = &mut scratch.unknown_ranges;
+        self.tokenizer.tokenize(input.text, &mut |token| {
+            if let Some(term) = terms.lookup(token) {
+                if !new_terms.contains(&term.0) {
+                    new_terms.push(term.0);
+                }
+                return;
+            }
+            if unknown_ranges
+                .iter()
+                .any(|&(start, end)| &unknown[start..end] == token)
+            {
+                return;
+            }
+            let start = unknown.len();
+            unknown.push_str(token);
+            unknown_ranges.push((start, unknown.len()));
+        });
+        let new_term_count = scratch.new_terms.len() + scratch.unknown_ranges.len();
+
+        let mut similar = Vec::new();
+        let result = (|| {
+            let encoded = match input.vector {
+                Some(vector) => {
+                    self.vecs
+                        .encode_slot_into(FactId::NONE, vector, &mut scratch.vector)?;
+                    SimilarVector::Encoded(&scratch.vector)
+                }
+                None => SimilarVector::None,
+            };
+            self.scan_similar(
+                SimilarityQuery {
+                    entity,
+                    exclude: None,
+                    terms: &scratch.new_terms,
+                    term_count: new_term_count,
+                    vector: encoded,
+                },
+                &mut scratch.candidate_terms,
+                &mut similar,
+            );
+            Ok::<(), Error>(())
+        })();
+        self.similarity_scratch = scratch;
+        result.map(|()| similar)
+    }
+
+    /// Similarity detection for an already-stored ordinary remember. This
+    /// feeds the same scanner as `remember_guarded`, but reuses the term ids and
+    /// quantized vector slot the write has just produced.
+    fn find_similar(&mut self, outcome: &mut RememberOutcome) {
+        let Some(entity) = outcome.entity else { return };
+        let new_vec = self
+            .fact(outcome.id)
+            .filter(|record| record.has_vector())
+            .map(|record| record.vector);
+        let mut scratch = core::mem::take(&mut self.similarity_scratch);
+        scratch.new_terms.clear();
+        scratch
+            .new_terms
+            .extend(self.tf_scratch.iter().map(|&(term, _)| term));
+        let new_term_count = scratch.new_terms.len();
+        self.scan_similar(
+            SimilarityQuery {
+                entity,
+                exclude: Some(outcome.id),
+                terms: &scratch.new_terms,
+                term_count: new_term_count,
+                vector: new_vec.map_or(SimilarVector::None, SimilarVector::Stored),
+            },
+            &mut scratch.candidate_terms,
+            &mut outcome.similar,
+        );
+        self.similarity_scratch = scratch;
+    }
+
     /// Lexical similar-detection: live facts of the same
     /// entity whose term sets overlap the new fact's above the
     /// `similar_jaccard` threshold. Bounded: the entity's most recent
@@ -706,27 +918,25 @@ impl<'a> Memory<'a> {
     /// produce, which would make the summary describe a different term set
     /// than the comparison uses; then every candidate is read, exactly as
     /// before the summary existed.
-    fn find_similar(&mut self, outcome: &mut RememberOutcome) {
-        let Some(entity) = outcome.entity else { return };
-        // The new fact's term set is still in tf_scratch (apply_remember
-        // filled it); snapshot the term ids.
-        let new_terms: Vec<u32> = self.tf_scratch.iter().map(|&(t, _)| t).collect();
-        // The new fact's vector slot, if it has one (for the cosine signal).
-        let new_vec = self
-            .fact(outcome.id)
-            .filter(|r| r.has_vector())
-            .map(|r| r.vector);
-        if new_terms.is_empty() && new_vec.is_none() {
+    fn scan_similar(
+        &mut self,
+        query: SimilarityQuery<'_>,
+        candidate_terms: &mut Vec<u32>,
+        out: &mut Vec<Similar>,
+    ) {
+        out.clear();
+        if query.term_count == 0 && matches!(query.vector, SimilarVector::None) {
             return;
         }
         // Most recent candidates of the entity (ring over the list).
         let mut ring = [FactId::NONE; SIMILAR_CANDIDATE_CAP];
         let mut n = 0usize;
-        for (fact, _) in self.entity_facts.entries(entity.0) {
-            if fact != outcome.id {
-                ring[n % SIMILAR_CANDIDATE_CAP] = fact;
-                n += 1;
+        for (fact, _) in self.entity_facts.entries(query.entity.0) {
+            if query.exclude == Some(fact) {
+                continue;
             }
+            ring[n % SIMILAR_CANDIDATE_CAP] = fact;
+            n += 1;
         }
         let summaries_trustworthy = self.bm25_tokenizer_version == TOKENIZER_INDEX_VERSION;
         // Without a vector on the new fact, a lexical overlap is the only hint
@@ -735,11 +945,15 @@ impl<'a> Memory<'a> {
         // arena lookup of the pair this loop would otherwise pay per
         // candidate. (`new_terms` is non-empty here: the two being empty
         // together returned above.)
-        let lexical_only = new_vec.is_none();
-        let mut cand_terms: Vec<u32> = Vec::new();
+        let lexical_only = matches!(query.vector, SimilarVector::None);
         for &fact in ring.iter().take(n.min(SIMILAR_CANDIDATE_CAP)) {
-            let may_overlap = !new_terms.is_empty()
-                && self.overlap_possible(fact, &new_terms, summaries_trustworthy);
+            let may_overlap = !query.terms.is_empty()
+                && self.overlap_possible(
+                    fact,
+                    query.terms,
+                    query.term_count,
+                    summaries_trustworthy,
+                );
             if lexical_only && !may_overlap {
                 continue;
             }
@@ -755,9 +969,9 @@ impl<'a> Memory<'a> {
             // Deferred validation: a load no longer scans the
             // text pool, so an unreadable text simply yields no lexical signal.
             if may_overlap && let Ok(text) = core::str::from_utf8(self.texts.get(record.text)) {
-                cand_terms.clear();
+                candidate_terms.clear();
                 let terms = &self.terms;
-                let cand = &mut cand_terms;
+                let cand = &mut *candidate_terms;
                 self.tokenizer.tokenize(text, &mut |token| {
                     if let Some(term) = terms.lookup(token)
                         && !cand.contains(&term.0)
@@ -765,9 +979,12 @@ impl<'a> Memory<'a> {
                         cand.push(term.0);
                     }
                 });
-                if !cand_terms.is_empty() {
-                    let both = cand_terms.iter().filter(|t| new_terms.contains(t)).count();
-                    let union = cand_terms.len() + new_terms.len() - both;
+                if !candidate_terms.is_empty() {
+                    let both = candidate_terms
+                        .iter()
+                        .filter(|term| query.terms.contains(term))
+                        .count();
+                    let union = candidate_terms.len() + query.term_count - both;
                     let jaccard = both as f32 / union as f32;
                     if jaccard > self.cfg.similar_jaccard {
                         lexical = Some(jaccard);
@@ -777,8 +994,14 @@ impl<'a> Memory<'a> {
 
             // Vector signal: quantized cosine when both facts carry one.
             let mut vector = None;
-            if let (Some(a), true) = (new_vec, record.has_vector()) {
-                let cos = self.vecs.cosine_slots(a, record.vector);
+            if record.has_vector() {
+                let cos = match query.vector {
+                    SimilarVector::None => 0.0,
+                    SimilarVector::Stored(slot) => self.vecs.cosine_slots(slot, record.vector),
+                    SimilarVector::Encoded(encoded) => {
+                        self.vecs.cosine_encoded_slot(encoded, record.vector)
+                    }
+                };
                 if cos > self.cfg.similar_cos {
                     vector = Some(cos);
                 }
@@ -792,17 +1015,15 @@ impl<'a> Memory<'a> {
                 (None, None) => None,
             };
             if let Some((score, reason)) = best {
-                outcome.similar.push(Similar {
+                out.push(Similar {
                     id: fact,
                     score,
                     reason,
                 });
             }
         }
-        outcome
-            .similar
-            .sort_unstable_by(|a, b| b.score.total_cmp(&a.score).then(a.id.cmp(&b.id)));
-        outcome.similar.truncate(8);
+        out.sort_unstable_by(|a, b| b.score.total_cmp(&a.score).then(a.id.cmp(&b.id)));
+        out.truncate(8);
     }
 
     /// Whether `candidate` could possibly overlap `new_terms` above
@@ -815,7 +1036,13 @@ impl<'a> Memory<'a> {
     /// threshold puts the true value there too. `true` means "unknown" and
     /// sends the caller to the exact comparison — which is also what an
     /// unsummarized document and an untrustworthy index return.
-    fn overlap_possible(&self, candidate: FactId, new_terms: &[u32], trust_summary: bool) -> bool {
+    fn overlap_possible(
+        &self,
+        candidate: FactId,
+        new_terms: &[u32],
+        new_term_count: usize,
+        trust_summary: bool,
+    ) -> bool {
         if !trust_summary {
             return true;
         }
@@ -835,7 +1062,7 @@ impl<'a> Memory<'a> {
             bound <= new_terms.len(),
             "the overlap bound counts query terms, so it cannot exceed them"
         );
-        let union = (new_terms.len() - bound) + usize::from(doc.distinct);
+        let union = (new_term_count - bound) + usize::from(doc.distinct);
         bound as f32 / union as f32 > self.cfg.similar_jaccard
     }
 

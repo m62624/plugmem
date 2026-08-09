@@ -1,13 +1,13 @@
 # plugmem-mcp
 
-> ⚠️ Experimental. plugmem is mostly an AI-built experiment — written with
+> ⚠️ Experimental. plugmem is mostly an AI-built experiment, written with
 > the help of a small local model (Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf) and various
 > Claude models, in roughly equal measure. Expect non-professional design
 > choices, rough edges, broken behavior, or mistakes. Use it at your own risk.
 
 `plugmem-mcp` is the [Model Context Protocol](https://modelcontextprotocol.io)
-server over the plugmem [temporal-memory engine](https://docs.rs/plugmem-core/latest)
-— a thin, long-lived shell around
+server over the plugmem [temporal-memory engine](https://docs.rs/plugmem-core/latest).
+It is a thin, long-lived shell around
 [`plugmem-host`](https://docs.rs/plugmem-host/latest) that exposes a memory to
 **AI agents, local-first applications and any non-Rust program** as MCP tools
 over stdio JSON-RPC. The
@@ -23,8 +23,7 @@ words, entities and time.
 ## Install
 
 Prebuilt for **Linux, Windows and macOS (x64 & arm64)** on every tagged release.
-**Pick one method — you don't need more than one; they install the same
-`plugmem-mcp` binary.**
+Choose one method. Each installs the same `plugmem-mcp` binary.
 
 ### Homebrew (macOS / Linux)
 
@@ -60,7 +59,8 @@ uninstalls.
 ### `cargo binstall`
 
 [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) downloads the
-prebuilt binary instead of compiling — it just works on every OS/arch above:
+prebuilt binary instead of compiling and supports every OS/architecture listed
+above:
 
 ```console
 $ cargo binstall plugmem-mcp
@@ -93,8 +93,8 @@ and `%LOCALAPPDATA%\plugmem-mcp`) by hand. See the
 
 ## Which door is this? (read before reaching for MCP)
 
-plugmem is **embedded-first** — the fastest, simplest path is to link the
-engine into your process, not to talk to a server.
+Rust programs should link `plugmem-host` directly. MCP is the process boundary
+for agents and programs that do not embed the Rust library.
 
 | You are… | Use | Why |
 |---|---|---|
@@ -162,14 +162,14 @@ earlier state stays answerable:
 `as_of` moves **both** clocks: a fact answers only if it was valid at that
 instant *and* had already been recorded by then. That second half matters for an
 agent replaying old context — an `as_of` earlier than a fact's `recorded_at`
-sees nothing, because the memory genuinely knew nothing then, and reporting
+sees nothing, because the memory had not recorded the fact yet. Reporting
 today's knowledge would be the wrong answer to "what did I hold".
 
 `valid_from` is the other half: something that became true before the agent
 heard of it. Recording today that a move happened last week closes the previous
 interval last week rather than today, so a query as of three days ago finds
 *neither* — the old fact had stopped being true and the new one was not yet
-known. That is the honest answer for that instant.
+known. That result follows from the two clocks.
 
 `plugmem_forget` is the destructive verb: for a fact that was wrong, not one
 that changed.
@@ -187,7 +187,7 @@ sets `isError: true` so the model can read and react to it.
 
 | tool | what it does |
 |---|---|
-| `plugmem_remember` | store a fact (`text`, optional `entity`, `tags[]`, `links[]` of `{rel, entity}`, `valid_from`); returns the id + similar/conflicting facts |
+| `plugmem_remember` | store a fact (`text`, optional `entity`, `tags[]`, `links[]` of `{rel, entity}`, `valid_from`); returns the id + similar/conflicting facts. With `guarded: true`, checks similarity and writes only if clear, without a race between those steps |
 | `plugmem_recall` | ranked, token-budgeted recall (`query`, `tags[]`, `entities[]`, `as_of`, `range [from,to]`, `k`, `closed`, `token_budget`, `ef`) |
 | `plugmem_revise` | close fact `id`, record the successor (same args as remember + `id`) |
 | `plugmem_forget` | tombstone fact `id` (purged at the next maintain) |

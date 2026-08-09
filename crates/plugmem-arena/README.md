@@ -1,22 +1,22 @@
 # plugmem-arena
 
-> ⚠️ Experimental. plugmem is mostly an AI-built experiment — written with
+> ⚠️ Experimental. plugmem is mostly an AI-built experiment, written with
 > the help of a small local model (Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf) and various
 > Claude models, in roughly equal measure. Expect non-professional design
 > choices, rough edges, broken behavior, or mistakes. Use it at your own risk.
 
 Flat byte-pool data structures: a sharded sorted arena, an append-only
 blob heap, chunked lists, and a string interner. `no_std + alloc`, no
-dependencies, so it runs anywhere Rust compiles — designed for 32-bit
-WebAssembly linear memory first, where allocator traffic is expensive:
+dependencies, so it runs anywhere Rust compiles. The design targets 32-bit
+WebAssembly linear memory, where allocator traffic is expensive:
 each structure's whole lifetime is a near-constant number of allocator
 calls (≈40 to build a million records), and its in-memory representation
 *is* its serialized form, so persisting is a `memcpy` and loading is a
-bounds-check plus adoption — no per-record parsing, no pointer rebuild.
+bounds-check plus adoption, with no per-record parsing or pointer rebuild.
 
-Nothing here knows about the data it stores. Reach for it when you need a
+Nothing here knows about the data it stores. Use it when you need a
 compact, allocation-frugal **ordered container that is its own file
-format** — an ordered index, a record store, an inverted index, a string
+format**: an ordered index, a record store, an inverted index, or a string
 dictionary. One user is [`plugmem-core`](https://docs.rs/plugmem-core/latest), an agent-memory
 engine built on top of these four structures, but the crate stands on its
 own; lift it into any project as-is.

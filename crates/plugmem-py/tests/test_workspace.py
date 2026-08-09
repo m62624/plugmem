@@ -7,12 +7,16 @@ import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Literal
 
 import plugmem
 import pytest
 
 
-def test_reference_opens_nothing_and_survives_eviction_and_release(tmp_path) -> None:
+def test_reference_opens_nothing_and_survives_eviction_and_release(
+    tmp_path: Path,
+) -> None:
     ws = plugmem.Workspace(str(tmp_path), max_open=1, idle_timeout_ms=0)
     a = ws.memory("a")
     b = ws.memory("b")
@@ -30,7 +34,9 @@ def test_reference_opens_nothing_and_survives_eviction_and_release(tmp_path) -> 
     ws.close()
 
 
-def test_reads_do_not_create_and_the_pool_holds_the_real_file_lock(tmp_path) -> None:
+def test_reads_do_not_create_and_the_pool_holds_the_real_file_lock(
+    tmp_path: Path,
+) -> None:
     ws = plugmem.Workspace(str(tmp_path))
     missing = ws.memory("missing")
     with pytest.raises(plugmem.EngineError, match="no database named missing"):
@@ -52,7 +58,7 @@ def test_reads_do_not_create_and_the_pool_holds_the_real_file_lock(tmp_path) -> 
     ws.close()
 
 
-def test_every_workspace_memory_verb_uses_the_scoped_path(tmp_path) -> None:
+def test_every_workspace_memory_verb_uses_the_scoped_path(tmp_path: Path) -> None:
     ws = plugmem.Workspace(str(tmp_path))
     memory = ws.memory("all-verbs")
     first, second = memory.remember_many(
@@ -83,7 +89,9 @@ def test_every_workspace_memory_verb_uses_the_scoped_path(tmp_path) -> None:
     ws.close()
 
 
-def test_parallel_references_serialize_writes_without_a_deadlock(tmp_path) -> None:
+def test_parallel_references_serialize_writes_without_a_deadlock(
+    tmp_path: Path,
+) -> None:
     ws = plugmem.Workspace(str(tmp_path))
     refs = [ws.memory("chat") for _ in range(24)]
 
@@ -101,7 +109,23 @@ def test_parallel_references_serialize_writes_without_a_deadlock(tmp_path) -> No
     ws.close()
 
 
-def test_workspace_writes_do_not_stall_asyncio(tmp_path) -> None:
+def test_workspace_memory_has_the_same_guarded_contract(tmp_path: Path) -> None:
+    ws = plugmem.Workspace(str(tmp_path))
+    memory = ws.memory("guarded")
+    stored = memory.remember_guarded("one durable fact", entity="user")
+    blocked = memory.remember_guarded("one durable fact", entity="user")
+    stored_status: Literal["stored", "blocked"] = stored.status
+    assert stored_status == "stored"
+    assert stored.status == "stored"
+    assert stored.outcome is not None and stored.outcome.id == 0
+    assert blocked.status == "blocked"
+    assert blocked.outcome is None
+    assert len(blocked.similar) == 1
+    assert memory.stats().facts == 1
+    ws.close()
+
+
+def test_workspace_writes_do_not_stall_asyncio(tmp_path: Path) -> None:
     ws = plugmem.Workspace(str(tmp_path))
     memory = ws.memory("chat")
 
@@ -117,7 +141,14 @@ def test_workspace_writes_do_not_stall_asyncio(tmp_path) -> None:
 
         pulse = asyncio.create_task(heartbeat())
         await asyncio.gather(
-            *(asyncio.to_thread(memory.remember, f"fact {i}") for i in range(24))
+            *(
+                asyncio.to_thread(
+                    memory.remember_guarded,
+                    f"fact {i}",
+                    entity=f"entity-{i}",
+                )
+                for i in range(24)
+            )
         )
         done.set()
         await pulse
@@ -128,7 +159,9 @@ def test_workspace_writes_do_not_stall_asyncio(tmp_path) -> None:
     ws.close()
 
 
-def test_active_capacity_is_busy_without_waiting_or_losing_the_lease(tmp_path) -> None:
+def test_active_capacity_is_busy_without_waiting_or_losing_the_lease(
+    tmp_path: Path,
+) -> None:
     dim = 8
     arrived = threading.Event()
     may_answer = threading.Event()
@@ -200,7 +233,7 @@ def test_active_capacity_is_busy_without_waiting_or_losing_the_lease(tmp_path) -
     assert reports[0].embedded == 1
 
 
-def test_close_invalidates_references_and_releases_the_lock(tmp_path) -> None:
+def test_close_invalidates_references_and_releases_the_lock(tmp_path: Path) -> None:
     ws = plugmem.Workspace(str(tmp_path))
     memory = ws.memory("chat")
     memory.remember("no stale native handle")

@@ -39,8 +39,9 @@ use plugmem_host::{
 use crate::error::{self, Error, Produced, Result, code};
 use crate::scrub::{ScrubOpenTask, ScrubOptions};
 use crate::types::{
-    self, ExportPage, ExportedEdge, ExportedFact, FactSnapshot, MaintainMode, MaintainReport,
-    RecallResult, RecoverReport, ReembedReport, RememberOutcome, RemoveTagReport, Stats, TagPage,
+    self, ExportPage, ExportedEdge, ExportedFact, FactSnapshot, GuardedRememberOutcome,
+    MaintainMode, MaintainReport, RecallResult, RecoverReport, ReembedReport, RememberOutcome,
+    RemoveTagReport, Stats, TagPage,
 };
 use crate::workspace::NamedMemoryTarget;
 
@@ -404,6 +405,16 @@ impl Plugmem {
     #[napi(ts_return_type = "Promise<RememberOutcome>")]
     pub fn remember(&self, args: RememberArgs) -> Result<AsyncTask<RememberTask>> {
         self.remember_task(args, None)
+    }
+
+    /// Stores only when the same bounded Jaccard/cosine detector used by
+    /// `remember().similar` finds no candidate. No other write can slip between
+    /// the check and possible write; a blocked result performs no mutation.
+    /// Runs on a libuv worker because
+    /// automatic embedding and durable writes are blocking work.
+    #[napi(ts_return_type = "Promise<GuardedRememberOutcome>")]
+    pub fn remember_guarded(&self, args: RememberArgs) -> Result<AsyncTask<GuardedRememberTask>> {
+        writer_guarded_remember_task(self.writer_source()?, args)
     }
 
     /// Stores a batch of facts and resolves with one outcome per input.
@@ -856,6 +867,24 @@ pub(crate) fn writer_remember_task(
         valid_from,
         vector,
         revise,
+        now: now_ms(),
+    }))
+}
+
+pub(crate) fn writer_guarded_remember_task(
+    source: WriterSource,
+    args: RememberArgs,
+) -> Result<AsyncTask<GuardedRememberTask>> {
+    let valid_from = args
+        .valid_from
+        .map(|value| checked_ms(value, "validFrom"))
+        .transpose()?;
+    let vector = checked_vector(args.vector.as_ref(), "vector")?;
+    Ok(AsyncTask::new(GuardedRememberTask {
+        source,
+        args,
+        valid_from,
+        vector,
         now: now_ms(),
     }))
 }
@@ -1661,6 +1690,63 @@ pub struct RememberTask {
     /// `Some(target)` makes this a revision of that fact.
     revise: Option<FactId>,
     now: u64,
+}
+
+/// The libuv-thread body of guarded remember. It deliberately has its own
+/// result type rather than smuggling "blocked" through an exception: a
+/// similarity decision is data, not a failure.
+pub struct GuardedRememberTask {
+    source: WriterSource,
+    args: RememberArgs,
+    valid_from: Option<u64>,
+    vector: Option<Vec<f32>>,
+    now: u64,
+}
+
+impl Task for GuardedRememberTask {
+    type Output = Produced<plugmem_host::GuardedRememberOutcome>;
+    type JsValue = GuardedRememberOutcome;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        let tags = str_refs(&self.args.tags);
+        let links: Vec<(&str, &str)> = self
+            .args
+            .links
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(|link| (link.rel.as_str(), link.entity.as_str()))
+            .collect();
+        let meta: Vec<(&str, &str)> = self
+            .args
+            .metadata
+            .as_ref()
+            .map(|metadata| {
+                metadata
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let input = RememberInput {
+            entity: self.args.entity.as_deref(),
+            tags: &tags,
+            links: &links,
+            metadata: (!meta.is_empty()).then_some(meta.as_slice()),
+            valid_from: self.valid_from,
+            vector: self.vector.as_deref(),
+            ..RememberInput::text(self.now, &self.args.text)
+        };
+        Ok(self
+            .source
+            .write(|db| db.remember_guarded(input).map_err(error::engine)))
+    }
+
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(GuardedRememberOutcome::from(
+            output.map_err(|error| error::to_js(env, error))?,
+        ))
+    }
 }
 
 impl Task for RememberTask {

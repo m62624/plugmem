@@ -50,7 +50,9 @@ responses stay short.";
 /// `plugmem_remember` tool description.
 pub const REMEMBER_TOOL: &str = "Store a fact in the memory. Returns the new fact's id plus any \
 similar or potentially-conflicting live facts (the engine never revises on its own — you judge: \
-`plugmem_revise`, keep both, or `plugmem_forget`). Time is the server's wall clock.";
+`plugmem_revise`, keep both, or `plugmem_forget`). Set `guarded:true` when the fact must not be \
+written until those candidates have been reviewed: no other write can slip between the check and possible write, and \
+a blocked result changes nothing. Time is the server's wall clock.";
 
 /// `plugmem_recall` tool description.
 pub const RECALL_TOOL: &str = "Recall the most relevant facts for a query as a ranked, \

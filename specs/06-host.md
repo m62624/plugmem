@@ -84,12 +84,19 @@ failure leaves the source generation current. `maintain`, including automatic
 maintenance after a write, has no code path into reembed.
 
 `Database`'s verbs mirror the core
-(`remember/recall/revise/forget/link/get/stats/maintain/checkpoint`) with two
+(`remember/remember_guarded/recall/revise/forget/link/get/stats/maintain/checkpoint`) with two
 conveniences: **auto-embedding** (if an `Embedder` is configured, a `remember` without a
 vector embeds the text and a `recall` with text and no vector embeds the query — both
 before the lock; an explicitly passed vector is always honored; `NullEmbedder`/no
 embedder = a purely structural database, complete by design) and input ownership
 (methods take `&str`/slices like the core, no extra copies).
+
+`remember_guarded` performs automatic embedding before the write guard, then
+holds that guard across the bounded similarity check and conditional insert.
+This prevents two callers from both passing a read-only preflight. A blocked
+outcome calls neither persistence bookkeeping nor automatic maintenance and
+therefore leaves the journal, ids, terms and indexes unchanged. Ordinary
+`remember` remains a complete atomic write that always stores.
 
 **Integrity and recovery.** Beyond the mirror verbs the host adds `verify()` (content
 consistency), `scrub()` on **either** handle (byte-level container integrity, a

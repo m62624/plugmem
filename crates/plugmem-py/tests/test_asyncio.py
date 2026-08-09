@@ -89,7 +89,11 @@ def test_a_write_does_not_stall_the_loop_either(tmp_path) -> None:
         pulse = asyncio.create_task(heartbeat())
         await asyncio.gather(
             *(
-                asyncio.to_thread(db.remember, f"written from task {i}")
+                asyncio.to_thread(
+                    db.remember_guarded,
+                    f"written from task {i}",
+                    entity=f"task-{i}",
+                )
                 for i in range(RECALLS)
             )
         )

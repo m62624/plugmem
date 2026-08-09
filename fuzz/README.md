@@ -4,13 +4,12 @@ Two of plugmem's files are untrusted input: the **snapshot** and the
 **journal**. Both live on disk where anything could have written to them, and
 a crash can truncate the journal mid-record.
 
-This matters more than it usually does, because the engine's read accessors
+The engine's read accessors
 panic on contract violations *by design* — `term()` resolves an id it assumes
-exists, a slot lookup assumes the fact is there. What makes that sound is the
-load path: it range-checks every persisted id before handing back an engine,
+exists, and a slot lookup assumes the fact is there. The load path makes this
+safe: it range-checks every persisted id before handing back an engine,
 so after a successful open no stored reference can violate a contract. The
-argument is only as strong as the checking, and the checking is what these
-targets attack.
+targets attack those load-time checks directly.
 
 | target | what it feeds |
 |---|---|

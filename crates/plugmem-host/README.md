@@ -1,14 +1,14 @@
 # plugmem-host
 
-> ⚠️ Experimental. plugmem is mostly an AI-built experiment — written with
+> ⚠️ Experimental. plugmem is mostly an AI-built experiment, written with
 > the help of a small local model (Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf) and various
 > Claude models, in roughly equal measure. Expect non-professional design
 > choices, rough edges, broken behavior, or mistakes. Use it at your own risk.
 
 `plugmem-host` is the `std` host layer for the plugmem
 [temporal-memory engine](https://docs.rs/plugmem-core/latest). It supplies
-what the `no_std` engine does not own — files, locking, and network — so from
-this one crate a Rust program gets `remember / recall / revise / forget`, a
+what the `no_std` engine does not own: files, locking, and network. From this
+one crate a Rust program gets `remember / recall / revise / forget`, a
 bounded tag catalogue and global tag removal, plus
 graph `link`/`unlink`, backed by durable storage. It re-exports the engine, so
 **this one crate is all a Rust program needs.**
@@ -22,8 +22,8 @@ a third option, passing a vector per call, which needs neither. See
 
 ## Which crate do I need?
 
-**Writing Rust and just want a working memory? This is the crate — it has
-everything.** The others are for narrower needs.
+Use this crate for the complete Rust integration. The others are for narrower
+needs.
 
 | You want | Use | Why |
 |---|---|---|
@@ -54,7 +54,7 @@ the `plugmem-core` or WASM build.
 
 ## What recall does
 
-Recall is not a vector lookup — it fuses four sources by reciprocal-rank fusion
+Recall fuses four sources by reciprocal-rank fusion
 with a recency boost (tags filter; they are not a source):
 
 | Source | Algorithm | What it finds |
@@ -124,7 +124,7 @@ let _around_kim = db.recall(RecallQuery {
 `as_of` moves **both** clocks: a fact answers only if it was valid at that
 instant *and* had already been recorded by then. The second half is the one
 people trip over. An `as_of` earlier than a fact's `recorded_at` does not see
-it, because the memory genuinely knew nothing then — answering with today's
+it, because the memory had not recorded the fact yet. Answering with today's
 knowledge would be the wrong answer to "what did I hold".
 
 `valid_from` is the other half of the model: a statement that became true before
@@ -132,14 +132,24 @@ you heard of it. Recording on March 10th that the move happened on March 1st —
 `valid_from: Some(MAR_1)` on the revision — closes the old interval at March 1st
 instead of at March 10th. A query as of March 5th then finds *neither*: Moscow
 had stopped being true, and Berlin was not yet known. That is not a hole in the
-model, it is the honest answer for that instant, and it is exactly what one
-timestamp cannot express.
+model. It is the only answer consistent with both clocks, and it is exactly
+what one timestamp cannot express.
 
 The old record stays on disk either way. `forget` is the destructive verb: use
 it when a fact was wrong, not when it changed.
 
 Edges are temporal the same way, so an `as_of` traversal walks the graph as it
 stood then — through relationships that have since been unlinked.
+
+When a caller wants to reject a likely duplicate before writing, use
+`Database::remember_guarded`. It embeds before taking the write guard, then
+holds that guard across the similarity check and conditional insertion. Two
+concurrent preflights therefore cannot both pass. `Blocked` means no id, journal
+record or index mutation was created;
+`Stored` contains the ordinary `RememberOutcome`. Ordinary `remember` is also
+a safe complete write, but it always stores and then returns its similarity hints.
+`recall` is not a substitute: it ranks the best available context even when a
+nearest vector is weak.
 
 ## What `plugmem-host` adds
 
