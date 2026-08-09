@@ -9,11 +9,11 @@ An embeddable bitemporal memory database for local-first applications and
 agents, embedded in your Python process. It stores short facts and answers a
 query with ranked facts and edges plus an optional bounded rendered block.
 
-File-backed on disk, no server, no daemon. It links into your process the way
-SQLite does: the engine is [`plugmem-host`](https://docs.rs/plugmem-host/latest)
-compiled to a CPython extension module through [PyO3](https://pyo3.rs), so the
-data lives in mapped files rather than in the interpreter's heap. Every call
-releases the GIL for the duration of the work.
+File-backed on disk, no server, no daemon. The
+[`plugmem-host`](https://docs.rs/plugmem-host/latest) engine is compiled to a
+CPython extension module through [PyO3](https://pyo3.rs) and linked directly
+into the process, so the data lives in mapped files rather than in the
+interpreter's heap. Every call releases the GIL for the duration of the work.
 
 **No embedding model is required.** Three of the four retrieval sources — text,
 graph and time — need nothing but the database. An embedder is optional and
@@ -373,6 +373,7 @@ dim = 1536
 enabled = true
 url = "https://api.openai.com/v1/embeddings"
 model = "text-embedding-3-small"
+space_id = "text-embedding-3-small@v1" # optional; defaults to model
 api_key_env = "OPENAI_API_KEY"
 
 [recall]
@@ -390,7 +391,9 @@ db = plugmem.Plugmem.open("agent.plugmem", config="plugmem.toml")
 The host uses one `OpenAiCompatEmbedder` implementation for OpenAI, Ollama,
 LM Studio, vLLM and other OpenAI-compatible servers. `url` is the complete
 embeddings endpoint exactly as provided (nothing is appended), and `model` is
-the model name understood by that server. Set `enabled = false` to keep the
+the model name understood by that server. `space_id` optionally identifies the
+exact semantic space and defaults to `model`; it is never discovered over the
+network. Set `enabled = false` to keep the
 settings without creating or calling the embedder; `$PLUGMEM_EMBEDDER_ENABLED`
 overrides it with `true` or `false`.
 

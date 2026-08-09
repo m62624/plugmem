@@ -7,7 +7,7 @@ the topic spec wins.
 
 **plugmem** is an embedded bitemporal memory and retrieval engine for
 local-first applications and agents. The core is a pure library with no server
-and no I/O assumptions (the SQLite model); everything else is a thin wrapper in
+and no I/O assumptions; everything else is a thin wrapper in
 one workspace. The store is data-agnostic (it holds opaque bytes), and the API
 offers `remember / recall / revise / forget`, built-in bitemporality, an entity
 graph, structured ranked results, and an optional compact rendered block for

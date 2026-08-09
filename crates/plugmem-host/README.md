@@ -165,9 +165,9 @@ The retrieval above lives in the engine; this crate adds the OS side:
   mutations land in a small owned overlay (an appended tail plus per-page
   copy-on-write), so opening a multi-gigabyte database to append one fact
   no longer copies the whole image into RAM. A snapshot materializes the
-  base + overlay into a fresh file and re-maps it. Validation is lazy (the
-  SQLite model): an open range-checks the record metadata and nothing else, so
-  the large text, vector and per-fact-metadata pools stay non-resident until a
+  base + overlay into a fresh file and re-maps it. Validation is lazy: an open
+  range-checks the record metadata and nothing else, so the large text, vector
+  and per-fact-metadata pools stay non-resident until a
   query touches them — a measured open residents well under half of a
   text-heavy image. What that guarantees is precise and worth stating: **no
   stored id can make a read unsafe. It does not mean the data agrees with
@@ -391,8 +391,8 @@ files) the engine uses the in-RAM rebuild instead.
 
 ## Integrity & recovery
 
-The default open trusts the file (like SQLite): it does not checksum the
-whole image, so a large database opens sparse. Integrity is on demand, in
+The default open trusts the file: it does not checksum the whole image, so a
+large database opens sparse. Integrity is on demand, in
 three layers of increasing cost, and corruption is never a panic — the
 accessors tolerate bad bytes, these turn latent damage into an explicit
 error or a repaired file.
@@ -527,9 +527,11 @@ protocol. The dimension is configured explicitly (no startup probe);
 a server answering with a different one is a typed error. Tests run
 against a local mock — no network in CI.
 
-`space_id` is the readable semantic identity persisted in the snapshot (the
-built-in HTTP embedder uses its model name). It detects same-dimension model
-changes that a dimension check cannot. Old experimental images without this
+`space_id` is the readable semantic identity persisted in the snapshot. The
+built-in HTTP embedder defaults it to the request model; `[embedder].space_id`
+or `OpenAiCompatEmbedder::with_space_id` can declare an exact revision or digest
+when that model is an alias. Plugmem never probes the provider to infer it. It
+detects same-dimension model changes that a dimension check cannot. Old experimental images without this
 section still open as untracked and require one explicit reembed; the snapshot
 format version remains 1.
 

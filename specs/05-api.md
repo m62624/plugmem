@@ -207,8 +207,8 @@ boundary does not rebuild itself repeatedly. There is no `config.toml` key; the
 current layout is reported by `stats()`. Setting the fields in Rust affects only a
 database being created, and the next maintenance pass overrules it.
 
-**Integrity is not config.** Open trusts the file by default (trust/sparse, the SQLite
-model) and does not checksum the image. Byte integrity is on demand via `scrub()`
+**Integrity is not config.** Open trusts the file by default (trust/sparse) and
+does not checksum the image. Byte integrity is on demand via `scrub()`
 (resumable); content integrity via `verify()`. Config is stored in the snapshot; on
 `open` the given config is checked — an incompatible `dim` against a non-empty
 database is `Error::ConfigMismatch` (changing dim = reindexing, a separate CLI
@@ -301,7 +301,8 @@ wrapper does the same through a host callback (see `07-wrappers.md`).
 dimension are incompatible unless their ids agree. An ordinary automatic
 vector write refuses a stored mismatch; explicit reembed is the sole operation
 that replaces a non-empty space. No `MaintenanceMode`, including `Auto`, can
-invoke the callback.
+invoke the callback. The HTTP embedder defaults the id to its request model and
+allows an explicit override; the host never queries a provider to infer it.
 
 ## Test plan
 

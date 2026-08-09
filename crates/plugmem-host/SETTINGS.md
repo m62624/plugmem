@@ -71,6 +71,7 @@ flat_to_hnsw = 50000   # this memory is small; stay exact for longer
 enabled = true
 url = "http://localhost:11434/v1/embeddings"
 model = "nomic-embed-text"
+# space_id = "nomic-embed-text@v1" # optional; defaults to model
 # api_key_env = "OPENAI_API_KEY" # name of the env var holding the token
 
 [maintenance]
@@ -220,10 +221,13 @@ accepts only `true` or `false`.
 | `enabled` | automatic | Set `false` to keep the settings but not create or use the embedder. |
 | `url` | unset | Full OpenAI-compatible embeddings endpoint URL. Required for an active embedder. |
 | `model` | unset | Embedding model name understood by the selected server. Required for an active embedder. |
+| `space_id` | `model` | Stable identity of the vectors' semantic space. Set an exact model revision or digest when `model` is an alias. |
 | `api_key_env` | unset | Environment variable containing the bearer token. |
 
 An active embedder also requires `[engine].dim > 0`. All supported providers
-use the same OpenAI-compatible HTTP shape.
+use the same OpenAI-compatible HTTP shape. `space_id` is a local declaration:
+Plugmem never probes the endpoint to discover it. Equal ids assert compatible
+vectors; changing the id requires an explicit reembed.
 
 ### `[maintenance]`
 

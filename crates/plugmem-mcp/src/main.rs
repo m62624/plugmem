@@ -10,7 +10,7 @@
 //! MVCC, not one network server.
 //!
 //! In a Rust program you do not need this — embed [`plugmem_host`] directly
-//! (the engine in your process, like linking SQLite). MCP is the door for
+//! (the engine runs directly in your process). MCP is the door for
 //! agents and other languages.
 //!
 //! Layout, so protocol, behavior and wording are each editable in isolation:

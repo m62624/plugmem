@@ -12,13 +12,15 @@ Priority: flag/parameter > env > config file > default.
   `$XDG_DATA_HOME/plugmem/default.plugmem` (created). With a workspace configured,
   `--db`/`PLUGMEM_DB` may also be a bare memory *name* — see `10-workspace.md`.
 - Config file: `$XDG_CONFIG_HOME/plugmem/config.toml` — `[engine]` (the Config fields
-  from `05-api.md`), `[embedder]` (`enabled`, `url`, `model`, `api_key_env`),
+  from `05-api.md`), `[embedder]` (`enabled`, `url`, `model`, `space_id`,
+  `api_key_env`),
   `[maintenance]` (`auto_after_ops`, `journal_snapshot_bytes`).
 - The default is no embedder (the system must work out of the box with no
   services); configuring `url` and `model` turns on the shared
   `OpenAiCompatEmbedder`, and `enabled = false` or
   `PLUGMEM_EMBEDDER_ENABLED=false` keeps the settings but prevents the
-  embedder from being created or called.
+  embedder from being created or called. `space_id` defaults to `model` and is
+  never inferred with a network request.
 - Locking: FileStorage holds an exclusive lock (see `03-snapshot.md`) — one database,
   one writer. When the database is busy (e.g. an MCP server holds it), the CLI prints
   "database is locked by another process" and exits 1.

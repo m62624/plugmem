@@ -1021,5 +1021,10 @@ mod tests {
                 .iter()
                 .any(|setting| setting.section == "recall" && setting.key == "w_bm25")
         );
+        assert!(
+            help.settings
+                .iter()
+                .any(|setting| setting.section == "embedder" && setting.key == "space_id")
+        );
     }
 }

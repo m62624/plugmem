@@ -192,7 +192,8 @@ def test_reembed_uses_to_thread_without_stalling_the_loop(tmp_path) -> None:
     config.write_text(
         f"[engine]\ndim = {dim}\n[embedder]\n"
         f'url = "http://127.0.0.1:{server.server_port}/v1/embeddings"\n'
-        'model = "async-test"\n',
+        'model = "async-test"\n'
+        'space_id = "async-space@v1"\n',
         encoding="utf-8",
     )
     db = plugmem.Plugmem.open(str(tmp_path / "reembed.plugmem"), config=str(config))
@@ -225,7 +226,7 @@ def test_reembed_uses_to_thread_without_stalling_the_loop(tmp_path) -> None:
 
     try:
         beats, report = asyncio.run(main())
-        assert report.new_space == "async-test"
+        assert report.new_space == "async-space@v1"
         assert report.embedded == 8
         assert beats > 0, "the event loop stalled while reembed called the model"
 
@@ -233,7 +234,8 @@ def test_reembed_uses_to_thread_without_stalling_the_loop(tmp_path) -> None:
         changed.write_text(
             f"[engine]\ndim = {dim}\n[embedder]\n"
             f'url = "http://127.0.0.1:{server.server_port}/v1/embeddings"\n'
-            'model = "other-model"\n',
+            'model = "other-model"\n'
+            'space_id = "other-space@v1"\n',
             encoding="utf-8",
         )
         reader = plugmem.Plugmem.open(

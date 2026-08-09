@@ -28,7 +28,7 @@
 //! overlay; a mutation lands its appends in an owned tail and copies only
 //! the pages it rewrites (per-page copy-on-write in `plugmem-arena`). So a
 //! multi-gigabyte database is opened and written to while resident only in
-//! the pages it actually touches — the SQLite model. A snapshot
+//! the pages it actually touches. A snapshot
 //! materializes the base + overlay into a fresh file and **re-maps** it, so
 //! the overlay collapses and a long write session stays bounded. A brand-new
 //! database has no file to map yet: it opens *owned* and empty, and switches
@@ -1244,8 +1244,8 @@ impl Database {
         Ok(())
     }
 
-    /// Runs the on-demand integrity check — the equivalent of
-    /// SQLite's `integrity_check`. An open validates only the metadata, so the
+    /// Runs the on-demand full content-integrity check. An open validates only
+    /// the metadata, so the
     /// large byte pools stay non-resident on an mmap'd base; this sweeps them
     /// (text UTF-8, vector self-consistency and the fact↔slot bijection) and
     /// reports any latent corruption. Skipping it is safe — the accessors never

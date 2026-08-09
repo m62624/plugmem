@@ -9,11 +9,11 @@ An embeddable bitemporal memory database for local-first applications and
 agents, embedded in your Node process. It stores short facts and answers a
 query with ranked facts and edges plus an optional bounded rendered block.
 
-File-backed on disk, no server, no daemon. It links into your process the way
-SQLite does: the engine is [`plugmem-host`](https://docs.rs/plugmem-host/latest)
-compiled to a native addon through [napi-rs](https://napi.rs), so there is no
-WebAssembly copy of the file in RAM and no 4 GiB ceiling. Runs on Node, Deno and
-Bun.
+File-backed on disk, no server, no daemon. The
+[`plugmem-host`](https://docs.rs/plugmem-host/latest) engine is compiled to a
+native addon through [napi-rs](https://napi.rs) and linked directly into the
+process, so there is no WebAssembly copy of the file in RAM and no 4 GiB
+ceiling. Runs on Node, Deno and Bun.
 
 **Contents:** [Install](#install) · [Quick start](#quick-start) ·
 [What it stores](#what-it-stores) · [Two clocks](#two-clocks) ·
@@ -421,6 +421,7 @@ half_life_days = 30           # and treat anything older than a month as stale
 enabled = true                # false keeps settings but makes no embedder calls
 url   = "http://localhost:11434/v1/embeddings"
 model = "nomic-embed-text"
+space_id = "nomic-embed-text@v1" # optional; defaults to model
 api_key_env = "OPENAI_API_KEY" # env var holding the bearer token
 
 [maintenance]
@@ -453,7 +454,9 @@ embedder, its dimension governs and `dim` must agree.
 The host uses one `OpenAiCompatEmbedder` implementation for OpenAI, Ollama,
 LM Studio, vLLM and other OpenAI-compatible servers. `url` is the complete
 embeddings endpoint exactly as provided (nothing is appended), and `model` is
-the model name understood by that server. Set `enabled = false` to keep the
+the model name understood by that server. `space_id` optionally identifies the
+exact semantic space and defaults to `model`; it is never discovered over the
+network. Set `enabled = false` to keep the
 settings without creating or calling the embedder; `$PLUGMEM_EMBEDDER_ENABLED`
 overrides it with `true` or `false`.
 
