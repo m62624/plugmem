@@ -52,6 +52,9 @@ fusion; tags act as filters. What the engine does:
 - **opaque per-fact metadata.** A key→value map — a URI to the real payload in
   another store, a mime type, an external key. Stored and returned verbatim,
   never interpreted or searched; large blobs stay outside, by reference.
+- **a bounded tag catalogue.** List current tags and their fact counts in stable
+  lexical pages, optionally by prefix. Removing a tag revises every affected
+  current fact without deleting the facts or their historical tag state.
 - **conflicts surfaced, not resolved.** `remember` returns the live facts a new
   one may duplicate or contradict. The engine never merges on its own; the
   caller revises, forgets, or keeps both.
@@ -76,6 +79,15 @@ $ plugmem-cli recall --entity kim
 
 $ plugmem-cli recall --entity kim --as-of <an instant between the two>
 - [f0] kim: lives in Moscow (2026-08 → 2026-08; closed)
+```
+
+Tag discovery stays bounded even when a memory has thousands of tags:
+
+```console
+$ plugmem-cli tags --prefix project: --limit 64
+2\tproject:plugmem
+$ plugmem-cli remove-tag project:old
+removed tag "project:old" from 3 current facts
 ```
 
 `as_of` moves **both** clocks: a fact answers only if it was valid at that

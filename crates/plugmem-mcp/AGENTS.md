@@ -15,6 +15,10 @@ The layers are intentionally separate:
 
 Writer mode exposes the full memory tool set. Read-only mode opens a shared checkpoint generation and exposes only read verbs plus `plugmem_generation` and `plugmem_refresh`; write verbs must be refused as tool-level errors.
 
+Tag discovery is a bounded read tool and belongs in both modes. Global tag
+removal is a bulk write tool and belongs only in writer mode; it delegates the
+history-preserving revisions to host/core.
+
 The default worker count is half of available parallelism, at least one, and can be overridden by `--workers` or `[server].workers`. Keep embedding HTTP work outside the database lock where the current tool path expects it. Do not add tokio or a network listener without redesigning the sidecar contract.
 
 Database/config resolution follows `--db`, `PLUGMEM_DB`, and `./plugmem.db`, plus the shared host config loader. Startup failures go to stderr and use a non-zero exit code so the spawning process can detect failure.

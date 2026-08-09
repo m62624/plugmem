@@ -521,6 +521,68 @@ impl ExportPage {
     }
 }
 
+/// One active tag and the number of current facts carrying it.
+#[gen_stub_pyclass]
+#[pyclass(frozen, get_all, module = "plugmem._plugmem")]
+pub struct TagSummary {
+    pub name: String,
+    pub count: u32,
+}
+repr!(TagSummary, "TagSummary", name, count);
+
+impl From<plugmem_host::TagSummary> for TagSummary {
+    fn from(value: plugmem_host::TagSummary) -> Self {
+        let plugmem_host::TagSummary { name, count } = value;
+        Self { name, count }
+    }
+}
+
+/// One bounded page of current tags.
+#[gen_stub_pyclass]
+#[pyclass(frozen, get_all, module = "plugmem._plugmem")]
+pub struct TagPage {
+    pub items: Vec<Py<TagSummary>>,
+    pub next_cursor: Option<String>,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl TagPage {
+    fn __repr__(&self) -> String {
+        format!(
+            "TagPage(items={}, next_cursor={:?})",
+            self.items.len(),
+            self.next_cursor
+        )
+    }
+}
+
+impl TagPage {
+    pub fn build(py: Python<'_>, page: plugmem_host::TagPage) -> PyResult<Self> {
+        let plugmem_host::TagPage { items, next_cursor } = page;
+        let items = items
+            .into_iter()
+            .map(|item| Py::new(py, TagSummary::from(item)))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(Self { items, next_cursor })
+    }
+}
+
+/// Result of removing one tag from all current facts.
+#[gen_stub_pyclass]
+#[pyclass(frozen, get_all, module = "plugmem._plugmem")]
+pub struct RemoveTagReport {
+    pub affected: u32,
+}
+repr!(RemoveTagReport, "RemoveTagReport", affected);
+
+impl From<plugmem_host::RemoveTagReport> for RemoveTagReport {
+    fn from(value: plugmem_host::RemoveTagReport) -> Self {
+        let plugmem_host::RemoveTagReport { affected } = value;
+        Self { affected }
+    }
+}
+
 impl ExportPage {
     /// Build the mirror, allocating each fact on the Python heap.
     pub fn build(py: Python<'_>, page: plugmem_host::ExportPage) -> PyResult<Self> {
@@ -845,6 +907,9 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<ExportedFact>()?;
     module.add_class::<ExportedEdge>()?;
     module.add_class::<ExportPage>()?;
+    module.add_class::<TagSummary>()?;
+    module.add_class::<TagPage>()?;
+    module.add_class::<RemoveTagReport>()?;
     module.add_class::<RecoverReport>()?;
     module.add_class::<ScrubProgress>()?;
     module.add_class::<MaintainReport>()?;

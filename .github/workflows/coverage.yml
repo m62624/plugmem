@@ -1,10 +1,10 @@
 name: coverage
 
 # Line coverage for the library crates, uploaded to Codecov. Kept as its own
-# workflow — deliberately NOT wired into ci.yml's `ci-pass` required gate — so a
-# Codecov hiccup or a small coverage dip never blocks a merge (the Codecov status
-# is informational, see codecov.yml). Scope and exclusions live in tarpaulin.toml,
-# the single source of truth shared with local `cargo tarpaulin` runs.
+# workflow. The local tarpaulin result is a hard >= 90% gate; the separate
+# Codecov upload remains informational so an upload-side outage cannot fail a
+# sound measurement. Scope and exclusions live in tarpaulin.toml, the single
+# source of truth shared with local `cargo tarpaulin` runs.
 on:
   push:
     branches:
@@ -42,8 +42,7 @@ jobs:
       # Reads tarpaulin.toml for workspace + exclude-files; we only override the
       # output to a Cobertura XML at the repo root for the Codecov upload step.
       - name: Generate coverage (Cobertura XML)
-        continue-on-error: true
-        run: cargo tarpaulin --timeout 300 --verbose --out Xml --output-dir .
+        run: cargo tarpaulin --timeout 300 --verbose --fail-under 90 --out Xml --output-dir .
       - name: Upload to Codecov
         if: hashFiles('cobertura.xml') != ''
         uses: codecov/codecov-action@v7

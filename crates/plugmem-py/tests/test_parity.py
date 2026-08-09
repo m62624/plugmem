@@ -132,6 +132,7 @@ def test_every_error_code_matches_the_node_binding() -> None:
         plugmem.ReadOnlyError: "PLUGMEM_READ_ONLY",
         plugmem.WriterOnlyError: "PLUGMEM_WRITER_ONLY",
         plugmem.BusyError: "PLUGMEM_BUSY",
+        plugmem.StaleCursorError: "PLUGMEM_STALE_CURSOR",
         plugmem.EngineError: "PLUGMEM_ENGINE",
         plugmem.InternalError: "PLUGMEM_INTERNAL",
     }

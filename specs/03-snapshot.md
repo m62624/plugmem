@@ -80,7 +80,7 @@ length, the file hash and two informational fields. The config block is a fixed
 alignment, the offset, the length and a per-section hash.
 
 **The field offsets are in `11-file-format.md` §2**, along with the complete
-section catalogue: the kinds are stable numbers 1..59 with retired ranges left as
+section catalogue: the kinds are stable numbers 1..60 with retired ranges left as
 gaps, and most structures contribute a small `meta`/`index` section plus a large
 `pool` section, the small one first.
 
@@ -138,8 +138,8 @@ An entry:
 [len u32][check u32][op u8][payload ...]   // len = 1 + payload
 ```
 
-`check` is the low 32 bits of xxh3-64 over `[op][payload]`. Six ops: Remember,
-Revise, Forget, Link, Maintain, Unlink. Payloads are a compact binary format,
+`check` is the low 32 bits of xxh3-64 over `[op][payload]`. Seven ops: Remember,
+Revise, Forget, Link, Maintain, Unlink, RemoveTag. Payloads are a compact binary format,
 strings length-prefixed UTF-8 — the field order per op is in
 `11-file-format.md` §9.
 
@@ -172,13 +172,19 @@ is in `06-host.md`.
 
 ## Versioning and migrations
 
-- `version` in the header is the format version; minor engine releases do not change
-  the format.
-- A format change = version+1 plus an explicit migrator (`load_v(N)` → build state →
-  `dump_v(N+1)`); no dual-read in the main path. The CLI gets a `migrate` command; a
-  library user gets `migrate(bytes) -> Result<Vec<u8>>` behind a `migrate` feature so
-  old loaders are not pulled into wasm by default.
-- Before 1.0 the format may break freely; it freezes at the first public tag.
+- `version` in the header is the container format version. During the current
+  pre-stable public-testing line it remains **1**; adding the derived tag
+  catalogue does not bump it.
+- `memory/migrations.rs` owns every legacy v1 shape. Load accepts an omitted
+  derived section or an older record layout, rebuilds the current in-memory
+  structure from authoritative data, and the next checkpoint writes one current,
+  canonical v1 image. Normal reads after load use only the current structures.
+- Compatibility is forward: a current binary opens all v1 images the project has
+  published. An older binary is not required to understand sections or journal
+  opcodes introduced later in the experimental v1 line.
+- A future version bump is reserved for a container change that cannot be
+  distinguished and migrated safely within v1. Unknown versions remain a typed
+  `UnsupportedVersion`, never a guessed interpretation.
 
 ## Test plan
 
@@ -186,6 +192,9 @@ is in `06-host.md`.
   a determinism test).
 - Golden files: pinned snapshots in testdata; every future build loads each (catches
   an accidental format break).
+- Migration: remove each derived/current-only section from a valid legacy-shaped
+  v1 image, open it, compare behavior, checkpoint, and assert the new image carries
+  the current section while the header version is still 1.
 - Corruption: systematic damage to each header/table/metadata field (a bitflip
   matrix) → always `Err`, never a panic; plus fuzz.
 - Journal: a crash "between appends" (a break at each byte of the tail entry) →

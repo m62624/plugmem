@@ -37,6 +37,9 @@ impl<'a> Memory<'a> {
     pub fn revise<S: Storage>(&mut self, s: &mut S, target: FactId, input: RememberInput<'_>)
         -> Result<RememberOutcome, Error>;
     pub fn forget<S: Storage>(&mut self, s: &mut S, now: u64, id: FactId) -> Result<bool, Error>;
+    pub fn remove_tag<S: Storage>(&mut self, s: &mut S, now: u64, tag: &str)
+        -> Result<RemoveTagReport, Error>; // revises current facts; keeps history
+    pub fn list_tags(&self, query: TagQuery<'_>) -> Result<TagPage, Error>;
     pub fn link<S: Storage>(&mut self, s: &mut S, input: LinkInput<'_>) -> Result<(), Error>;
     /// Close the current edge of (src, rel, dst). Its history version stays,
     /// so `as_of` before the close still sees it. `Ok(false)` when no such
@@ -102,6 +105,15 @@ pub struct Similar {
     pub score: f32,
     pub reason: SimilarReason,               // LexicalOverlap | VectorCosine
 }
+
+pub struct TagQuery<'a> {
+    pub prefix: Option<&'a str>,             // exact, case-sensitive
+    pub cursor: Option<&'a str>,             // opaque continuation token
+    pub limit: usize,                        // 0 = 64; maximum 256
+}
+pub struct TagSummary { pub name: String, pub count: u32 }
+pub struct TagPage { pub items: Vec<TagSummary>, pub next_cursor: Option<String> }
+pub struct RemoveTagReport { pub affected: u32 }
 ```
 
 Similar detection (cheap, from the ready indexes): live facts of the same entity
@@ -209,6 +221,7 @@ pub enum Error {
     Corrupt(&'static str),          // snapshot/journal
     UnsupportedVersion(u16),        // a snapshot of an unknown format version
     Invalid(&'static str),          // a structural input violation not about size
+    StaleCursor,                    // catalogue changed; restart tag pagination
     Storage(String),               // debug-render of a Storage error (the core stays
                                     // generic and Clone; the wrapper logs the source)
     Arena(plugmem_arena::Error),   // #[from]
@@ -226,14 +239,16 @@ review policy).
 | remember | yes | a new open fact + indexes + similar hints |
 | revise | yes | close target (valid_to = new.valid_from), a new fact with revises=target |
 | forget | yes | tombstone immediately (recall hides it), physical purge in maintain |
+| remove_tag | yes | revise every current fact carrying the tag; facts and historical tag state survive |
 | link | yes | opens an edge version for (src,rel,dst); a repeat closes the open one and opens a new one |
 | unlink | yes | closes the current edge; the version stays and `as_of` still sees it |
 | recall | no | a pure query |
+| list_tags | no | bounded lexical page of current tags and current-fact counts |
 | maintain | yes (marker) | physical deletion of tombstoned records (ids burned; see 02-data-model.md), satellite rebuild, stat recompute, folding the vector tail into HNSW. Policy-driven (`auto` / `compact` / `reindex-text` / `optimize-vectors` / `full`); **no mode ever drops a fact revision or an edge version** |
 | snapshot | clears | full image + clear_journal |
 
-`maintain` is the only place with O(database) cost; every other verb is microseconds
-(budgets in `08-performance.md`). Wrappers call it on their own policy (CLI — a command
+`maintain` and the explicit bulk `remove_tag` can cost O(database); point verbs are
+microseconds (budgets in `08-performance.md`). Wrappers call maintenance on their own policy (CLI — a command
 plus auto after N ops; MCP — when idle; wasm — the host decides).
 
 ## The Embedder layer (`plugmem-host`, std)

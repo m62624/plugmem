@@ -8,7 +8,8 @@
 `plugmem-host` is the `std` host layer for the plugmem
 [temporal-memory engine](https://docs.rs/plugmem-core/latest). It supplies
 what the `no_std` engine does not own — files, locking, and network — so from
-this one crate a Rust program gets `remember / recall / revise / forget` plus
+this one crate a Rust program gets `remember / recall / revise / forget`, a
+bounded tag catalogue and global tag removal, plus
 graph `link`/`unlink`, backed by durable storage. It re-exports the engine, so
 **this one crate is all a Rust program needs.**
 
@@ -222,6 +223,7 @@ println!("{}", out.rendered);
 ```text
 cargo run -p plugmem-host --example edge_lifecycle
 cargo run -p plugmem-host --example maintain_modes
+cargo run -p plugmem-host --example tag_catalog -- /tmp/tag-catalog.plugmem
 cargo run --release -p plugmem-host --example bench_database -- 100000 --diagnose-recall | tee database-benchmark-100k.tsv
 cargo run --release -p plugmem-host --example bench_database -- 1000000 --diagnose-recall | tee database-benchmark-1m.tsv
 cat database-benchmark-100k.tsv database-benchmark-1m.tsv > database-benchmark-scale.tsv

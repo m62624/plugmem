@@ -7,11 +7,9 @@
 # runtimes. The `ignore` list below mirrors that so Codecov's file tree matches
 # the metric.
 #
-# Both statuses are `informational: true` — Codecov reports the number and the
-# diff but never fails the check, so coverage guides without gatekeeping merges
-# (the hard coverage mandate of specs/07 is enforced by review, not by a flaky
-# upload). Tighten (drop `informational`, set a `target`) once stage 5 turns
-# the tarpaulin threshold into a local gate.
+# Both statuses are `informational: true` because the coverage workflow already
+# enforces the >= 90% aggregate floor on tarpaulin's local result. Codecov reports
+# the number and diff without making an upload-side outage a second gate.
 coverage:
   status:
     project:

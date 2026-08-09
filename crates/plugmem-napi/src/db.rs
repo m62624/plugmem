@@ -40,7 +40,7 @@ use crate::error::{self, Error, Produced, Result, code};
 use crate::scrub::{ScrubOpenTask, ScrubOptions};
 use crate::types::{
     self, ExportPage, ExportedEdge, ExportedFact, FactSnapshot, MaintainMode, MaintainReport,
-    RecallResult, RecoverReport, RememberOutcome, Stats,
+    RecallResult, RecoverReport, RememberOutcome, RemoveTagReport, Stats, TagPage,
 };
 use crate::workspace::NamedMemoryTarget;
 
@@ -212,6 +212,18 @@ pub struct LinkArgs {
     /// graph recall — the answer to "why is this edge here". Ignored by
     /// `unlink`, which closes an edge rather than opening one.
     pub provenance: Option<u32>,
+}
+
+/// Bounded tag-catalog options. Omitted fields select the first 64 entries.
+#[napi(object)]
+#[derive(Default)]
+pub struct TagListOptions {
+    /// Exact, case-sensitive prefix.
+    pub prefix: Option<String>,
+    /// Opaque cursor returned by the previous page.
+    pub cursor: Option<String>,
+    /// Page size (maximum 256).
+    pub limit: Option<u32>,
 }
 
 /// The open handle behind a [`Plugmem`]: a read-write writer, or a read-only
@@ -636,6 +648,28 @@ impl Plugmem {
         }
     }
 
+    /// One bounded page of current tags. Runs on a libuv worker so neither a
+    /// mapped-page fault nor host locking can pause the JavaScript event loop.
+    #[napi(ts_return_type = "Promise<TagPage>")]
+    pub fn list_tags(&self, options: Option<TagListOptions>) -> Result<AsyncTask<TagPageTask>> {
+        let source = match self.handle()? {
+            Handle::Writer(db) => ExportSource::Writer(WriterSource::Direct(db.clone())),
+            Handle::Reader { db, .. } => ExportSource::Reader(Arc::clone(db)),
+        };
+        Ok(AsyncTask::new(TagPageTask {
+            source,
+            options: options.unwrap_or_default(),
+        }))
+    }
+
+    /// Removes a tag from every current fact by creating successor revisions.
+    /// The bulk write and journal sync run on a libuv worker.
+    /// @throws synchronously in read-only mode.
+    #[napi(ts_return_type = "Promise<RemoveTagReport>")]
+    pub fn remove_tag(&self, tag: String) -> Result<AsyncTask<RemoveTagTask>> {
+        Ok(writer_remove_tag_task(self.writer_source()?, tag))
+    }
+
     /// Content-integrity check; rejects on the first inconsistency found.
     ///
     /// **Async**: this is a full sweep — every fact's text and metadata, the
@@ -868,6 +902,27 @@ pub(crate) fn writer_forget_task(source: WriterSource, id: u32) -> AsyncTask<Wri
     })
 }
 
+pub(crate) fn writer_remove_tag_task(
+    source: WriterSource,
+    tag: String,
+) -> AsyncTask<RemoveTagTask> {
+    AsyncTask::new(RemoveTagTask {
+        source,
+        tag,
+        now: now_ms(),
+    })
+}
+
+pub(crate) fn writer_tag_page_task(
+    source: WriterSource,
+    options: Option<TagListOptions>,
+) -> AsyncTask<TagPageTask> {
+    AsyncTask::new(TagPageTask {
+        source: ExportSource::Writer(source),
+        options: options.unwrap_or_default(),
+    })
+}
+
 pub(crate) fn writer_link_task(source: WriterSource, args: LinkArgs) -> AsyncTask<WriteTask> {
     AsyncTask::new(WriteTask {
         source,
@@ -1030,6 +1085,60 @@ impl Task for WriterTagsTask {
 
     fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
         output.map_err(|e| error::to_js(env, e))
+    }
+}
+
+/// Bounded tag catalogue read, shared by direct writer/read-only handles and
+/// named workspace memories.
+pub struct TagPageTask {
+    source: ExportSource,
+    options: TagListOptions,
+}
+
+impl Task for TagPageTask {
+    type Output = Produced<plugmem_host::TagPage>;
+    type JsValue = TagPage;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        let query = plugmem_host::TagQuery {
+            prefix: self.options.prefix.as_deref(),
+            cursor: self.options.cursor.as_deref(),
+            limit: self.options.limit.unwrap_or(0) as usize,
+        };
+        Ok(match &self.source {
+            ExportSource::Writer(source) => {
+                source.read(|db| db.list_tags(query).map_err(error::engine))
+            }
+            ExportSource::Reader(db) => db.list_tags(query).map_err(error::engine),
+        })
+    }
+
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(TagPage::from(output.map_err(|e| error::to_js(env, e))?))
+    }
+}
+
+/// Bulk tag removal on a libuv worker.
+pub struct RemoveTagTask {
+    source: WriterSource,
+    tag: String,
+    now: u64,
+}
+
+impl Task for RemoveTagTask {
+    type Output = Produced<plugmem_host::RemoveTagReport>;
+    type JsValue = RemoveTagReport;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        Ok(self
+            .source
+            .write(|db| db.remove_tag(self.now, &self.tag).map_err(error::engine)))
+    }
+
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(RemoveTagReport::from(
+            output.map_err(|e| error::to_js(env, e))?,
+        ))
     }
 }
 

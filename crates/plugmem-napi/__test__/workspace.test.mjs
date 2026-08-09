@@ -46,6 +46,11 @@ test("every WorkspaceMemory verb executes through a scoped lease", async () => {
     const revised = await memory.revise(first.id, { text: "current version", tags: ["new"] });
     assert.equal((await memory.get(revised.id)).text, "current version");
     assert.deepEqual(await memory.tagsOf(revised.id), ["new"]);
+    assert.deepEqual((await memory.listTags()).items, [
+      { name: "new", count: 1 },
+    ]);
+    assert.deepEqual(await memory.removeTag("new"), { affected: 1 });
+    assert.deepEqual((await memory.listTags()).items, []);
     assert.match((await memory.recall({ query: "current" })).rendered, /current version/);
 
     await memory.link({ src: "ann", rel: "owns", dst: "service", provenance: revised.id });
@@ -57,7 +62,7 @@ test("every WorkspaceMemory verb executes through a scoped lease", async () => {
 
     assert.equal((await memory.export()).length, 1);
     assert.equal((await memory.exportPage()).facts.length, 1);
-    assert.equal((await memory.stats()).facts, 3, "stats counts closed records before maintenance");
+    assert.equal((await memory.stats()).facts, 4, "stats counts closed records before maintenance");
     await memory.verify();
     await memory.checkpoint();
     const scrub = await memory.scrub({ budget: 64 * 1024 });

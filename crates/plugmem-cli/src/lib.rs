@@ -27,7 +27,7 @@ use clap::Parser;
 use plugmem_host::{
     Database, ExportedFact, FactId, HostError, LinkInput, MaintenanceMode, MaintenanceOptions,
     ReadOnlyDatabase, RecallQuery, RecallResult, RememberInput, RememberOutcome, Settings, Stats,
-    UnlinkInput, VALID_TO_OPEN,
+    TagPage, TagQuery, UnlinkInput, VALID_TO_OPEN,
 };
 use serde_json::json;
 
@@ -149,6 +149,7 @@ fn run_parsed(cli: Cli, out: &mut impl Write) -> u8 {
         &cli.command,
         Command::Show { .. }
             | Command::Stats
+            | Command::Tags { .. }
             | Command::Export
             | Command::Verify
             | Command::Recall { .. }
@@ -339,6 +340,21 @@ fn execute_ro(
             render_stats(&ro.stats(), json, out);
             0
         }
+        Command::Tags {
+            prefix,
+            cursor,
+            limit,
+        } => match ro.list_tags(TagQuery {
+            prefix: prefix.as_deref(),
+            cursor: cursor.as_deref(),
+            limit: *limit,
+        }) {
+            Ok(page) => {
+                render_tags(&page, json, out);
+                0
+            }
+            Err(e) => report_err(&CliError::Host(e)),
+        },
         Command::Export => {
             ro.export_each(|f| write_export_line(out, &f));
             ro.export_edges_each(|src, rel, dst, fact| write_export_edge(out, src, rel, dst, fact));
@@ -433,6 +449,38 @@ fn execute(
                 writeln!(out, "forgot fact {id}").ok();
             } else {
                 writeln!(out, "fact {id} was already gone").ok();
+            }
+            Ok(0)
+        }
+        Command::Tags {
+            prefix,
+            cursor,
+            limit,
+        } => {
+            let page = db.list_tags(TagQuery {
+                prefix: prefix.as_deref(),
+                cursor: cursor.as_deref(),
+                limit: *limit,
+            })?;
+            render_tags(&page, json, out);
+            Ok(0)
+        }
+        Command::RemoveTag { tag } => {
+            let report = db.remove_tag(now, tag)?;
+            if json {
+                writeln!(
+                    out,
+                    "{}",
+                    json!({ "tag": tag, "affected": report.affected })
+                )
+                .ok();
+            } else {
+                writeln!(
+                    out,
+                    "removed tag {tag:?} from {} current facts",
+                    report.affected
+                )
+                .ok();
             }
             Ok(0)
         }
@@ -724,7 +772,7 @@ fn run_repl(
         } else if line == "help" {
             writeln!(
                 out,
-                "verbs: remember recall revise forget link unlink show stats maintain checkpoint \
+                "verbs: remember recall revise forget tags remove-tag link unlink show stats maintain checkpoint \
                  verify export import  (scrub/recover stay one-shot)  exit"
             )
             .ok();
@@ -872,6 +920,7 @@ fn run_repl_ro_line(
         &cmd,
         Command::Show { .. }
             | Command::Stats
+            | Command::Tags { .. }
             | Command::Export
             | Command::Verify
             | Command::Recall { .. }
@@ -879,7 +928,7 @@ fn run_repl_ro_line(
     if !readable {
         let _ = writeln!(
             out,
-            "read-only session: only recall/show/stats/export/verify run \
+            "read-only session: only recall/show/stats/tags/export/verify run \
              (plus refresh/generation); writes and one-shot commands need a writer handle"
         );
         return;
@@ -1153,6 +1202,32 @@ fn render_stats(s: &Stats, json: bool, out: &mut impl Write) {
             s.shards.facts, s.shards.entities, s.shards.edges, s.shards.temporal, s.shards.postings,
         )
         .ok();
+    }
+}
+
+/// Renders one bounded page. Human output is line-oriented and keeps the
+/// opaque continuation token separate so scripts can feed it back verbatim.
+fn render_tags(page: &TagPage, json_output: bool, out: &mut impl Write) {
+    if json_output {
+        writeln!(
+            out,
+            "{}",
+            json!({
+                "items": page.items.iter().map(|item| json!({
+                    "name": item.name,
+                    "count": item.count,
+                })).collect::<Vec<_>>(),
+                "next_cursor": page.next_cursor,
+            })
+        )
+        .ok();
+        return;
+    }
+    for item in &page.items {
+        writeln!(out, "{}\t{}", item.count, item.name).ok();
+    }
+    if let Some(cursor) = &page.next_cursor {
+        writeln!(out, "next_cursor\t{cursor}").ok();
     }
 }
 
@@ -2003,6 +2078,45 @@ mod tests {
         );
         assert_eq!(code, 0);
         assert!(out.contains("purged 1"), "{out}");
+    }
+
+    #[test]
+    fn tags_pages_and_remove_tag_have_human_and_json_shapes() {
+        let (db, _t) = TempDb::open();
+        run_cmd(&db, &remember("one", None, &["drop", "keep"]), false, 1_000);
+        run_cmd(&db, &remember("two", None, &["drop"]), false, 1_100);
+
+        let (code, out) = run_cmd(
+            &db,
+            &Command::Tags {
+                prefix: None,
+                cursor: None,
+                limit: 1,
+            },
+            false,
+            2_000,
+        );
+        assert_eq!(code, 0);
+        assert!(out.starts_with("2\tdrop\n"), "{out}");
+        assert!(out.contains("next_cursor\t"), "{out}");
+
+        let (_, out) = run_cmd(&db, &Command::RemoveTag { tag: "drop".into() }, true, 3_000);
+        let removed: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(removed["affected"], 2);
+
+        let (_, out) = run_cmd(
+            &db,
+            &Command::Tags {
+                prefix: None,
+                cursor: None,
+                limit: 0,
+            },
+            true,
+            4_000,
+        );
+        let page: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(page["items"][0]["name"], "keep");
+        assert_eq!(db.export().len(), 2, "facts remain current after retagging");
     }
 
     #[test]

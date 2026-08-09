@@ -101,6 +101,8 @@ mod kind {
     /// Per-document BM25 records carrying the term-set summary.
     pub const BM25_DOCLEN_META: u16 = 58;
     pub const BM25_DOCLEN_POOL: u16 = 59;
+    /// Sorted `(TermId, current fact count)` tag catalog.
+    pub const TAG_CATALOG: u16 = 60;
 }
 
 /// The callback [`Memory::emit_sections_from`] drives once per snapshot
@@ -524,6 +526,7 @@ impl<'a> Memory<'a> {
         f(kind::TAGS_HANDLES_POOL, &[&hp])?;
         f(kind::TAGS_CHUNKS_META, &[&cm])?;
         f(kind::TAGS_CHUNKS_POOL, &[&cp])?;
+        f(kind::TAG_CATALOG, &[&self.tag_catalog.dump(&self.terms)])?;
         let [hm, hp, cm, cp] = s.entity_facts.dump_sections();
         f(kind::ENTFACTS_HANDLES_META, &[&hm])?;
         f(kind::ENTFACTS_HANDLES_POOL, &[&hp])?;
@@ -759,6 +762,10 @@ impl<'a> Memory<'a> {
             section(&snap, kind::TAGS_CHUNKS_META)?,
             section(&snap, kind::TAGS_CHUNKS_POOL)?,
         )?;
+        mem.tag_catalog = match snap.section(kind::TAG_CATALOG) {
+            Some(bytes) => super::tags::TagCatalog::load(bytes, &mem.terms)?,
+            None => super::tags::TagCatalog::new(),
+        };
         mem.entity_facts = IdListIndex::load_sections(
             cfg.shards_entities,
             cfg.max_bytes,
@@ -876,6 +883,10 @@ impl<'a> Memory<'a> {
             section(&snap, kind::TAGS_CHUNKS_META)?,
             section(&snap, kind::TAGS_CHUNKS_POOL)?,
         )?;
+        mem.tag_catalog = match snap.section(kind::TAG_CATALOG) {
+            Some(bytes) => super::tags::TagCatalog::load(bytes, &mem.terms)?,
+            None => super::tags::TagCatalog::new(),
+        };
         mem.entity_facts = IdListIndex::load_sections_borrowed(
             cfg.shards_entities,
             cfg.max_bytes,
@@ -985,6 +996,7 @@ impl<'a> Memory<'a> {
         }
         mem.tombstones = mem.facts.iter().filter(|fact| fact.is_tombstone()).count();
         mem.validate_references()?;
+        mem.migrate_tag_catalog(snap.section(kind::TAG_CATALOG).is_some());
         Ok(mem)
     }
 
@@ -1129,6 +1141,7 @@ impl<'a> Memory<'a> {
     /// [`Error::Corrupt`] for the first inconsistency found.
     pub fn verify(&self) -> Result<(), Error> {
         self.verify_graph()?;
+        self.verify_tag_catalog()?;
         // Text: every stored blob is valid UTF-8. Accessors already tolerate
         // invalid text gracefully; this is the eager confirmation.
         for (_, text) in self.texts.iter() {
@@ -1164,6 +1177,39 @@ impl<'a> Memory<'a> {
         }
         if with_vec != vslots {
             return Err(Error::Corrupt("vector pool has orphan slots"));
+        }
+        Ok(())
+    }
+
+    /// Confirms that the compact derived catalog agrees with the authoritative
+    /// tag postings and current-fact state. This is intentionally part of the
+    /// explicit O(database) integrity sweep rather than the mmap open path.
+    fn verify_tag_catalog(&self) -> Result<(), Error> {
+        let mut active = 0usize;
+        for slot in self.tags_idx.slots() {
+            let count = self
+                .tags_idx
+                .entries(slot.key)
+                .filter(|(id, _)| {
+                    self.fact(*id)
+                        .is_some_and(|fact| !fact.is_tombstone() && !fact.is_closed())
+                })
+                .count();
+            let count = u32::try_from(count)
+                .map_err(|_| Error::Corrupt("tag catalog count exceeds u32"))?;
+            if count != 0 {
+                active += 1;
+            }
+            if self
+                .tag_catalog
+                .count(&self.terms, plugmem_arena::TermId(slot.key))
+                != count
+            {
+                return Err(Error::Corrupt("tag catalog disagrees with tag postings"));
+            }
+        }
+        if self.tag_catalog.dump(&self.terms).len() / 8 != active {
+            return Err(Error::Corrupt("tag catalog contains an unindexed tag"));
         }
         Ok(())
     }

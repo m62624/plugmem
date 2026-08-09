@@ -47,6 +47,10 @@ const res = await db.recall({ query: "tokio", k: 5 });
 console.log(res.rendered);   // paste this into the prompt
 // - [f0] user: the user prefers tokio (2026-08; active) #pref
 
+const tags = await db.listTags({ prefix: "pre", limit: 64 });
+console.log(tags.items);     // [{ name: "pref", count: 1 }]
+// await db.removeTag("pref"); // global: revises every current fact carrying it
+
 db.close();
 ```
 
@@ -201,6 +205,7 @@ only moves arguments and results across the boundary.
 | `rememberMany(args[])` | store a batch: one embedding round-trip, one journal sync |
 | `revise(id, args)` | close a fact and record its successor |
 | `forget(id)` | tombstone a fact; resolves with whether it was live |
+| `removeTag(tag)` | remove a tag from every current fact while preserving facts/history |
 | `link(args)` | upsert a typed edge, optionally with `provenance` |
 | `unlink(args)` | close the current edge; resolves with whether one was open |
 
@@ -211,6 +216,7 @@ only moves arguments and results across the boundary.
 | `recall(args?)` | ranked, fused, token-budgeted result (async) |
 | `get(id)` | one fact's full card, or `null` (sync) |
 | `tagsOf(id)` | that fact's tags (sync) |
+| `listTags(options?)` | bounded lexical page of current tags and counts (async) |
 | `stats()` | engine size counters (sync) |
 | `path()` | the file this handle resolved to (sync) |
 | `export()` | every open fact as one array (async, unbounded — see below) |
@@ -460,7 +466,7 @@ callback in the process. Anything that can do that runs on a libuv worker and
 returns a promise instead.
 
 Promises: `Plugmem.open`, `remember`, `rememberMany`, `revise`, `recall`,
-`forget`, `link`, `unlink`, `export`, `exportPage`, `verify`, `maintain`,
+`forget`, `removeTag`, `listTags`, `link`, `unlink`, `export`, `exportPage`, `verify`, `maintain`,
 `checkpoint`, every database verb on `WorkspaceMemory`, and every registry
 verb on `Workspace`.
 

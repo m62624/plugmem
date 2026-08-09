@@ -20,6 +20,32 @@ time).
 The core is agnostic: it does not know what a "user" or a "project" is — all
 names/types/tags are interned host strings.
 
+### Current tag catalogue
+
+Facts and their per-fact tag lists are authoritative. A derived catalogue keeps
+one `(TermId, current fact count)` entry for every tag used by at least one
+current, non-tombstoned fact. It lets a caller discover tags without scanning
+every fact or confusing tags with text/entity/relation terms in the shared
+interner.
+
+`list_tags` returns bounded pages in raw UTF-8 lexical order. Prefix matching is
+exact and case-sensitive. Its opaque cursor includes the database identity,
+prefix and a fingerprint of the current catalogue; when a write changes any tag
+count, continuing an old scan returns `StaleCursor` so a caller restarts instead
+of silently skipping or duplicating a tag.
+
+The snapshot stores the merged catalogue as 8 bytes per tag and reuses the
+interner's strings. Between checkpoints, changed counts live in a 64-entry
+sorted buffer and logarithmically many sorted runs. A write therefore never
+re-sorts the whole tag set; a page is a bounded k-way merge of the snapshot base
+and those runs.
+
+`remove_tag(tag)` is a bulk temporal update, not string deletion. Every current
+fact carrying the tag is closed and replaced by an otherwise-identical successor
+without it. Current recall and the catalogue stop showing the tag immediately;
+historical `as_of` queries retain the old classification and all facts remain.
+The interned string may remain as harmless historical residue.
+
 ## IDs
 
 All ids are `u32`, monotonically increasing, and **never reused** (the journal is
@@ -201,6 +227,8 @@ different `db_uuid` means a different database whose ids are not comparable.
 4. A slot's key prefix is not mutated after it is written to the arena.
 5. A fact's text ≤ `cfg.max_text` (default 4096 B); tags ≤ 32; edges per link ≤ 16 —
    guards against junk inserts, returned as typed errors, never panics.
+6. The derived tag catalogue equals counts recomputed from current facts; `verify`
+   checks this without putting a full scan on normal open or paging.
 
 ## Test plan
 

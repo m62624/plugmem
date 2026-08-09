@@ -68,6 +68,16 @@ pub const FORGET_TOOL: &str = "Tombstone fact `id` (physically purged at the nex
 `plugmem_maintain`). Returns whether the fact was live. Idempotent: forgetting an already-gone \
 fact is not an error.";
 
+/// `plugmem_tags` tool description.
+pub const TAGS_TOOL: &str = "List current tags and the number of current facts carrying each one. \
+The result is a bounded, lexically sorted page; pass `next_cursor` back as `cursor` to continue, \
+and use `prefix` to narrow discovery without loading the full catalogue.";
+
+/// `plugmem_remove_tag` tool description.
+pub const REMOVE_TAG_TOOL: &str = "Remove one tag from every current fact. Facts are revised, not \
+deleted: their text and other fields stay current, while historical as-of queries still see the \
+old tagged revisions. Returns the number of affected facts.";
+
 /// `plugmem_link` tool description.
 pub const LINK_TOOL: &str = "Upsert a typed edge `src -rel-> dst` between two entities (created \
 lazily). Edges feed the graph recall source. Time is the server's wall clock.";

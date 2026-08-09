@@ -18,10 +18,8 @@ description: >-
 
 # plugmem — long-term memory for agents
 
-plugmem is an embedded memory engine (the SQLite model: a library plus a
-file-backed local database — manifest, immutable snapshots, journal and lock;
-no server). You talk to it through these main
-verbs:
+plugmem is an embedded memory engine: a library plus a file-backed local
+database (snapshot, journal and lock), with no server. Its main verbs are:
 
 - **remember** — store one durable fact: short text, optional subject entity,
   tags, optional embedding vector, optional `valid_from`.
@@ -33,6 +31,9 @@ verbs:
 - **link** — create or update a typed relationship between two entities.
 - **unlink** — close a typed relationship for current recall while preserving
   its historical `as_of` interval.
+- **list tags** — discover current tags and counts in bounded lexical pages.
+- **remove tag** — remove one tag from every current fact by revising those
+  facts; current classification changes, facts and historical tags survive.
 
 ## When to remember
 
@@ -92,6 +93,24 @@ surfaces the tension and hands you the choice:
 When in doubt, prefer `revise` over `forget`: it corrects the record without
 destroying the "what was true then" answer.
 
+## Discovering and removing tags
+
+Do not guess which tags exist or inspect the general term count: text tokens,
+entities, relations and tags share that interner. Use the bounded tag catalogue:
+
+- CLI: `tags [--prefix P] [--cursor C] [--limit N]`, `remove-tag TAG`.
+- MCP: `plugmem_tags`, `plugmem_remove_tag`.
+- Node: `await db.listTags(options)`, `await db.removeTag(tag)`.
+- Python: `db.list_tags(...)`, `db.remove_tag(tag)`; use
+  `asyncio.to_thread` from an event loop.
+- Rust: `list_tags(TagQuery { .. })`, `remove_tag(now, tag)`.
+
+Pages are sorted by exact, case-sensitive UTF-8 name; default size is 64 and
+the hard maximum is 256. Pass the opaque cursor unchanged. If writes make it
+stale, restart from the first page. Global removal may touch many facts: it
+closes each current version and creates an otherwise-identical successor
+without the tag. Never use it when you meant to change only one fact.
+
 ## Temporality — two independent time axes
 
 plugmem is bitemporal. Keep the axes straight:
@@ -141,14 +160,10 @@ it was valid at that instant *and* had already been recorded by then. So an
 genuinely knew nothing then, and answering with today's knowledge would be the
 wrong answer to "what did I hold".
 
-## Sizing the block you paste
-
-The `rendered` block is what goes into your prompt, so its size is your
-context budget, not the engine's.
+## Sizing recalled context
 
 - **`--token-budget <n>`** (default 512) caps the block. Lower it when you are
-  pulling context alongside a large task; raise it when recall *is* the task.
-  `-k` caps the number of facts, this caps the text — set both.
+  `-k` caps facts; this caps rendered text.
 - **`--ef <n>`** widens the vector search beam (default: the configured
   `hnsw_ef_search`). Higher is more accurate and slower. It does nothing until
   the database is past the flat-search threshold, so reach for it only on a
@@ -237,6 +252,8 @@ MANDATORY.
   | `recall` | `recall ["<query>"] [--tag T]… [--entity E]… [--as-of MS] [--range FROM TO] [-k N] [--closed] [--token-budget N] [--ef N] [--graph-depth N] [--vector F32,…]` |
   | `revise` | `revise <id> "<text>" [same flags as remember]` |
   | `forget` | `forget <id>` |
+  | `tags` | `tags [--prefix P] [--cursor C] [--limit N]` |
+  | `remove-tag` | `remove-tag <tag>` |
   | `link` | `link <src> <rel> <dst> [--provenance FACT_ID]` |
   | `unlink` | `unlink <src> <rel> <dst>` |
   | `show` / `stats` | `show <id>` · `stats` |
@@ -286,9 +303,11 @@ MANDATORY.
 
 - **No shell, but your tools include `plugmem_recall` →** MCP. The server
   exposes, as tools: `plugmem_remember`, `plugmem_recall`, `plugmem_revise`,
-  `plugmem_forget`, `plugmem_link`, `plugmem_unlink`, `plugmem_show`, `plugmem_stats`,
+  `plugmem_forget`, `plugmem_tags`, `plugmem_remove_tag`, `plugmem_link`,
+  `plugmem_unlink`, `plugmem_show`, `plugmem_stats`,
   `plugmem_export`, `plugmem_maintain`, `plugmem_checkpoint`, `plugmem_verify`,
-  plus `plugmem_version` and `plugmem_about`. A read-only server adds
+  plus `plugmem_version` and `plugmem_about`. A read-only server keeps
+  `plugmem_tags`, adds
   `plugmem_generation` / `plugmem_refresh` and refuses the write verbs.
   (`scrub`, `recover` and `import` have no MCP tool. The first two are an
   operator's job on the server's own disk; the third needs a file the server can
@@ -397,7 +416,7 @@ comparison line:
 plugmem version check: skill <marker> vs engine <reported> → OK | MISMATCH
 ```
 
-<!-- skill-version: 0.8.0 -->
+<!-- skill-version: 0.9.0 -->
 
 If they differ in ANY way: **stop**, warn the user that skill and engine
 describe different functionality, and proceed only on their explicit

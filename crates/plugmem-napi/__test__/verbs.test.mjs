@@ -127,6 +127,32 @@ test("forget tombstones a live fact and reports freshness", async () => {
   });
 });
 
+test("listTags is bounded and removeTag preserves facts", async () => {
+  await withDb(async (db) => {
+    await db.rememberMany([
+      { text: "one", tags: ["drop", "keep"] },
+      { text: "two", tags: ["drop"] },
+      { text: "three", tags: ["project:plugmem"] },
+    ]);
+    const first = await db.listTags({ limit: 1 });
+    assert.deepEqual(first.items, [{ name: "drop", count: 2 }]);
+    const second = await db.listTags({ cursor: first.nextCursor, limit: 2 });
+    assert.deepEqual(second.items.map(({ name }) => name), ["keep", "project:plugmem"]);
+    assert.deepEqual(
+      (await db.listTags({ prefix: "project" })).items.map(({ name }) => name),
+      ["project:plugmem"],
+    );
+
+    assert.deepEqual(await db.removeTag("drop"), { affected: 2 });
+    assert.deepEqual((await db.listTags()).items.map(({ name }) => name), ["keep", "project:plugmem"]);
+    assert.equal((await db.export()).length, 3, "removing a tag keeps every current fact");
+    await assert.rejects(
+      () => db.listTags({ cursor: first.nextCursor }),
+      (err) => err.code === "PLUGMEM_STALE_CURSOR",
+    );
+  });
+});
+
 test("link upserts and unlink closes a typed edge", async () => {
   await withDb(async (db) => {
     await assert.doesNotReject(() => db.link({ src: "user", rel: "works_at", dst: "acme" }));

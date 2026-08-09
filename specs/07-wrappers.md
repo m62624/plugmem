@@ -33,6 +33,8 @@ Commands (all read verbs take `--json`; human output is the default):
 | `recall [QUERY] [--tag]… [--entity]… [--as-of TS] [--range A B] [-k N] [--closed]` | recall; human output is the `rendered` block |
 | `revise ID "text" […]` | revise (same flags as remember) |
 | `forget ID` | forget |
+| `tags [--prefix P] [--cursor C] [--limit N]` | one bounded lexical page of current tags and counts |
+| `remove-tag TAG` | remove a tag from every current fact by creating tag-free successors |
 | `link SRC REL DST` | upsert a typed edge |
 | `show ID` | a fact's full card (both time axes, state, metadata) |
 | `stats` | sizes, counters, identity |
@@ -50,7 +52,8 @@ process per command): no work before the command is parsed.
 
 stdio JSON-RPC (newline-delimited, one message per line). The tools mirror the core:
 `plugmem_remember`, `plugmem_recall`, `plugmem_revise`, `plugmem_forget`,
-`plugmem_link`, `plugmem_show`, `plugmem_stats`, `plugmem_export` (`{ facts, edges }` —
+`plugmem_link`, `plugmem_show`, `plugmem_stats`, `plugmem_tags`,
+`plugmem_remove_tag`, `plugmem_export` (`{ facts, edges }` —
 an edge belongs to no single fact, so facts alone lose the graph), `plugmem_maintain`,
 `plugmem_checkpoint`, `plugmem_verify`, plus `plugmem_version` and `plugmem_about`. A
 read-only server adds `plugmem_generation` / `plugmem_refresh` (cross-process freshness)
@@ -79,7 +82,9 @@ the identically-named host verb, and it is the *whole* of `Database`: `exportEdg
 `AGENTS.md`. The one thing host has and this does not is `import`, which is not a host
 verb at all — JSONL is a format the CLI defines. Inputs/outputs are
 `napi(object)` mapped to hand-written TypeScript interfaces; the heavy verbs
-(`maintain`/`checkpoint`) are async on libuv. Node opens a file directly (real file
+(`maintain`/`checkpoint`) are async on libuv. `listTags` is also async because
+a page may acquire a cold workspace lease, and `removeTag` is async because it
+can touch the whole database; neither may block the JavaScript event loop. Node opens a file directly (real file
 I/O), so there is no JS storage bridge. `Workspace.memory(name)` returns a
 lock-free logical `WorkspaceMemory`; every database verb obtains a scoped host
 lease on its libuv worker and has the same typed result as the direct writer
@@ -102,7 +107,7 @@ purpose — one `export_page` and no `export_each`, one `maintain(mode)` and no
 third surface derived from host would disagree with the second. Verified rather
 than asserted: `tests/test_parity.py` reads napi's generated `index.d.ts` and
 its `error.rs`, maps camelCase to snake_case, and fails in both directions.
-`Plugmem` 23 verbs, `Scrub` 3, `Workspace` 12, `WorkspaceMemory` 18, plus the
+`Plugmem` 25 verbs, `Scrub` 3, `Workspace` 12, `WorkspaceMemory` 20, plus the
 module functions.
 
 **No async layer, by the same reasoning that produced one in napi.** Node has a
@@ -110,7 +115,9 @@ single thread that runs JavaScript, so the blocking verbs had to move to a libuv
 worker. The Python equivalent of that thread is the GIL, and the equivalent move
 is to release it: every verb is synchronous with its body inside
 `Python::detach`. That is what makes `asyncio.to_thread(db.recall, ...)` and a
-`ThreadPoolExecutor` correct without a runtime to bridge.
+`ThreadPoolExecutor` correct without a runtime to bridge. `list_tags` and the
+O(database) `remove_tag` follow the same rule, so even bulk tag removal does not
+hold the GIL or starve an asyncio loop that delegates it with `to_thread`.
 
 Locks appear where napi needs none, and they guard the **handle slot**, not the
 engine: host's `Database` and `Workspace` synchronize themselves, but several

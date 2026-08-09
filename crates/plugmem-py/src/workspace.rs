@@ -37,7 +37,7 @@ use crate::error::{self, Result};
 use crate::scrub::Scrub;
 use crate::types::{
     DbEntry, ExportPage, ExportedEdge, ExportedFact, FactSnapshot, MaintainReport, RecallResult,
-    ReindexReport, RememberOutcome, Stats, WorkspaceProblem,
+    ReindexReport, RememberOutcome, RemoveTagReport, Stats, TagPage, WorkspaceProblem,
 };
 
 /// Shared owner of the host workspace.
@@ -329,6 +329,39 @@ impl WorkspaceMemory {
     fn tags_of(&self, py: Python<'_>, id: u32) -> Result<Vec<String>> {
         let target = self.target()?;
         py.detach(move || target.with_database(IfMissing::Fail, |db| Ok(db.tags_of(FactId(id)))))
+    }
+
+    #[pyo3(signature = (*, prefix=None, cursor=None, limit=0))]
+    fn list_tags(
+        &self,
+        py: Python<'_>,
+        prefix: Option<String>,
+        cursor: Option<String>,
+        limit: usize,
+    ) -> Result<TagPage> {
+        let target = self.target()?;
+        let page = py.detach(move || {
+            target.with_database(IfMissing::Fail, |db| {
+                db.list_tags(plugmem_host::TagQuery {
+                    prefix: prefix.as_deref(),
+                    cursor: cursor.as_deref(),
+                    limit,
+                })
+                .map_err(error::engine)
+            })
+        })?;
+        TagPage::build(py, page)
+    }
+
+    fn remove_tag(&self, py: Python<'_>, tag: String) -> Result<RemoveTagReport> {
+        let target = self.target()?;
+        let now = now_ms();
+        let report = py.detach(move || {
+            target.with_database(IfMissing::Create, |db| {
+                db.remove_tag(now, &tag).map_err(error::engine)
+            })
+        })?;
+        Ok(RemoveTagReport::from(report))
     }
 
     fn stats(&self, py: Python<'_>) -> Result<Stats> {

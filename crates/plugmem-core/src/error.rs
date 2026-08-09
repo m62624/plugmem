@@ -48,6 +48,10 @@ pub enum Error {
     #[error("fact {} is already closed", (.0).0)]
     AlreadyClosed(FactId),
 
+    /// A paginated read continued after the underlying catalog changed.
+    #[error("tag cursor is stale; restart without a cursor")]
+    StaleCursor,
+
     /// The supplied `Config` is invalid, or incompatible with the config
     /// stored in an existing database (changing `dim` or shard counts
     /// requires a reindex, not an open).

@@ -328,6 +328,36 @@ impl<'a> VecPool<'a> {
         index
     }
 
+    /// Appends an exact copy of one of this pool's slots for a new owning
+    /// fact. Retag revisions preserve embeddings without a model round trip or
+    /// a lossy dequantize/requantize cycle.
+    pub(crate) fn clone_slot_for_fact(&mut self, fact: FactId, source: u32) -> Result<u32, Error> {
+        let stride = self.stride();
+        let pool_len = self.pool_len();
+        if source as usize >= self.len() {
+            return Err(Error::Corrupt("retag vector slot is out of range"));
+        }
+        if pool_len + stride > self.max_bytes {
+            return Err(Error::CapacityExceeded { what: "vectors" });
+        }
+        let index = u32::try_from(pool_len / stride).map_err(|_| Error::CapacityExceeded {
+            what: "vector slots",
+        })?;
+        let source_start = source as usize * stride;
+        if source_start < self.base.len() {
+            self.tail
+                .extend_from_slice(&self.base[source_start..source_start + stride]);
+        } else {
+            let at = source_start - self.base.len();
+            let dst = self.tail.len();
+            self.tail.resize(dst + stride, 0);
+            self.tail.copy_within(at..at + stride, dst);
+        }
+        let at = self.tail.len() - stride;
+        self.tail[at..at + FACT_BYTES].copy_from_slice(&fact.0.to_le_bytes());
+        Ok(index)
+    }
+
     /// The exact quantized cosine of two slots by their scales and i8
     /// components.
     fn cosine_at(&self, a: usize, b: usize) -> f32 {

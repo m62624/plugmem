@@ -10,7 +10,7 @@ Global options include `--db`, `--config`, and `--json`. The default database pa
 
 The commands cover:
 
-- `remember`, `recall`, `revise`, `forget`, and `link`;
+- `remember`, `recall`, `revise`, `forget`, tag listing/removal, and `link`;
 - `show`, `stats`, `export`, and `import`;
 - `maintain`, `checkpoint`, `verify`, `scrub`, and `recover`;
 - `repl`, including an explicit read-only mode.

@@ -17,6 +17,7 @@
 //! | edges without history | the whole edge-history arena | one open version synthesized per current edge |
 //! | edges keyed by triple | the time-ordered history key | every version re-keyed by `valid_from`; current edges re-derived from the open ones |
 //! | 8-byte per-document BM25 records | the term-set summary | widened, marked unknown; `maintain` fills them from the postings |
+//! | no tag-catalog section | bounded tag discovery index | rebuilt from authoritative tag postings and current facts |
 //!
 //! The legacy record layouts live here as their own [`Slot`] types. They are
 //! deliberately duplicated rather than shared with [`crate::model`]: the
@@ -189,6 +190,33 @@ impl Slot for LegacyEdgeHistorySlot {
 }
 
 impl Memory<'_> {
+    /// Rebuilds the optional derived tag catalogue for an image written before
+    /// section kind 60 existed. The next checkpoint persists the compact
+    /// sorted section; interned tag strings and fact tag lists never move.
+    pub(super) fn migrate_tag_catalog(&mut self, has_catalog: bool) -> bool {
+        if has_catalog {
+            return false;
+        }
+        let mut counts = alloc::vec::Vec::with_capacity(self.tags_idx.keys());
+        for slot in self.tags_idx.slots() {
+            let count = self
+                .tags_idx
+                .entries(slot.key)
+                .filter(|(id, _)| {
+                    self.fact(*id)
+                        .is_some_and(|fact| !fact.is_tombstone() && !fact.is_closed())
+                })
+                .count();
+            if let Ok(count) = u32::try_from(count)
+                && count != 0
+            {
+                counts.push((TermId(slot.key), count));
+            }
+        }
+        self.tag_catalog = super::tags::TagCatalog::from_counts(counts, &self.terms);
+        true
+    }
+
     /// Rebuilds the edge arenas from a pre-time-ordered image, if this
     /// snapshot is one. Returns `true` when a migration ran.
     ///

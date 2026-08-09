@@ -4,7 +4,10 @@
 
 `plugmem-host` is the native `std` layer around `plugmem-core`. It owns filesystem paths, generation files, manifest publication, append-only journals, locks, mmap read-only access, settings, embedders, checkpointing, verification, and salvage recovery.
 
-The public writer is `Database`; the zero-copy reader is `ReadOnlyDatabase`. Core logic must remain in `plugmem-core`; this crate coordinates it with durable storage and process-level concurrency.
+The public writer is `Database`; the zero-copy reader is `ReadOnlyDatabase`.
+Both expose bounded tag listing; only the writer exposes global tag removal.
+Core logic must remain in `plugmem-core`; this crate coordinates it with durable
+storage and process-level concurrency.
 
 ## File and generation model
 
