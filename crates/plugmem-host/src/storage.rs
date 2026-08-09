@@ -109,6 +109,11 @@ impl FileStorage {
 
         let current_gen = read_manifest(&base)?.unwrap_or(0);
 
+        // A crash during explicit reembed may leave its private frozen source.
+        // It is never published and the exclusive writer lock proves nobody
+        // can still be using it.
+        let _ = std::fs::remove_file(suffixed(&base, "reembed-source.tmp"));
+
         // Crash recovery + GC: drop unpublished orphan generations and staging
         // tmps, and reclaim any unpinned superseded generation. Safe with live
         // readers — reclaim is pin-aware (a reader's shared lock keeps its
@@ -199,6 +204,59 @@ impl FileStorage {
         Ok(())
     }
 
+    /// Opens a next-generation sink that may be filled without borrowing this
+    /// storage. Explicit reembed uses it while the database state lock is free:
+    /// model/network latency must not hold an engine lock.
+    pub(crate) fn begin_detached_snapshot(&self) -> Result<DetachedSnapshot, HostError> {
+        let generation = self.next_gen();
+        let tmp = gen_tmp_path(&self.base, generation);
+        let file = File::create(&tmp).map_err(|e| HostError::io(&tmp, e))?;
+        Ok(DetachedSnapshot {
+            generation,
+            sink: FileSink::new(file, tmp),
+        })
+    }
+
+    /// Writes an unpublished private source image for explicit reembed. It is
+    /// not a generation and can never be named by the manifest; dropping the
+    /// returned guard removes it.
+    pub(crate) fn stage_reembed_source(
+        &self,
+        write: impl FnOnce(&mut FileSink) -> Result<(), HostError>,
+    ) -> Result<PreparedSource, HostError> {
+        let path = suffixed(&self.base, "reembed-source.tmp");
+        let file = File::create(&path).map_err(|e| HostError::io(&path, e))?;
+        let mut sink = FileSink::new(file, path.clone());
+        write(&mut sink)?;
+        let file = sink.finish()?;
+        file.sync_all().map_err(|e| HostError::io(&path, e))?;
+        Ok(PreparedSource { path: Some(path) })
+    }
+
+    /// Publishes a detached snapshot prepared for this storage's still-current
+    /// next generation. A mismatch means another publisher bypassed the
+    /// reembed barrier and is refused rather than overwriting its generation.
+    pub(crate) fn commit_detached_snapshot(
+        &mut self,
+        mut prepared: PreparedSnapshot,
+    ) -> Result<(), HostError> {
+        if prepared.generation != self.next_gen() {
+            return Err(HostError::Engine(Error::Invalid(
+                "staged snapshot generation became stale",
+            )));
+        }
+        let tmp = prepared.tmp.take().ok_or(HostError::Engine(Error::Invalid(
+            "prepared snapshot has already been published",
+        )))?;
+        let genp = gen_path(&self.base, prepared.generation);
+        std::fs::rename(&tmp, &genp).map_err(|e| HostError::io(&genp, e))?;
+        sync_dir(&self.base)?;
+        publish_manifest(&self.base, &self.manifest_tmp, prepared.generation)?;
+        self.current_gen = prepared.generation;
+        let _ = sweep_generations(&self.base, self.current_gen);
+        Ok(())
+    }
+
     /// Publishes the staged generation: rename its tmp to the immutable
     /// `snap.<N+1>`, repoint the manifest, then GC superseded generations
     /// (pin-aware). Call only after [`FileStorage::stage_snapshot`] and after
@@ -215,6 +273,78 @@ impl FileStorage {
         // keeps it until it drops). Best-effort — leftovers go on the next pass.
         let _ = sweep_generations(&self.base, self.current_gen);
         Ok(())
+    }
+}
+
+/// Streaming next-generation file detached from [`FileStorage`].
+pub(crate) struct DetachedSnapshot {
+    generation: u64,
+    sink: FileSink,
+}
+
+impl DetachedSnapshot {
+    /// Flushes and fsyncs the completed image, making it ready for the short
+    /// atomic publication step under the database lock.
+    pub(crate) fn prepare(self) -> Result<PreparedSnapshot, HostError> {
+        let generation = self.generation;
+        let tmp = self.sink.path.clone();
+        let file = self.sink.finish()?;
+        file.sync_all().map_err(|e| HostError::io(&tmp, e))?;
+        Ok(PreparedSnapshot {
+            generation,
+            tmp: Some(tmp),
+        })
+    }
+}
+
+impl SnapshotSink for &mut DetachedSnapshot {
+    fn write(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        self.sink.buf.write_all(bytes).map_err(sink_io)
+    }
+
+    fn patch(&mut self, at: u64, bytes: &[u8]) -> Result<(), Error> {
+        self.sink.buf.flush().map_err(sink_io)?;
+        let file = self.sink.buf.get_mut();
+        file.seek(SeekFrom::Start(at)).map_err(sink_io)?;
+        file.write_all(bytes).map_err(sink_io)?;
+        file.seek(SeekFrom::End(0)).map_err(sink_io)?;
+        Ok(())
+    }
+}
+
+/// Durable staged snapshot not yet named by the manifest. Dropping an
+/// unpublished one cleans its temp file after any reembed failure.
+pub(crate) struct PreparedSnapshot {
+    generation: u64,
+    tmp: Option<PathBuf>,
+}
+
+/// A frozen source image that is never published.
+pub(crate) struct PreparedSource {
+    path: Option<PathBuf>,
+}
+
+impl PreparedSource {
+    pub(crate) fn path(&self) -> Result<&Path, HostError> {
+        self.path.as_deref().ok_or(HostError::Engine(Error::Invalid(
+            "reembed source has already been discarded",
+        )))
+    }
+}
+
+impl Drop for PreparedSource {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+impl Drop for PreparedSnapshot {
+    fn drop(&mut self) {
+        if let Some(path) = self.tmp.take() {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
@@ -657,6 +787,15 @@ impl Scratch for FileScratch {
     }
 
     fn freeze(&mut self) -> Result<&[u8], HostError> {
+        if self.len == 0 {
+            if let Some(writer) = self.writer.take() {
+                let file = writer
+                    .into_inner()
+                    .map_err(|e| HostError::io(&self.path, e.into_error()))?;
+                file.sync_all().map_err(|e| HostError::io(&self.path, e))?;
+            }
+            return Ok(&[]);
+        }
         if self.map.is_none() {
             // Flush and fsync the staged bytes, then map the file fresh.
             let writer = self

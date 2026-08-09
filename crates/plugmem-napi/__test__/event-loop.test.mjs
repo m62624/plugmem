@@ -159,6 +159,9 @@ test("workspace leases never wait on the event loop and capacity fails fast", as
     });
     await active;
     assert.equal(loopTurned, true, "the JS loop ran while the lease was active");
+    const workspaceReport = await ws.memory("active").reembed(1);
+    assert.equal(workspaceReport.newSpace, "mock");
+    assert.equal(workspaceReport.embedded, 1);
     assert.equal(ws.release("active"), true);
   } finally {
     answer();
@@ -343,10 +346,12 @@ test("an embedder on this very event loop can answer, and is not locked", async 
   const DELAY = 150;
   let peak = 0;
   let inFlight = 0;
+  let onRequest = () => {};
   const server = createServer((req, res) => {
     let body = "";
     req.on("data", (chunk) => (body += chunk));
     req.on("end", () => {
+      onRequest();
       inFlight++;
       if (inFlight > peak) peak = inFlight;
       const inputs = JSON.parse(body).input;
@@ -387,6 +392,27 @@ test("an embedder on this very event loop can answer, and is not locked", async 
       `remember held the JS thread for ${remembered.held.toFixed(0)} of ` +
         `${remembered.total.toFixed(0)} ms across the embedder call`,
     );
+
+    const reembedded = await heldFor(() => db.reembed(1));
+    assert.equal(reembedded.value.newSpace, "mock");
+    assert.equal(reembedded.value.embedded, 1);
+    assert.ok(
+      reembedded.held <= budget(reembedded.total, floor),
+      `reembed held the JS thread for ${reembedded.held.toFixed(0)} of ` +
+        `${reembedded.total.toFixed(0)} ms across the model and snapshot work`,
+    );
+
+    let arrived;
+    const reembedArrived = new Promise((resolve) => (arrived = resolve));
+    onRequest = arrived;
+    const pendingReembed = db.reembed(1);
+    await reembedArrived;
+    await assert.rejects(
+      () => db.remember({ text: "cannot cross frozen source", vector: Array(DIM).fill(0.1) }),
+      (err) => err.code === "PLUGMEM_BUSY",
+    );
+    await pendingReembed;
+    onRequest = () => {};
 
     const single = await heldFor(() => db.recall({ query: "when does it ship", k: 3 }));
     assert.ok(

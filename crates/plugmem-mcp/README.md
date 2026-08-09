@@ -198,7 +198,7 @@ sets `isError: true` so the model can read and react to it.
 | `plugmem_show` | one fact's full card by `id` |
 | `plugmem_stats` | engine size counters |
 | `plugmem_export` | the whole memory as `{ facts, edges }` — an edge belongs to no single fact, so facts alone would lose the graph |
-| `plugmem_maintain` | run policy-driven maintenance: no-op, compact, reindex or optimize vectors. Optional `mode`: `auto` (default), `compact`, `reindex-text`, `optimize-vectors`, `full` |
+| `plugmem_maintain` | policy maintenance, or explicit vector replacement. `mode`: `auto` (default), `compact`, `reindex-text`, `optimize-vectors`, `full`, or `reembed`; only `reembed` calls the configured model, in bounded `batch_size` requests |
 | `plugmem_checkpoint` | flush the journal into a fresh snapshot |
 | `plugmem_verify` | the integrity check an open defers: content plus graph consistency |
 | `plugmem_version` / `plugmem_about` | the running version; a pointer to the plugmem skill |

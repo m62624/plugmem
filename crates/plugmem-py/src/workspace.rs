@@ -37,7 +37,8 @@ use crate::error::{self, Result};
 use crate::scrub::Scrub;
 use crate::types::{
     DbEntry, ExportPage, ExportedEdge, ExportedFact, FactSnapshot, MaintainReport, RecallResult,
-    ReindexReport, RememberOutcome, RemoveTagReport, Stats, TagPage, WorkspaceProblem,
+    ReembedReport, ReindexReport, RememberOutcome, RemoveTagReport, Stats, TagPage,
+    WorkspaceProblem,
 };
 
 /// Shared owner of the host workspace.
@@ -456,6 +457,22 @@ impl WorkspaceMemory {
             })
         })?;
         Ok(MaintainReport::from(report))
+    }
+
+    #[pyo3(signature = (batch_size=plugmem_host::DEFAULT_REEMBED_BATCH_SIZE))]
+    fn reembed(&self, py: Python<'_>, batch_size: usize) -> Result<ReembedReport> {
+        if batch_size == 0 {
+            return Err(error::invalid_arg("batch_size must be greater than zero"));
+        }
+        let target = self.target()?;
+        let now = now_ms();
+        let report = py.detach(move || {
+            target.with_database(IfMissing::Create, |db| {
+                db.reembed_with_batch(now, batch_size)
+                    .map_err(error::engine)
+            })
+        })?;
+        Ok(ReembedReport::from(report))
     }
 
     fn checkpoint(&self, py: Python<'_>) -> Result<()> {

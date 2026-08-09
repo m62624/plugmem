@@ -161,7 +161,20 @@ fn run_parsed(cli: Cli, out: &mut impl Write) -> u8 {
         };
         match Database::open_readonly(&path, settings.config.clone()) {
             Ok(ro) => {
-                return execute_ro(&ro, &cli.command, recall_vector.as_deref(), cli.json, out);
+                let recall_space = recall_vector.as_ref().and_then(|_| {
+                    settings
+                        .embedder
+                        .as_ref()
+                        .map(|embedder| embedder.space_id())
+                });
+                return execute_ro(
+                    &ro,
+                    &cli.command,
+                    recall_vector.as_deref(),
+                    recall_space,
+                    cli.json,
+                    out,
+                );
             }
             Err(HostError::Locked { path }) => return report_locked(&path),
             // Any other failure — a missing snapshot (fresh db), a dirty
@@ -322,12 +335,16 @@ fn execute_ro(
     ro: &ReadOnlyDatabase,
     cmd: &Command,
     recall_vector: Option<&[f32]>,
+    recall_space: Option<&str>,
     json: bool,
     out: &mut impl Write,
 ) -> u8 {
     match cmd {
         Command::Recall { .. } => {
-            match with_recall_query(cmd, now_ms(), recall_vector, |q| ro.recall(q)) {
+            match with_recall_query(cmd, now_ms(), recall_vector, |q| match recall_space {
+                Some(space) => ro.recall_in_space(q, space),
+                None => ro.recall(q),
+            }) {
                 Ok(res) => {
                     render_recall(&res, json, out);
                     0
@@ -530,7 +547,34 @@ fn execute(
             db.export_edges_each(|src, rel, dst, fact| write_export_edge(out, src, rel, dst, fact));
             Ok(0)
         }
-        Command::Maintain { mode } => {
+        Command::Maintain {
+            mode,
+            reembed,
+            batch_size,
+        } => {
+            if *reembed {
+                let report = db.reembed_with_batch(
+                    now,
+                    batch_size.unwrap_or(plugmem_host::DEFAULT_REEMBED_BATCH_SIZE),
+                )?;
+                if json {
+                    writeln!(out, "{}", serde_json::to_string(&report).unwrap()).ok();
+                } else {
+                    writeln!(
+                        out,
+                        "reembedded: {} facts, {} -> {} dimensions, {:?} -> {:?}, {} vector bytes, hnsw {}",
+                        report.embedded,
+                        report.previous_dim,
+                        report.new_dim,
+                        report.previous_space,
+                        report.new_space,
+                        report.vector_bytes,
+                        report.hnsw_indexed,
+                    )
+                    .ok();
+                }
+                return Ok(0);
+            }
             let report = db.maintain_with_options(now, maintenance_options(*mode))?;
             if json {
                 writeln!(
@@ -942,7 +986,13 @@ fn run_repl_ro_line(
             return;
         }
     };
-    let _ = execute_ro(ro, &cmd, recall_vector.as_deref(), json, out);
+    let recall_space = recall_vector.as_ref().and_then(|_| {
+        settings
+            .embedder
+            .as_ref()
+            .map(|embedder| embedder.space_id())
+    });
+    let _ = execute_ro(ro, &cmd, recall_vector.as_deref(), recall_space, json, out);
 }
 
 /// Embeds a `recall` command's text query into a vector using the configured
@@ -1624,6 +1674,10 @@ mod tests {
     /// A stub embedder returning a fixed vector per input — no network.
     struct StubEmbedder;
     impl plugmem_host::Embedder for StubEmbedder {
+        fn space_id(&self) -> &str {
+            "cli-stub"
+        }
+
         fn dim(&self) -> usize {
             3
         }
@@ -2072,12 +2126,70 @@ mod tests {
             &db,
             &Command::Maintain {
                 mode: MaintainMode::Auto,
+                reembed: false,
+                batch_size: None,
             },
             false,
             3_000,
         );
         assert_eq!(code, 0);
         assert!(out.contains("purged 1"), "{out}");
+    }
+
+    #[test]
+    fn explicit_reembed_has_human_and_json_reports() {
+        let (plain, tmp) = TempDb::open();
+        let path = tmp.0.join("m.plugmem");
+        drop(plain);
+        let mut config = Config::default();
+        config.dim = 3;
+        let (db, _) = Database::builder(config)
+            .embedder(Box::new(StubEmbedder))
+            .open(path)
+            .unwrap();
+        run_cmd(&db, &remember("vector fact", None, &["kept"]), false, 1);
+
+        let command = Command::Maintain {
+            mode: MaintainMode::Auto,
+            reembed: true,
+            batch_size: Some(1),
+        };
+        let (code, human) = run_cmd(&db, &command, false, 2);
+        assert_eq!(code, 0);
+        assert!(human.contains("reembedded: 1 facts"));
+        let (code, json) = run_cmd(&db, &command, true, 3);
+        assert_eq!(code, 0);
+        let report: serde_json::Value = serde_json::from_str(json.trim()).unwrap();
+        assert_eq!(report["new_space"], "cli-stub");
+        assert_eq!(report["embedded"], 1);
+    }
+
+    #[test]
+    fn readonly_cli_refuses_a_same_dimension_different_space() {
+        let (plain, tmp) = TempDb::open();
+        let path = tmp.0.join("m.plugmem");
+        drop(plain);
+        let mut config = Config::default();
+        config.dim = 3;
+        let (db, _) = Database::builder(config.clone())
+            .embedder(Box::new(StubEmbedder))
+            .open(&path)
+            .unwrap();
+        db.remember(RememberInput::text(1, "stored vector"))
+            .unwrap();
+        db.checkpoint(2).unwrap();
+        let ro = Database::open_readonly(&path, config).unwrap();
+        let cmd = recall_cmd(Some("stored"));
+        let mut out = Vec::new();
+        let code = execute_ro(
+            &ro,
+            &cmd,
+            Some(&[0.1, 0.2, 0.3]),
+            Some("other-model"),
+            false,
+            &mut out,
+        );
+        assert_eq!(code, 2);
     }
 
     #[test]
@@ -2267,6 +2379,8 @@ mod tests {
             &db,
             &Command::Maintain {
                 mode: MaintainMode::Auto,
+                reembed: false,
+                batch_size: None,
             },
             true,
             3_000,
@@ -2530,20 +2644,26 @@ mod tests {
         let ro = Database::open_readonly(&path, Config::default()).unwrap();
 
         let mut out = Vec::new();
-        assert_eq!(execute_ro(&ro, &Command::Stats, None, true, &mut out), 0);
+        assert_eq!(
+            execute_ro(&ro, &Command::Stats, None, None, true, &mut out),
+            0
+        );
         let stats: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(stats["facts"], 1);
 
         let mut out = Vec::new();
         assert_eq!(
-            execute_ro(&ro, &Command::Show { id: 0 }, None, false, &mut out),
+            execute_ro(&ro, &Command::Show { id: 0 }, None, None, false, &mut out),
             0
         );
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("readonly tokio fact"), "{text}");
 
         let mut out = Vec::new();
-        assert_eq!(execute_ro(&ro, &Command::Export, None, false, &mut out), 0);
+        assert_eq!(
+            execute_ro(&ro, &Command::Export, None, None, false, &mut out),
+            0
+        );
         let exported: serde_json::Value =
             serde_json::from_str(String::from_utf8(out).unwrap().lines().next().unwrap()).unwrap();
         assert_eq!(exported["text"], "readonly tokio fact");
@@ -2562,12 +2682,15 @@ mod tests {
             graph_depth: None,
             vector: Vec::new(),
         };
-        assert_eq!(execute_ro(&ro, &recall, None, false, &mut out), 0);
+        assert_eq!(execute_ro(&ro, &recall, None, None, false, &mut out), 0);
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("tokio"), "{text}");
 
         let mut out = Vec::new();
-        assert_eq!(execute_ro(&ro, &Command::Verify, None, true, &mut out), 0);
+        assert_eq!(
+            execute_ro(&ro, &Command::Verify, None, None, true, &mut out),
+            0
+        );
         let verify: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(verify["ok"], true);
     }

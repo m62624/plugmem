@@ -98,16 +98,17 @@ no single fact, so facts alone lose the graph. The counterpart of the CLI's JSON
 for backup or inspection.";
 
 /// `plugmem_maintain` tool description.
-pub const MAINTAIN_TOOL: &str = "Run policy-driven maintenance: no-op when nothing is pending, \
-purge tombstoned facts, compact storage, reindex text when needed and advance the vector index. \
-Returns a report with purge, byte and maintenance-action counters. Time is the server's wall clock.";
+pub const MAINTAIN_TOOL: &str = "Run policy-driven maintenance, or explicitly replace the whole \
+vector axis with the configured embedder using mode `reembed`. Automatic maintenance never calls \
+the model. Returns the corresponding typed report. Time is the server's wall clock.";
 
 /// The `mode` argument of `plugmem_maintain`.
 pub const ARG_MAINTAIN_MODE: &str = "How much work to do. `auto` (the default) does only what is \
 pending and is cheap enough to run often. `compact` purges tombstones and compacts storage; \
 `reindex-text` rebuilds the text index from the stored text; `optimize-vectors` builds or advances \
-the vector graph; `full` rebuilds everything and repacks the edge arenas, which is O(database) \
-work. No mode ever drops a fact revision or an edge version.";
+the vector graph; `full` rebuilds everything and repacks the edge arenas. `reembed` is the only \
+choice that calls the configured embedding provider and atomically replaces every stored vector. \
+No choice drops a fact revision or an edge version.";
 
 /// `plugmem_checkpoint` tool description.
 pub const CHECKPOINT_TOOL: &str = "Flush the journal into a fresh snapshot and clear it, leaving \

@@ -59,11 +59,7 @@ class Handler(BaseHTTPRequestHandler):
         # rather than trusting arrival order, so a response without one is
         # refused with "embedding without an index".
         payload = json.dumps(
-            {
-                "data": [
-                    {"index": i, "embedding": [0.1] * DIM} for i in range(count)
-                ]
-            }
+            {"data": [{"index": i, "embedding": [0.1] * DIM} for i in range(count)]}
         ).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -90,8 +86,7 @@ def embedder_url() -> str:
 def test_remember_releases_the_interpreter(embedder_url: str, tmp_path) -> None:
     config = tmp_path / "config.toml"
     config.write_text(
-        f'[engine]\ndim = {DIM}\n[embedder]\n'
-        f'url = "{embedder_url}"\nmodel = "test"\n',
+        f'[engine]\ndim = {DIM}\n[embedder]\nurl = "{embedder_url}"\nmodel = "test"\n',
         encoding="utf-8",
     )
     db_path = tmp_path / "concurrent.plugmem"

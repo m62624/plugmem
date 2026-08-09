@@ -1261,6 +1261,50 @@ mod tests {
     }
 
     #[test]
+    fn auto_maintain_preserves_scoped_workspace_ownership_and_tag_catalogue() {
+        let tmp = TempDir::new("pool-auto-maintain");
+        let open: Opener = Box::new(|path| {
+            Ok(Database::builder(crate::Config::default())
+                .maintain_every_forgets(1)
+                .open(path)?
+                .0)
+        });
+        let ws = Workspace::new(
+            WorkspaceLayout::new(&tmp.0),
+            open,
+            WorkspaceLimits {
+                max_open: 1,
+                idle_timeout_ms: 0,
+            },
+        );
+        let chat = name("chat");
+        let id = {
+            let lease = ws.lease(&chat, 1, IfMissing::Create).unwrap();
+            lease
+                .remember(crate::RememberInput {
+                    tags: &["temporary"],
+                    ..crate::RememberInput::text(1, "short lived")
+                })
+                .unwrap()
+                .id
+        };
+        {
+            let lease = ws.lease(&chat, 2, IfMissing::Fail).unwrap();
+            assert!(lease.forget(2, id).unwrap());
+            assert_eq!(lease.stats().tombstones, 0, "auto maintain purged it");
+            assert!(
+                lease
+                    .list_tags(crate::TagQuery::default())
+                    .unwrap()
+                    .items
+                    .is_empty()
+            );
+        }
+        assert!(ws.release(&chat).unwrap());
+        assert!(Database::open(ws.layout().path_of(&chat), crate::Config::default()).is_ok());
+    }
+
+    #[test]
     fn dropping_a_lease_after_unwind_makes_the_entry_available_again() {
         let tmp = TempDir::new("pool-lease-unwind");
         let (ws, _) = workspace(

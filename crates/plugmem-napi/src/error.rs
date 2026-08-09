@@ -80,6 +80,7 @@ pub fn invalid_arg(message: impl Into<String>) -> Error {
 pub fn engine(e: HostError) -> Error {
     let status = match &e {
         HostError::Engine(plugmem_host::Error::StaleCursor) => code::STALE_CURSOR,
+        HostError::ReembedBusy => code::BUSY,
         _ => code::ENGINE,
     };
     coded(status, e.to_string())

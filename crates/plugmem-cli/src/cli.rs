@@ -224,7 +224,7 @@ pub(crate) enum Command {
     },
     /// Print engine size counters and identity.
     Stats,
-    /// Run a maintenance pass now (no-op, compact, reindex or optimize).
+    /// Run maintenance, or explicitly replace every stored embedding.
     Maintain {
         /// How much work to do. `auto` (the default) does only what is
         /// pending: purge tombstones, refresh a stale text index, and advance
@@ -233,6 +233,13 @@ pub(crate) enum Command {
         /// the only mode that reclaims edge-history page slack.
         #[arg(long, value_enum, default_value_t = MaintainMode::Auto)]
         mode: MaintainMode,
+        /// Recompute every retained fact with the configured embedder and
+        /// atomically replace the vector axis. Never implied by `--mode auto`.
+        #[arg(long, conflicts_with = "mode")]
+        reembed: bool,
+        /// Maximum fact texts per provider request during `--reembed`.
+        #[arg(long, value_name = "N", requires = "reembed")]
+        batch_size: Option<usize>,
     },
     /// Flush the journal into a fresh snapshot now and clear it. Leaves the
     /// database checkpointed, so the read-only path (`scrub`, and any
@@ -415,5 +422,25 @@ mod tests {
                 topic: HelpTopic::Settings
             }
         ));
+    }
+
+    #[test]
+    fn reembed_is_explicit_and_owns_its_batch_bound() {
+        let cli =
+            Cli::try_parse_from(["plugmem-cli", "maintain", "--reembed", "--batch-size", "32"])
+                .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Maintain {
+                reembed: true,
+                batch_size: Some(32),
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from(["plugmem-cli", "maintain", "--batch-size", "32"]).is_err());
+        assert!(
+            Cli::try_parse_from(["plugmem-cli", "maintain", "--reembed", "--mode", "full"])
+                .is_err()
+        );
     }
 }

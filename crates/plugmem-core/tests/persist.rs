@@ -62,6 +62,7 @@ const LEGACY_KIND_EDGE_HIST_IN_POOL: u16 = 49;
 const KIND_BM25_DOCLEN_META: u16 = 58;
 const KIND_BM25_DOCLEN_POOL: u16 = 59;
 const KIND_TAG_CATALOG: u16 = 60;
+const KIND_VECTOR_SPACE: u16 = 61;
 const LEGACY_KIND_BM25_DOCLEN_META: u16 = 26;
 const LEGACY_KIND_BM25_DOCLEN_POOL: u16 = 27;
 const STATE_V2_LEN: usize = 32;
@@ -224,6 +225,52 @@ fn legacy_snapshot_without_tag_catalog_is_migrated_and_next_snapshot_persists_it
             .section(KIND_TAG_CATALOG)
             .is_some(),
         "the next checkpoint writes the current derived section"
+    );
+}
+
+#[test]
+fn legacy_vectors_open_untracked_and_the_next_snapshot_uses_the_current_shape() {
+    let mut config = cfg();
+    config.dim = 4;
+    let (mut mem, mut store) = (Memory::new(config.clone()).unwrap(), MemStorage::new());
+    mem.claim_vector_space(&mut store, "old-model").unwrap();
+    mem.remember(
+        &mut store,
+        RememberInput {
+            vector: Some(&[1.0, 0.0, 0.0, 0.0]),
+            ..RememberInput::text(1, "legacy vector")
+        },
+    )
+    .unwrap();
+    let current = mem.snapshot_bytes(2);
+    assert_eq!(
+        Snapshot::parse(&current)
+            .unwrap()
+            .section(KIND_VECTOR_SPACE),
+        Some(&b"old-model"[..])
+    );
+
+    let legacy = omit_sections(&current, &[KIND_VECTOR_SPACE]);
+    assert_eq!(u16::from_le_bytes(legacy[4..6].try_into().unwrap()), 1);
+    let (mut migrated, _) = Memory::from_bytes(Some(&legacy), &[], config).unwrap();
+    assert_eq!(migrated.vector_space(), None);
+    assert_eq!(migrated.stats().vectors, 1);
+    assert_eq!(
+        migrated
+            .claim_vector_space(&mut MemStorage::new(), "old-model")
+            .unwrap_err(),
+        Error::UntrackedVectorSpace,
+        "a missing identity cannot be guessed even when the dimension matches"
+    );
+
+    let upgraded = migrated.snapshot_bytes(3);
+    assert_eq!(u16::from_le_bytes(upgraded[4..6].try_into().unwrap()), 1);
+    assert_eq!(
+        Snapshot::parse(&upgraded)
+            .unwrap()
+            .section(KIND_VECTOR_SPACE),
+        Some(&b""[..]),
+        "the next checkpoint writes the current optional section without inventing a model"
     );
 }
 

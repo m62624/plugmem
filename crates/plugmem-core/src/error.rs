@@ -52,6 +52,23 @@ pub enum Error {
     #[error("tag cursor is stale; restart without a cursor")]
     StaleCursor,
 
+    /// A database contains vectors written before embedding-space identities
+    /// were persisted. Their model cannot be inferred safely.
+    #[error("vector space is untracked; run an explicit reembed")]
+    UntrackedVectorSpace,
+
+    /// The configured embedder belongs to a different semantic vector space
+    /// than the one recorded in the database.
+    #[error(
+        "vector space mismatch: stored {stored:?}, requested {requested:?}; run an explicit reembed"
+    )]
+    VectorSpaceMismatch {
+        /// Identity persisted with the current vectors.
+        stored: alloc::string::String,
+        /// Identity supplied by the configured embedder.
+        requested: alloc::string::String,
+    },
+
     /// The supplied `Config` is invalid, or incompatible with the config
     /// stored in an existing database (changing `dim` or shard counts
     /// requires a reindex, not an open).

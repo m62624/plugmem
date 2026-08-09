@@ -257,6 +257,21 @@ impl<'a> VecPool<'a> {
         Ok(())
     }
 
+    /// Encodes one complete slot into reusable caller-owned scratch without
+    /// appending it to this pool. The disk-first reembed path writes that slot
+    /// straight to a [`Scratch`](crate::Scratch), keeping the new vector pool
+    /// out of RAM while it is produced.
+    pub(crate) fn encode_slot_into(
+        &self,
+        fact: FactId,
+        v: &[f32],
+        out: &mut Vec<u8>,
+    ) -> Result<(), Error> {
+        out.clear();
+        out.resize(self.stride(), 0);
+        self.encode_slot(fact.0, v, out)
+    }
+
     /// Quantizes `v` and appends it as `fact`'s slot, returning the slot
     /// index. Ids are not stored sorted — the fact record keeps the index.
     ///

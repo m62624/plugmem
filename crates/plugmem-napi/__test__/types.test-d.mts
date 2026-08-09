@@ -53,6 +53,7 @@ assertType<Exact<typeof stats.facts, number>>(true);
 
 // The async verbs are promises, not callbacks.
 const maintained: Promise<MaintainReport> = db.maintain("auto");
+const reembedded: Promise<import("../index.js").ReembedReport> = db.reembed(64);
 const checkpointed: Promise<void> = db.checkpoint();
 const rememberedMany: Promise<RememberOutcome[]> = db.rememberMany([
   { text: "batch", tags: ["example"] },
@@ -121,6 +122,7 @@ export const used = {
   id,
   rendered,
   maintained,
+  reembedded,
   checkpointed,
   rememberedMany,
   tags,

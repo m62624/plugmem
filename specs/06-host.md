@@ -22,7 +22,7 @@ host does not "improve" this — it orchestrates it honestly at three levels:
 | Level | Mechanism | Behavior |
 |---|---|---|
 | **One database, many processes** | an exclusive OS advisory lock on `<base>.lock` (std `File::try_lock`, no new dependency) | a second **writer** gets `HostError::Locked` immediately, no wait. A loud refusal instead of silent corruption |
-| **One database, many threads/agents of one process** | `Database` = `Arc<Inner>`, engine state behind a `Mutex`; the handle is `Clone + Send + Sync` | all verbs serialize on the mutex. At microsecond core operations that is hundreds of thousands of ops/s — a queue, not a bottleneck |
+| **One database, many threads/agents of one process** | `Database` = `Arc<Inner>`, engine state behind an `RwLock`; the handle is `Clone + Send + Sync` | reads overlap; writes serialize. At microsecond core operations the short write queue is not a bottleneck |
 | **Different databases** | independent `Database`s | full parallelism: different mutexes, different lock files. No "database manager" type is needed — open as many `Database`s as needed |
 
 **Network outside the lock.** The expensive external step — computing an embedding over
@@ -75,6 +75,14 @@ background threads (the core principle). `maintain` is explicit by default: the 
 maintain past the HNSW threshold pays the graph build (~1.6 ms/vector,
 `08-performance.md`) — the process owner's decision, not a silent pause.
 
+`Database::reembed` / `reembed_with` are a distinct explicit boundary. They
+checkpoint a frozen source generation, release the state lock for every bounded
+provider batch and snapshot write, rebuild the vector pool and HNSW, then
+publish one new generation atomically. Reads continue against the source;
+writes fail immediately with `HostError::ReembedBusy`. Provider or staging
+failure leaves the source generation current. `maintain`, including automatic
+maintenance after a write, has no code path into reembed.
+
 `Database`'s verbs mirror the core
 (`remember/recall/revise/forget/link/get/stats/maintain/checkpoint`) with two
 conveniences: **auto-embedding** (if an `Embedder` is configured, a `remember` without a
@@ -104,6 +112,11 @@ startup network call; a mismatch with the server's response is a typed error). H
 `ureq` (blocking, small — the core is synchronous, no async is needed), JSON is
 `serde_json`. A built-in local embedder (candle, e5-small) is v1.1.
 
+The model name is also the built-in embedder's readable `space_id` and is
+persisted beside the vectors. Opening an existing database with new target
+settings adopts the stored dimension for normal reads; automatic embedding
+then returns `VectorSpaceMismatch` until the caller explicitly reembeds.
+
 **No lock sits in front of it.** `embed` takes `&self` (`05-api.md`), so a
 `Database` holds its embedder unlocked and `SharedEmbedder` — the handle a
 workspace clones into every memory so a hundred chats do not open a hundred HTTP
@@ -122,6 +135,7 @@ pub enum HostError {
     Io { path, source },  // a file operation
     Engine(plugmem_core::Error),
     Embed(String),        // embedder transport / response format
+    ReembedBusy,          // frozen source; retry this write after reembed
 }
 ```
 
@@ -140,4 +154,7 @@ pub enum HostError {
 - Concurrency: several threads on clones of one `Database` — all operations succeed, the
   fact count converges, no deadlocks. Cross-process: external readers coexist with a
   churning writer, never `Locked`, never torn (the MVCC invariant tests).
+- Reembed: provider work holds no state lock; readers progress, writes fail
+  fast, failure preserves the old generation, success survives reopen, and
+  `Auto` never calls the model after a configured-space change.
 - All temp files are in unique subdirectories of `std::env::temp_dir`, cleaned up.

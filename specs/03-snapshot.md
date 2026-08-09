@@ -174,11 +174,13 @@ is in `06-host.md`.
 
 - `version` in the header is the container format version. During the current
   pre-stable public-testing line it remains **1**; adding the derived tag
-  catalogue does not bump it.
+  catalogue or optional vector-space identity does not bump it.
 - `memory/migrations.rs` owns every legacy v1 shape. Load accepts an omitted
   derived section or an older record layout, rebuilds the current in-memory
   structure from authoritative data, and the next checkpoint writes one current,
   canonical v1 image. Normal reads after load use only the current structures.
+  A missing vector-space id is the exception that cannot be derived safely:
+  old vectors load as untracked, and explicit reembed establishes the identity.
 - Compatibility is forward: a current binary opens all v1 images the project has
   published. An older binary is not required to understand sections or journal
   opcodes introduced later in the experimental v1 line.

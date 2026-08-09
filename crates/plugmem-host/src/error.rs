@@ -50,6 +50,11 @@ pub enum HostError {
     /// names what exactly: status, dimension mismatch, malformed JSON).
     #[error("embedder: {0}")]
     Embed(String),
+
+    /// A long explicit reembed is already staging a replacement generation.
+    /// Writes fail immediately rather than waiting behind model/network work.
+    #[error("database is being reembedded; retry the write after it completes")]
+    ReembedBusy,
 }
 
 /// What to tell someone whose pool hit its ceiling.

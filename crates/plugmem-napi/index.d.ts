@@ -396,6 +396,17 @@ export interface TagPage {
 export interface RemoveTagReport {
   affected: number
 }
+/** The report of an explicit complete vector-axis replacement. */
+export interface ReembedReport {
+  previousSpace?: string
+  newSpace: string
+  previousDim: number
+  newDim: number
+  embedded: number
+  tombstonesSkipped: number
+  vectorBytes: number
+  hnswIndexed: number
+}
 /** The report of a `maintain` pass. */
 export interface MaintainReport {
   /** Tombstoned facts physically removed by this pass. */
@@ -809,6 +820,16 @@ export declare class Plugmem {
    */
   maintain(mode?: 'auto' | 'compact' | 'reindex-text' | 'optimize-vectors' | 'full'): Promise<MaintainReport>
   /**
+   * Explicitly recomputes every retained fact with the configured embedder
+   * and atomically replaces the complete vector axis. This is never invoked
+   * by `maintain('auto')`.
+   *
+   * **Async**: provider and snapshot work runs on a libuv worker; the event
+   * loop remains responsive. Reads continue while it runs and writes reject
+   * with `PLUGMEM_BUSY` instead of waiting.
+   */
+  reembed(batchSize?: number | undefined | null): Promise<ReembedReport>
+  /**
    * Flushes the journal into a fresh snapshot. **Async** (returns a `Promise`):
    * it writes and fsyncs a snapshot file, so it runs on a libuv worker thread.
    * @throws synchronously in read-only mode.
@@ -900,6 +921,7 @@ export declare class WorkspaceMemory {
   removeTag(tag: string): Promise<RemoveTagReport>
   verify(): Promise<void>
   maintain(mode?: 'auto' | 'compact' | 'reindex-text' | 'optimize-vectors' | 'full'): Promise<MaintainReport>
+  reembed(batchSize?: number | undefined | null): Promise<ReembedReport>
   checkpoint(): Promise<void>
 }
 export declare class Workspace {

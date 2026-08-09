@@ -52,6 +52,13 @@ impl<'a> Memory<'a> {
 
     /// All upkeep. Explicit, no background.
     pub fn maintain<S: Storage>(&mut self, s: &mut S, now: u64) -> Result<MaintainReport, Error>;
+    pub fn vector_space(&self) -> Option<&str>;
+    pub fn claim_vector_space<S: Storage>(&mut self, s: &mut S, space: &str)
+        -> Result<bool, Error>;
+    /// The host supplies bounded embedding batches and a SnapshotSink; the
+    /// source Memory is not mutated.
+    pub fn write_reembedded_snapshot(/* target dim/space/batch/scratch/callback */)
+        -> Result<ReembedReport, ReembedError<_>>;
     /// Full image + journal clear.
     pub fn snapshot<S: Storage>(&mut self, s: &mut S, now: u64) -> Result<(), Error>;
     /// Image to bytes (the wasm path; the host clears the journal).
@@ -245,6 +252,8 @@ review policy).
 | recall | no | a pure query |
 | list_tags | no | bounded lexical page of current tags and current-fact counts |
 | maintain | yes (marker) | physical deletion of tombstoned records (ids burned; see 02-data-model.md), satellite rebuild, stat recompute, folding the vector tail into HNSW. Policy-driven (`auto` / `compact` / `reindex-text` / `optimize-vectors` / `full`); **no mode ever drops a fact revision or an edge version** |
+| claim_vector_space | yes | attach a readable semantic-space id to an empty vector pool; never guess a non-empty legacy pool |
+| write_reembedded_snapshot | no | stream a complete new vector pool and rebuilt HNSW into a replacement snapshot; all facts/history/text/tags/graph stay unchanged |
 | snapshot | clears | full image + clear_journal |
 
 `maintain` and the explicit bulk `remove_tag` can cost O(database); point verbs are
@@ -255,6 +264,7 @@ plus auto after N ops; MCP — when idle; wasm — the host decides).
 
 ```rust
 pub trait Embedder: Send + Sync {
+    fn space_id(&self) -> &str;
     fn dim(&self) -> usize;
     /// Batch is in the signature on purpose: providers are far cheaper batched.
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, HostError>;
@@ -286,6 +296,12 @@ core is untouched, the Embedder contract is ready.
 The wrapper calls `embed` before `remember`/`recall` (if an embedder is configured) and
 puts the vector in the input; the core does not know about Embedder. On wasm the JS
 wrapper does the same through a host callback (see `07-wrappers.md`).
+
+`space_id` is semantic identity, not capacity. Two embedders with the same
+dimension are incompatible unless their ids agree. An ordinary automatic
+vector write refuses a stored mismatch; explicit reembed is the sole operation
+that replaces a non-empty space. No `MaintenanceMode`, including `Auto`, can
+invoke the callback.
 
 ## Test plan
 

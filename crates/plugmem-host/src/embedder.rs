@@ -27,6 +27,11 @@ use crate::error::HostError;
 /// not. [`OpenAiCompatEmbedder`] needs none — a `ureq::Agent` is a
 /// connection-pool handle built for concurrent use.
 pub trait Embedder: Send + Sync {
+    /// Stable, human-readable identity of the semantic vector space.
+    /// Different models (or incompatible revisions of one model) must return
+    /// different ids even when their dimensions match.
+    fn space_id(&self) -> &str;
+
     /// Vector dimension this embedder produces. `0` disables the vector
     /// layer (the engine is fully functional without it).
     fn dim(&self) -> usize;
@@ -49,6 +54,10 @@ pub trait Embedder: Send + Sync {
 pub struct NullEmbedder;
 
 impl Embedder for NullEmbedder {
+    fn space_id(&self) -> &str {
+        "none"
+    }
+
     fn dim(&self) -> usize {
         0
     }
@@ -88,6 +97,10 @@ impl std::fmt::Debug for SharedEmbedder {
 }
 
 impl Embedder for SharedEmbedder {
+    fn space_id(&self) -> &str {
+        self.0.space_id()
+    }
+
     fn dim(&self) -> usize {
         self.0.dim()
     }
@@ -134,6 +147,10 @@ impl OpenAiCompatEmbedder {
 }
 
 impl Embedder for OpenAiCompatEmbedder {
+    fn space_id(&self) -> &str {
+        &self.model
+    }
+
     fn dim(&self) -> usize {
         self.dim
     }
@@ -215,6 +232,10 @@ mod tests {
     /// — the arrangement the trait asks a stateful implementation to make.
     struct Counting(AtomicUsize);
     impl Embedder for Counting {
+        fn space_id(&self) -> &str {
+            "test/counting"
+        }
+
         fn dim(&self) -> usize {
             3
         }
@@ -231,6 +252,10 @@ mod tests {
         peak: AtomicUsize,
     }
     impl Embedder for Overlapping {
+        fn space_id(&self) -> &str {
+            "test/overlapping"
+        }
+
         fn dim(&self) -> usize {
             1
         }

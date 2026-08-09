@@ -40,7 +40,7 @@ use crate::error::{self, Error, Produced, Result, code};
 use crate::scrub::{ScrubOpenTask, ScrubOptions};
 use crate::types::{
     self, ExportPage, ExportedEdge, ExportedFact, FactSnapshot, MaintainMode, MaintainReport,
-    RecallResult, RecoverReport, RememberOutcome, RemoveTagReport, Stats, TagPage,
+    RecallResult, RecoverReport, ReembedReport, RememberOutcome, RemoveTagReport, Stats, TagPage,
 };
 use crate::workspace::NamedMemoryTarget;
 
@@ -709,6 +709,18 @@ impl Plugmem {
         }))
     }
 
+    /// Explicitly recomputes every retained fact with the configured embedder
+    /// and atomically replaces the complete vector axis. This is never invoked
+    /// by `maintain('auto')`.
+    ///
+    /// **Async**: provider and snapshot work runs on a libuv worker; the event
+    /// loop remains responsive. Reads continue while it runs and writes reject
+    /// with `PLUGMEM_BUSY` instead of waiting.
+    #[napi(ts_return_type = "Promise<ReembedReport>")]
+    pub fn reembed(&self, batch_size: Option<u32>) -> Result<AsyncTask<ReembedTask>> {
+        writer_reembed_task(self.writer_source()?, batch_size)
+    }
+
     /// Flushes the journal into a fresh snapshot. **Async** (returns a `Promise`):
     /// it writes and fsyncs a snapshot file, so it runs on a libuv worker thread.
     /// @throws synchronously in read-only mode.
@@ -997,6 +1009,26 @@ pub(crate) fn writer_maintain_task(
     })
 }
 
+pub(crate) fn writer_reembed_task(
+    source: WriterSource,
+    batch_size: Option<u32>,
+) -> Result<AsyncTask<ReembedTask>> {
+    let batch_size = batch_size
+        .map(|value| {
+            usize::try_from(value)
+                .ok()
+                .filter(|value| *value != 0)
+                .ok_or_else(|| error::invalid_arg("batchSize must be greater than zero"))
+        })
+        .transpose()?
+        .unwrap_or(plugmem_host::DEFAULT_REEMBED_BATCH_SIZE);
+    Ok(AsyncTask::new(ReembedTask {
+        source,
+        now: now_ms(),
+        batch_size,
+    }))
+}
+
 pub(crate) fn writer_checkpoint_task(source: WriterSource) -> AsyncTask<CheckpointTask> {
     AsyncTask::new(CheckpointTask {
         source,
@@ -1149,6 +1181,31 @@ pub struct MaintainTask {
     source: WriterSource,
     now: u64,
     options: MaintenanceOptions,
+}
+
+/// The libuv-thread body of explicit reembedding.
+pub struct ReembedTask {
+    source: WriterSource,
+    now: u64,
+    batch_size: usize,
+}
+
+impl Task for ReembedTask {
+    type Output = Produced<plugmem_host::ReembedReport>;
+    type JsValue = ReembedReport;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        Ok(self.source.write(|db| {
+            db.reembed_with_batch(self.now, self.batch_size)
+                .map_err(error::engine)
+        }))
+    }
+
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        output
+            .and_then(|report| types::to_typed(&report))
+            .map_err(|e| error::to_js(env, e))
+    }
 }
 
 impl Task for MaintainTask {
@@ -1815,7 +1872,9 @@ impl Task for RecallTask {
                 },
             ) => match self.args.query.as_deref() {
                 Some(text) => match embedder.embed(&[text]) {
-                    Ok(mut vectors) => vectors.pop(),
+                    Ok(mut vectors) => vectors
+                        .pop()
+                        .map(|vector| (vector, embedder.space_id().to_owned())),
                     Err(e) => return Ok(Err(error::engine(e))),
                 },
                 None => None,
@@ -1828,7 +1887,10 @@ impl Task for RecallTask {
         let q = RecallQuery {
             now: self.now,
             text: self.args.query.as_deref(),
-            vector: self.vector.as_deref().or(embedded.as_deref()),
+            vector: self
+                .vector
+                .as_deref()
+                .or_else(|| embedded.as_ref().map(|(vector, _)| vector.as_slice())),
             tags: &tags,
             entities: &entities,
             as_of: self.as_of,
@@ -1843,7 +1905,10 @@ impl Task for RecallTask {
             RecallSource::Writer(source) => {
                 return Ok(source.read(|db| db.recall(q).map_err(error::engine)));
             }
-            RecallSource::Reader { db, .. } => db.recall(q),
+            RecallSource::Reader { db, .. } => match embedded.as_ref() {
+                Some((_, space)) => db.recall_in_space(q, space),
+                None => db.recall(q),
+            },
         }
         .map_err(error::engine))
     }

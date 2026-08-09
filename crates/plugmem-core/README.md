@@ -247,7 +247,14 @@ historical edge indexes.
 | `link` | upsert a typed edge between entities |
 | `unlink` | close the current typed edge while preserving `as_of` history |
 | `maintain` | policy-driven maintenance: no-op, compaction, text reindex, vector optimization or full rebuild |
+| `write_reembedded_snapshot` | caller-driven, bounded replacement of every retained vector plus HNSW; other data is unchanged |
 | `snapshot` | full image + journal reset |
+
+Vector capacity (`dim`) and semantic identity are separate. A host may persist
+an embedder's readable identity with `claim_vector_space`; a different identity
+cannot write into a non-empty pool. Legacy vectors with no identity stay
+untracked rather than being guessed, and only explicit reembedding establishes
+a new space. `maintain`, including `Auto`, never invokes an embedder callback.
 
 ## Retrieval
 

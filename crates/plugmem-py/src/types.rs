@@ -663,6 +663,57 @@ impl From<plugmem_host::ScrubProgress> for ScrubProgress {
     }
 }
 
+/// The report of an explicit complete vector-axis replacement.
+#[gen_stub_pyclass]
+#[pyclass(frozen, get_all, module = "plugmem._plugmem")]
+pub struct ReembedReport {
+    pub previous_space: Option<String>,
+    pub new_space: String,
+    pub previous_dim: usize,
+    pub new_dim: usize,
+    pub embedded: usize,
+    pub tombstones_skipped: usize,
+    pub vector_bytes: u64,
+    pub hnsw_indexed: u32,
+}
+repr!(
+    ReembedReport,
+    "ReembedReport",
+    previous_space,
+    new_space,
+    previous_dim,
+    new_dim,
+    embedded,
+    tombstones_skipped,
+    vector_bytes,
+    hnsw_indexed,
+);
+
+impl From<plugmem_host::ReembedReport> for ReembedReport {
+    fn from(report: plugmem_host::ReembedReport) -> Self {
+        let plugmem_host::ReembedReport {
+            previous_space,
+            new_space,
+            previous_dim,
+            new_dim,
+            embedded,
+            tombstones_skipped,
+            vector_bytes,
+            hnsw_indexed,
+        } = report;
+        Self {
+            previous_space,
+            new_space,
+            previous_dim,
+            new_dim,
+            embedded,
+            tombstones_skipped,
+            vector_bytes,
+            hnsw_indexed,
+        }
+    }
+}
+
 /// The report of a `maintain` pass.
 #[gen_stub_pyclass]
 #[pyclass(frozen, get_all, module = "plugmem._plugmem")]
@@ -913,6 +964,7 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<RecoverReport>()?;
     module.add_class::<ScrubProgress>()?;
     module.add_class::<MaintainReport>()?;
+    module.add_class::<ReembedReport>()?;
     module.add_class::<DbEntry>()?;
     module.add_class::<ReindexReport>()?;
     module.add_class::<WorkspaceProblem>()?;

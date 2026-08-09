@@ -70,6 +70,11 @@ multi-gigabyte request. The seed exists so that region is reached on the first
 run instead of after the fuzzer guesses a valid header, a valid section table
 and a plausible power of two.
 
+`vector-space.snap` is a current-format image with a non-empty vector pool and
+the readable embedding-space identity section. `vector-space.journal` starts
+with the matching identity-assignment operation. Keep these alongside the older
+untracked images: together they fuzz both sides of the compatibility migration.
+
 `corpus/` is the fuzzer's own working set. It is **ignored by git**: a single
 run grows it by thousands of files, all derived from the seeds. Pass it first
 and `seeds/` second so libFuzzer writes new finds into the corpus and treats

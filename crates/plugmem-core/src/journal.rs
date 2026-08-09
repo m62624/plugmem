@@ -169,6 +169,11 @@ pub enum Op<'a> {
         /// Verbatim tag name.
         tag: &'a str,
     },
+    /// Op 8: assign the semantic identity of an empty vector pool.
+    SetVectorSpace {
+        /// Stable, human-readable embedding-space identity.
+        space: &'a str,
+    },
 }
 
 /// Appends a length-prefixed string (`u32 LE` + bytes).
@@ -328,6 +333,10 @@ impl<'a> Op<'a> {
                 put_str(&mut payload, tag);
                 7
             }
+            Op::SetVectorSpace { space } => {
+                put_str(&mut payload, space);
+                8
+            }
         };
         encode_entry(out, op, &payload);
     }
@@ -447,6 +456,9 @@ impl<'a> Op<'a> {
                 let tag = take_str(payload, at)?;
                 Op::RemoveTag { now, tag }
             }
+            8 => Op::SetVectorSpace {
+                space: take_str(payload, at)?,
+            },
             _ => return Err(Error::Corrupt("unknown journal op")),
         };
         if *at != payload.len() {
