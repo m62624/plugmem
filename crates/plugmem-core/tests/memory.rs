@@ -939,7 +939,10 @@ fn guarded_remember_blocks_without_mutating_and_stores_when_clear() {
         )
         .unwrap();
     let outcome = match stored {
-        GuardedRememberOutcome::Stored { outcome } => outcome,
+        GuardedRememberOutcome::Stored { outcome, checked } => {
+            assert!(checked, "an entity was named, so a comparison happened");
+            outcome
+        }
         other => panic!("unrelated fact must be stored, got {other:?}"),
     };
     assert_eq!(outcome.id, FactId(1));
@@ -1569,4 +1572,61 @@ fn edges_each_visits_every_open_edge_once_and_can_stop() {
         true
     });
     assert_eq!(none, 0);
+}
+
+/// A guarded write with no entity is stored unguarded, and says so.
+///
+/// The detector walks the fact's entity, so an input naming none has an empty
+/// candidate set and cannot block anything - now or after any number of later
+/// writes. That behaviour is correct (the alternative is comparing against
+/// every live fact, which is the unbounded work the per-entity cap exists to
+/// avoid); what was wrong was that it was indistinguishable from a check that
+/// found nothing. A consumer built on the napi binding stored the same sentence
+/// six times before anyone measured why.
+#[test]
+fn a_guarded_write_without_an_entity_reports_that_nothing_was_checked() {
+    let (mut mem, mut store) = engine();
+    let text = "the cache is disabled because it raced with the warmup task";
+
+    for at in [100, 200, 300] {
+        let outcome = mem
+            .remember_guarded(&mut store, RememberInput::text(at, text))
+            .unwrap();
+        match outcome {
+            GuardedRememberOutcome::Stored { checked, .. } => assert!(
+                !checked,
+                "no entity means no candidate set, so nothing was compared"
+            ),
+            other => panic!("nothing can block without an entity, got {other:?}"),
+        }
+    }
+    // Three identical facts, exactly as an unguarded `remember` would leave.
+    assert_eq!(mem.facts_len(), 3);
+}
+
+/// The same three writes, with an entity: one stored, two blocked.
+#[test]
+fn the_same_writes_with_an_entity_are_checked_and_blocked() {
+    let (mut mem, mut store) = engine();
+    let text = "the cache is disabled because it raced with the warmup task";
+    let input = |at: u64| RememberInput {
+        entity: Some("project"),
+        ..RememberInput::text(at, text)
+    };
+
+    match mem.remember_guarded(&mut store, input(100)).unwrap() {
+        GuardedRememberOutcome::Stored { checked, .. } => assert!(
+            checked,
+            "an entity was named, so a comparison took place - against an \
+             empty candidate set, which is a real 'nothing similar'"
+        ),
+        other => panic!("the first fact has nothing to collide with, got {other:?}"),
+    }
+    for at in [200, 300] {
+        assert!(matches!(
+            mem.remember_guarded(&mut store, input(at)).unwrap(),
+            GuardedRememberOutcome::Blocked { .. }
+        ));
+    }
+    assert_eq!(mem.facts_len(), 1);
 }

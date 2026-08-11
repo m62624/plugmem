@@ -139,6 +139,10 @@ against that entity's most recent live facts and against nothing else, so a
 returns `stored` - it does not fail, it simply has nothing to compare against.
 Pass an entity whenever avoiding a duplicate is the reason for the call.
 
+`decision.checked` says whether a comparison happened at all: `False` is a fact
+stored exactly as `remember` would have stored it. Do not read
+`status == "stored"` as "checked and clear" without it.
+
 
 ```python
 decision = db.remember_guarded("the user prefers async-std", entity="user")
@@ -410,6 +414,24 @@ exact semantic space and defaults to `model`; it is never discovered over the
 network. Set `enabled = false` to keep the
 settings without creating or calling the embedder; `$PLUGMEM_EMBEDDER_ENABLED`
 overrides it with `true` or `false`.
+
+A mismatch does **not** stop the database opening, on a writer or a read-only
+handle, and loses nothing. What fails is exactly two things: `recall` with a
+`query` and `remember` with `text`. Everything else - `stats`, `get`, `tags_of`,
+`list_tags`, entity/graph recall, `export_page`, `forget`, `link`, `verify`,
+`maintain`, `checkpoint`, `reembed` - keeps answering. So the content is safe
+and recovery is always available, and a consumer only finds out at its first
+lookup after the change: detect it by making the cheapest text recall and
+watching for the error, rather than from a note of what was configured last
+time.
+
+`reembed` is idempotent; it rebuilds ONE database, so a workspace needs a pass
+over every memory in it. On an EMPTY database it still makes one request whose
+input is the empty string - a provider that rejects empty input fails a rebuild
+that had nothing to rebuild. And switching an embedder on over a database built
+without one breaks nothing and warns about nothing: compare `stats().vectors`
+with `stats().facts` to notice the facts that have no vectors yet.
+
 
 `plugmem.settings_help()` returns the whole catalogue — every section, key,
 type, default and what it does — without opening anything.

@@ -79,20 +79,30 @@ pub struct GuardedRememberOutcome {
     pub status: String,
     pub outcome: Option<RememberOutcome>,
     pub similar: Vec<Similar>,
+    /// Whether the similarity detector had anything to compare against.
+    ///
+    /// `false` means the fact was stored WITHOUT a duplicate check: the
+    /// detector is scoped to the fact's entity, so a call carrying no
+    /// `entity` has no candidate set and cannot block anything, now or after
+    /// any number of later writes. Always `true` on a blocked result, which
+    /// by definition compared something.
+    pub checked: bool,
 }
 
 impl From<plugmem_host::GuardedRememberOutcome> for GuardedRememberOutcome {
     fn from(outcome: plugmem_host::GuardedRememberOutcome) -> Self {
         match outcome {
-            plugmem_host::GuardedRememberOutcome::Stored { outcome } => Self {
+            plugmem_host::GuardedRememberOutcome::Stored { outcome, checked } => Self {
                 status: "stored".to_owned(),
                 outcome: Some(RememberOutcome::from(outcome)),
                 similar: Vec::new(),
+                checked,
             },
             plugmem_host::GuardedRememberOutcome::Blocked { similar } => Self {
                 status: "blocked".to_owned(),
                 outcome: None,
                 similar: similar.into_iter().map(Similar::from).collect(),
+                checked: true,
             },
         }
     }

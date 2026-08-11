@@ -218,6 +218,16 @@ export interface GuardedRememberOutcome {
   status: 'stored' | 'blocked'
   outcome?: RememberOutcome
   similar: Array<Similar>
+  /**
+   * Whether the similarity detector had anything to compare against.
+   *
+   * `false` means the fact was stored WITHOUT a duplicate check: the
+   * detector is scoped to the fact's entity, so a call carrying no
+   * `entity` has no candidate set and cannot block anything, now or after
+   * any number of later writes. Always `true` on a blocked result, which
+   * by definition compared something.
+   */
+  checked: boolean
 }
 /** One recalled fact. */
 export interface RecalledFact {

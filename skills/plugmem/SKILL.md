@@ -102,6 +102,10 @@ same six with `entity` produce one and five blocked. So: name an entity whenever
 avoiding a duplicate is the reason you chose the guarded verb, and give related
 facts the *same* entity spelling, since two spellings are two candidate sets.
 
+A stored result reports `checked`: `false` means no comparison happened, so the
+fact was stored exactly as an ordinary remember would have stored it. Never read
+"stored" as "checked and clear" without it.
+
 `similar` hints carry the id, the score and the reason — not the text. Read a
 hit's wording with `get <id>` when you want to tell someone what it collided
 with.
@@ -419,6 +423,44 @@ alias. Plugmem trusts the value and never probes the provider to discover it.
 Changing it for an existing vector database requires an explicit reembed;
 routine and automatic maintenance never calls the model.
 
+### What a mismatched vector space actually does
+
+Worth knowing exactly, because the shape of the failure decides how a consumer
+should handle it, and guessing produces either needless panic or silent data
+rot. Changing `model`, `space_id` or `dim` on a database that already holds
+vectors does **not** stop it opening, and loses nothing:
+
+| still works | fails, loudly |
+|---|---|
+| open (writer and read-only), `stats`, `get`, `tags_of`, `list_tags` | a **recall with text** |
+| entity/graph recall, export/scan, `forget`, `link`, `unlink` | a **remember with text** |
+| `verify`, `maintain`, `checkpoint`, `reembed` | |
+
+So the content is intact and recovery is always possible — which is the reason
+`open` is deliberately not the place this fails. What it costs is exactly the
+two verbs a text-driven memory is built on, and a consumer only finds out at
+the first lookup after the change. Detect it by making the cheapest text recall
+and watching for the mismatch error, not by remembering what you configured
+last time: a bookkeeping file drifts the moment somebody edits the config,
+restores a backup, or copies a database between machines — and it drifts
+towards "everything is fine".
+
+The repair is `reembed`, and it is idempotent: an interrupted one leaves the
+facts it finished with their new vectors, so running it again completes the
+job. It rebuilds one database, so a workspace needs a pass over every memory in
+it — half rebuilt is a workspace answering from two vector spaces at once, and
+nothing reports that on its own.
+
+Two more measured details, both easy to assume wrongly:
+
+- `reembed` on an EMPTY database still makes one embedder request, whose input
+  is the empty string. A provider that rejects empty input (OpenAI answers 400)
+  fails a rebuild that had nothing to rebuild.
+- switching the embedder **on** over a database built without one breaks
+  nothing and warns about nothing: the old facts simply have no vectors, so
+  meaning-based recall answers from a fraction of the memory. Compare
+  `stats().vectors` against `stats().facts` to notice it.
+
 `[engine]` is what a database is built with — changing one of those on an
 existing memory is refused. `[recall]` and `[index]` are the opposite: reopening
 with different weights is how ranking changes, so they are safe to tune on a
@@ -462,7 +504,7 @@ comparison line:
 plugmem version check: skill <marker> vs engine <reported> → OK | MISMATCH
 ```
 
-<!-- skill-version: 0.9.0 -->
+<!-- skill-version: 0.10.0 -->
 
 If they differ in ANY way: **stop**, warn the user that skill and engine
 describe different functionality, and proceed only on their explicit

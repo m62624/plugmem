@@ -173,7 +173,10 @@ against that entity's most recent live facts (`SIMILAR_CANDIDATE_CAP`, 32) and
 against nothing else - so a fact written with **no** entity has no candidates,
 and a guarded write with no entity stores unconditionally. It does not fail;
 there is simply nothing to guard against. Name an entity whenever avoiding a
-duplicate is the reason for the call.
+duplicate is the reason for the call. `GuardedRememberOutcome::Stored` carries
+`checked` for exactly this: `false` is a fact stored as an ordinary `remember`
+would have stored it, and without the flag that is indistinguishable from a
+check that found nothing.
 
 ```rust
 use plugmem_core::{Config, GuardedRememberOutcome, MemStorage, Memory, RememberInput};

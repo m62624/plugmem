@@ -283,6 +283,17 @@ class GuardedRememberOutcome:
     @property
     def similar(self) -> builtins.list[Similar]: ...
     @property
+    def checked(self) -> builtins.bool:
+        r"""
+        Whether the similarity detector had anything to compare against.
+        
+        `False` means the fact was stored WITHOUT a duplicate check: the
+        detector is scoped to the fact's entity, so a call carrying no
+        `entity` has no candidate set and cannot block anything, now or after
+        any number of later writes. Always `True` on a blocked result, which
+        by definition compared something.
+        """
+    @property
     def status(self) -> typing.Literal["stored", "blocked"]: ...
     def __repr__(self) -> builtins.str: ...
 

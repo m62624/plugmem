@@ -121,7 +121,36 @@ def test_workspace_memory_has_the_same_guarded_contract(tmp_path: Path) -> None:
     assert blocked.status == "blocked"
     assert blocked.outcome is None
     assert len(blocked.similar) == 1
+    assert stored.checked is True
+    assert blocked.checked is True
     assert memory.stats().facts == 1
+    ws.close()
+
+
+def test_a_guarded_write_without_an_entity_is_stored_unguarded(
+    tmp_path: Path,
+) -> None:
+    """The detector is scoped to the fact's entity.
+
+    An input naming none has no candidate set and cannot block anything - now
+    or after any number of later writes. `checked` is what tells the caller
+    that, because otherwise "nothing similar was found" and "nothing could be
+    compared" are the same value.
+    """
+    ws = plugmem.Workspace(str(tmp_path))
+    memory = ws.memory("unguarded")
+    text = "the cache is disabled because it raced with the warmup task"
+    for _ in range(3):
+        outcome = memory.remember_guarded(text)
+        assert outcome.status == "stored"
+        assert outcome.checked is False
+    assert memory.stats().facts == 3
+
+    named = memory.remember_guarded(text, entity="project")
+    assert named.status == "stored"
+    assert named.checked is True
+    again = memory.remember_guarded(text, entity="project")
+    assert again.status == "blocked"
     ws.close()
 
 

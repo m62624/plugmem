@@ -63,7 +63,8 @@ the engine does:
   never merges on its own; the caller revises, forgets, or keeps both.
   **The detector is scoped to the fact's entity**, so a fact written with no
   entity is compared against nothing and a guarded write stores it
-  unconditionally.
+  unconditionally - the outcome reports `checked: false` rather than letting
+  that pass as a check that found nothing.
 - **bounded ranked context.** Recall returns structured facts and edges and can
   render text constrained by a token budget; prompt-ready rendering is one
   consumer of the result.
