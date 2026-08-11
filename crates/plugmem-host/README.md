@@ -151,6 +151,16 @@ a safe complete write, but it always stores and then returns its similarity hint
 `recall` is not a substitute: it ranks the best available context even when a
 nearest vector is weak.
 
+**The detector is scoped to the fact's `entity`**, comparing against that
+entity's most recent live facts and against nothing else. An input naming no
+entity therefore has an empty candidate set and cannot be blocked - now or
+after any number of later writes. That is not a fallback: comparing against
+every live fact instead is precisely the unbounded work the per-entity
+candidate cap exists to avoid. `Stored` carries `checked` so the two answers
+stay distinguishable, because otherwise "compared, nothing similar" and "there
+was nothing to compare" are the same value, and a caller who reached for this
+verb specifically to avoid duplicates cannot tell it did not get one.
+
 ## What `plugmem-host` adds
 
 The retrieval above lives in the engine; this crate adds the OS side:
