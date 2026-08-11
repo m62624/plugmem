@@ -141,6 +141,15 @@ pub struct GuardedRememberOutcome {
     pub outcome: Option<Py<RememberOutcome>>,
     #[pyo3(get)]
     pub similar: Vec<Py<Similar>>,
+    /// Whether the similarity detector had anything to compare against.
+    ///
+    /// `False` means the fact was stored WITHOUT a duplicate check: the
+    /// detector is scoped to the fact's entity, so a call carrying no
+    /// `entity` has no candidate set and cannot block anything, now or after
+    /// any number of later writes. Always `True` on a blocked result, which
+    /// by definition compared something.
+    #[pyo3(get)]
+    pub checked: bool,
 }
 
 #[gen_stub_pymethods]
@@ -157,17 +166,22 @@ impl GuardedRememberOutcome {
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         let value = self.status.clone().into_pyobject(py)?;
-        Ok(format!("GuardedRememberOutcome(status={})", value.repr()?))
+        Ok(format!(
+            "GuardedRememberOutcome(status={}, checked={})",
+            value.repr()?,
+            if self.checked { "True" } else { "False" }
+        ))
     }
 }
 
 impl GuardedRememberOutcome {
     pub fn build(py: Python<'_>, outcome: plugmem_host::GuardedRememberOutcome) -> PyResult<Self> {
         match outcome {
-            plugmem_host::GuardedRememberOutcome::Stored { outcome } => Ok(Self {
+            plugmem_host::GuardedRememberOutcome::Stored { outcome, checked } => Ok(Self {
                 status: "stored".to_owned(),
                 outcome: Some(Py::new(py, RememberOutcome::build(py, outcome)?)?),
                 similar: Vec::new(),
+                checked,
             }),
             plugmem_host::GuardedRememberOutcome::Blocked { similar } => Ok(Self {
                 status: "blocked".to_owned(),
@@ -176,6 +190,7 @@ impl GuardedRememberOutcome {
                     .into_iter()
                     .map(|item| Py::new(py, Similar::from(item)))
                     .collect::<PyResult<Vec<_>>>()?,
+                checked: true,
             }),
         }
     }

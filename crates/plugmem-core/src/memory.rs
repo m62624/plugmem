@@ -153,6 +153,12 @@ pub struct RememberOutcome {
 /// because it did not allocate one, mutate an index, or append a journal
 /// record. A caller that decides the candidates are compatible can make that
 /// choice explicit by following with ordinary [`Memory::remember`].
+///
+/// `Stored` additionally reports whether a check happened at all - see
+/// [`GuardedRememberOutcome::Stored::checked`]. Without it the two answers
+/// "nothing similar was found" and "nothing could be compared" are the same
+/// value, and a caller reaching for this verb specifically to avoid duplicates
+/// has no way to learn it did not get one.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(tag = "status", rename_all = "snake_case"))]
@@ -162,6 +168,27 @@ pub enum GuardedRememberOutcome {
     Stored {
         /// The committed fact.
         outcome: RememberOutcome,
+        /// Whether the similarity detector actually had candidates to compare
+        /// against.
+        ///
+        /// `false` means the write was stored **unguarded**: the detector is
+        /// scoped to the fact's entity and walks that entity's most recent
+        /// live facts, so an input carrying no `entity` has no candidate set
+        /// and cannot block anything, now or after any number of later
+        /// writes. The fact is stored, exactly as an ordinary
+        /// [`Memory::remember`] would have stored it.
+        ///
+        /// `true` says a comparison took place, including the case where the
+        /// entity is new and its candidate set was empty - that is a real
+        /// "nothing similar is stored", and the same call will be compared
+        /// properly from the entity's second fact onwards.
+        ///
+        /// This is not a failure and not a fallback: comparing against every
+        /// live fact instead is precisely the unbounded work the per-entity
+        /// candidate cap exists to avoid. It is reported because the
+        /// alternative is silence, and silence here reads as "checked, and it
+        /// was clear".
+        checked: bool,
     },
     /// At least one live same-entity fact crossed a similarity threshold; no
     /// mutation was made.
@@ -762,6 +789,14 @@ impl<'a> Memory<'a> {
         if let Some(space) = vector_space {
             self.check_vector_space_claim(space)?;
         }
+        // Whether a check was POSSIBLE, which is a property of the call rather
+        // than of what the memory currently holds: the detector is scoped to
+        // the input's entity, so an input naming none has no candidate set now
+        // and would have none however many facts were stored later. An input
+        // that does name one is checked - against an empty set when it is that
+        // entity's first fact, which is a real "nothing similar" rather than an
+        // absent comparison.
+        let checked = input.entity.is_some();
         let similar = self.find_similar_input(&input)?;
         if !similar.is_empty() {
             return Ok(GuardedRememberOutcome::Blocked { similar });
@@ -771,7 +806,7 @@ impl<'a> Memory<'a> {
         }
         let outcome = self.apply_remember(&input, FactId::NONE, None)?;
         self.journal_remember(store, &input, FactId::NONE, outcome.id)?;
-        Ok(GuardedRememberOutcome::Stored { outcome })
+        Ok(GuardedRememberOutcome::Stored { outcome, checked })
     }
 
     /// Batch import: a sequence of remembers in one call, journaled

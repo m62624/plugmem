@@ -24,7 +24,10 @@ fn main() -> Result<(), plugmem_core::Error> {
     )?;
 
     match decision {
-        GuardedRememberOutcome::Stored { outcome } => {
+        GuardedRememberOutcome::Stored { outcome, checked } => {
+            if !checked {
+                println!("stored WITHOUT a check: no entity, so nothing to compare");
+            }
             println!("stored fact {}", outcome.id.0);
         }
         GuardedRememberOutcome::Blocked { similar } => print_candidates(&similar),

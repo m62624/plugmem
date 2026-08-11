@@ -1727,13 +1727,14 @@ fn render_remember(outcome: &RememberOutcome, json: bool, out: &mut impl Write) 
 
 fn render_guarded_remember(outcome: &GuardedRememberOutcome, json: bool, out: &mut impl Write) {
     match outcome {
-        GuardedRememberOutcome::Stored { outcome } => {
+        GuardedRememberOutcome::Stored { outcome, checked } => {
             if json {
                 writeln!(
                     out,
                     "{}",
                     json!({
                         "status": "stored",
+                        "checked": checked,
                         "outcome": {
                             "id": outcome.id.0,
                             "entity": outcome.entity.map(|entity| entity.0),
@@ -1744,6 +1745,16 @@ fn render_guarded_remember(outcome: &GuardedRememberOutcome, json: bool, out: &m
                 .ok();
             } else {
                 writeln!(out, "remembered fact {}", outcome.id.0).ok();
+                // Said plainly, because the alternative is a caller who asked
+                // for a duplicate check, did not get one, and cannot tell.
+                if !checked {
+                    writeln!(
+                        out,
+                        "  ! stored WITHOUT a duplicate check: the check is scoped to \
+                         --entity, and none was given"
+                    )
+                    .ok();
+                }
             }
         }
         GuardedRememberOutcome::Blocked { similar } => {
@@ -2097,6 +2108,7 @@ mod tests {
         let stored: serde_json::Value = serde_json::from_str(&stored).unwrap();
         assert_eq!(stored["status"], "stored");
         assert_eq!(stored["outcome"]["id"], 0);
+        assert_eq!(stored["checked"], true, "an entity was named");
 
         let mut second = remember("likes green tea each morning", Some("user"), &[]);
         let Command::Remember { guarded, .. } = &mut second else {
@@ -2108,6 +2120,40 @@ mod tests {
         assert_eq!(blocked["status"], "blocked");
         assert_eq!(blocked["similar"][0]["id"], 0);
         assert_eq!(db.stats().facts, 1);
+    }
+
+    /// `--guarded` with no `--entity` stores unguarded, and prints that it did.
+    ///
+    /// The detector is scoped to the fact's entity, so there is no candidate
+    /// set to compare against and nothing can be blocked - now or after any
+    /// number of later writes. Without the notice the caller sees a plain
+    /// "remembered fact N" and has no way to learn the check they asked for
+    /// never ran.
+    #[test]
+    fn guarded_without_an_entity_says_it_stored_unchecked() {
+        let (db, _temp) = TempDb::open();
+        let text = "the cache is disabled because it raced with the warmup task";
+        for at in [1_000, 2_000, 3_000] {
+            let mut cmd = remember(text, None, &[]);
+            let Command::Remember { guarded, .. } = &mut cmd else {
+                unreachable!()
+            };
+            *guarded = true;
+            let (_, plain) = run_cmd(&db, &cmd, false, at);
+            assert!(plain.contains("remembered fact"), "{plain}");
+            assert!(plain.contains("WITHOUT a duplicate check"), "{plain}");
+        }
+        assert_eq!(db.stats().facts, 3, "identical facts, as remember would");
+
+        let mut cmd = remember(text, None, &[]);
+        let Command::Remember { guarded, .. } = &mut cmd else {
+            unreachable!()
+        };
+        *guarded = true;
+        let (_, json) = run_cmd(&db, &cmd, true, 4_000);
+        let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(json["status"], "stored");
+        assert_eq!(json["checked"], false);
     }
 
     #[test]

@@ -151,6 +151,16 @@ a safe complete write, but it always stores and then returns its similarity hint
 `recall` is not a substitute: it ranks the best available context even when a
 nearest vector is weak.
 
+**The detector is scoped to the fact's `entity`**, comparing against that
+entity's most recent live facts and against nothing else. An input naming no
+entity therefore has an empty candidate set and cannot be blocked - now or
+after any number of later writes. That is not a fallback: comparing against
+every live fact instead is precisely the unbounded work the per-entity
+candidate cap exists to avoid. `Stored` carries `checked` so the two answers
+stay distinguishable, because otherwise "compared, nothing similar" and "there
+was nothing to compare" are the same value, and a caller who reached for this
+verb specifically to avoid duplicates cannot tell it did not get one.
+
 ## What `plugmem-host` adds
 
 The retrieval above lives in the engine; this crate adds the OS side:
@@ -544,6 +554,43 @@ when that model is an alias. Plugmem never probes the provider to infer it. It
 detects same-dimension model changes that a dimension check cannot. Old experimental images without this
 section still open as untracked and require one explicit reembed; the snapshot
 format version remains 1.
+
+### Exactly what a mismatched vector space does
+
+The shape of the failure decides how a consumer must handle it, so it is worth
+stating precisely rather than guessing. A database whose stored vectors belong
+to a different space than the configured one **still opens** - on a writer and
+on a read-only handle alike - and loses nothing:
+
+| keeps working | fails, loudly |
+|---|---|
+| open, `stats`, `get`, `tags_of`, `list_tags` | a recall **with text** |
+| entity/graph recall, export/scan, `forget`, `link`, `unlink` | a remember **with text** |
+| `verify`, `maintain`, `checkpoint`, `reembed` | |
+
+That split is why `open` is deliberately not where this fails: the content is
+intact and recovery is always available. What it costs is precisely the two
+verbs a text-driven memory runs on, and a consumer finds out at its first
+lookup after the change. Detect it by making the cheapest text recall and
+watching for the error - not from a note of what was configured last time,
+which drifts the moment a config is edited, a backup restored or a database
+copied between machines, and drifts towards "everything is fine".
+
+`reembed` is the repair and is idempotent: an interrupted run leaves the facts
+it finished with their new vectors, so running it again completes the job. It
+rebuilds ONE database; a workspace needs a pass over every memory in it,
+because half rebuilt is a workspace answering from two vector spaces at once
+and nothing reports that on its own.
+
+Two measured details that are easy to assume wrongly:
+
+- `reembed` on an **empty** database still makes one embedder request, whose
+  input is the empty string. A provider that rejects empty input (OpenAI
+  answers `400`) fails a rebuild that had nothing to rebuild.
+- switching an embedder **on** over a database built without one breaks nothing
+  and warns about nothing: the old facts simply have no vectors, so
+  meaning-based recall answers from a fraction of the memory. Compare
+  `stats().vectors` with `stats().facts` to notice it.
 
 `embed` takes **`&self`**, and the trait requires `Send + Sync`, because an
 embedder is a client of a remote service rather than a piece of mutable state.

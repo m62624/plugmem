@@ -185,6 +185,21 @@ duplicate or contradict**. If a preflight must not write, use
 `rememberGuarded`: the database holds one write scope across its similarity
 check and conditional insertion, so concurrent preflights cannot both pass.
 
+**`entity` is what makes the guard a guard.** The detector compares the new text
+against that entity's most recent live facts and against nothing else, so a
+`rememberGuarded` call with **no** `entity` has no candidates and always returns
+`status: "stored"` - it does not fail, it simply has nothing to compare against.
+Six identical guarded writes with no entity produce six facts; the same six with
+`entity` produce one and five `blocked`.
+
+`checked` on the result says whether a comparison happened at all: `false` is a
+fact stored exactly as `remember` would have stored it. Do not read `status:
+"stored"` as "checked and clear" without it.
+
+`similar` carries `{ id, score, reason }` - the ids, not the text. Resolve a
+hit's wording with `get(id)` when you want to show the caller what it collided
+with.
+
 ```typescript
 const decision = await db.rememberGuarded({
   text: "the user prefers async-std",
@@ -253,6 +268,23 @@ dimension. A changed model makes ordinary automatic embedding reject instead
 of mixing incompatible vectors. `reembed` is the deliberate transition; it
 runs on a libuv worker, leaves the JavaScript event loop responsive, keeps reads
 live and makes concurrent writes reject with `PLUGMEM_BUSY`.
+
+A mismatch does **not** stop the database opening, on a writer or a read-only
+handle, and loses nothing. What fails is exactly two things: `recall` with a
+`query` and `remember` with `text`. Everything else - `stats`, `get`, `tagsOf`,
+`listTags`, entity/graph recall, `exportPage`, `forget`, `link`, `verify`,
+`maintain`, `checkpoint`, `reembed` - keeps answering. So the content is safe
+and recovery is always available, and a consumer only finds out at its first
+lookup after the change: detect it by making the cheapest text recall and
+watching for the error, rather than from a note of what was configured last
+time.
+
+`reembed` is idempotent; it rebuilds ONE database, so a workspace needs a pass
+over every memory in it. On an EMPTY database it still makes one request whose
+input is the empty string - a provider that rejects empty input fails a rebuild
+that had nothing to rebuild. And switching an embedder on over a database built
+without one breaks nothing and warns about nothing: compare `stats().vectors`
+with `stats().facts` to notice the facts that have no vectors yet.
 
 **Read-only handles** (`{ readOnly: true }`) observe another process's writer
 over a published snapshot. The read verbs answer, the write verbs throw, and two
