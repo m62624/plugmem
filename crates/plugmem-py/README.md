@@ -133,6 +133,13 @@ fact stays short and searchable while the bulk stays wherever you keep bulk.
 duplicates or contradictions. Use `remember_guarded` when finding one must
 prevent the write:
 
+**`entity` is what makes the guard a guard.** The detector compares the new text
+against that entity's most recent live facts and against nothing else, so a
+`remember_guarded` call with **no** `entity` has no candidates and always
+returns `stored` - it does not fail, it simply has nothing to compare against.
+Pass an entity whenever avoiding a duplicate is the reason for the call.
+
+
 ```python
 decision = db.remember_guarded("the user prefers async-std", entity="user")
 if decision.status == "blocked":

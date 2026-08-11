@@ -25,6 +25,7 @@ database (snapshot, journal and lock), with no server. Its main verbs are:
   tags, optional embedding vector, optional `valid_from`.
 - **guarded remember** — check the normal bounded similarity detector and store
   only if it is clear, with no race between the check and possible write.
+  **Give it an entity**, or it has nothing to compare against (below).
 - **recall** — ask for context: text and/or vector and/or tags/entities/time;
   you get a ranked, token-budgeted block (`rendered`) ready for the prompt.
 - **revise** — close an old fact and chain its successor (history survives:
@@ -90,6 +91,20 @@ has no new fact id.
 Never use `recall` as a duplicate/conflict check. Recall ranks the best context
 available and may return a weak nearest vector; its fused score is neither
 cosine similarity nor the detector threshold.
+
+**The detector is scoped to the fact's entity, and a fact with no entity is
+compared against nothing.** It looks at that entity's most recent live facts and
+at no others, so a guarded write carrying no entity has no candidates and is
+always stored. It does not error and it does not warn — it silently behaves like
+an ordinary `remember`, which is the one thing a caller reaching for the guard
+did not want. Six identical guarded writes with no entity produce six facts; the
+same six with `entity` produce one and five blocked. So: name an entity whenever
+avoiding a duplicate is the reason you chose the guarded verb, and give related
+facts the *same* entity spelling, since two spellings are two candidate sets.
+
+`similar` hints carry the id, the score and the reason — not the text. Read a
+hit's wording with `get <id>` when you want to tell someone what it collided
+with.
 
 The engine never merges, revises or deletes on its own — it surfaces the
 tension and hands you the choice:

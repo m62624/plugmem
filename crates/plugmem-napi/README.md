@@ -185,6 +185,17 @@ duplicate or contradict**. If a preflight must not write, use
 `rememberGuarded`: the database holds one write scope across its similarity
 check and conditional insertion, so concurrent preflights cannot both pass.
 
+**`entity` is what makes the guard a guard.** The detector compares the new text
+against that entity's most recent live facts and against nothing else, so a
+`rememberGuarded` call with **no** `entity` has no candidates and always returns
+`status: "stored"` - it does not fail, it simply has nothing to compare against.
+Six identical guarded writes with no entity produce six facts; the same six with
+`entity` produce one and five `blocked`.
+
+`similar` carries `{ id, score, reason }` - the ids, not the text. Resolve a
+hit's wording with `get(id)` when you want to show the caller what it collided
+with.
+
 ```typescript
 const decision = await db.rememberGuarded({
   text: "the user prefers async-std",

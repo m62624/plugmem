@@ -129,7 +129,7 @@ engine keeps no clock, so `now` comes from the system clock at each call.
 
 | command | what it does |
 |---|---|
-| `remember <TEXT> [--guarded] [--entity E] [--tag T]… [--link REL:ENTITY]… [--meta KEY=VALUE]… [--valid-from TS] [--vector F32,…]` | store a fact; prints its id and any similar/conflicting facts. `--guarded` checks similarity and writes only if clear, without a race between those steps. `--meta` is repeatable (opaque key→value, e.g. a URI; last value wins per key) |
+| `remember <TEXT> [--guarded] [--entity E] [--tag T]… [--link REL:ENTITY]… [--meta KEY=VALUE]… [--valid-from TS] [--vector F32,…]` | store a fact; prints its id and any similar/conflicting facts. `--guarded` checks similarity and writes only if clear, without a race between those steps. The similarity check is scoped to `--entity`, so `--guarded` with no `--entity` has nothing to compare against and always stores. `--meta` is repeatable (opaque key→value, e.g. a URI; last value wins per key) |
 | `recall [QUERY] [--tag T]… [--entity E]… [--as-of TS] [--range FROM TO] [-k N] [--closed] [--token-budget N] [--ef N] [--graph-depth N] [--vector F32,…]` | ranked, token-budgeted block; sources compose. Each line is `- [fN] text …` — `N` is the fact's id (see below). `--token-budget` caps the block (default 512), `--ef` widens the vector search beam, `--graph-depth` sets how far the graph walks from an anchor (default 2; `0` disables expansion) |
 | `revise <ID> <TEXT> [same flags as remember]` | close the old fact, record the successor |
 | `forget <ID>` | tombstone a fact (purged physically at the next `maintain`) |

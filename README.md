@@ -61,6 +61,9 @@ the engine does:
   race between those steps. Ordinary `remember` remains a safe complete write.
   Recall is ranked context retrieval, not a duplicate threshold. The engine
   never merges on its own; the caller revises, forgets, or keeps both.
+  **The detector is scoped to the fact's entity**, so a fact written with no
+  entity is compared against nothing and a guarded write stores it
+  unconditionally.
 - **bounded ranked context.** Recall returns structured facts and edges and can
   render text constrained by a token budget; prompt-ready rendering is one
   consumer of the result.

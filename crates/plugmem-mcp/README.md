@@ -187,7 +187,7 @@ sets `isError: true` so the model can read and react to it.
 
 | tool | what it does |
 |---|---|
-| `plugmem_remember` | store a fact (`text`, optional `entity`, `tags[]`, `links[]` of `{rel, entity}`, `valid_from`); returns the id + similar/conflicting facts. With `guarded: true`, checks similarity and writes only if clear, without a race between those steps |
+| `plugmem_remember` | store a fact (`text`, optional `entity`, `tags[]`, `links[]` of `{rel, entity}`, `valid_from`); returns the id + similar/conflicting facts. With `guarded: true`, checks similarity and writes only if clear, without a race between those steps. The check is scoped to `entity`, so `guarded` with no `entity` has nothing to compare against and always stores |
 | `plugmem_recall` | ranked, token-budgeted recall (`query`, `tags[]`, `entities[]`, `as_of`, `range [from,to]`, `k`, `closed`, `token_budget`, `ef`) |
 | `plugmem_revise` | close fact `id`, record the successor (same args as remember + `id`) |
 | `plugmem_forget` | tombstone fact `id` (purged at the next maintain) |
