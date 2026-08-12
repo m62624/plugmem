@@ -42,6 +42,15 @@ use maintain::TOKENIZER_INDEX_VERSION;
 /// Most recent same-entity facts examined by similar-detection.
 const SIMILAR_CANDIDATE_CAP: usize = 32;
 
+/// Tags one fact may carry.
+///
+/// Structural, not a policy knob: `apply_remember` deduplicates into a stack
+/// array of exactly this length, and `change_catalog_for_fact` reads the tags
+/// back into another one to keep the catalog counts balanced. Every path that
+/// reaches `apply_remember` — the verbs through `validate_input`, replay
+/// through its own corruption check — has to have established the bound first.
+const MAX_TAGS: usize = 32;
+
 mod maintain;
 mod migrations;
 mod persist;
@@ -584,6 +593,15 @@ impl<'a> Memory<'a> {
                         return Err(Error::Corrupt(
                             "journal vector dimension disagrees with dim",
                         ));
+                    }
+                    // The record count is a `u8` on the wire, so a damaged
+                    // journal can name up to 255 tags where a fact holds
+                    // [`MAX_TAGS`]. Replay does not run `validate_input` — it
+                    // reapplies what the verbs already accepted — so the one
+                    // bound `apply_remember` indexes an array with has to be
+                    // re-established here, beside the other corruption checks.
+                    if tags.len() > MAX_TAGS {
+                        return Err(Error::Corrupt("journal record carries too many tags"));
                     }
                     if let Some(target) = revises.some() {
                         self.check_revisable(target)
@@ -1416,11 +1434,11 @@ impl<'a> Memory<'a> {
                 max: self.cfg.max_text,
             });
         }
-        if input.tags.len() > 32 {
+        if input.tags.len() > MAX_TAGS {
             return Err(Error::TooLarge {
                 what: "tags",
                 len: input.tags.len(),
-                max: 32,
+                max: MAX_TAGS,
             });
         }
         if input.links.len() > 16 {
@@ -1534,7 +1552,7 @@ impl<'a> Memory<'a> {
             tags: ListHandle::EMPTY,
             meta,
         };
-        let mut seen_tags: [u32; 32] = [NONE_U32; 32];
+        let mut seen_tags: [u32; MAX_TAGS] = [NONE_U32; MAX_TAGS];
         let mut seen_cnt = 0usize;
         for tag in input.tags {
             let term = self.terms.intern(tag)?;
@@ -1692,7 +1710,7 @@ impl<'a> Memory<'a> {
         let Some(aux) = self.fact_aux.get(&id.0.to_be_bytes()) else {
             return;
         };
-        let mut ids = [NONE_U32; 32];
+        let mut ids = [NONE_U32; MAX_TAGS];
         let mut len = 0usize;
         for chunk in self.tag_lists.iter(&aux.tags) {
             for raw in chunk.chunks_exact(4) {

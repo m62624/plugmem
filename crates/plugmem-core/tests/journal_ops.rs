@@ -208,6 +208,45 @@ fn replay_rejects_semantically_corrupt_journals() {
     .unwrap();
     assert_eq!(mem.facts_len(), 0);
 
+    // More tags than a fact can hold. The wire format counts them in a `u8`,
+    // so a damaged journal can name up to 255 where the engine deduplicates
+    // into a 32-slot array — which used to index straight past the end and
+    // panic. Opening a database must never panic on a corrupt journal; it
+    // reports.
+    let names: Vec<String> = (0..33).map(|i| format!("tag{i}")).collect();
+    let err = open_with(&[Op::Remember {
+        now: 1,
+        valid_from: 1,
+        entity: None,
+        text: "x",
+        tags: names.iter().map(String::as_str).collect(),
+        links: vec![],
+        vector: vec![],
+        metadata: vec![],
+        revises: FactId::NONE,
+        assigned: FactId(0),
+    }])
+    .unwrap_err();
+    assert_eq!(err, Error::Corrupt("journal record carries too many tags"));
+
+    // The bound is on distinct tags a fact holds, and 32 is inside it: a
+    // journal at the ceiling still replays.
+    let names: Vec<String> = (0..32).map(|i| format!("tag{i}")).collect();
+    let mem = open_with(&[Op::Remember {
+        now: 1,
+        valid_from: 1,
+        entity: None,
+        text: "x",
+        tags: names.iter().map(String::as_str).collect(),
+        links: vec![],
+        vector: vec![],
+        metadata: vec![],
+        revises: FactId::NONE,
+        assigned: FactId(0),
+    }])
+    .unwrap();
+    assert_eq!(mem.facts_len(), 1);
+
     // A duplicated tail (double-applied journal segment) is skipped
     // idempotently, not re-executed.
     let rec = Op::Remember {

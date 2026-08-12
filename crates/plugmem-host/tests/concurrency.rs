@@ -513,3 +513,116 @@ fn external_readers_coexist_with_a_churning_writer() {
         );
     });
 }
+
+#[test]
+#[cfg_attr(any(tarpaulin, valgrind), ignore)]
+fn compaction_under_contention_leaves_a_consistent_image() {
+    // The suite above proves nothing tears and nothing deadlocks. It never
+    // asks whether what survives the contention is *internally consistent* —
+    // and `maintain` is the operation with the most to get wrong there: it
+    // rewrites every index at once, remapping fact ids, vector slots and the
+    // graph, while readers and writers keep arriving.
+    //
+    // `verify()` is the whole-image integrity check, so running it against a
+    // database that has been compacted, checkpointed, written and read
+    // concurrently turns the whole scenario into one assertion. Reopening from
+    // disk and verifying again covers the other half: that what was persisted
+    // under contention is loadable and consistent too.
+    run_with_deadline(120, "compaction under contention", || {
+        const WRITERS: u64 = 4;
+        const READERS: u64 = 4;
+        const PER: u64 = 150;
+
+        let tmp = TempDir::new("compact");
+        let (db, _) = Database::open(tmp.db(), Config::default()).unwrap();
+        let db = Arc::new(db);
+        let stop = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(Barrier::new((WRITERS + READERS + 1) as usize));
+
+        let mut churn = Vec::new();
+        let mut readers = Vec::new();
+        for t in 0..WRITERS {
+            let db = Arc::clone(&db);
+            let barrier = Arc::clone(&barrier);
+            churn.push(std::thread::spawn(move || {
+                barrier.wait();
+                for i in 0..PER {
+                    let now = 1 + t * PER + i;
+                    db.remember(RememberInput {
+                        entity: Some(["user", "plugmem"][(i % 2) as usize]),
+                        tags: &["pref"],
+                        ..RememberInput::text(now, &fact_text(now))
+                    })
+                    .unwrap();
+                    // Tombstones are what give compaction something to reclaim.
+                    if i.is_multiple_of(5) {
+                        let _ = db.forget(now, FactId((t * PER + i) as u32 / 2));
+                    }
+                }
+            }));
+        }
+        for _ in 0..READERS {
+            let db = Arc::clone(&db);
+            let barrier = Arc::clone(&barrier);
+            let stop = Arc::clone(&stop);
+            readers.push(std::thread::spawn(move || {
+                barrier.wait();
+                while !stop.load(Ordering::Relaxed) {
+                    let out = db
+                        .recall(RecallQuery::text(u64::MAX / 2, "marker"))
+                        .unwrap();
+                    for fact in &out.facts {
+                        // A writer may tombstone a fact between the recall and
+                        // this fetch, so absence is legal. What is not legal is
+                        // reading a frame that was spliced together from two.
+                        if let Some(view) = db.get(fact.id) {
+                            assert_consistent(&view.text);
+                        }
+                    }
+                }
+            }));
+        }
+        // The compactor: rebuilds the whole engine repeatedly, against traffic.
+        {
+            let db = Arc::clone(&db);
+            let barrier = Arc::clone(&barrier);
+            churn.push(std::thread::spawn(move || {
+                barrier.wait();
+                for r in 0..12u64 {
+                    db.maintain(WRITERS * PER + r).unwrap();
+                    db.checkpoint(WRITERS * PER + r).unwrap();
+                }
+            }));
+        }
+
+        // Readers run for as long as there is churn to race against: every
+        // writer and the compactor finish first, and only then are the readers
+        // told to stop.
+        for h in churn {
+            h.join().unwrap();
+        }
+        stop.store(true, Ordering::Relaxed);
+        for h in readers {
+            h.join().unwrap();
+        }
+
+        // A guard against the scenario degenerating: if the writers or the
+        // compactor stopped doing work, `verify` on an near-empty image would
+        // pass for the wrong reason.
+        let stats = db.stats();
+        assert!(
+            stats.facts > (WRITERS * PER / 2) as usize,
+            "the scenario must leave a non-trivial image, got {} facts",
+            stats.facts
+        );
+        db.verify()
+            .expect("the live image must verify after contention");
+        db.checkpoint(u64::MAX / 2).unwrap();
+        drop(db);
+
+        let (reopened, _) = Database::open(tmp.db(), Config::default()).unwrap();
+        reopened
+            .verify()
+            .expect("the persisted image must verify after contention");
+    });
+}

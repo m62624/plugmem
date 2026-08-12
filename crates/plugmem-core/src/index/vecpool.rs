@@ -448,12 +448,17 @@ impl<'a> VecPool<'a> {
             cand, top, query, ..
         } = scratch;
         let q_sig = &query[HEAD..HEAD + words * SIG_WORD_BYTES];
-        let c = (4 * k).max(64).min(n);
+        // Saturating because `k` is the caller's and this is a public entry
+        // point: a wrapping `4 * k` could land under 64 and quietly narrow the
+        // rescore band. `min(n)` then holds `c` at or below the slot count.
+        let c = k.saturating_mul(4).max(64).min(n);
         // Compacting at twice the target amortizes the partition to O(n): each
         // pass discards half the buffer, so it runs at most n/c times.
         let cap = c * 2;
         cand.clear();
-        cand.reserve(cap);
+        // Only `n` entries can ever be pushed, so the buffer never needs the
+        // full doubled threshold when the pool is smaller than it.
+        cand.reserve(cap.min(n));
         let mut limit: Option<(u32, u32)> = None;
         let slots = self
             .base

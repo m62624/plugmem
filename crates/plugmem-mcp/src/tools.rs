@@ -577,7 +577,11 @@ fn recall_ro(reader: &ReaderShared, id: Value, args: Option<&Value>) -> Value {
         token_budget: arg_u64(args, "token_budget").map(|v| v as usize),
         include_closed: arg_bool(args, "closed"),
         ef: arg_u64(args, "ef").map(|v| v as usize),
-        graph_depth: arg_u64(args, "graph_depth").map(|v| v as u32),
+        // Saturating, not truncating: a depth past `u32` means "as deep as the
+        // graph goes", and the walk is bounded by the entity and edge caps
+        // rather than by the hop count. Casting would have turned the largest
+        // possible request into `0` — no expansion at all.
+        graph_depth: arg_u64(args, "graph_depth").map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
     };
     let db = reader.db.read().expect("snapshot lock");
     let result = match vector_space.as_deref() {
@@ -594,7 +598,28 @@ fn recall_ro(reader: &ReaderShared, id: Value, args: Option<&Value>) -> Value {
 /// The `id` argument as a `u32` fact id (0 when absent — a `show`/`get` of a
 /// non-existent fact is a clean "does not exist").
 fn id_arg(args: Option<&Value>) -> u32 {
-    arg_u64(args, "id").unwrap_or(0) as u32
+    arg_u64(args, "id").and_then(fact_id).map_or(0, |f| f.0)
+}
+
+/// A JSON integer as a fact id, or `None` when it names no fact a database can
+/// hold.
+///
+/// Ids are `u32` and JSON numbers are not. Casting one to the other truncates,
+/// and truncation does not fail — it *aliases*: `2^32` becomes fact 0, and
+/// `2^32 + 2` becomes fact 2. A caller asking about an id that cannot exist
+/// would silently be answered about a real, unrelated fact, and on `forget`
+/// would silently destroy it and be told the call succeeded. Every other
+/// binding types its id `u32` at the boundary, so its runtime rejects the
+/// value; this surface reads JSON, where the check has to be made here — and
+/// it is the surface a model drives, so a garbled number is the expected
+/// input, not the exotic one.
+fn fact_id(v: u64) -> Option<FactId> {
+    u32::try_from(v).ok().map(FactId)
+}
+
+/// The tool-call error for an id past the `u32` fact-id space.
+fn out_of_range(id: Value, v: u64) -> Value {
+    rpc::tool_result(id, format!("fact id {v} is out of range"), true)
 }
 
 // ── Write verbs ───────────────────────────────────────────────────────────
@@ -662,7 +687,10 @@ fn revise(db: &Database, id: Value, args: Option<&Value>) -> Value {
     let Some(target) = arg_u64(args, "id") else {
         return rpc::tool_result(id, "missing required `id`".into(), true);
     };
-    remember(db, id, args, Some(FactId(target as u32)))
+    let Some(target) = fact_id(target) else {
+        return out_of_range(id, target);
+    };
+    remember(db, id, args, Some(target))
 }
 
 fn forget(db: &Database, id: Value, args: Option<&Value>) -> Value {
@@ -670,7 +698,14 @@ fn forget(db: &Database, id: Value, args: Option<&Value>) -> Value {
     if ids.is_empty() {
         return rpc::tool_result(id, "missing required `id` or `ids`".into(), true);
     }
-    let fact_ids: Vec<FactId> = ids.iter().map(|&i| FactId(i as u32)).collect();
+    let Some(fact_ids) = ids.iter().map(|&i| fact_id(i)).collect::<Option<Vec<_>>>() else {
+        let bad = ids
+            .iter()
+            .copied()
+            .find(|&i| fact_id(i).is_none())
+            .unwrap_or(0);
+        return out_of_range(id, bad);
+    };
     match db.forget_many(now_ms(), &fact_ids) {
         Ok(results) => {
             let body = if ids.len() == 1 {
@@ -722,12 +757,19 @@ fn link(db: &Database, id: Value, args: Option<&Value>) -> Value {
     ) else {
         return rpc::tool_result(id, "link needs `src`, `rel` and `dst`".into(), true);
     };
+    let provenance = match arg_u64(args, "provenance") {
+        Some(v) => match fact_id(v) {
+            Some(f) => Some(f),
+            None => return out_of_range(id, v),
+        },
+        None => None,
+    };
     match db.link(LinkInput {
         now: now_ms(),
         src,
         rel,
         dst,
-        provenance: arg_u64(args, "provenance").map(|v| FactId(v as u32)),
+        provenance,
     }) {
         Ok(()) => rpc::tool_result(
             id,
@@ -800,7 +842,11 @@ fn recall(db: &Database, id: Value, args: Option<&Value>) -> Value {
         token_budget: arg_u64(args, "token_budget").map(|v| v as usize),
         include_closed: arg_bool(args, "closed"),
         ef: arg_u64(args, "ef").map(|v| v as usize),
-        graph_depth: arg_u64(args, "graph_depth").map(|v| v as u32),
+        // Saturating, not truncating: a depth past `u32` means "as deep as the
+        // graph goes", and the walk is bounded by the entity and edge caps
+        // rather than by the hop count. Casting would have turned the largest
+        // possible request into `0` — no expansion at all.
+        graph_depth: arg_u64(args, "graph_depth").map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
     };
     match db.recall(q) {
         // Human = the rendered block; json = the structured result.
@@ -814,7 +860,10 @@ fn show(db: &Database, id: Value, args: Option<&Value>) -> Value {
     let Some(fid) = arg_u64(args, "id") else {
         return rpc::tool_result(id, "missing required `id`".into(), true);
     };
-    match db.get(FactId(fid as u32)) {
+    let Some(target) = fact_id(fid) else {
+        return out_of_range(id, fid);
+    };
+    match db.get(target) {
         Some(snap) => rpc::tool_result(id, render(&snap, format_arg(args)), false),
         None => rpc::tool_result(id, format!("fact {fid} does not exist"), true),
     }
@@ -1818,6 +1867,75 @@ mod tests {
                 Some(&params("plugmem_about", json!({})))
             ))
             .contains("skill")
+        );
+    }
+
+    /// Fact ids are `u32`; JSON numbers are not. A cast between them does not
+    /// fail, it *aliases* — `2^32` lands on fact 0 and `2^32 + 2` on fact 2 —
+    /// so an id that cannot name anything used to answer about a real,
+    /// unrelated fact, and on `forget` used to destroy it and report success.
+    /// A model driving this surface is exactly the caller that emits such a
+    /// number.
+    #[test]
+    fn an_id_past_the_fact_space_names_no_fact() {
+        let tmp = TempDir::new("id-range");
+        let (db, _) = Database::open(tmp.db(), Config::default()).unwrap();
+        for text in ["alpha", "beta", "gamma"] {
+            assert!(!is_error(&call(
+                &db,
+                json!(1),
+                Some(&params("plugmem_remember", json!({"text": text}))),
+            )));
+        }
+
+        // 2^32 would have truncated to fact 0 and forgotten it.
+        let f = call(
+            &db,
+            json!(2),
+            Some(&params("plugmem_forget", json!({"id": 4_294_967_296u64}))),
+        );
+        assert!(is_error(&f), "an unrepresentable id must be an error");
+        assert!(text(&f).contains("out of range"));
+        assert!(
+            text(&call(
+                &db,
+                json!(3),
+                Some(&params("plugmem_show", json!({"id": 0})))
+            ))
+            .contains("alpha"),
+            "fact 0 must survive a forget aimed past the id space"
+        );
+
+        // 2^32 + 2 would have shown fact 2.
+        let g = call(
+            &db,
+            json!(4),
+            Some(&params("plugmem_show", json!({"id": 4_294_967_298u64}))),
+        );
+        assert!(is_error(&g));
+        assert!(
+            !text(&g).contains("gamma"),
+            "must not answer about a real fact"
+        );
+
+        // The batch form checks every element, not just the first.
+        let h = call(
+            &db,
+            json!(5),
+            Some(&params(
+                "plugmem_forget",
+                json!({"ids": [1, 4_294_967_297u64]}),
+            )),
+        );
+        assert!(is_error(&h));
+        assert!(
+            text(&call(
+                &db,
+                json!(6),
+                Some(&params("plugmem_show", json!({"id": 1})))
+            ))
+            .contains("beta"),
+            "a rejected batch must not have forgotten its valid ids"
         );
     }
 

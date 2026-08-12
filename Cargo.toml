@@ -182,7 +182,11 @@ inherits = "release"
 
 # `dist` keeps `thin` deliberately: the release pipeline builds six targets and
 # pays fat LTO six times for a binary whose cost is dominated by I/O, not by the
-# scoring loops a benchmark exercises.
+# scoring loops a benchmark exercises. `codegen-units` is restated for the same
+# reason and not left to inheritance — the single unit above buys inlining a
+# benchmark can measure, at the price of serializing codegen, and `dist` pays
+# that price six times over for a binary that cannot show the gain.
 [profile.dist]
 inherits = "release"
 lto = "thin"
+codegen-units = 16
