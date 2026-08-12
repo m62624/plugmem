@@ -329,13 +329,47 @@ impl<'a> Bm25Index<'a> {
         docs.saturating_add(1).saturating_mul(SLACK)
     }
 
-    /// Rebuilds the flat length index from the stored records (the load path).
+    /// Rebuilds the flat length index from the stored records — the load path,
+    /// and the last step of [`Self::compact_live`].
+    ///
+    /// Deriving it in bulk rather than record by record is what makes it whole:
+    /// [`Self::note_dense`] judges an id against a capacity that grows with
+    /// `total_docs`, which is right while documents arrive in ascending id
+    /// order (the write path) and wrong when they arrive hashed, because the
+    /// first few are then measured against a capacity of eight. Here the
+    /// document count is already final, so every id is judged against the same
+    /// bound whatever order the arena yields it in.
+    ///
+    /// Two passes and no owned copy of the corpus: the first finds the
+    /// watermark and how far the array has to reach, the second fills it.
     fn rebuild_dense(&mut self) {
-        self.doc_len_dense.clear();
-        self.dense_limit = usize::MAX;
-        let docs: Vec<DocLenSlot> = self.doc_len.iter().collect();
-        for doc in docs {
-            self.note_dense(&doc);
+        let cap = self.dense_capacity();
+        let Self {
+            doc_len,
+            doc_len_dense,
+            dense_limit,
+            ..
+        } = self;
+        doc_len_dense.clear();
+        *dense_limit = usize::MAX;
+        let mut reach = 0usize;
+        for doc in doc_len.iter() {
+            let at = doc.fact.0 as usize;
+            if at >= cap {
+                // Declined, exactly as `note_dense` declines it: the array can
+                // never speak for this id, so the watermark drops to it.
+                *dense_limit = (*dense_limit).min(at);
+            } else {
+                // `at < cap` bounds `at + 1` — see `dense_capacity`.
+                reach = reach.max(at + 1);
+            }
+        }
+        doc_len_dense.resize(reach, DOC_LEN_ABSENT);
+        for doc in doc_len.iter() {
+            let at = doc.fact.0 as usize;
+            if at < cap {
+                doc_len_dense[at] = u32::from(doc.len);
+            }
         }
     }
 
@@ -383,7 +417,6 @@ impl<'a> Bm25Index<'a> {
         for doc in self.doc_len.iter() {
             if live(doc.fact) {
                 out.doc_len.insert(&doc)?;
-                out.note_dense(&doc);
                 out.total_docs += 1;
                 out.total_len += u64::from(doc.len);
                 if !doc.has_signature() {
@@ -422,6 +455,13 @@ impl<'a> Bm25Index<'a> {
         if !rebuilt.is_empty() {
             out.fill_missing_signatures(&rebuilt);
         }
+        // Last, with the document count final: the flat length index is derived
+        // state, and deriving it the way the load path does is what keeps a
+        // compacted index and a reopened one the same index. Building it inside
+        // the loop above judged the earliest documents against a capacity of
+        // eight — and compaction walks a hashed arena, so whichever id came
+        // first pinned the watermark there for the whole corpus.
+        out.rebuild_dense();
         Ok(out)
     }
 
@@ -735,5 +775,74 @@ impl<'a> Bm25Index<'a> {
         self.decoded.set(0);
         self.scored.set(0);
         self.admitted.set(0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds `n` single-term documents with ascending ids, the order
+    /// [`Bm25Index::index_doc`] requires.
+    fn indexed(n: u32) -> Bm25Index<'static> {
+        let mut idx = Bm25Index::new(64, usize::MAX).unwrap();
+        for id in 0..n {
+            idx.index_doc(FactId(id), &[(id % 16, 1)]).unwrap();
+        }
+        idx
+    }
+
+    /// Compaction must hand the compacted index the same flat length cache
+    /// the load path would build from the same records.
+    #[test]
+    fn compaction_keeps_the_flat_length_index_dense() {
+        let idx = indexed(512);
+        let compacted = idx.compact_live(64, usize::MAX, |_| true).unwrap();
+        assert_eq!(compacted.total_docs, 512);
+        assert_eq!(
+            compacted.dense_limit,
+            usize::MAX,
+            "compaction declined ids the load path covers"
+        );
+        for id in 0..512u32 {
+            assert!(
+                (id as usize) < compacted.dense_limit
+                    && compacted.doc_len_dense.get(id as usize).copied()
+                        != Some(DOC_LEN_ABSENT),
+                "id {id} fell through to the arena"
+            );
+        }
+    }
+
+    /// Tombstoning most of a corpus leaves the survivors' ids sparse. The
+    /// array still covers them — the bound is generous by design — and the
+    /// lengths it reports are the survivors' own.
+    #[test]
+    fn compaction_covers_a_corpus_thinned_by_tombstones() {
+        let idx = indexed(512);
+        let compacted = idx
+            .compact_live(64, usize::MAX, |fact| fact.0.is_multiple_of(4))
+            .unwrap();
+        assert_eq!(compacted.total_docs, 128);
+        for id in (0..512u32).step_by(4) {
+            assert_eq!(compacted.doc_len_of(FactId(id)), Some(1));
+        }
+        assert_eq!(compacted.doc_len_of(FactId(1)), None);
+    }
+
+    /// An id far past the document count is declined, and the watermark sends
+    /// every id at or above it to the arena — which answers correctly.
+    #[test]
+    fn a_sparse_id_is_declined_and_answered_by_the_arena() {
+        let mut idx = Bm25Index::new(64, usize::MAX).unwrap();
+        idx.index_doc(FactId(0), &[(1, 1)]).unwrap();
+        idx.index_doc(FactId(9_000), &[(1, 2)]).unwrap();
+        let compacted = idx.compact_live(64, usize::MAX, |_| true).unwrap();
+        assert_eq!(
+            compacted.dense_limit, 9_000,
+            "the sparse id should pin the watermark"
+        );
+        assert_eq!(compacted.doc_len_of(FactId(0)), Some(1));
+        assert_eq!(compacted.doc_len_of(FactId(9_000)), Some(2));
     }
 }
