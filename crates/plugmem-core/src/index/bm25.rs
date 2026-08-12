@@ -624,9 +624,18 @@ impl<'a> Bm25Index<'a> {
         // ordering is total (score descending, id ascending), ids are unique,
         // so no candidate ties with the limit and none that fails it can belong
         // to the best `k`.
-        let cap = (k * 2).max(2);
+        // `k` is the caller's — `recall` clamps it, but this is a public entry
+        // point and nothing here may assume that. Saturating keeps the compaction
+        // threshold above `k` for every `k`: past `usize::MAX / 2` a wrapping
+        // double would land *below* it, and the partition at `k - 1` would then
+        // run off the end of a buffer it had just filled. Saturated, the branch
+        // simply never fires and every candidate is kept, which is the answer.
+        let cap = k.saturating_mul(2).max(2);
         top.clear();
-        top.reserve(cap);
+        // The reserve is bounded by the candidates as well: at most one entry per
+        // scored document is ever pushed, so sizing on `k` alone would ask the
+        // allocator for an answer the corpus cannot supply.
+        top.reserve(cap.min(acc.len()));
         let mut limit: Option<(f32, u32)> = None;
         for &(id, score) in acc.iter() {
             let entry = (score, id);

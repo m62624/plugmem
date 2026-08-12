@@ -343,3 +343,27 @@ proptest! {
         prop_assert_eq!(&got, &want);
     }
 }
+
+/// `k` is the caller's, and both index searches are public entry points that
+/// size a selection buffer from it. A `k` past `usize::MAX / 2` used to double
+/// into a threshold *below* `k`, so the buffer compacted and then partitioned
+/// at `k - 1` — off the end of what it had just filled. Answer the query
+/// instead: every live candidate, since the corpus cannot supply more.
+#[test]
+fn a_degenerate_k_is_answered_rather_than_partitioned_out_of_range() {
+    let mut idx = Bm25Index::new(64, usize::MAX).unwrap();
+    for fact in 0..8u32 {
+        idx.index_doc(FactId(fact), &[(1, (fact as u8 % 5) + 1)])
+            .unwrap();
+    }
+    let mut scratch = Bm25Scratch::new();
+    let mut out = Vec::new();
+    for k in [usize::MAX, usize::MAX / 2 + 1, usize::MAX / 2] {
+        idx.search((1.2, 0.75), &[1], k, &mut |_| true, &mut scratch, &mut out);
+        assert_eq!(out.len(), 8, "k = {k} lost candidates");
+        assert!(
+            out.windows(2).all(|w| w[0].1 >= w[1].1),
+            "k = {k} broke the ordering"
+        );
+    }
+}
