@@ -253,6 +253,7 @@ why that is the right shape and not a limitation.
 | `revise(id, text, ...)` | close a fact's interval and record the successor |
 | `recall(query=None, *, tags, entities, as_of, range, k, closed, token_budget, ef, graph_depth, vector)` | the ranked answer |
 | `forget(id)` | tombstone a fact; `maintain` purges it later |
+| `forget_many(ids)` | tombstone a batch — one journal write, one post-write pass |
 | `remove_tag(tag)` | remove a tag from every current fact while preserving facts/history |
 | `link(src, rel, dst, *, provenance)` / `unlink(src, rel, dst)` | open or close a typed edge |
 | `get(id)` / `tags_of(id)` / `stats()` | one fact's card, its tags, engine counters |
@@ -477,7 +478,7 @@ Use this practical split inside an async application:
 
 | Call directly | Use `await asyncio.to_thread(...)` |
 |---|---|
-| `get`, `tags_of`, `stats`, `generation`, `path`, `config_warnings` | `open`, `remember`, `remember_guarded`, `remember_many`, `revise`, `recall`, `forget`, `remove_tag`, `list_tags`, `link`, `unlink` |
+| `get`, `tags_of`, `stats`, `generation`, `path`, `config_warnings` | `open`, `remember`, `remember_guarded`, `remember_many`, `revise`, `recall`, `forget`, `forget_many`, `remove_tag`, `list_tags`, `link`, `unlink` |
 | simple property/result access | `export`, `export_page`, `export_edges`, `verify`, `scrub`, `maintain`, `reembed`, `checkpoint`, `refresh`, `recover` |
 
 The left column only performs bounded in-memory reads and normally returns in

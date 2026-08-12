@@ -233,6 +233,7 @@ only moves arguments and results across the boundary.
 | `rememberMany(args[])` | store a batch: one embedding round-trip, one journal sync |
 | `revise(id, args)` | close a fact and record its successor |
 | `forget(id)` | tombstone a fact; resolves with whether it was live |
+| `forgetMany(ids[])` | tombstone a batch: one journal sync, one post-write pass |
 | `removeTag(tag)` | remove a tag from every current fact while preserving facts/history |
 | `link(args)` | upsert a typed edge, optionally with `provenance` |
 | `unlink(args)` | close the current edge; resolves with whether one was open |
@@ -521,7 +522,7 @@ callback in the process. Anything that can do that runs on a libuv worker and
 returns a promise instead.
 
 Promises: `Plugmem.open`, `remember`, `rememberGuarded`, `rememberMany`, `revise`, `recall`,
-`forget`, `removeTag`, `listTags`, `link`, `unlink`, `export`, `exportPage`, `verify`, `maintain`,
+`forget`, `forgetMany`, `removeTag`, `listTags`, `link`, `unlink`, `export`, `exportPage`, `verify`, `maintain`,
 `checkpoint`, every database verb on `WorkspaceMemory`, and every registry
 verb on `Workspace`.
 

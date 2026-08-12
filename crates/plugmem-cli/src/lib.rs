@@ -474,14 +474,28 @@ fn execute(
             render_recall(&res, json, out);
             Ok(0)
         }
-        Command::Forget { id } => {
-            let fresh = db.forget(now, FactId(*id))?;
+        Command::Forget { ids } => {
+            let fact_ids: Vec<FactId> = ids.iter().copied().map(FactId).collect();
+            let results = db.forget_many(now, &fact_ids)?;
             if json {
-                writeln!(out, "{}", json!({ "id": id, "forgotten": fresh })).ok();
-            } else if fresh {
-                writeln!(out, "forgot fact {id}").ok();
+                if ids.len() == 1 {
+                    writeln!(out, "{}", json!({ "id": ids[0], "forgotten": results[0] })).ok();
+                } else {
+                    let items: Vec<_> = ids
+                        .iter()
+                        .zip(&results)
+                        .map(|(id, fresh)| json!({ "id": id, "forgotten": fresh }))
+                        .collect();
+                    writeln!(out, "{}", json!(items)).ok();
+                }
             } else {
-                writeln!(out, "fact {id} was already gone").ok();
+                for (id, fresh) in ids.iter().zip(&results) {
+                    if *fresh {
+                        writeln!(out, "forgot fact {id}").ok();
+                    } else {
+                        writeln!(out, "fact {id} was already gone").ok();
+                    }
+                }
             }
             Ok(0)
         }
@@ -2307,11 +2321,11 @@ mod tests {
         let (db, _t) = TempDb::open();
         run_cmd(&db, &remember("temp", None, &[]), false, 1_000);
 
-        let (code, out) = run_cmd(&db, &Command::Forget { id: 0 }, false, 2_000);
+        let (code, out) = run_cmd(&db, &Command::Forget { ids: vec![0] }, false, 2_000);
         assert_eq!(code, 0);
         assert!(out.contains("forgot fact 0"), "{out}");
         // second forget is idempotent
-        let (_, out) = run_cmd(&db, &Command::Forget { id: 0 }, false, 2_100);
+        let (_, out) = run_cmd(&db, &Command::Forget { ids: vec![0] }, false, 2_100);
         assert!(out.contains("already gone"), "{out}");
 
         let (code, out) = run_cmd(
@@ -2326,6 +2340,41 @@ mod tests {
         );
         assert_eq!(code, 0);
         assert!(out.contains("purged 1"), "{out}");
+    }
+
+    #[test]
+    fn forget_many_ids_one_line_per_id() {
+        let (db, _t) = TempDb::open();
+        run_cmd(&db, &remember("a", None, &[]), false, 1_000);
+        run_cmd(&db, &remember("b", None, &[]), false, 1_100);
+        run_cmd(&db, &remember("c", None, &[]), false, 1_200);
+
+        let (code, out) = run_cmd(&db, &Command::Forget { ids: vec![0, 1] }, false, 2_000);
+        assert_eq!(code, 0);
+        let lines: Vec<_> = out.lines().collect();
+        assert_eq!(lines, vec!["forgot fact 0", "forgot fact 1"]);
+
+        // A second batch mixes an already-gone id with a fresh one.
+        let (code, out) = run_cmd(&db, &Command::Forget { ids: vec![0, 2] }, false, 2_100);
+        assert_eq!(code, 0);
+        let lines: Vec<_> = out.lines().collect();
+        assert_eq!(lines, vec!["fact 0 was already gone", "forgot fact 2"]);
+    }
+
+    #[test]
+    fn forget_many_ids_json_is_an_array() {
+        let (db, _t) = TempDb::open();
+        run_cmd(&db, &remember("a", None, &[]), false, 1_000);
+        run_cmd(&db, &remember("b", None, &[]), false, 1_100);
+
+        let (_, out) = run_cmd(&db, &Command::Forget { ids: vec![0, 1] }, true, 2_000);
+        let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        let arr = v.as_array().expect("json array for multi-id forget");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["id"], 0);
+        assert_eq!(arr[0]["forgotten"], true);
+        assert_eq!(arr[1]["id"], 1);
+        assert_eq!(arr[1]["forgotten"], true);
     }
 
     #[test]
@@ -2565,7 +2614,7 @@ mod tests {
         assert_eq!(v["unlinked"], true);
 
         // forget --json then maintain --json
-        let (_, out) = run_cmd(&db, &Command::Forget { id: 1 }, true, 2_500);
+        let (_, out) = run_cmd(&db, &Command::Forget { ids: vec![1] }, true, 2_500);
         let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
         assert_eq!(v["forgotten"], true);
         let (_, out) = run_cmd(
@@ -3005,7 +3054,7 @@ mod tests {
             1_200,
         ); // id 2 open, id 1 closed
         run_cmd(&a, &remember("junk", None, &[]), false, 1_300); // id 3
-        run_cmd(&a, &Command::Forget { id: 3 }, false, 1_400); // tombstone id 3
+        run_cmd(&a, &Command::Forget { ids: vec![3] }, false, 1_400); // tombstone id 3
         run_cmd(
             &a,
             &remember("uses rust", Some("plugmem"), &["lang"]),

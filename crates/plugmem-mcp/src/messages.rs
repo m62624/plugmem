@@ -66,9 +66,10 @@ the new text/flags. Use this to correct a fact while keeping the bitemporal hist
 `plugmem_recall --as-of` still sees the old value). Same arguments as remember, plus `id`.";
 
 /// `plugmem_forget` tool description.
-pub const FORGET_TOOL: &str = "Tombstone fact `id` (physically purged at the next \
-`plugmem_maintain`). Returns whether the fact was live. Idempotent: forgetting an already-gone \
-fact is not an error.";
+pub const FORGET_TOOL: &str = "Tombstone one or more facts (physically purged at the next \
+`plugmem_maintain`). Pass a single `id`, or `ids` for several at once — batched under one write \
+and one fsync instead of N. Returns whether each fact was live. Idempotent: forgetting an \
+already-gone fact is not an error.";
 
 /// `plugmem_tags` tool description.
 pub const TAGS_TOOL: &str = "List current tags and the number of current facts carrying each one. \
@@ -164,6 +165,8 @@ anchor entity (default: the configured `graph_depth`). `0` asks for the anchors'
 facts and no neighbours. Widen it when the question is \"what is known around this\", narrow it \
 when you want one entity's own facts and not its neighbourhood.";
 pub const ARG_ID: &str = "The fact id (as printed by remember, or the `[fN]` in a recall block).";
+pub const ARG_IDS_FORGET: &str = "Several fact ids to forget at once (as printed by remember, or \
+the `[fN]` ids in a recall block). Takes precedence over `id` when both are given.";
 pub const ARG_SRC: &str = "Source entity name (created lazily).";
 pub const ARG_REL: &str = "Relation term, verbatim (e.g. \"works_at\").";
 pub const ARG_DST: &str = "Destination entity name (created lazily).";

@@ -31,6 +31,10 @@ database (snapshot, journal and lock), with no server. Its main verbs are:
 - **revise** — close an old fact and chain its successor (history survives:
   "lived in Moscow (2023 → 2025)" stays answerable via `as_of`).
 - **forget** — tombstone a fact immediately; `maintain` purges it physically.
+  Forgetting several ids at once (CLI `forget <id>…`, MCP `ids:[...]`, or the
+  host/napi/Python `forget_many`) runs under one write instead of N — reach for
+  it whenever you already have the whole list of ids to drop, rather than
+  looping one `forget` call per id.
 - **link** — create or update a typed relationship between two entities.
 - **unlink** — close a typed relationship for current recall while preserving
   its historical `as_of` interval.
@@ -283,7 +287,7 @@ MANDATORY.
   | `remember` | `remember "<text>" [--guarded] [--entity E] [--tag T]… [--link REL:ENTITY]… [--meta K=V]… [--valid-from MS] [--vector F32,…]` |
   | `recall` | `recall ["<query>"] [--tag T]… [--entity E]… [--as-of MS] [--range FROM TO] [-k N] [--closed] [--token-budget N] [--ef N] [--graph-depth N] [--vector F32,…]` |
   | `revise` | `revise <id> "<text>" [same flags as remember]` |
-  | `forget` | `forget <id>` |
+  | `forget` | `forget <id>…` (one or more ids, batched under one write) |
   | `tags` | `tags [--prefix P] [--cursor C] [--limit N]` |
   | `remove-tag` | `remove-tag <tag>` |
   | `link` | `link <src> <rel> <dst> [--provenance FACT_ID]` |
@@ -504,7 +508,7 @@ comparison line:
 plugmem version check: skill <marker> vs engine <reported> → OK | MISMATCH
 ```
 
-<!-- skill-version: 0.10.0 -->
+<!-- skill-version: 0.11.0 -->
 
 If they differ in ANY way: **stop**, warn the user that skill and engine
 describe different functionality, and proceed only on their explicit

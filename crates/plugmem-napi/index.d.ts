@@ -732,6 +732,15 @@ export declare class Plugmem {
    */
   forget(id: number): Promise<boolean>
   /**
+   * Tombstones many facts at once. Equivalent to [`forget`](Plugmem::forget)
+   * on each id in order, but under **one** journal sync and **one**
+   * post-write policy pass instead of N — the same batching
+   * [`rememberMany`](Plugmem::remember_many) does for writes. Resolves with
+   * one boolean per id, in the same order, `true` when that id was live.
+   * @throws synchronously in read-only mode.
+   */
+  forgetMany(ids: Array<number>): Promise<boolean[]>
+  /**
    * Upserts a typed edge `src -rel-> dst`. **Async** for the same reason as
    * [`forget`](Plugmem::forget). @throws synchronously in read-only mode.
    */
@@ -936,6 +945,7 @@ export declare class WorkspaceMemory {
   revise(id: number, args: RememberArgs): Promise<RememberOutcome>
   recall(args?: RecallArgs | undefined | null): Promise<RecallResult>
   forget(id: number): Promise<boolean>
+  forgetMany(ids: Array<number>): Promise<boolean[]>
   link(args: LinkArgs): Promise<void>
   unlink(args: LinkArgs): Promise<boolean>
   get(id: number): Promise<FactSnapshot | null>

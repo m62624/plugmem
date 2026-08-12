@@ -885,6 +885,83 @@ fn remember_many_is_durable_after_reopen() {
 }
 
 #[test]
+fn forget_many_matches_single_forgets() {
+    let tmp = TempDir::new("forget-many-eq");
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    let a = db.remember(RememberInput::text(1, "alpha")).unwrap().id;
+    let b = db.remember(RememberInput::text(1, "beta")).unwrap().id;
+    let c = db.remember(RememberInput::text(1, "gamma")).unwrap().id;
+
+    let out = db.forget_many(100, &[a, b]).unwrap();
+    assert_eq!(out, vec![true, true]);
+    assert_eq!(db.stats().facts, 3, "tombstoned, not purged yet");
+
+    let tmp2 = TempDir::new("forget-many-eq2");
+    let (db2, _) = Database::open(tmp2.db(), cfg()).unwrap();
+    let a2 = db2.remember(RememberInput::text(1, "alpha")).unwrap().id;
+    let b2 = db2.remember(RememberInput::text(1, "beta")).unwrap().id;
+    let c2 = db2.remember(RememberInput::text(1, "gamma")).unwrap().id;
+    db2.forget(100, a2).unwrap();
+    db2.forget(100, b2).unwrap();
+
+    assert_eq!(db.get(c), db2.get(c2));
+    assert_eq!(db.get(a), None);
+    assert_eq!(db.get(b), None);
+}
+
+#[test]
+fn forget_many_reports_false_for_already_gone_ids() {
+    let tmp = TempDir::new("forget-many-idempotent");
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    let a = db.remember(RememberInput::text(1, "alpha")).unwrap().id;
+    db.forget(50, a).unwrap();
+
+    let out = db.forget_many(100, &[a]).unwrap();
+    assert_eq!(out, vec![false], "already tombstoned, so not fresh");
+}
+
+#[test]
+fn forget_many_empty_is_a_noop() {
+    let tmp = TempDir::new("forget-many-empty");
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    let a = db.remember(RememberInput::text(1, "alpha")).unwrap().id;
+    assert!(db.forget_many(100, &[]).unwrap().is_empty());
+    assert!(db.get(a).is_some(), "untouched");
+}
+
+#[test]
+fn forget_many_is_fail_fast_on_an_unknown_id() {
+    let tmp = TempDir::new("forget-many-fail");
+    let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+    let a = db.remember(RememberInput::text(1, "alpha")).unwrap().id;
+
+    let r = db.forget_many(100, &[a, FactId(9999)]);
+    assert!(r.is_err(), "unknown id → Err");
+    assert!(
+        db.get(a).is_none(),
+        "fail-fast: the good forget before it stayed applied"
+    );
+}
+
+#[test]
+fn forget_many_is_durable_after_reopen() {
+    // Same batch-fsync deferral as remember_many: durability rests on the
+    // single `sync_journal` at the end of the batch.
+    let tmp = TempDir::new("forget-many-durable");
+    let (a, b);
+    {
+        let (db, _) = Database::open(tmp.db(), cfg()).unwrap();
+        a = db.remember(RememberInput::text(1, "alpha")).unwrap().id;
+        b = db.remember(RememberInput::text(1, "beta")).unwrap().id;
+        db.forget_many(100, &[a, b]).unwrap();
+    }
+
+    let (db2, _) = Database::open(tmp.db(), cfg()).unwrap();
+    assert!(db2.get(a).is_none());
+    assert!(db2.get(b).is_none());
+}
+
+#[test]
 fn export_each_streams_the_same_facts_as_export() {
     let tmp = TempDir::new("export-each");
     let (db, _) = Database::open(tmp.db(), cfg()).unwrap();

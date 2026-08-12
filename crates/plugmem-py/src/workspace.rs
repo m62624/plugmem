@@ -310,6 +310,17 @@ impl WorkspaceMemory {
         })
     }
 
+    fn forget_many(&self, py: Python<'_>, ids: Vec<u32>) -> Result<Vec<bool>> {
+        let target = self.target()?;
+        let now = now_ms();
+        py.detach(move || {
+            target.with_database(IfMissing::Create, |db| {
+                let fact_ids: Vec<FactId> = ids.into_iter().map(FactId).collect();
+                db.forget_many(now, &fact_ids).map_err(error::engine)
+            })
+        })
+    }
+
     #[pyo3(signature = (src, rel, dst, *, provenance=None))]
     fn link(
         &self,
