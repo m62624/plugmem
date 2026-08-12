@@ -838,6 +838,25 @@ mod tests {
         assert_eq!(compacted.doc_len_of(FactId(1)), None);
     }
 
+    /// The highest id a fact can carry, which on wasm32 is also `usize::MAX`
+    /// — the watermark's own "nothing was declined" sentinel, and the one
+    /// value where computing the array's reach as `at + 1` would overflow.
+    ///
+    /// Neither can happen, and for the same reason: the reach is only taken
+    /// for an id *below* the capacity, and the capacity never exceeds
+    /// `usize::MAX`, so `usize::MAX` is always declined instead. Declining it
+    /// leaves the watermark at `usize::MAX`, which is exactly right — it is an
+    /// exclusive bound, and every id strictly below it really is covered.
+    #[test]
+    fn the_highest_fact_id_is_declined_rather_than_overflowing_the_reach() {
+        let mut idx = Bm25Index::new(64, usize::MAX).unwrap();
+        idx.index_doc(FactId(0), &[(1, 1)]).unwrap();
+        idx.index_doc(FactId(u32::MAX), &[(1, 3)]).unwrap();
+        let compacted = idx.compact_live(64, usize::MAX, |_| true).unwrap();
+        assert_eq!(compacted.doc_len_of(FactId(0)), Some(1));
+        assert_eq!(compacted.doc_len_of(FactId(u32::MAX)), Some(3));
+    }
+
     /// An id far past the document count is declined, and the watermark sends
     /// every id at or above it to the arena — which answers correctly.
     #[test]
