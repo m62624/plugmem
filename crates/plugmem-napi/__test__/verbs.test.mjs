@@ -127,6 +127,24 @@ test("forget tombstones a live fact and reports freshness", async () => {
   });
 });
 
+test("forgetMany batches several ids under one call", async () => {
+  await withDb(async (db) => {
+    await db.rememberMany([{ text: "alpha" }, { text: "beta" }, { text: "gamma" }]);
+
+    const promise = db.forgetMany([0, 1]);
+    assert.ok(promise instanceof Promise);
+    assert.deepEqual(await promise, [true, true]);
+
+    assert.equal(db.get(0), null);
+    assert.equal(db.get(1), null);
+    assert.match(db.get(2).text, /gamma/);
+
+    // Idempotent, same as single forget: a repeat reports false.
+    assert.deepEqual(await db.forgetMany([0, 2]), [false, true]);
+    assert.deepEqual(await db.forgetMany([]), []);
+  });
+});
+
 test("listTags is bounded and removeTag preserves facts", async () => {
   await withDb(async (db) => {
     await db.rememberMany([

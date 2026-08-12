@@ -505,6 +505,17 @@ impl Plugmem {
         self.write_task(Write::Forget(FactId(id)))
     }
 
+    /// Tombstones many facts at once. Equivalent to [`forget`](Plugmem::forget)
+    /// on each id in order, but under **one** journal sync and **one**
+    /// post-write policy pass instead of N — the same batching
+    /// [`rememberMany`](Plugmem::remember_many) does for writes. Resolves with
+    /// one boolean per id, in the same order, `true` when that id was live.
+    /// @throws synchronously in read-only mode.
+    #[napi(ts_return_type = "Promise<boolean[]>")]
+    pub fn forget_many(&self, ids: Vec<u32>) -> Result<AsyncTask<ForgetManyTask>> {
+        Ok(writer_forget_many_task(self.writer_source()?, ids))
+    }
+
     /// Upserts a typed edge `src -rel-> dst`. **Async** for the same reason as
     /// [`forget`](Plugmem::forget). @throws synchronously in read-only mode.
     #[napi(ts_return_type = "Promise<void>")]
@@ -939,6 +950,17 @@ pub(crate) fn writer_forget_task(source: WriterSource, id: u32) -> AsyncTask<Wri
     AsyncTask::new(WriteTask {
         source,
         what: Write::Forget(FactId(id)),
+        now: now_ms(),
+    })
+}
+
+pub(crate) fn writer_forget_many_task(
+    source: WriterSource,
+    ids: Vec<u32>,
+) -> AsyncTask<ForgetManyTask> {
+    AsyncTask::new(ForgetManyTask {
+        source,
+        ids,
         now: now_ms(),
     })
 }
@@ -1862,6 +1884,29 @@ impl Task for WriteTask {
             WriteOutput::Changed(changed) => napi::bindgen_prelude::Either::A(changed),
             WriteOutput::Done => napi::bindgen_prelude::Either::B(()),
         })
+    }
+}
+
+/// The libuv-thread body of [`Plugmem::forget_many`].
+pub struct ForgetManyTask {
+    source: WriterSource,
+    ids: Vec<u32>,
+    now: u64,
+}
+
+impl Task for ForgetManyTask {
+    type Output = Produced<Vec<bool>>;
+    type JsValue = Vec<bool>;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        let fact_ids: Vec<FactId> = self.ids.iter().copied().map(FactId).collect();
+        Ok(self
+            .source
+            .write(|db| db.forget_many(self.now, &fact_ids).map_err(error::engine)))
+    }
+
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        output.map_err(|e| error::to_js(env, e))
     }
 }
 

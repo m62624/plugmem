@@ -192,6 +192,11 @@ impl WorkspaceMemory {
         Ok(writer_forget_task(self.source()?, id))
     }
 
+    #[napi(ts_return_type = "Promise<boolean[]>")]
+    pub fn forget_many(&self, ids: Vec<u32>) -> Result<AsyncTask<crate::db::ForgetManyTask>> {
+        Ok(crate::db::writer_forget_many_task(self.source()?, ids))
+    }
+
     #[napi(ts_return_type = "Promise<void>")]
     pub fn link(&self, args: LinkArgs) -> Result<AsyncTask<WriteTask>> {
         Ok(writer_link_task(self.source()?, args))

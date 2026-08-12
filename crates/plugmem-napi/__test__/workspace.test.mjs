@@ -74,6 +74,16 @@ test("every WorkspaceMemory verb executes through a scoped lease", async () => {
   });
 });
 
+test("WorkspaceMemory.forgetMany batches ids through a scoped lease", async () => {
+  await withWorkspace(async (ws) => {
+    const memory = ws.memory("forget-many");
+    const [a, b] = await memory.rememberMany([{ text: "alpha" }, { text: "beta" }]);
+    assert.deepEqual(await memory.forgetMany([a.id, b.id]), [true, true]);
+    assert.equal(await memory.get(a.id), null);
+    assert.deepEqual(await memory.forgetMany([]), []);
+  });
+});
+
 test("a read of an unknown name fails and creates nothing", async () => {
   await withWorkspace(async (ws, dir) => {
     const typo = ws.memory("typo");

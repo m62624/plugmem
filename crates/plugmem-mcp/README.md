@@ -190,7 +190,7 @@ sets `isError: true` so the model can read and react to it.
 | `plugmem_remember` | store a fact (`text`, optional `entity`, `tags[]`, `links[]` of `{rel, entity}`, `valid_from`); returns the id + similar/conflicting facts. With `guarded: true`, checks similarity and writes only if clear, without a race between those steps. The check is scoped to `entity`, so `guarded` with no `entity` has nothing to compare against and always stores, and the result's `checked` field says so |
 | `plugmem_recall` | ranked, token-budgeted recall (`query`, `tags[]`, `entities[]`, `as_of`, `range [from,to]`, `k`, `closed`, `token_budget`, `ef`) |
 | `plugmem_revise` | close fact `id`, record the successor (same args as remember + `id`) |
-| `plugmem_forget` | tombstone fact `id` (purged at the next maintain) |
+| `plugmem_forget` | tombstone fact `id`, or several at once via `ids: [...]` (purged at the next maintain) |
 | `plugmem_tags` | bounded lexical page of current tags and counts (`prefix`, opaque `cursor`, `limit` up to 256) |
 | `plugmem_remove_tag` | remove one tag from every current fact while preserving facts and historical tag state |
 | `plugmem_link` | upsert a typed edge `src -rel-> dst`, optionally with `provenance`: the fact id the edge follows from, which graph recall returns |

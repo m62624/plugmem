@@ -177,11 +177,14 @@ pub(crate) enum Command {
         #[arg(long, value_name = "F32,…", value_delimiter = ',', num_args = 1..)]
         vector: Vec<f32>,
     },
-    /// Tombstone a fact (physically purged at the next `maintain`).
+    /// Tombstone one or more facts (physically purged at the next `maintain`).
+    /// Several ids run under one write-guard and one fsync instead of N.
     Forget {
-        /// The fact id to forget — the `N` from a `recall` line `[fN]`, a
-        /// `show`, or a `remember`/`revise` confirmation.
-        id: u32,
+        /// The fact id(s) to forget — the `N` from a `recall` line `[fN]`, a
+        /// `show`, or a `remember`/`revise` confirmation. Space-separated for
+        /// more than one: `forget 3 7 12`.
+        #[arg(num_args = 1..)]
+        ids: Vec<u32>,
     },
     /// List current tags with counts in stable lexical order.
     Tags {

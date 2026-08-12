@@ -554,6 +554,22 @@ impl Plugmem {
         })
     }
 
+    /// Tombstone a batch of facts. Returns one `True`/`False` per id, in order.
+    ///
+    /// Equivalent to `forget` on each id in order, but under one journal write
+    /// and one post-write policy pass — the batching `remember_many` does for
+    /// writes, mirrored here since there is no embedder in the way.
+    fn forget_many(&self, py: Python<'_>, ids: Vec<u32>) -> Result<Vec<bool>> {
+        let now = now_ms();
+        py.detach(|| {
+            let guard = self.handle.read().map_err(|_| error::busy("this memory"))?;
+            let fact_ids: Vec<FactId> = ids.into_iter().map(FactId).collect();
+            writer(&guard)?
+                .forget_many(now, &fact_ids)
+                .map_err(error::engine)
+        })
+    }
+
     /// Open a typed edge `src -[rel]-> dst`.
     ///
     /// `provenance` records the fact the edge follows from, which is what makes

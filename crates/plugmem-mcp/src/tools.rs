@@ -666,17 +666,35 @@ fn revise(db: &Database, id: Value, args: Option<&Value>) -> Value {
 }
 
 fn forget(db: &Database, id: Value, args: Option<&Value>) -> Value {
-    let Some(fid) = arg_u64(args, "id") else {
-        return rpc::tool_result(id, "missing required `id`".into(), true);
-    };
-    match db.forget(now_ms(), FactId(fid as u32)) {
-        Ok(fresh) => rpc::tool_result(
-            id,
-            render(&json!({ "id": fid, "forgotten": fresh }), format_arg(args)),
-            false,
-        ),
+    let ids = forget_ids(args);
+    if ids.is_empty() {
+        return rpc::tool_result(id, "missing required `id` or `ids`".into(), true);
+    }
+    let fact_ids: Vec<FactId> = ids.iter().map(|&i| FactId(i as u32)).collect();
+    match db.forget_many(now_ms(), &fact_ids) {
+        Ok(results) => {
+            let body = if ids.len() == 1 {
+                json!({ "id": ids[0], "forgotten": results[0] })
+            } else {
+                json!(
+                    ids.iter()
+                        .zip(&results)
+                        .map(|(i, fresh)| json!({ "id": i, "forgotten": fresh }))
+                        .collect::<Vec<_>>()
+                )
+            };
+            rpc::tool_result(id, render(&body, format_arg(args)), false)
+        }
         Err(e) => tool_error(id, &e),
     }
+}
+
+/// `ids` (an array) if present, else `id` alone as a single-element list.
+fn forget_ids(args: Option<&Value>) -> Vec<u64> {
+    if let Some(arr) = args.and_then(|a| a.get("ids")).and_then(Value::as_array) {
+        return arr.iter().filter_map(Value::as_u64).collect();
+    }
+    arg_u64(args, "id").into_iter().collect()
 }
 
 fn remove_tag(db: &Database, id: Value, args: Option<&Value>) -> Value {
@@ -919,7 +937,23 @@ fn recall_def() -> Value {
 }
 
 fn forget_def() -> Value {
-    id_only_def(FORGET, messages::FORGET_TOOL)
+    json!({
+        "name": FORGET,
+        "description": messages::FORGET_TOOL,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": { "type": "integer", "minimum": 0, "description": messages::ARG_ID },
+                "ids": {
+                    "type": "array",
+                    "items": { "type": "integer", "minimum": 0 },
+                    "minItems": 1,
+                    "description": messages::ARG_IDS_FORGET
+                },
+                "format": format_prop()
+            }
+        }
+    })
 }
 
 fn remove_tag_def() -> Value {
@@ -1785,6 +1819,52 @@ mod tests {
             ))
             .contains("skill")
         );
+    }
+
+    #[test]
+    fn forget_ids_batches_several_at_once() {
+        let tmp = TempDir::new("forget-ids");
+        let (db, _) = Database::open(tmp.db(), Config::default()).unwrap();
+
+        for text in ["alpha", "beta", "gamma"] {
+            assert!(!is_error(&call(
+                &db,
+                json!(1),
+                Some(&params("plugmem_remember", json!({"text": text}))),
+            )));
+        }
+
+        let f = call(
+            &db,
+            json!(2),
+            Some(&params("plugmem_forget", json!({"ids": [0, 1]}))),
+        );
+        assert!(!is_error(&f));
+        let arr: Value = serde_json::from_str(&text(&f)).unwrap();
+        let arr = arr.as_array().expect("multi-id forget returns an array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0], json!({"id": 0, "forgotten": true}));
+        assert_eq!(arr[1], json!({"id": 1, "forgotten": true}));
+
+        // Fact 2 (gamma) is untouched.
+        let show = call(
+            &db,
+            json!(3),
+            Some(&params("plugmem_show", json!({"id": 2}))),
+        );
+        assert!(text(&show).contains("gamma"));
+
+        // `ids` takes precedence over a stray `id`.
+        assert!(!is_error(&call(
+            &db,
+            json!(4),
+            Some(&params("plugmem_forget", json!({"id": 999, "ids": [2]}),)),
+        )));
+        assert!(is_error(&call(
+            &db,
+            json!(5),
+            Some(&params("plugmem_forget", json!({"ids": []})))
+        ))); // empty ids → same as missing
     }
 
     #[test]

@@ -1042,6 +1042,51 @@ impl Database {
         Ok(fresh)
     }
 
+    /// Tombstones many facts. Equivalent to [`forget`](Self::forget) on each id
+    /// in order, but under **one** write-guard and **one** post-mutation policy
+    /// pass — instead of N critical sections and N fsyncs. Unlike
+    /// [`remember_many`](Self::remember_many) there is no embedder involved, so
+    /// this is a plain batched loop.
+    ///
+    /// **Fail-fast:** the first engine error returns `Err`; the ids forgotten
+    /// before it stay forgotten (exactly as separate `forget`s — the journal
+    /// replay is idempotent, so a retried bulk forget is safe). Returns one
+    /// `bool` per id, in order — `true` when that id was live and is now
+    /// tombstoned, `false` when it was already gone.
+    pub fn forget_many(
+        &self,
+        now: u64,
+        ids: &[plugmem_core::FactId],
+    ) -> Result<Vec<bool>, HostError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut st = self.write_available()?;
+        // Batch mode: journal appends skip their per-record fsync; one
+        // `sync_journal` at the end makes the whole batch durable at once.
+        st.store.set_batch(true);
+        let mut out = Vec::with_capacity(ids.len());
+        let mut failed = None;
+        for &id in ids {
+            let State { engine, store, .. } = &mut *st;
+            match engine.with(store, |mem, store| mem.forget(store, now, id)) {
+                Ok(fresh) => out.push(fresh),
+                Err(e) => {
+                    failed = Some(HostError::from(e));
+                    break;
+                }
+            }
+        }
+        st.store.set_batch(false);
+        st.store.sync_journal()?;
+        if let Some(e) = failed {
+            return Err(e);
+        }
+        st.forgets += out.len() as u64;
+        self.after_mutation(&mut st, now)?;
+        Ok(out)
+    }
+
     /// Upserts a typed edge.
     pub fn link(&self, input: LinkInput<'_>) -> Result<(), HostError> {
         let mut st = self.write_available()?;
