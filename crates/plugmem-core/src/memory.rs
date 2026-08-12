@@ -409,6 +409,11 @@ pub struct Memory<'a> {
     // -- reusable scratches --
     tokenizer: Tokenizer,
     tf_scratch: Vec<(u32, u8)>,
+    /// Open-addressing `term -> index into `tf_scratch` + 1` table (0 is
+    /// empty), so accumulating a document's term frequencies costs one probe
+    /// per token instead of a scan of the terms already seen. Grown to the
+    /// largest document indexed and reused; see [`tally_term`].
+    tf_probe: Vec<u32>,
     name_scratch: String,
     similarity_scratch: SimilarityScratch,
 }
@@ -457,6 +462,7 @@ impl<'a> Memory<'a> {
             bm25_tokenizer_version: maintain::TOKENIZER_INDEX_VERSION,
             tokenizer: Tokenizer::new(),
             tf_scratch: Vec::new(),
+            tf_probe: Vec::new(),
             name_scratch: String::new(),
             similarity_scratch: SimilarityScratch::default(),
             cfg,
@@ -1489,7 +1495,9 @@ impl<'a> Memory<'a> {
 
         // Tokenize into (term, tf) pairs in the reusable scratch.
         let mut tfs = core::mem::take(&mut self.tf_scratch);
+        let mut probe = core::mem::take(&mut self.tf_probe);
         tfs.clear();
+        probe.fill(0);
         let terms = &mut self.terms;
         let mut intern_err = None;
         self.tokenizer.tokenize(input.text, &mut |token| {
@@ -1497,13 +1505,11 @@ impl<'a> Memory<'a> {
                 return;
             }
             match terms.intern(token) {
-                Ok(term) => match tfs.iter_mut().find(|(t, _)| *t == term.0) {
-                    Some((_, tf)) => *tf = tf.saturating_add(1),
-                    None => tfs.push((term.0, 1)),
-                },
+                Ok(term) => tally_term(&mut tfs, &mut probe, term.0),
                 Err(e) => intern_err = Some(e),
             }
         });
+        self.tf_probe = probe;
         if let Some(e) = intern_err {
             self.tf_scratch = tfs;
             return Err(Error::Arena(e));
@@ -1955,4 +1961,59 @@ fn normalize_name(tokenizer: &mut Tokenizer, name: &str, out: &mut String) {
         }
         out.push_str(token);
     });
+}
+
+/// Probe index for `term` in a table of `mask + 1` slots. Fibonacci hashing —
+/// the same constant the arena shards with, so term ids scatter without a
+/// second hash family.
+#[inline]
+fn probe_at(term: u32, mask: usize) -> usize {
+    (u64::from(term).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as usize & mask
+}
+
+/// Records one occurrence of `term` in `tfs`, using `probe` as a
+/// `term -> index + 1` open-addressing table (0 is empty).
+///
+/// This replaces a scan of the terms already seen, which made indexing a
+/// document quadratic in its length — at the 4 KiB `max_text` ceiling, on the
+/// order of 10^5 comparisons for one `remember`.
+///
+/// **A term keeps the slot its first occurrence claimed**, so `tfs` comes out
+/// in first-occurrence order exactly as the scan left it and `index_doc`
+/// receives byte-identical input.
+fn tally_term(tfs: &mut Vec<(u32, u8)>, probe: &mut Vec<u32>, term: u32) {
+    // Half full at most: probes stay short and the loop below terminates.
+    // Growth rehashes from `tfs`, which is the authoritative order.
+    if (tfs.len() + 1) * 2 > probe.len() {
+        let grown = (probe.len() * 2).max(64);
+        probe.clear();
+        probe.resize(grown, 0);
+        let mask = grown - 1;
+        for (i, &(seen, _)) in tfs.iter().enumerate() {
+            let mut at = probe_at(seen, mask);
+            while probe[at] != 0 {
+                at = (at + 1) & mask;
+            }
+            probe[at] = i as u32 + 1;
+        }
+    }
+    let mask = probe.len() - 1;
+    let mut at = probe_at(term, mask);
+    loop {
+        match probe[at] {
+            0 => {
+                probe[at] = tfs.len() as u32 + 1;
+                tfs.push((term, 1));
+                return;
+            }
+            slot => {
+                let entry = &mut tfs[slot as usize - 1];
+                if entry.0 == term {
+                    entry.1 = entry.1.saturating_add(1);
+                    return;
+                }
+            }
+        }
+        at = (at + 1) & mask;
+    }
 }
