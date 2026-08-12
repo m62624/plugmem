@@ -577,7 +577,11 @@ fn recall_ro(reader: &ReaderShared, id: Value, args: Option<&Value>) -> Value {
         token_budget: arg_u64(args, "token_budget").map(|v| v as usize),
         include_closed: arg_bool(args, "closed"),
         ef: arg_u64(args, "ef").map(|v| v as usize),
-        graph_depth: arg_u64(args, "graph_depth").map(|v| v as u32),
+        // Saturating, not truncating: a depth past `u32` means "as deep as the
+        // graph goes", and the walk is bounded by the entity and edge caps
+        // rather than by the hop count. Casting would have turned the largest
+        // possible request into `0` — no expansion at all.
+        graph_depth: arg_u64(args, "graph_depth").map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
     };
     let db = reader.db.read().expect("snapshot lock");
     let result = match vector_space.as_deref() {
@@ -838,7 +842,11 @@ fn recall(db: &Database, id: Value, args: Option<&Value>) -> Value {
         token_budget: arg_u64(args, "token_budget").map(|v| v as usize),
         include_closed: arg_bool(args, "closed"),
         ef: arg_u64(args, "ef").map(|v| v as usize),
-        graph_depth: arg_u64(args, "graph_depth").map(|v| v as u32),
+        // Saturating, not truncating: a depth past `u32` means "as deep as the
+        // graph goes", and the walk is bounded by the entity and edge caps
+        // rather than by the hop count. Casting would have turned the largest
+        // possible request into `0` — no expansion at all.
+        graph_depth: arg_u64(args, "graph_depth").map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
     };
     match db.recall(q) {
         // Human = the rendered block; json = the structured result.
