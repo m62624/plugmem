@@ -26,7 +26,8 @@ fn main() {
     use plugmem_core::index::bm25::{Bm25Index, Bm25Scratch};
     use plugmem_core::index::{IdListIndex, IntersectScratch, intersect};
     use plugmem_core::{
-        Config, FactId, MemStorage, Memory, RecallQuery, RecallResult, RecallScratch,
+        Config, FactId, MaintenanceOptions, MemStorage, Memory, RecallQuery, RecallResult,
+        RecallScratch,
     };
     use plugmem_testgen::{Gen, GenOp, Profile, apply};
 
@@ -133,19 +134,46 @@ fn main() {
     // Below the flat→HNSW threshold (24k): a flat two-phase scan.
     row(
         "flat vector (24k, d384)",
-        vector_recall_us(0x5EC0_0000_0000_0384, 24_000, false),
+        vector_recall_us(0x5EC0_0000_0000_0384, 24_000, Graph::None),
     );
-    // Above it (30k) with the graph built by `maintain`: HNSW search.
+    // Above it (30k) with every vector folded into the graph: HNSW search.
     row(
         "HNSW (30k, d384)",
-        vector_recall_us(0x4A5A_0000_0000_0001, 30_000, true),
+        vector_recall_us(0x4A5A_0000_0000_0001, 30_000, Graph::Full),
+    );
+    // The same corpus after one bounded `Auto` pass — the state a database
+    // that has never run an offline maintain is actually in. Most vectors are
+    // still in the flat tail, which `recall` scans exactly beside the graph,
+    // so this is the row a wrapper's maintenance policy is answerable for.
+    row(
+        "HNSW + flat tail (30k, d384)",
+        vector_recall_us(0x4A5A_0000_0000_0001, 30_000, Graph::Auto),
     );
 
+    /// How much of the corpus `maintain` folded into the graph before the
+    /// query — the difference between the two vector regimes above.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Graph {
+        /// No graph at all: the flat two-phase scan.
+        None,
+        /// One bounded pass; the rest of the corpus stays in the flat tail.
+        Auto,
+        /// Every vector in the graph, nothing in the tail.
+        Full,
+    }
+
     /// Builds a dim-384 vector engine of `vectors` corpus members and
-    /// returns the best k=8 vector-recall time (µs). With `build_graph`,
-    /// `maintain` builds the HNSW graph first (search then goes through
-    /// it); without, the flat regime is measured.
-    fn vector_recall_us(seed: u64, vectors: usize, build_graph: bool) -> f64 {
+    /// returns the best k=8 vector-recall time (µs) in the requested graph
+    /// regime.
+    ///
+    /// The regime matters and used to be conflated. `Auto` bounds a pass at
+    /// `AUTO_HNSW_INSERT_BUDGET` insertions, so on 30k vectors one pass leaves
+    /// ~26k of them in the flat tail that `recall` scans exactly alongside the
+    /// graph. Reporting that under the name "HNSW" made the row uncomparable
+    /// against any other engine's graph latency, so the two are separate rows
+    /// now — the tail is a real cost of a real configuration, and it is not a
+    /// graph search.
+    fn vector_recall_us(seed: u64, vectors: usize, graph: Graph) -> f64 {
         const DIM: usize = 384;
         let profile = Profile {
             dim: DIM,
@@ -174,8 +202,16 @@ fn main() {
             .max()
             .unwrap_or(0)
             + 1;
-        if build_graph {
-            mem.maintain(&mut store, now).unwrap();
+        match graph {
+            Graph::None => {}
+            Graph::Auto => {
+                mem.maintain_with_options(&mut store, now, MaintenanceOptions::auto())
+                    .unwrap();
+            }
+            Graph::Full => {
+                mem.maintain_with_options(&mut store, now, MaintenanceOptions::full())
+                    .unwrap();
+            }
         }
         let query = ops
             .iter()
