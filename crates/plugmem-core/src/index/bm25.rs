@@ -807,8 +807,7 @@ mod tests {
         for id in 0..512u32 {
             assert!(
                 (id as usize) < compacted.dense_limit
-                    && compacted.doc_len_dense.get(id as usize).copied()
-                        != Some(DOC_LEN_ABSENT),
+                    && compacted.doc_len_dense.get(id as usize).copied() != Some(DOC_LEN_ABSENT),
                 "id {id} fell through to the arena"
             );
         }

@@ -1132,6 +1132,56 @@ fn an_open_never_panics_through_access_and_verify_catches_corruption() {
 }
 
 #[test]
+fn maintain_never_panics_through_a_corrupt_image() {
+    // The sweep above proves the *read* accessors tolerate a corrupt image.
+    // `maintain` is not a read, and it was not covered: compaction copies each
+    // live fact's vector slot into the rebuilt pool by index, and the loader
+    // deliberately defers the fact↔slot bijection to `verify()`. A slot past
+    // the end of the section therefore reached a raw slice index and aborted
+    // the process, on an image the loader had accepted — the range check now
+    // sits with the other reference checks, where every consumer inherits it.
+    //
+    // Compaction has to actually run for this to mean anything, so the corpus
+    // carries vectors and enough tombstones to earn a rebuild.
+    let mut cfg = cfg();
+    cfg.dim = 8;
+    let (mut mem, mut store) = (Memory::new(cfg.clone()).unwrap(), MemStorage::new());
+    for i in 0..40u64 {
+        let v: Vec<f32> = (0..8).map(|j| ((i + j) % 7) as f32).collect();
+        mem.remember(
+            &mut store,
+            RememberInput {
+                entity: Some("user"),
+                vector: Some(&v),
+                ..RememberInput::text(i * 1000, "some text here")
+            },
+        )
+        .unwrap();
+    }
+    for i in (0..40u32).step_by(3) {
+        mem.forget(&mut store, 50 * DAY, FactId(i)).unwrap();
+    }
+    let bytes = mem.snapshot_bytes(0);
+
+    for at in (0..bytes.len()).step_by(7) {
+        let mut b = bytes.clone();
+        b[at] ^= 0x40;
+        let cfg = cfg.clone();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let Ok((mut m, _)) = Memory::from_bytes(Some(&b), &[], cfg) else {
+                return; // a typed load error is a fine outcome
+            };
+            let mut s = MemStorage::new();
+            // Ok or Err, never a panic.
+            let _ = m.maintain_with_options(&mut s, 99 * DAY, MaintenanceOptions::full());
+            let _ = m.get(FactId(0));
+            let _ = m.verify();
+        }));
+        assert!(outcome.is_ok(), "maintain panicked after a flip at {at}");
+    }
+}
+
+#[test]
 fn verify_accepts_a_clean_image_and_reports_deferred_text_corruption() {
     // `verify()` is the on-demand full content-integrity check:
     // a clean image passes; a stored text corrupted past the (skipped) checksums

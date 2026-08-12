@@ -1074,10 +1074,22 @@ impl<'a> Memory<'a> {
             {
                 return Err(Error::Corrupt("fact record references out of range"));
             }
-            // The has-vector bijection touches the vector pool and is deferred
-            // to `verify()`; the cheap direction stays — a fact without the
-            // flag must carry no slot.
-            if !fact.has_vector() && fact.vector != NONE_U32 {
+            // The has-vector *bijection* — every slot owned by exactly the
+            // fact naming it — reads the pool and stays deferred to `verify()`.
+            // Both range directions are free, though: they compare against a
+            // slot count, which is two slice lengths and a division, and touch
+            // no vector bytes. So they are checked here, where every consumer
+            // downstream can rely on them. `Memory::compact` copies a slot by
+            // index into the rebuilt pool with no bound of its own, and a
+            // maintain over an unvalidated image used to walk off the end of
+            // the section and panic — on an image the loader had already
+            // accepted, which is exactly the shape of corruption a trust/sparse
+            // open is meant to tolerate rather than crash on.
+            if fact.has_vector() {
+                if fact.vector as usize >= self.vecs.len() {
+                    return Err(Error::Corrupt("fact vector slot is out of range"));
+                }
+            } else if fact.vector != NONE_U32 {
                 return Err(Error::Corrupt("fact without a vector flag carries a slot"));
             }
         }
