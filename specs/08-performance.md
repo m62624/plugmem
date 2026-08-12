@@ -26,9 +26,19 @@ Memory budget: the "RAM image / useful data" inflation ≤ 1.6, checked by a tes
 corpus M. Representative measured numbers (native, testgen corpus): structural recall
 @100k ~70 µs (a Zipf hub anchor still makes the graph source spend its full
 `GRAPH_EXAMINE_CAP` of 2048 postings — the price of the declared caps, not a complexity
-regression); tags+range @100k ~17 µs; flat 24k×384 k=8 ~267 µs; HNSW 30k×384 ef64
-~3.3 ms; BM25 3-terms-of-10k ~8.5 µs. Ceilings only tighten; loosening one is a
-deliberate edit to this file.
+regression); tags+range @100k ~18 µs; flat 24k×384 k=8 ~250 µs; HNSW 30k×384 ef64
+~185 µs with every vector in the graph and ~1.8 ms with the corpus still in the
+flat tail after one bounded `Auto` pass; BM25 3-terms-of-10k ~7.3 µs. Ceilings
+only tighten; loosening one is a deliberate edit to this file.
+
+The two HNSW figures used to be one, and it was the second wearing the name of
+the first: `Auto` bounds a pass at 4096 insertions, so a 30k-vector corpus keeps
+~26k of them in the flat tail, which `recall` scans exactly beside the graph.
+The tail is a real cost of a real configuration — it is what a database that has
+never run an offline `maintain` pays — but it is not a graph search, and a
+single row that averaged them was comparable to nothing. Both are measured
+separately now (`plugmem-core/examples/bench_ops`), and the budget row above
+applies to the graph.
 
 Those figures come from one machine and are not comparable to earlier editions of
 this file: the vector and graph rows moved with the hardware, not with the code,

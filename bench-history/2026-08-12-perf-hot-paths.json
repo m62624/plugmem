@@ -1,0 +1,73 @@
+{
+  "date": "2026-08-12",
+  "branch": "perf/recall-hot-paths",
+  "base_commit": "381cb14",
+  "target": "native x86-64, 13th Gen Intel Core i5-13400F (16 threads), dev desktop, idle",
+  "rustc": "1.96.0",
+  "purpose": "Before/after for the recall and write hot-path work: release-profile LTO, rank-before-admit on the vector sources, bounded BM25 top-k, and a probe table for document term frequencies. Every change preserves recall output bit for bit; the numbers below are the same commands run on the same machine in the same session, which is the only comparison worth making (a committed baseline drifts between machines and days).",
+  "method": {
+    "warm_up": "criterion defaults for the criterion rows; best-of-200 after 30 warm-up calls for examples/bench_ops; the database stand reports p50/p95 over its own repetition loop",
+    "commands": [
+      "cargo run --release -p plugmem-core --example bench_ops",
+      "cargo run --release -p plugmem-host --example bench_database -- {5000,100000,1000000} --diagnose-recall",
+      "cargo bench -p plugmem-core --bench engine",
+      "cargo run --release -p plugmem-arena --example bench_repro -- 1000000"
+    ],
+    "correctness": "cargo test --workspace in default/counters/serde; the counters perf gates assert equalities (not ceilings), so an unchanged gate is evidence the selected candidate sets did not move; tests/zero_alloc.rs holds recall/get at 0 allocations; arena tests at 32 bits (wasm32-wasip1); wasm32v1-none build. miri and valgrind were not run in this session."
+  },
+  "database_1m_us_or_ms": {
+    "note": "examples/bench_database, 1M operations, dim 0",
+    "mixed_stream_load_ops_per_sec": { "before": 23298.5, "after": 24267.3 },
+    "checkpoint_ms": { "before": 592.1, "after": 513.6 },
+    "maintain_ms": { "before": 1983.6, "after": 1767.1 },
+    "reopen_ms": { "before": 160.0, "after": 112.6 },
+    "readonly_open_ms": { "before": 161.8, "after": 114.0 },
+    "readonly_scrub_ms": { "before": 52.4, "after": 50.7 },
+    "writer_text_recall_p50_us": { "before": 149.6, "after": 137.3 },
+    "writer_hybrid_recall_p50_us": { "before": 321.9, "after": 277.9 },
+    "writer_hybrid_recall_p95_us": { "before": 384.1, "after": 288.5 },
+    "diagnostic_text_common_p50_us": { "before": 25973.4, "after": 21927.5, "spread": "20117-21928 across runs; this row is the noisiest in the matrix" },
+    "diagnostic_full_hybrid_p50_us": { "before": 330.4, "after": 299.0 }
+  },
+  "database_100k_us": {
+    "diagnostic_text_common_p50_us": { "before": 2416.3, "after": 1788.1 }
+  },
+  "core_sources_us": {
+    "note": "examples/bench_ops, best-of-N",
+    "bm25_3_terms_10k": { "before": 8.8, "after": 7.3 },
+    "tags_3_lists_100k": { "before": 58.0, "after": 57.1 },
+    "flat_vector_24k_d384": {
+      "before": 237.7,
+      "after": 249.1,
+      "note": "This row is unreliable in bench_ops — three consecutive pre-change runs gave 237.7 / 251.4 / 357.0. Criterion measured the same work at -5.1% (vec/flat_24k_d384_k8), which is the number to believe."
+    },
+    "hnsw_30k_d384": {
+      "before": 3351.9,
+      "after": 182.8,
+      "note": "NOT a like-for-like speedup. The old row called maintain in Auto mode, which bounds a pass at 4096 insertions, so ~26k of the 30k vectors stayed in the flat tail that recall scans exactly beside the graph — it published a tail scan under the name of a graph search. The row now folds every vector in and reports the graph."
+    },
+    "hnsw_plus_flat_tail_30k_d384": {
+      "before": 3351.9,
+      "after": 1766.5,
+      "note": "The old row's true subject, kept as its own row: the bounded-Auto state a database that never ran an offline maintain is actually in. This is the like-for-like number: -47%."
+    }
+  },
+  "criterion_deltas": {
+    "note": "cargo bench -p plugmem-core --bench engine, criterion's own before/after comparison",
+    "recall/structural_100k": "-18.0%",
+    "hnsw/search_30k_d384_k8_ef64": "-47.9%",
+    "vec/flat_24k_d384_k8": "-5.1%",
+    "bm25/index_10k_docs": "-12.4%"
+  },
+  "arena_1m": {
+    "note": "examples/bench_repro. Unchanged by this branch and reported only to show it. The Arena rows moved with the machine, not the code: in the same sweep std BTreeMap (which nothing here touches) moved further than the arena did.",
+    "arena_ordered_insert_ns": { "before": 119.5, "after": 125.7 },
+    "arena_ordered_get_ns": { "before": 101.2, "after": 102.9 },
+    "std_btreemap_insert_ns": { "before": 129.8, "after": 153.9 },
+    "allocs": { "before": 67, "after": 67, "note": "the arena allocation contract is intact" }
+  },
+  "caveats": [
+    "tools/bench-charts/baseline.tsv was measured in an earlier session and is not this machine's 'before'. Where the regenerated charts show a value worse than the committed one — reopen_verify is the clear case, ~330 ms in the old baseline against ~583 ms measured here before any change on this branch — that is the machine, not this work. The before/after pairs above are all from one session.",
+    "The HNSW chart row changed meaning as well as value. Do not add 'HNSW' and 'HNSW + flat tail' together, and do not compare either against the pre-branch 3352 us without saying which one it is."
+  ]
+}

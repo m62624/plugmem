@@ -572,9 +572,34 @@ impl<'a> Bm25Index<'a> {
         // therefore wasted work: rank first, then walk the ranking and ask
         // only until `k` survivors are found. The result is the same set in
         // the same order an exhaustive filter produces.
-        top.clear();
-        top.extend(acc.iter().map(|&(id, score)| (score, id)));
         let order = |a: &(f32, u32), b: &(f32, u32)| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1));
+        // Collecting every candidate and partitioning the whole thing was the
+        // shape that made a corpus-wide term expensive twice over: an 8-byte
+        // copy per scored document, then a quickselect across all of them, for
+        // an answer of `k`. Only the best `k` are kept, behind a running limit
+        // that rejects the rest with one comparison; compacting at twice `k`
+        // amortizes the partition to O(candidates).
+        //
+        // The kept set is the same one the full partition produced: the
+        // ordering is total (score descending, id ascending), ids are unique,
+        // so no candidate ties with the limit and none that fails it can belong
+        // to the best `k`.
+        let cap = (k * 2).max(2);
+        top.clear();
+        top.reserve(cap);
+        let mut limit: Option<(f32, u32)> = None;
+        for &(id, score) in acc.iter() {
+            let entry = (score, id);
+            if limit.is_some_and(|worst| !order(&entry, &worst).is_lt()) {
+                continue;
+            }
+            top.push(entry);
+            if top.len() == cap {
+                top.select_nth_unstable_by(k - 1, order);
+                top.truncate(k);
+                limit = Some(top[k - 1]);
+            }
+        }
         #[cfg(feature = "counters")]
         let mut admitted = 0u64;
         let mut consume = |band: &[(f32, u32)], out: &mut Vec<(FactId, f32)>| {
@@ -606,11 +631,14 @@ impl<'a> Bm25Index<'a> {
         // The band was thinned by tombstones or a filter. Order what is left
         // in one pass and continue down it — the same total cost the
         // exhaustive filter used to pay on every query, now only on a query
-        // that needs it.
-        if out.len() < k && band < top.len() {
-            top[band..].sort_unstable_by(order);
-            let (_, rest) = top.split_at(band);
-            consume(rest, out);
+        // that needs it. The band is the best `band` candidates and was just
+        // consumed, so ordering `acc` and resuming past it walks exactly the
+        // documents the exhaustive path would have reached, in the same order.
+        if out.len() < k && band < acc.len() {
+            acc.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+            top.clear();
+            top.extend(acc[band..].iter().map(|&(id, score)| (score, id)));
+            consume(top, out);
         }
         #[cfg(feature = "counters")]
         self.admitted.set(self.admitted.get() + admitted);

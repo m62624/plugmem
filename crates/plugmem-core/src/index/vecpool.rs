@@ -431,32 +431,56 @@ impl<'a> VecPool<'a> {
         let q_off = HEAD + words * SIG_WORD_BYTES;
 
         // Phase 1: Hamming distance of every slot's signature to the query.
+        //
+        // Two things keep this O(n) pass cheap. The slots are walked as two
+        // contiguous runs — `base` then `tail` — instead of through
+        // `slot_bytes`, so the per-slot base/tail branch disappears and the
+        // optimizer sees a fixed-stride chunk iterator. And the candidates are
+        // *not* materialized: only the `c` best are kept, behind a running
+        // limit that rejects the overwhelming majority with one comparison.
+        //
+        // The kept set is exactly what pushing all `n` and partitioning at
+        // `c - 1` produced. Ordering on `(hamming, slot)` is total, slots
+        // arrive strictly ascending, and the limit is the largest of the `c`
+        // currently kept — so an entry that fails `< limit` can never belong to
+        // the best `c`, and one that ties on hamming is greater by its slot.
         let VecScratch {
             cand, top, query, ..
         } = scratch;
         let q_sig = &query[HEAD..HEAD + words * SIG_WORD_BYTES];
+        let c = (4 * k).max(64).min(n);
+        // Compacting at twice the target amortizes the partition to O(n): each
+        // pass discards half the buffer, so it runs at most n/c times.
+        let cap = c * 2;
         cand.clear();
-        cand.reserve(n);
-        for i in 0..n {
-            let slot = self.slot_bytes(i);
+        cand.reserve(cap);
+        let mut limit: Option<(u32, u32)> = None;
+        let slots = self
+            .base
+            .chunks_exact(stride)
+            .chain(self.tail.chunks_exact(stride));
+        for (i, slot) in slots.enumerate() {
             let s_sig = &slot[HEAD..HEAD + words * SIG_WORD_BYTES];
             let mut ham = 0u32;
-            for w in 0..words {
-                let a = u64::from_le_bytes(
-                    q_sig[w * SIG_WORD_BYTES..w * SIG_WORD_BYTES + SIG_WORD_BYTES]
-                        .try_into()
-                        .unwrap(),
-                );
-                let b = u64::from_le_bytes(
-                    s_sig[w * SIG_WORD_BYTES..w * SIG_WORD_BYTES + SIG_WORD_BYTES]
-                        .try_into()
-                        .unwrap(),
-                );
+            for (qw, sw) in q_sig
+                .chunks_exact(SIG_WORD_BYTES)
+                .zip(s_sig.chunks_exact(SIG_WORD_BYTES))
+            {
+                let a = u64::from_le_bytes(qw.try_into().unwrap());
+                let b = u64::from_le_bytes(sw.try_into().unwrap());
                 ham += (a ^ b).count_ones();
             }
-            cand.push((ham, i as u32));
+            let entry = (ham, i as u32);
+            if limit.is_some_and(|worst| entry >= worst) {
+                continue;
+            }
+            cand.push(entry);
+            if cand.len() == cap {
+                cand.select_nth_unstable(c - 1);
+                cand.truncate(c);
+                limit = Some(cand[c - 1]);
+            }
         }
-        let c = (4 * k).max(64).min(n);
         if cand.len() > c {
             cand.select_nth_unstable(c - 1);
         }
@@ -483,7 +507,16 @@ impl<'a> VecPool<'a> {
         }
         #[cfg(feature = "counters")]
         self.dots.set(self.dots.get() + dots);
-        top.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        // Only the first `k` survivors are read, and the ordering below is
+        // total (score descending, then id), so partitioning at `k` and
+        // ordering that prefix yields the same sequence a full sort would —
+        // for the price of the prefix rather than of every candidate.
+        let order = |a: &(f32, u32), b: &(f32, u32)| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1));
+        let band = k.min(top.len());
+        if band < top.len() {
+            top.select_nth_unstable_by(band, order);
+        }
+        top[..band].sort_unstable_by(order);
         for &(score, id) in top.iter().take(k) {
             out.push((FactId(id), score));
         }
@@ -615,13 +648,33 @@ impl<'a> VecPool<'a> {
     }
 }
 
+/// Lanes the dot product accumulates in parallel. Sixteen i8 pairs are one
+/// 128-bit vector on every target this runs on — baseline SSE2, NEON, and
+/// wasm's 128-bit SIMD — so a chunk maps to one widening multiply-add
+/// without naming an intrinsic. The crate is `#![forbid(unsafe_code)]`, so
+/// `core::arch` is not available and autovectorization is the whole lever.
+const DOT_LANES: usize = 16;
+
 /// Integer dot product of two equal-length i8 slices held as bytes.
 /// `dim ≤ 4096` and `|q| ≤ 127`, so the sum fits `i32`
 /// (`4096 · 127² < 2³¹`).
+///
+/// Summing per lane and folding at the end changes the *order* of the
+/// additions, not the result: this is `i32` arithmetic that cannot overflow
+/// at these bounds, and integer addition is associative. A quantized cosine
+/// is therefore bit-for-bit what the scalar loop produced.
 #[inline]
 pub(crate) fn dot_i8(a: &[u8], b: &[u8]) -> i32 {
-    let mut acc = 0i32;
-    for (&x, &y) in a.iter().zip(b.iter()) {
+    let mut lanes = [0i32; DOT_LANES];
+    let mut a_chunks = a.chunks_exact(DOT_LANES);
+    let mut b_chunks = b.chunks_exact(DOT_LANES);
+    for (x, y) in a_chunks.by_ref().zip(b_chunks.by_ref()) {
+        for (lane, (&x, &y)) in lanes.iter_mut().zip(x.iter().zip(y.iter())) {
+            *lane += i32::from(x as i8) * i32::from(y as i8);
+        }
+    }
+    let mut acc: i32 = lanes.iter().sum();
+    for (&x, &y) in a_chunks.remainder().iter().zip(b_chunks.remainder().iter()) {
         acc += i32::from(x as i8) * i32::from(y as i8);
     }
     acc

@@ -255,21 +255,26 @@ behaved worst: it used to pay a fixed floor sized for a million facts.
 |---|---:|---:|---:|
 | Active facts after `maintain` | 4,305 | 86,010 | 860,204 |
 | Pool bytes after `maintain` | 3.4 MB | 44.5 MB | 413.7 MB |
-| Streaming load | 0.08 s (65,876 ops/s) | 1.65 s (60,589 ops/s) | 39.6 s (25,277 ops/s) |
-| Text-only recall p50 | 6 µs | 25 µs | 147 µs |
-| Full hybrid recall p50 | 34 µs | 60 µs | 302 µs |
-| Single frequent term recall p50 | 0.09 ms | 2.47 ms | 25.6 ms |
-| Checkpoint | 4 ms | 59 ms | 514 ms |
-| `maintain` | 0.01 s | 0.20 s | 1.96 s |
-| Reopen (writer) | 1 ms | 15 ms | 166 ms |
-| `verify` | 1 ms | 34 ms | 320 ms |
+| Streaming load | 0.07 s (72,189 ops/s) | 1.65 s (60,491 ops/s) | 42.7 s (23,399 ops/s) |
+| Text-only recall p50 | 6 µs | 23 µs | 148 µs |
+| Full hybrid recall p50 | 34 µs | 53 µs | 299 µs |
+| Single frequent term recall p50 | 0.10 ms | 1.82 ms | 21.9 ms |
+| Checkpoint | 4 ms | 56 ms | 523 ms |
+| `maintain` | 0.01 s | 0.17 s | 1.81 s |
+| Reopen (writer) | 1 ms | 12 ms | 124 ms |
+| `verify` | 2 ms | 44 ms | 572 ms |
 
 ![Recall latency at 5k, 100k and 1M operations](crates/plugmem-host/assets/database-recall-scale.svg)
 
-Across the two decades from 5k to 1M the pool grows 122× for 200× the facts —
-the per-fact cost *falls* (800 → 481 B) because the fixed floor amortizes away
-rather than dominating. Load time is 480× for 200× the operations, so the
-per-operation cost grows 2.4×; text-only recall grows 25×.
+Across the two decades from 5k to 1M the pool grows 120× for 200× the facts —
+the per-fact cost *falls* (801 → 481 B) because the fixed floor amortizes away
+rather than dominating. Load time is 617× for 200× the operations, so the
+per-operation cost grows 3.1×; text-only recall grows 26×.
+
+The `verify` row is the one that reads worse than earlier editions of this
+table, and it did so before any of the work these numbers come from: it is a
+different machine state, not a change in the check. Only numbers inside this
+table compare to each other.
 
 The **single frequent term** row is the worst lexical input there is, and it is
 charted next to the others because it is the number to budget for. A query made

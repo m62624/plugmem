@@ -167,6 +167,22 @@ install-updater = false
 [workspace.metadata.dist.github-custom-runners]
 aarch64-pc-windows-msvc = "windows-2022"
 
+# The hot loops are split across crates by design — the arena holds the page
+# walk and the byte moves, the core holds the scoring and the distance kernels
+# — so without cross-crate inlining every posting decode and every slot read
+# crosses a call boundary the optimizer cannot see through. `lto = "fat"` plus a
+# single codegen unit is what lets it. Benches inherit this: a benchmark built
+# with different inlining measures a different program.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
+[profile.bench]
+inherits = "release"
+
+# `dist` keeps `thin` deliberately: the release pipeline builds six targets and
+# pays fat LTO six times for a binary whose cost is dominated by I/O, not by the
+# scoring loops a benchmark exercises.
 [profile.dist]
 inherits = "release"
 lto = "thin"
