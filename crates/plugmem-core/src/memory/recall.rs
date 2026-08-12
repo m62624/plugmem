@@ -493,9 +493,44 @@ impl Memory<'_> {
             let (s_scale, s_q) = self.vecs.quant(slot as usize);
             hnsw_out.push((slot, q_scale * s_scale * dot_i8(q_q, s_q) as f32));
         }
+        // Resolving the slot to its fact is a byte read; *admitting* it is an
+        // arena lookup, and the flat tail can be tens of thousands of entries
+        // long. Admission cannot reorder a ranking, only thin it — the same
+        // property `Bm25Index::search` relies on — so rank first and ask about
+        // the band actually in contention, not about every scanned vector.
         vec_out.clear();
-        for &(slot, sim) in hnsw_out.iter() {
-            let fact = FactId(self.vecs.slot_fact(slot as usize));
+        vec_out.extend(
+            hnsw_out
+                .iter()
+                .map(|&(slot, sim)| (FactId(self.vecs.slot_fact(slot as usize)), sim)),
+        );
+
+        // Rank, then admit. The flat tail is unbounded — it holds every vector
+        // written since the last `maintain` folded one into the graph — so
+        // sorting all of it to keep `SOURCE_CAP` was O(tail log tail) for a
+        // constant-size answer. Partitioning is O(tail) and, the ordering being
+        // total, leaves the same prefix in the same order.
+        let order = |a: &(FactId, f32), b: &(FactId, f32)| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0));
+        let band = SOURCE_CAP.min(vec_out.len());
+        if band < vec_out.len() {
+            vec_out.select_nth_unstable_by(band, order);
+        }
+        vec_out[..band].sort_unstable_by(order);
+
+        // Compact the admitted survivors of the band to the front. `write` only
+        // ever trails `read`, so the two indices never cross and no candidate is
+        // overwritten before it is examined.
+        let mut write = 0usize;
+        let mut read = 0usize;
+        while write < SOURCE_CAP && read < vec_out.len() {
+            // Past the band the entries are still unordered — order them once,
+            // the price a query pays only when tombstones or a filter thinned
+            // the band below `SOURCE_CAP`.
+            if read == band && band < vec_out.len() {
+                vec_out[band..].sort_unstable_by(order);
+            }
+            let candidate = vec_out[read];
+            read += 1;
             if admit(
                 &self.facts,
                 allow,
@@ -503,15 +538,15 @@ impl Memory<'_> {
                 filtered,
                 as_of,
                 q.include_closed,
-                fact,
+                candidate.0,
             )
             .is_some()
             {
-                vec_out.push((fact, sim));
+                vec_out[write] = candidate;
+                write += 1;
             }
         }
-        vec_out.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-        vec_out.truncate(SOURCE_CAP);
+        vec_out.truncate(write);
         Ok(())
     }
 
