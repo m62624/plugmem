@@ -100,38 +100,38 @@
 1000000	wasmtime	std HashMap	ins_p99	183.8
 1000000	wasmtime	std HashMap	insert_ns	53.0
 1000000	wasmtime	std HashMap	mem_b	35.7
-core	native	BM25 (3 terms, 10k)	latency_us	8.5
-core	native	HNSW (30k, d384)	latency_us	3262.3
-core	native	flat vector (24k, d384)	latency_us	266.9
-core	native	tags (3 lists, 100k)	latency_us	56.9
-database-100k	native	writer_diagnostic/full_hybrid	p50_us	60.1
-database-100k	native	writer_diagnostic/text_common	p50_us	2473.7
-database-100k	native	writer_diagnostic/text_only	p50_us	25.3
-database-100k	native	writer_diagnostic/text_tag_range	p50_us	25.6
+core	native	BM25 (3 terms, 10k)	latency_us	7.3
+core	native	HNSW (30k, d384)	latency_us	182.8
+core	native	flat vector (24k, d384)	latency_us	249.1
+core	native	tags (3 lists, 100k)	latency_us	57.1
+database-100k	native	writer_diagnostic/full_hybrid	p50_us	53.2
+database-100k	native	writer_diagnostic/text_common	p50_us	1824.2
+database-100k	native	writer_diagnostic/text_only	p50_us	22.6
+database-100k	native	writer_diagnostic/text_tag_range	p50_us	25.1
 database-1m	native	after_load	pool_bytes	416602511.0
 database-1m	native	after_maintain	pool_bytes	413715784.0
-database-1m	native	checkpoint	elapsed_ms	513.6
-database-1m	native	maintain	elapsed_ms	1963.3
+database-1m	native	checkpoint	elapsed_ms	522.6
+database-1m	native	maintain	elapsed_ms	1813.7
 database-1m	native	mixed_stream	load_ops_per_sec	25276.6
-database-1m	native	readonly	elapsed_ms	151.0
+database-1m	native	readonly	elapsed_ms	120.1
 database-1m	native	readonly	pool_bytes	413715784.0
 database-1m	native	readonly/hybrid_recall	p50_us	324.7
 database-1m	native	readonly/text_recall	p50_us	161.6
-database-1m	native	readonly_scrub	elapsed_ms	48.3
-database-1m	native	readonly_verify	elapsed_ms	337.4
-database-1m	native	reopen	elapsed_ms	165.6
-database-1m	native	reopen_verify	elapsed_ms	329.1
+database-1m	native	readonly_scrub	elapsed_ms	54.1
+database-1m	native	readonly_verify	elapsed_ms	566.8
+database-1m	native	reopen	elapsed_ms	123.6
+database-1m	native	reopen_verify	elapsed_ms	576.6
 database-1m	native	writer/hybrid_recall	p50_us	300.6
 database-1m	native	writer/text_recall	p50_us	147.3
-database-1m	native	writer_diagnostic/full_hybrid	p50_us	301.7
-database-1m	native	writer_diagnostic/text_common	p50_us	25566.8
-database-1m	native	writer_diagnostic/text_only	p50_us	147.3
-database-1m	native	writer_diagnostic/text_tag_range	p50_us	274.1
-database-1m	native	writer_verify	elapsed_ms	319.9
-database-5k	native	writer_diagnostic/full_hybrid	p50_us	33.8
-database-5k	native	writer_diagnostic/text_common	p50_us	92.6
-database-5k	native	writer_diagnostic/text_only	p50_us	5.9
-database-5k	native	writer_diagnostic/text_tag_range	p50_us	3.8
+database-1m	native	writer_diagnostic/full_hybrid	p50_us	299.0
+database-1m	native	writer_diagnostic/text_common	p50_us	21927.5
+database-1m	native	writer_diagnostic/text_only	p50_us	147.5
+database-1m	native	writer_diagnostic/text_tag_range	p50_us	259.1
+database-1m	native	writer_verify	elapsed_ms	572.0
+database-5k	native	writer_diagnostic/full_hybrid	p50_us	34.0
+database-5k	native	writer_diagnostic/text_common	p50_us	95.4
+database-5k	native	writer_diagnostic/text_only	p50_us	5.6
+database-5k	native	writer_diagnostic/text_tag_range	p50_us	3.6
 edge-100k	native	current_edges/after_full_maintain	count	0.0
 edge-100k	native	current_edges/after_link	count	100000.0
 edge-100k	native	current_edges/after_unlink	count	0.0
