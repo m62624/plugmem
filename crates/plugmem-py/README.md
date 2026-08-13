@@ -427,7 +427,10 @@ call does not pay the same failure again. Facts written meanwhile are in the
 state every fact is in when a memory is written with no embedder, and `reembed`
 fills their vectors in from the stored text. `timeout_ms` bounds one request
 (10s by default), and a suspension lifts by itself after `retry_after_ms`
-(unset: 1s doubling to `retry_max_ms`, reset by the first success).
+(unset: 1s doubling to `retry_max_ms`, reset by the first success). Each has an
+environment override, which is the form that fits an outage:
+`$PLUGMEM_EMBEDDER_ON_ERROR`, `$PLUGMEM_EMBEDDER_TIMEOUT_MS`,
+`$PLUGMEM_EMBEDDER_RETRY_AFTER_MS`, `$PLUGMEM_EMBEDDER_RETRY_MAX_MS`.
 
 `embedder_state()` answers `"absent"`, `"active"` or `"suspended"`, and
 `suspend_embedder()` / `resume_embedder()` are the manual switches. Both work

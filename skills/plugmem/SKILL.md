@@ -389,7 +389,9 @@ The config file itself resolves as `--config` (or the `config` option passed to
 Database-path precedence is an explicit `--db` or `open` path, then
 `$PLUGMEM_DB`, then `[database].path`, then the platform data directory.
 
-The common shape is:
+The common shape is below. It is **not** the whole catalogue — there are around
+forty keys, and the settings-help call above prints every one of them with its
+default, read out of the running build rather than out of this document:
 
 ```toml
 [database]
@@ -455,6 +457,12 @@ For a consumer, three things are worth knowing:
   the caller already knows the provider is gone.
 - `vectors < facts` in `stats` is the durable trace of a degraded stretch, and
   the reason to run a reembed on the next start with a working provider.
+
+Every key of this section also has an environment variable, which is the form
+that fits an outage — nobody wants to edit a config file to get through one:
+`$PLUGMEM_EMBEDDER_ON_ERROR`, `$PLUGMEM_EMBEDDER_TIMEOUT_MS`,
+`$PLUGMEM_EMBEDDER_RETRY_AFTER_MS`, `$PLUGMEM_EMBEDDER_RETRY_MAX_MS`. The
+environment wins over the file, the file over the defaults.
 
 ### What a mismatched vector space actually does
 
@@ -537,7 +545,7 @@ comparison line:
 plugmem version check: skill <marker> vs engine <reported> → OK | MISMATCH
 ```
 
-<!-- skill-version: 0.11.0 -->
+<!-- skill-version: 0.12.0 -->
 
 If they differ in ANY way: **stop**, warn the user that skill and engine
 describe different functionality, and proceed only on their explicit

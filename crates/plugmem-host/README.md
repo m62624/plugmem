@@ -566,8 +566,10 @@ database itself stayed as usable as it is with no embedder at all.
 `[embedder].on_error = "degrade"`, carries on without the vector instead, and
 suspends the embedder so the next verb does not pay the same failure. The
 suspension retries by itself — `embed_retry`/`retry_after_ms`, one second
-doubling to a minute by default, reset by the first success — and
-`Database::embedder_state()` reports `Absent`, `Active` or
+doubling to a minute by default (`retry_max_ms`), reset by the first success —
+and `OpenAiCompatEmbedder::with_timeout` / `[embedder].timeout_ms` bounds one
+request at ten seconds, without which degrading is late by however long a hung
+server hangs. `Database::embedder_state()` reports `Absent`, `Active` or
 `Suspended { retry_at }` for a surface that wants to say so out loud.
 `suspend_embedder()` / `resume_embedder()` are the manual switches, and an
 explicit suspension outranks every timer.
