@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import math
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -25,6 +24,21 @@ import pytest
 DIM = 8
 
 
+class _Gate:
+    """Two events that let a test hold one request inside the provider.
+
+    `self_released` records that the endpoint gave up waiting and answered on
+    its own. That only happens when the test never got as far as releasing it —
+    i.e. when something below blocked — so it turns a hang into a named
+    failure instead of a test that eventually passes late.
+    """
+
+    def __init__(self) -> None:
+        self.arrived = threading.Event()
+        self.release = threading.Event()
+        self.self_released = False
+
+
 class _Handler(BaseHTTPRequestHandler):
     """An OpenAI-shaped `/v1/embeddings` endpoint that counts what it embeds."""
 
@@ -32,10 +46,16 @@ class _Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("content-length", "0"))
         inputs = json.loads(self.rfile.read(length))["input"]
         self.server.embedded += len(inputs)
-        # `delay` lets a test be inside a provider round trip while it calls
-        # something else, which is how the lock discipline is checked.
-        if self.server.delay:
-            time.sleep(self.server.delay)
+        # A gated endpoint announces the arriving request and then waits to be
+        # let go, which is what puts a test *provably* inside a round trip: no
+        # sleep, and no assumption about how fast a thread starts. The wait has
+        # a ceiling only so a regression ends in a red test instead of a
+        # process nobody can kill.
+        gate = self.server.gate
+        if gate is not None:
+            gate.arrived.set()
+            if not gate.release.wait(timeout=5):
+                gate.self_released = True
         data = [
             {
                 "index": index,
@@ -57,10 +77,10 @@ class _Handler(BaseHTTPRequestHandler):
 class _Embedder:
     """A live endpoint, until `stop()`."""
 
-    def __init__(self, delay: float = 0.0) -> None:
+    def __init__(self, gate: _Gate | None = None) -> None:
         self.server = HTTPServer(("127.0.0.1", 0), _Handler)
         self.server.embedded = 0
-        self.server.delay = delay
+        self.server.gate = gate
         self.url = f"http://127.0.0.1:{self.server.server_port}/v1/embeddings"
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -254,13 +274,21 @@ def test_a_workspace_memory_degrades_on_an_unreachable_provider(
 
 
 def test_the_switches_answer_while_a_round_trip_is_in_flight(tmp_path: Path) -> None:
-    # Two locks could turn this into a hang rather than a failure: the gate's,
-    # if it were ever held across the HTTP call, and the GIL, if a verb forgot
-    # to release it. `remember` runs on another thread and sits in the provider
-    # for 300 ms; everything below happens while it is in there.
-    slow = _Embedder(delay=0.3)
+    # Two locks are under test: the gate's, which must not be held across the
+    # HTTP call, and the GIL, which every verb must release. Nothing here is
+    # timed — the endpoint says when it has the request, and only this test
+    # lets it answer, so the assertions below run inside the round trip by
+    # construction rather than by being quick enough.
+    #
+    # A regression that merely *serialises* the switches behind the write is
+    # caught by `self_released`: the endpoint gives up waiting, and a test that
+    # never released it says so by name. One that deadlocks outright blocks
+    # instead, and the job timeout ends it — verified by holding the slot lock
+    # across `embed` on a scratch build.
+    gate = _Gate()
+    held = _Embedder(gate=gate)
     try:
-        config = config_file(tmp_path, slow.url)
+        config = config_file(tmp_path, held.url)
         with plugmem.Plugmem.open(str(tmp_path / "m.plugmem"), config=config) as db:
             done = threading.Event()
 
@@ -270,6 +298,8 @@ def test_the_switches_answer_while_a_round_trip_is_in_flight(tmp_path: Path) -> 
 
             worker = threading.Thread(target=write, daemon=True)
             worker.start()
+            assert gate.arrived.wait(timeout=30), "the provider never got the request"
+            assert not done.is_set(), "the write cannot have finished yet"
 
             assert db.embedder_state() == "active"
             db.suspend_embedder()
@@ -277,8 +307,15 @@ def test_the_switches_answer_while_a_round_trip_is_in_flight(tmp_path: Path) -> 
             db.resume_embedder()
             assert db.embedder_state() == "active"
 
-            assert done.wait(timeout=10), "the write never finished"
+            assert not gate.self_released, (
+                "a switch blocked until the provider answered — the gate is "
+                "holding its lock across the round trip"
+            )
+
+            gate.release.set()
+            assert done.wait(timeout=30), "the write never finished"
             worker.join(timeout=5)
             assert db.stats().vectors == 1
     finally:
-        slow.stop()
+        gate.release.set()
+        held.stop()

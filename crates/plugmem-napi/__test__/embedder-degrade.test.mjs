@@ -36,19 +36,32 @@ async function deadEndpoint() {
 /**
  * A live OpenAI-shaped embedder, plus a count of the texts it has embedded.
  *
- * `delayMs` holds the response back, which is how a test can be inside a
- * provider round trip while it calls something else.
+ * With `gated`, the endpoint announces each arriving request on `arrived` and
+ * then waits for `release()` before answering. That is what puts a test
+ * *provably* inside a provider round trip: no sleep, no assumption about how
+ * fast a worker starts — the request is known to have arrived because the
+ * server said so, and known not to have finished because only the test can
+ * finish it.
  */
-async function liveEndpoint(delayMs = 0) {
+async function liveEndpoint({ gated = false } = {}) {
   const state = { embedded: 0 };
+  let announce = null;
+  let release = null;
+  if (gated) {
+    state.arrived = new Promise((resolve) => (announce = resolve));
+    state.release = () => release?.();
+  }
   const server = createServer((req, res) => {
     let body = "";
     req.on("data", (chunk) => (body += chunk));
     req.on("end", async () => {
       const inputs = JSON.parse(body).input;
       state.embedded += inputs.length;
-      if (delayMs > 0) {
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      if (gated) {
+        const held = new Promise((resolve) => (release = resolve));
+        announce?.();
+        announce = null;
+        await held;
       }
       const data = inputs.map((text, index) => ({
         index,
@@ -293,19 +306,29 @@ test("a workspace memory degrades on an unreachable provider like any other", as
   }
 });
 
-test("the switches answer while a provider round trip is in flight", async () => {
+test("the switches answer while a provider round trip is in flight", { timeout: 30000 }, async () => {
   // The gate must never hold its lock across the HTTP call: `embed` takes
   // `&self` precisely so several verbs can be inside the provider at once, and
-  // `embedderState()` is synchronous on this class. If the lock were ever held
-  // through a round trip, this test would not fail — it would hang, with the
-  // JavaScript main thread parked behind a network call.
-  const live = await liveEndpoint(300);
+  // `embedderState()` is synchronous on this class.
+  //
+  // Nothing here is timed. `live.arrived` resolves when the provider has the
+  // request, and only `live.release()` lets it answer, so the lines between
+  // them run inside the round trip by construction rather than by being quick
+  // enough — the test cannot pass by racing.
+  //
+  // What it does on a regression is block, not fail: the switches would wait
+  // on the write, and the write waits on a server living in this same event
+  // loop. `{ timeout }` cannot fire either, for the same reason — a blocked
+  // main thread runs no timers. The ceiling that ends it is the job's
+  // `timeout-minutes`. Verified by holding the slot lock across `embed` on a
+  // scratch build: this test stopped passing.
+  const live = await liveEndpoint({ gated: true });
   await withConfig(live.url, "", async ({ config, path }) => {
     const db = await Plugmem.open(path, { config });
-    // Started, not awaited: the write is sitting in the provider right now.
     const writing = db.remember({ text: "a fact that takes its time" });
+    await live.arrived;
 
-    // All three, from the main thread, mid-flight.
+    // All three, from the main thread, with the write held in the provider.
     assert.equal(db.embedderState(), "active");
     db.suspendEmbedder();
     assert.equal(db.embedderState(), "suspended");
@@ -313,6 +336,7 @@ test("the switches answer while a provider round trip is in flight", async () =>
     assert.equal(db.embedderState(), "active");
 
     // And the write still lands: nothing above cancelled or corrupted it.
+    live.release();
     const out = await writing;
     assert.equal(out.id, 0);
     assert.equal(db.stats().vectors, 1);
@@ -321,32 +345,37 @@ test("the switches answer while a provider round trip is in flight", async () =>
   await live.stop();
 });
 
-test("a workspace memory answers its state while one of its writes is in flight", async () => {
-  // Two scoped leases on the same pooled database at once: the write holds one
-  // for 300 ms inside the provider, and `embedderState()` takes another. The
-  // pool lock is released before either closure runs, so this returns rather
-  // than queueing behind the round trip — and would hang, not fail, if that
-  // ever changed.
-  const live = await liveEndpoint(300);
-  const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-ws-inflight-"));
-  const config = join(dir, "config.toml");
-  writeFileSync(
-    config,
-    `[engine]\ndim = ${DIM}\n[embedder]\nurl = "${live.url}"\nmodel = "test"\n`,
-  );
-  const ws = new Workspace(dir, { config });
-  try {
-    const chat = ws.memory("chat-1");
-    // Create the file first, so the in-flight lease is a hit rather than an open.
-    await chat.remember({ text: "a first fact" });
+test(
+  "a workspace memory answers its state while one of its writes is in flight",
+  { timeout: 30000 },
+  async () => {
+    // Two scoped leases on the same pooled database at once: the write holds
+    // one while the provider has its request, and `embedderState()` takes
+    // another. The pool lock is released before either closure runs, so this
+    // returns rather than queueing behind the round trip — and would hang, not
+    // fail, if that ever changed.
+    const live = await liveEndpoint({ gated: true });
+    const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-ws-inflight-"));
+    const config = join(dir, "config.toml");
+    writeFileSync(
+      config,
+      `[engine]\ndim = ${DIM}\n[embedder]\nurl = "${live.url}"\nmodel = "test"\n`,
+    );
+    const ws = new Workspace(dir, { config });
+    try {
+      const chat = ws.memory("chat-1");
+      const writing = chat.remember({ text: "a fact that takes its time" });
+      await live.arrived;
 
-    const writing = chat.remember({ text: "a fact that takes its time" });
-    assert.equal(await chat.embedderState(), "active");
-    await writing;
-    assert.equal((await chat.stats()).vectors, 2);
-  } finally {
-    ws.close();
-    rmSync(dir, { recursive: true, force: true });
-    await live.stop();
-  }
-});
+      assert.equal(await chat.embedderState(), "active");
+
+      live.release();
+      await writing;
+      assert.equal((await chat.stats()).vectors, 1);
+    } finally {
+      ws.close();
+      rmSync(dir, { recursive: true, force: true });
+      await live.stop();
+    }
+  },
+);
