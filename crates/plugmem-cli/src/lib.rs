@@ -26,10 +26,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 use plugmem_host::{
-    Database, Embedder, EmbedderGate, ExportedFact, FactId, GuardedRememberOutcome, HostError,
-    LinkInput, MaintenanceMode, MaintenanceOptions, ReadOnlyDatabase, RecallQuery, RecallResult,
-    RememberInput, RememberOutcome, Settings, SharedEmbedder, Stats, TagPage, TagQuery,
-    UnlinkInput, VALID_TO_OPEN,
+    Database, Embedder, EmbedderGate, EmbedderState, ExportedFact, FactId, GuardedRememberOutcome,
+    HostError, LinkInput, MaintenanceMode, MaintenanceOptions, ReadOnlyDatabase, RecallQuery,
+    RecallResult, RememberInput, RememberOutcome, Settings, SharedEmbedder, Stats, TagPage,
+    TagQuery, UnlinkInput, VALID_TO_OPEN,
 };
 use serde_json::json;
 
@@ -157,13 +157,20 @@ fn run_parsed(cli: Cli, out: &mut impl Write) -> u8 {
             | Command::Recall { .. }
     );
     if readonly_ok {
-        let gate = embedder_gate(&mut settings);
-        let recall_vector = match embed_recall_query(&gate, &cli.command) {
-            Ok(v) => v,
-            Err(e) => return report_err(&e),
-        };
         match Database::open_readonly(&path, settings.config.clone()) {
             Ok(ro) => {
+                // Embedded here rather than before the open, and that ordering
+                // is the whole point: the read-write fallback below embeds
+                // inside `Database::recall`, so a query embedded up front
+                // would be embedded twice whenever this open fails — a fresh
+                // database, a dirty journal, a locked file. Holding the
+                // read-only map across the round trip costs nothing; it is a
+                // shared mmap, and the MCP server does the same.
+                let gate = embedder_gate(&mut settings);
+                let recall_vector = match embed_recall_query(&gate, &cli.command) {
+                    Ok(v) => v,
+                    Err(e) => return report_err(&e),
+                };
                 // The space travels with the vector it belongs to: they come
                 // from one provider call, and pairing them anywhere else is a
                 // chance to pair a vector with the wrong space.
@@ -173,6 +180,7 @@ fn run_parsed(cli: Cli, out: &mut impl Write) -> u8 {
                     &cli.command,
                     recall_vector,
                     recall_space,
+                    gate.state(),
                     cli.json,
                     out,
                 );
@@ -337,6 +345,7 @@ fn execute_ro(
     cmd: &Command,
     recall_vector: Option<&[f32]>,
     recall_space: Option<&str>,
+    embedder: EmbedderState,
     json: bool,
     out: &mut impl Write,
 ) -> u8 {
@@ -355,7 +364,7 @@ fn execute_ro(
         }
         Command::Show { id } => render_show(ro.get(FactId(*id)), *id, json, out),
         Command::Stats => {
-            render_stats(&ro.stats(), json, out);
+            render_stats(&ro.stats(), embedder, json, out);
             0
         }
         Command::Tags {
@@ -570,7 +579,7 @@ fn execute(
         }
         Command::Show { id } => Ok(render_show(db.get(FactId(*id)), *id, json, out)),
         Command::Stats => {
-            render_stats(&db.stats(), json, out);
+            render_stats(&db.stats(), db.embedder_state(), json, out);
             Ok(0)
         }
         Command::Export => {
@@ -1036,7 +1045,7 @@ fn run_repl_ro_line(
         }
     };
     let (vector, space) = split_embedded(recall_vector.as_ref());
-    let _ = execute_ro(ro, &cmd, vector, space, json, out);
+    let _ = execute_ro(ro, &cmd, vector, space, gate.state(), json, out);
 }
 
 /// Splits what [`embed_recall_query`] produced into the two borrowed halves
@@ -1075,9 +1084,12 @@ fn embedder_gate(settings: &mut Settings) -> EmbedderGate {
 /// embedder, so the read-only path (which carries no embedder) can still search
 /// by meaning while a writer process holds the database. Returns `None` when the
 /// command is not `recall`, carries no query text, or no embedder is configured
-/// — recall then falls back to lexical/structural sources. Mirrors the host's
-/// "embed before the lock" rule; the embed happens before the open
-/// so a locked database only costs the embed on the rare read-write fallback.
+/// — recall then falls back to lexical/structural sources.
+///
+/// Called only once a read-only handle is open, on both paths that use one
+/// (the one-shot command and each repl line). A query embedded before the open
+/// would be embedded a second time by `Database::recall` on the read-write
+/// fallback, which is the path a fresh or journal-dirty database always takes.
 ///
 /// The call goes through an [`EmbedderGate`], which is what makes
 /// `[embedder].on_error` mean the same thing here as it does inside the host:
@@ -1286,12 +1298,24 @@ fn maintenance_options(mode: MaintainMode) -> MaintenanceOptions {
 }
 
 /// Renders engine size counters.
-fn render_stats(s: &Stats, json: bool, out: &mut impl Write) {
+/// The size counters, plus the one thing they cannot explain.
+///
+/// `vectors` below `facts` is the durable trace of a provider that was
+/// unreachable while something was written, and it looks exactly like a memory
+/// that never had an embedder. `embedder` says which, in the same word the MCP
+/// server's `plugmem_stats` uses: `absent`, `active` or `suspended`.
+fn render_stats(s: &Stats, embedder: EmbedderState, json: bool, out: &mut impl Write) {
+    let embedder = match embedder {
+        EmbedderState::Absent => "absent",
+        EmbedderState::Active => "active",
+        EmbedderState::Suspended { .. } => "suspended",
+    };
     if json {
         writeln!(
             out,
             "{}",
             json!({
+                "embedder": embedder,
                 "facts": s.facts,
                 "entities": s.entities,
                 "terms": s.terms,
@@ -1314,6 +1338,7 @@ fn render_stats(s: &Stats, json: bool, out: &mut impl Write) {
         )
         .ok();
     } else {
+        writeln!(out, "embedder    {embedder}").ok();
         writeln!(out, "facts       {}", s.facts).ok();
         writeln!(out, "entities    {}", s.entities).ok();
         writeln!(out, "terms       {}", s.terms).ok();
@@ -2502,6 +2527,7 @@ mod tests {
             &cmd,
             Some(&[0.1, 0.2, 0.3]),
             Some("other-model"),
+            EmbedderState::Active,
             false,
             &mut out,
         );
@@ -2963,7 +2989,15 @@ mod tests {
 
         let mut out = Vec::new();
         assert_eq!(
-            execute_ro(&ro, &Command::Stats, None, None, true, &mut out),
+            execute_ro(
+                &ro,
+                &Command::Stats,
+                None,
+                None,
+                EmbedderState::Absent,
+                true,
+                &mut out
+            ),
             0
         );
         let stats: serde_json::Value = serde_json::from_slice(&out).unwrap();
@@ -2971,7 +3005,15 @@ mod tests {
 
         let mut out = Vec::new();
         assert_eq!(
-            execute_ro(&ro, &Command::Show { id: 0 }, None, None, false, &mut out),
+            execute_ro(
+                &ro,
+                &Command::Show { id: 0 },
+                None,
+                None,
+                EmbedderState::Absent,
+                false,
+                &mut out
+            ),
             0
         );
         let text = String::from_utf8(out).unwrap();
@@ -2979,7 +3021,15 @@ mod tests {
 
         let mut out = Vec::new();
         assert_eq!(
-            execute_ro(&ro, &Command::Export, None, None, false, &mut out),
+            execute_ro(
+                &ro,
+                &Command::Export,
+                None,
+                None,
+                EmbedderState::Absent,
+                false,
+                &mut out
+            ),
             0
         );
         let exported: serde_json::Value =
@@ -3000,13 +3050,32 @@ mod tests {
             graph_depth: None,
             vector: Vec::new(),
         };
-        assert_eq!(execute_ro(&ro, &recall, None, None, false, &mut out), 0);
+        assert_eq!(
+            execute_ro(
+                &ro,
+                &recall,
+                None,
+                None,
+                EmbedderState::Absent,
+                false,
+                &mut out
+            ),
+            0
+        );
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("tokio"), "{text}");
 
         let mut out = Vec::new();
         assert_eq!(
-            execute_ro(&ro, &Command::Verify, None, None, true, &mut out),
+            execute_ro(
+                &ro,
+                &Command::Verify,
+                None,
+                None,
+                EmbedderState::Absent,
+                true,
+                &mut out
+            ),
             0
         );
         let verify: serde_json::Value = serde_json::from_slice(&out).unwrap();

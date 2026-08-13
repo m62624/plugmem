@@ -138,7 +138,7 @@ engine keeps no clock, so `now` comes from the system clock at each call.
 | `link <SRC> <REL> <DST> [--provenance FACT_ID]` | upsert a typed edge between entities. `--provenance` records the fact the edge follows from, and graph recall returns it |
 | `unlink <SRC> <REL> <DST>` | close the current typed edge while preserving `--as-of` history |
 | `show <ID>` | one fact's full card — text, both time axes, state |
-| `stats` | engine size counters |
+| `stats` | engine size counters, plus `embedder`: `absent`, `active` or `suspended` — which is what tells `vectors < facts` after a provider outage apart from a memory that never had an embedder |
 | `maintain [--mode M]` | policy-driven maintenance: cheap no-op, tombstone compaction, text reindex or bounded HNSW work. `M` is `auto` (default), `compact`, `reindex-text`, `optimize-vectors` or `full`; only `full` repacks the edge arenas, and no mode drops history |
 | `maintain --reembed [--batch-size N]` | explicitly recompute every retained fact with the configured embedder, rebuild HNSW and atomically publish the new vector space; never implied by `auto` |
 | `checkpoint` | flush the journal into a fresh snapshot and clear it (leaves the database checkpointed) |
@@ -166,9 +166,12 @@ flow.
 Read-only commands (`recall`, `show`, `stats`, `tags`, `export`) open the snapshot
 **zero-copy over an mmap** (a shared lock, so several may run at once and
 the whole file is not loaded) — falling back to a normal open if the
-journal is un-checkpointed. `recall` uses that fast path only when no
-embedder is configured, because embedding the query needs the read-write
-handle. `scrub` also takes the shared mmap open, so it needs a checkpointed
+journal is un-checkpointed. A text `recall` takes that fast path with an
+embedder too: the CLI embeds the query itself once the snapshot is open,
+because the zero-copy handle cannot embed into its own mapping. (It embeds
+*after* the open, so the read-write fallback — a fresh or journal-dirty
+database — pays for one embedding rather than two.) `scrub` also takes the
+shared mmap open, so it needs a checkpointed
 database — run `checkpoint` (or `maintain`) first if the journal is dirty.
 
 ### Examples
@@ -352,6 +355,7 @@ tuned something.
 $ plugmem-cli stats
 plugmem: unknown config section [engin] — did you mean `engine`?
 plugmem: unknown setting [recall].w_vector — did you mean `w_vec`?
+embedder    absent
 facts       0
 ...
 ```
