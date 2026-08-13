@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import math
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -31,6 +32,10 @@ class _Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("content-length", "0"))
         inputs = json.loads(self.rfile.read(length))["input"]
         self.server.embedded += len(inputs)
+        # `delay` lets a test be inside a provider round trip while it calls
+        # something else, which is how the lock discipline is checked.
+        if self.server.delay:
+            time.sleep(self.server.delay)
         data = [
             {
                 "index": index,
@@ -52,9 +57,10 @@ class _Handler(BaseHTTPRequestHandler):
 class _Embedder:
     """A live endpoint, until `stop()`."""
 
-    def __init__(self) -> None:
+    def __init__(self, delay: float = 0.0) -> None:
         self.server = HTTPServer(("127.0.0.1", 0), _Handler)
         self.server.embedded = 0
+        self.server.delay = delay
         self.url = f"http://127.0.0.1:{self.server.server_port}/v1/embeddings"
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -245,3 +251,34 @@ def test_a_workspace_memory_degrades_on_an_unreachable_provider(
     assert stats.facts == 1
     assert stats.vectors == 0
     assert len(chat.recall("fact").facts) == 1
+
+
+def test_the_switches_answer_while_a_round_trip_is_in_flight(tmp_path: Path) -> None:
+    # Two locks could turn this into a hang rather than a failure: the gate's,
+    # if it were ever held across the HTTP call, and the GIL, if a verb forgot
+    # to release it. `remember` runs on another thread and sits in the provider
+    # for 300 ms; everything below happens while it is in there.
+    slow = _Embedder(delay=0.3)
+    try:
+        config = config_file(tmp_path, slow.url)
+        with plugmem.Plugmem.open(str(tmp_path / "m.plugmem"), config=config) as db:
+            done = threading.Event()
+
+            def write() -> None:
+                db.remember("a fact that takes its time")
+                done.set()
+
+            worker = threading.Thread(target=write, daemon=True)
+            worker.start()
+
+            assert db.embedder_state() == "active"
+            db.suspend_embedder()
+            assert db.embedder_state() == "suspended"
+            db.resume_embedder()
+            assert db.embedder_state() == "active"
+
+            assert done.wait(timeout=10), "the write never finished"
+            worker.join(timeout=5)
+            assert db.stats().vectors == 1
+    finally:
+        slow.stop()
