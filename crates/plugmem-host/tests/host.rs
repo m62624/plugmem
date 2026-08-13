@@ -2610,3 +2610,358 @@ fn tag_catalog_and_bulk_removal_match_on_writer_and_pinned_reader() {
         }]
     );
 }
+
+/// An embedder that answers, or refuses, on command.
+///
+/// The refusal is [`HostError::Embed`] because that is what a real transport
+/// failure produces — a refused connection, a timeout, a 502 — and it is the
+/// only class the degrade policy is allowed to swallow.
+struct FlakyEmbedder {
+    dim: usize,
+    down: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl FlakyEmbedder {
+    fn new(dim: usize) -> Self {
+        Self {
+            dim,
+            down: Default::default(),
+            calls: Default::default(),
+        }
+    }
+
+    fn handle(
+        &self,
+    ) -> (
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        (self.down.clone(), self.calls.clone())
+    }
+}
+
+impl Embedder for FlakyEmbedder {
+    fn space_id(&self) -> &str {
+        "flaky-model"
+    }
+
+    fn dim(&self) -> usize {
+        self.dim
+    }
+
+    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, HostError> {
+        use std::sync::atomic::Ordering;
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.down.load(Ordering::SeqCst) {
+            return Err(HostError::Embed("connection refused".into()));
+        }
+        Ok(texts.iter().map(|_| vec![0.5f32; self.dim]).collect())
+    }
+}
+
+fn flaky_db(
+    tmp: &TempDir,
+    policy: plugmem_host::EmbedErrorPolicy,
+    retry: plugmem_host::EmbedRetry,
+) -> (
+    Database,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    let mut config = cfg();
+    config.dim = 4;
+    let embedder = FlakyEmbedder::new(4);
+    let (down, calls) = embedder.handle();
+    let (db, _) = Database::builder(config)
+        .embedder(Box::new(embedder))
+        .on_embed_error(policy)
+        .embed_retry(retry)
+        .open(tmp.db())
+        .unwrap();
+    (db, down, calls)
+}
+
+#[test]
+fn the_default_policy_still_fails_the_verb() {
+    // The whole point of defaulting to `Fail`: a database that has been
+    // upgraded, and configured nothing, behaves exactly as it did before.
+    use std::sync::atomic::Ordering;
+    let tmp = TempDir::new("embed-fail");
+    let (db, down, _) = flaky_db(
+        &tmp,
+        plugmem_host::EmbedErrorPolicy::Fail,
+        plugmem_host::EmbedRetry::default(),
+    );
+    down.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        db.remember(RememberInput::text(1, "a fact")),
+        Err(HostError::Embed(_))
+    ));
+    assert!(matches!(
+        db.recall(RecallQuery::text(1, "a fact")),
+        Err(HostError::Embed(_))
+    ));
+    // And it stays callable: `Fail` never suspends, so nothing has to be
+    // resumed once the provider comes back.
+    assert_eq!(db.embedder_state(), plugmem_host::EmbedderState::Active);
+}
+
+#[test]
+fn degrading_stores_the_fact_without_a_vector_and_still_finds_it() {
+    use std::sync::atomic::Ordering;
+    let tmp = TempDir::new("embed-degrade");
+    let (db, down, _) = flaky_db(
+        &tmp,
+        plugmem_host::EmbedErrorPolicy::Degrade,
+        plugmem_host::EmbedRetry::Manual,
+    );
+    down.store(true, Ordering::SeqCst);
+
+    let id = db
+        .remember(RememberInput::text(1, "the cache is off"))
+        .unwrap()
+        .id;
+    assert_eq!(db.stats().facts, 1);
+    // Stored, and stored without a vector — which is exactly the state a
+    // database has when it was written with no embedder at all, and exactly
+    // what `reembed` knows how to fill in later.
+    assert_eq!(db.stats().vectors, 0);
+    assert!(db.get(id).is_some());
+    // And still findable: BM25, tags, graph and time never needed the
+    // provider.
+    let found = db.recall(RecallQuery::text(2, "cache")).unwrap();
+    assert_eq!(found.facts.len(), 1);
+}
+
+#[test]
+fn a_failure_suspends_the_embedder_instead_of_paying_for_it_every_call() {
+    use std::sync::atomic::Ordering;
+    let tmp = TempDir::new("embed-suspend");
+    let (db, down, calls) = flaky_db(
+        &tmp,
+        plugmem_host::EmbedErrorPolicy::Degrade,
+        plugmem_host::EmbedRetry::Manual,
+    );
+    down.store(true, Ordering::SeqCst);
+
+    for i in 0..5 {
+        db.remember(RememberInput::text(i + 1, &format!("fact {i}")))
+            .unwrap();
+    }
+    // One call reached the dead provider; the other four did not, which is the
+    // difference between a degraded mode and a slow one.
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        db.embedder_state(),
+        plugmem_host::EmbedderState::Suspended { retry_at: None }
+    );
+
+    // Nothing comes back by itself under `Manual` — not even after the
+    // provider recovers.
+    down.store(false, Ordering::SeqCst);
+    db.remember(RememberInput::text(9, "another fact")).unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    db.resume_embedder();
+    assert_eq!(db.embedder_state(), plugmem_host::EmbedderState::Active);
+    db.remember(RememberInput::text(10, "a vectored fact"))
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(db.stats().vectors, 1);
+}
+
+#[test]
+fn a_backoff_expires_by_itself_and_lengthens_while_the_provider_stays_down() {
+    use std::sync::atomic::Ordering;
+    let tmp = TempDir::new("embed-backoff");
+    // Milliseconds, so the test measures the mechanism rather than the clock.
+    let (db, down, calls) = flaky_db(
+        &tmp,
+        plugmem_host::EmbedErrorPolicy::Degrade,
+        plugmem_host::EmbedRetry::Backoff {
+            first: std::time::Duration::from_millis(20),
+            max: std::time::Duration::from_millis(80),
+        },
+    );
+    down.store(true, Ordering::SeqCst);
+
+    db.remember(RememberInput::text(1, "first")).unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        db.embedder_state(),
+        plugmem_host::EmbedderState::Suspended { retry_at: Some(_) }
+    ));
+    // Immediately after, the provider is not called again.
+    db.remember(RememberInput::text(2, "second")).unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    db.remember(RememberInput::text(3, "third")).unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    // Second consecutive failure: the wait doubled, so 30ms is no longer
+    // enough to earn another attempt.
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    db.remember(RememberInput::text(4, "fourth")).unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    // A success resets the ladder: the next failure waits the first interval
+    // again rather than continuing to double.
+    down.store(false, Ordering::SeqCst);
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    db.remember(RememberInput::text(5, "fifth")).unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert_eq!(db.stats().vectors, 1);
+
+    down.store(true, Ordering::SeqCst);
+    db.remember(RememberInput::text(6, "sixth")).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    db.remember(RememberInput::text(7, "seventh")).unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 5);
+}
+
+#[test]
+fn an_explicit_suspension_outranks_a_failure_and_its_timer() {
+    use std::sync::atomic::Ordering;
+    let tmp = TempDir::new("embed-explicit");
+    let (db, down, calls) = flaky_db(
+        &tmp,
+        plugmem_host::EmbedErrorPolicy::Degrade,
+        plugmem_host::EmbedRetry::Fixed(std::time::Duration::from_millis(10)),
+    );
+    db.suspend_embedder();
+    assert_eq!(
+        db.embedder_state(),
+        plugmem_host::EmbedderState::Suspended { retry_at: None }
+    );
+
+    down.store(true, Ordering::SeqCst);
+    db.remember(RememberInput::text(1, "a fact")).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    db.remember(RememberInput::text(2, "another fact")).unwrap();
+    // Never called: a decision is not undone by a clock.
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        db.embedder_state(),
+        plugmem_host::EmbedderState::Suspended { retry_at: None }
+    );
+
+    db.resume_embedder();
+    assert_eq!(db.embedder_state(), plugmem_host::EmbedderState::Active);
+}
+
+#[test]
+fn a_vector_space_mismatch_is_never_degraded() {
+    // The one failure that must stay loud under every policy: the provider
+    // answered, and its answer belongs to a different semantic space. Storing
+    // it would mix two spaces in one index, and no later repair can tell the
+    // halves apart.
+    let tmp = TempDir::new("embed-space");
+    let mut config = cfg();
+    config.dim = 4;
+    let (db, _) = Database::builder(config.clone())
+        .embedder(Box::new(CountingEmbedder::in_space(4, "old-model")))
+        .on_embed_error(plugmem_host::EmbedErrorPolicy::Degrade)
+        .open(tmp.db())
+        .unwrap();
+    db.remember(RememberInput::text(1, "a fact")).unwrap();
+    db.checkpoint(2).unwrap();
+    drop(db);
+
+    let (db, _) = Database::builder(config)
+        .embedder(Box::new(CountingEmbedder::in_space(4, "new-model")))
+        .on_embed_error(plugmem_host::EmbedErrorPolicy::Degrade)
+        .open(tmp.db())
+        .unwrap();
+    assert!(matches!(
+        db.remember(RememberInput::text(3, "another fact")),
+        Err(HostError::Engine(_))
+    ));
+    assert_eq!(db.embedder_state(), plugmem_host::EmbedderState::Active);
+}
+
+#[test]
+fn a_reembed_says_suspended_rather_than_unconfigured() {
+    let tmp = TempDir::new("embed-reembed");
+    let (db, _, _) = flaky_db(
+        &tmp,
+        plugmem_host::EmbedErrorPolicy::Degrade,
+        plugmem_host::EmbedRetry::Manual,
+    );
+    db.remember(RememberInput::text(1, "a fact")).unwrap();
+    db.suspend_embedder();
+    let Err(HostError::Embed(message)) = db.reembed(2) else {
+        panic!("a suspended reembed must fail");
+    };
+    assert!(message.contains("suspended"), "unexpected: {message}");
+
+    // And it works again the moment the provider is back, without reopening.
+    db.resume_embedder();
+    assert_eq!(db.reembed(3).unwrap().embedded, 1);
+}
+
+#[test]
+fn a_suspended_embedder_is_reported_as_active_once_its_deadline_passes() {
+    // The state read must not claim "suspended" about an embedder the very
+    // next verb would call — a host showing that to a person would be telling
+    // them their memory is degraded when it is not.
+    use std::sync::atomic::Ordering;
+    let tmp = TempDir::new("embed-state");
+    let (db, down, _) = flaky_db(
+        &tmp,
+        plugmem_host::EmbedErrorPolicy::Degrade,
+        plugmem_host::EmbedRetry::Fixed(std::time::Duration::from_millis(20)),
+    );
+    down.store(true, Ordering::SeqCst);
+    db.remember(RememberInput::text(1, "a fact")).unwrap();
+    assert!(matches!(
+        db.embedder_state(),
+        plugmem_host::EmbedderState::Suspended { retry_at: Some(_) }
+    ));
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    assert_eq!(db.embedder_state(), plugmem_host::EmbedderState::Active);
+}
+
+#[test]
+fn a_database_without_an_embedder_reports_absent_and_ignores_both_switches() {
+    let tmp = TempDir::new("embed-absent");
+    let (db, _) = Database::builder(cfg()).open(tmp.db()).unwrap();
+    assert_eq!(db.embedder_state(), plugmem_host::EmbedderState::Absent);
+    db.suspend_embedder();
+    assert_eq!(db.embedder_state(), plugmem_host::EmbedderState::Absent);
+    db.resume_embedder();
+    assert_eq!(db.embedder_state(), plugmem_host::EmbedderState::Absent);
+    // The verbs keep working, as they always did without a provider.
+    db.remember(RememberInput::text(1, "a fact")).unwrap();
+    assert_eq!(
+        db.recall(RecallQuery::text(2, "fact")).unwrap().facts.len(),
+        1
+    );
+}
+
+#[test]
+fn a_batch_write_degrades_as_one() {
+    // `remember_many` makes a single provider call for the whole batch, so a
+    // failure must leave the whole batch stored and vectorless rather than
+    // half of it.
+    use std::sync::atomic::Ordering;
+    let tmp = TempDir::new("embed-batch");
+    let (db, down, calls) = flaky_db(
+        &tmp,
+        plugmem_host::EmbedErrorPolicy::Degrade,
+        plugmem_host::EmbedRetry::Manual,
+    );
+    down.store(true, Ordering::SeqCst);
+    let out = db
+        .remember_many(vec![
+            RememberInput::text(1, "first fact"),
+            RememberInput::text(1, "second fact"),
+            RememberInput::text(1, "third fact"),
+        ])
+        .unwrap();
+    assert_eq!(out.len(), 3);
+    assert_eq!(db.stats().facts, 3);
+    assert_eq!(db.stats().vectors, 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
