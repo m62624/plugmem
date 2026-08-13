@@ -59,7 +59,9 @@ thread_local! {
     static RECALL_SCRATCH: RefCell<RecallScratch> = RefCell::new(RecallScratch::new());
 }
 
-use crate::embedder::{EmbedErrorPolicy, EmbedRetry, Embedder, EmbedderGate, EmbedderState};
+use crate::embedder::{
+    EmbedErrorPolicy, EmbedRetry, Embedded, EmbeddedBatch, Embedder, EmbedderGate, EmbedderState,
+};
 use crate::error::HostError;
 use crate::readonly::{ReadOnlyDatabase, Scrub};
 use crate::storage::{FileScratch, FileStorage, FsyncPolicy};
@@ -68,8 +70,6 @@ use crate::storage::{FileScratch, FileStorage, FsyncPolicy};
 /// explicit reembed request.
 pub const DEFAULT_REEMBED_BATCH_SIZE: usize = 128;
 
-/// Automatically produced vectors plus the provider identity that owns them.
-type EmbeddedBatch = (Vec<Vec<f32>>, String);
 
 self_cell::self_cell!(
     /// Owns the memory map and the overlay [`Memory`] that borrows it — the
@@ -787,7 +787,7 @@ impl Database {
     /// and usable. `None` = leave the input as it was — which is also what a
     /// failure returns under [`EmbedErrorPolicy::Degrade`], so the verb above
     /// stores the fact (or answers the query) without a vector.
-    fn embed_one(&self, text: &str) -> Result<Option<(Vec<f32>, String)>, HostError> {
+    fn embed_one(&self, text: &str) -> Result<Option<Embedded>, HostError> {
         self.inner
             .embedder
             .embed_one(text, |space| self.check_vector_space(space))

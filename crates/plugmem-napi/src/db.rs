@@ -244,8 +244,8 @@ pub enum Handle {
         /// out here and passed in as a vector.
         ///
         /// [`EmbedderGate`] is the host's own type, shared with the writer
-        /// path, and that is the point: the policy for an unreachable provider
-        /// - fail, or answer without the vector - is one implementation rather
+        /// path, and that is the point: what an unreachable provider means
+        /// (fail, or answer without the vector) is one implementation rather
         /// than one per handle kind. It holds no lock across the round trip,
         /// so several recalls sit in the provider at once, which is what a
         /// recall on a libuv worker needs (the task outlives the call that

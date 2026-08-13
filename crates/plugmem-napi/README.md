@@ -469,6 +469,10 @@ url   = "http://localhost:11434/v1/embeddings"
 model = "nomic-embed-text"
 space_id = "nomic-embed-text@v1" # optional; defaults to model
 api_key_env = "OPENAI_API_KEY" # env var holding the bearer token
+on_error = "fail"      # or "degrade": answer without the vector instead
+timeout_ms = 10000     # one request, end to end; 0 waits indefinitely
+retry_after_ms = 0     # a suspended embedder: 0 = never on its own,
+                       # unset = 1s doubling to retry_max_ms (60s)
 
 [maintenance]
 fsync = "each_op"             # or "on_snapshot": faster, loses the journal tail on an OS crash
@@ -505,6 +509,27 @@ exact semantic space and defaults to `model`; it is never discovered over the
 network. Set `enabled = false` to keep the
 settings without creating or calling the embedder; `$PLUGMEM_EMBEDDER_ENABLED`
 overrides it with `true` or `false`.
+
+When the provider cannot be reached — a stopped Ollama, a laptop that went
+offline, a model that was unloaded — `on_error` decides what that costs.
+`fail`, the default, propagates the error, which is what every release before
+0.12 did. `degrade` carries on **without** the vector: the fact is stored, the
+query is answered from the lexical, tag, graph and time sources, and the
+embedder is suspended so the next call does not pay the same failure again. A
+fact stored that way is not damaged — it is in the state every fact is in when
+a memory is written with no embedder, and `reembed` fills the vectors in from
+the stored text once the provider answers again. A suspension lifts by itself
+after `retry_after_ms` (unset: one second, doubling to `retry_max_ms`, reset by
+the first success). A vector-space mismatch is never degraded, and a `reembed`
+refuses while the embedder is suspended rather than publishing half a vector
+axis. Each of these keys has an environment override under the usual
+precedence: `$PLUGMEM_EMBEDDER_ON_ERROR`, `$PLUGMEM_EMBEDDER_TIMEOUT_MS`,
+`$PLUGMEM_EMBEDDER_RETRY_AFTER_MS`, `$PLUGMEM_EMBEDDER_RETRY_MAX_MS`.
+
+`embedderState()` answers `'absent' | 'active' | 'suspended'`, and
+`suspendEmbedder()` / `resumeEmbedder()` are the manual switches — for when the
+caller already knows the provider is gone and would rather not pay one failed
+request to rediscover it. Both work on a read-only handle too.
 
 A read-only handle cannot embed inside the engine — writing into a zero-copy
 mapping is exactly what read-only exists to avoid — so this binding embeds the

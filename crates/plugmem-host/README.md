@@ -555,6 +555,31 @@ detects same-dimension model changes that a dimension check cannot. Old experime
 section still open as untracked and require one explicit reembed; the snapshot
 format version remains 1.
 
+### When the provider cannot be reached
+
+A different failure from the one below, and a more ordinary one. Until 0.12 an
+unreachable provider failed the verb and there was no alternative, so a stopped
+Ollama took every write and every meaning-based read with it — while the
+database itself stayed as usable as it is with no embedder at all.
+
+`DatabaseBuilder::on_embed_error(EmbedErrorPolicy::Degrade)`, or
+`[embedder].on_error = "degrade"`, carries on without the vector instead, and
+suspends the embedder so the next verb does not pay the same failure. The
+suspension retries by itself — `embed_retry`/`retry_after_ms`, one second
+doubling to a minute by default, reset by the first success — and
+`Database::embedder_state()` reports `Absent`, `Active` or
+`Suspended { retry_at }` for a surface that wants to say so out loud.
+`suspend_embedder()` / `resume_embedder()` are the manual switches, and an
+explicit suspension outranks every timer.
+
+A vector-space mismatch is never degraded (the section below is about that),
+and `reembed` refuses while the embedder is suspended rather than publishing a
+generation with a fraction of its vectors.
+
+All of this lives in `EmbedderGate`, not in `Database`, because a wrapper over
+a zero-copy `ReadOnlyDatabase` embeds its own queries and needs exactly the same
+policy — the bindings, the CLI and the MCP server all hold one.
+
 ### Exactly what a mismatched vector space does
 
 The shape of the failure decides how a consumer must handle it, so it is worth

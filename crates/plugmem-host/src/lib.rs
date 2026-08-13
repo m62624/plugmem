@@ -45,8 +45,8 @@ pub use db::{
 };
 pub use embedder::{
     DEFAULT_EMBED_RETRY_FIRST, DEFAULT_EMBED_RETRY_MAX, DEFAULT_EMBED_TIMEOUT, EmbedErrorPolicy,
-    EmbedRetry, Embedder, EmbedderGate, EmbedderState, NullEmbedder, OpenAiCompatEmbedder,
-    SharedEmbedder,
+    EmbedRetry, Embedded, EmbeddedBatch, Embedder, EmbedderGate, EmbedderState, NullEmbedder,
+    OpenAiCompatEmbedder, SharedEmbedder,
 };
 pub use error::HostError;
 pub use paths::{default_config_dir, default_config_path, default_data_dir, default_database_path};

@@ -415,6 +415,10 @@ enabled = false                # keep settings but do not create/use the embedde
 # model = "nomic-embed-text"
 # space_id = "nomic-embed-text@v1" # optional; defaults to model, never probed
 # api_key_env = "OPENAI_API_KEY" # env var containing the bearer token
+# on_error = "degrade"           # keep working when the provider is unreachable
+# timeout_ms = 10000             # one request, end to end; 0 waits forever
+# retry_after_ms = 0             # a suspended embedder: 0 = only on request,
+#                                # unset = 1s doubling to retry_max_ms (60s)
 
 [maintenance]
 snapshot_every_ops = 1024
@@ -426,6 +430,31 @@ snapshot_journal_bytes = 4194304
 alias. Plugmem trusts the value and never probes the provider to discover it.
 Changing it for an existing vector database requires an explicit reembed;
 routine and automatic maintenance never calls the model.
+
+### When the provider is simply unreachable
+
+A different failure from the one below, and the more common one: the endpoint
+refuses the connection, times out, or answers with something else. By default
+that fails the verb — `remember` and a text `recall` both embed, so a stopped
+Ollama takes every write and every meaning-based read with it.
+
+`[embedder].on_error = "degrade"` carries on without the vector instead: the
+fact is stored, the query is answered from the lexical, tag, graph and time
+sources, and the embedder is suspended so the next call does not pay the same
+failure again. It retries by itself (1s, doubling to a minute, reset by the
+first success), and `reembed` fills in the missing vectors from the stored text
+once the provider is back. Nothing needs reopening.
+
+For a consumer, three things are worth knowing:
+
+- `embedder_state()` / `embedderState()` answers `absent`, `active` or
+  `suspended` — the honest way to tell a person "your memory is running
+  without meaning-based ranking right now". The MCP server puts the same word
+  in `plugmem_stats`.
+- `suspend_embedder()` / `resume_embedder()` are the manual switches, for when
+  the caller already knows the provider is gone.
+- `vectors < facts` in `stats` is the durable trace of a degraded stretch, and
+  the reason to run a reembed on the next start with a working provider.
 
 ### What a mismatched vector space actually does
 

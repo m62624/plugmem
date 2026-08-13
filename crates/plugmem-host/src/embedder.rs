@@ -313,6 +313,20 @@ impl EmbedderSlot {
     }
 }
 
+/// One vector plus the identity of the space it belongs to.
+///
+/// The two always travel together: a vector without its space is a number
+/// sequence nobody can tell apart from one produced by a different model, and
+/// pairing them anywhere but at the point of production is a chance to pair
+/// them wrongly.
+pub type Embedded = (Vec<f32>, String);
+
+/// A batch of vectors, in input order, plus their shared space identity.
+pub type EmbeddedBatch = (Vec<Vec<f32>>, String);
+
+/// A provider that may be called now, and the space it produces.
+type Ready = (Arc<dyn Embedder>, String);
+
 /// The embedder, the policy for its failures, and whether it may be called.
 ///
 /// One implementation, deliberately, because there are two callers and they
@@ -386,7 +400,7 @@ impl EmbedderGate {
         &self,
         text: &str,
         check_space: impl FnOnce(&str) -> Result<(), HostError>,
-    ) -> Result<Option<(Vec<f32>, String)>, HostError> {
+    ) -> Result<Option<Embedded>, HostError> {
         let Some((embedder, space)) = self.ready(check_space)? else {
             return Ok(None);
         };
@@ -411,7 +425,7 @@ impl EmbedderGate {
         &self,
         texts: &[&str],
         check_space: impl FnOnce(&str) -> Result<(), HostError>,
-    ) -> Result<Option<(Vec<Vec<f32>>, String)>, HostError> {
+    ) -> Result<Option<EmbeddedBatch>, HostError> {
         let Some((embedder, space)) = self.ready(check_space)? else {
             return Ok(None);
         };
@@ -448,7 +462,7 @@ impl EmbedderGate {
     fn ready(
         &self,
         check_space: impl FnOnce(&str) -> Result<(), HostError>,
-    ) -> Result<Option<(Arc<dyn Embedder>, String)>, HostError> {
+    ) -> Result<Option<Ready>, HostError> {
         let Some(embedder) = self.usable() else {
             return Ok(None);
         };

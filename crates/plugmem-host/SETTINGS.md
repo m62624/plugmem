@@ -73,6 +73,7 @@ url = "http://localhost:11434/v1/embeddings"
 model = "nomic-embed-text"
 # space_id = "nomic-embed-text@v1" # optional; defaults to model
 # api_key_env = "OPENAI_API_KEY" # name of the env var holding the token
+on_error = "degrade"   # keep working when the provider is unreachable
 
 [maintenance]
 snapshot_every_ops = 1024
@@ -223,6 +224,43 @@ accepts only `true` or `false`.
 | `model` | unset | Embedding model name understood by the selected server. Required for an active embedder. |
 | `space_id` | `model` | Stable identity of the vectors' semantic space. Set an exact model revision or digest when `model` is an alias. |
 | `api_key_env` | unset | Environment variable containing the bearer token. |
+| `on_error` | `fail` | What an unreachable provider costs. `fail` propagates the error; `degrade` stores or answers without the vector and suspends the embedder. |
+| `timeout_ms` | `10000` | Deadline for one embeddings request, end to end. `0` waits indefinitely. |
+| `retry_after_ms` | unset | Fixed wait before a suspended embedder is called again. Unset means 1s doubling to `retry_max_ms`; `0` means never, until the host resumes it. |
+| `retry_max_ms` | `60000` | Ceiling the default doubling retry grows to. Ignored when `retry_after_ms` is set. |
+
+**When the provider stops answering.** Until 0.12 that failed the verb, and
+there was nothing else it could do: `remember` and a text `recall` both embed,
+so a stopped Ollama took every write and every meaning-based read with it —
+even though the database itself was perfectly usable, exactly as it is when no
+embedder was ever configured.
+
+`on_error = "degrade"` carries on without the vector instead. The fact is
+stored, the query is answered from the lexical, tag, graph and time sources,
+and the embedder is *suspended* so the next call does not pay the same failure
+again — which matters more than it sounds, since otherwise a dead provider
+costs a full timeout on every verb of every turn. Facts written meanwhile are
+not damaged: they are in the state every fact is in when a memory is written
+with no embedder, and `reembed` fills their vectors in from the stored text.
+
+A suspension lifts by itself on the next call after the wait, and the wait
+doubles while the provider stays down (1s, 2s, 4s … up to `retry_max_ms`),
+resetting on the first success. There is no timer and no background probe: the
+retry rides on the next call that wanted an embedding anyway.
+
+Three things stay loud under both policies. A vector-space mismatch is an
+error, because mixing two semantic spaces in one index cannot be untangled
+afterwards. A `reembed` refuses while the embedder is suspended, rather than
+publishing a generation with a fraction of its vectors. And an explicit
+`suspend_embedder()` outranks every timer — it was a decision, not an
+observation, and only `resume_embedder()` undoes it.
+
+Every key here is also an environment variable, under the usual precedence
+(environment over file): `$PLUGMEM_EMBEDDER_ON_ERROR`,
+`$PLUGMEM_EMBEDDER_TIMEOUT_MS`, `$PLUGMEM_EMBEDDER_RETRY_AFTER_MS`,
+`$PLUGMEM_EMBEDDER_RETRY_MAX_MS`. The moment they exist for — "the provider is
+down, run without it for now" — is exactly when editing a config file is the
+wrong thing to ask of somebody.
 
 An active embedder also requires `[engine].dim > 0`. All supported providers
 use the same OpenAI-compatible HTTP shape. `space_id` is a local declaration:

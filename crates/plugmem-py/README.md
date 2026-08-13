@@ -394,6 +394,8 @@ url = "https://api.openai.com/v1/embeddings"
 model = "text-embedding-3-small"
 space_id = "text-embedding-3-small@v1" # optional; defaults to model
 api_key_env = "OPENAI_API_KEY"
+on_error = "degrade"                  # keep working when it is unreachable
+timeout_ms = 10000                    # one request, end to end
 
 [recall]
 w_bm25 = 1.0        # weight of the lexical source
@@ -415,6 +417,21 @@ exact semantic space and defaults to `model`; it is never discovered over the
 network. Set `enabled = false` to keep the
 settings without creating or calling the embedder; `$PLUGMEM_EMBEDDER_ENABLED`
 overrides it with `true` or `false`.
+
+When the provider cannot be reached — a stopped Ollama, a laptop that went
+offline, a model that was unloaded — `[embedder].on_error` decides what that
+costs. `fail`, the default, propagates the error. `degrade` carries on
+**without** the vector: the fact is stored, the query is answered from the
+lexical, tag, graph and time sources, and the embedder is suspended so the next
+call does not pay the same failure again. Facts written meanwhile are in the
+state every fact is in when a memory is written with no embedder, and `reembed`
+fills their vectors in from the stored text. `timeout_ms` bounds one request
+(10s by default), and a suspension lifts by itself after `retry_after_ms`
+(unset: 1s doubling to `retry_max_ms`, reset by the first success).
+
+`embedder_state()` answers `"absent"`, `"active"` or `"suspended"`, and
+`suspend_embedder()` / `resume_embedder()` are the manual switches. Both work
+on a read-only handle, which is the one that embeds its own queries.
 
 A mismatch does **not** stop the database opening, on a writer or a read-only
 handle, and loses nothing. What fails is exactly two things: `recall` with a
