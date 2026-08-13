@@ -32,8 +32,8 @@ use napi::threadsafe_function::{
 use napi::{Env, JsFunction, Task};
 use napi_derive::napi;
 use plugmem_host::{
-    Database, Embedder, FactId, HostError, LinkInput, MaintenanceOptions, ReadOnlyDatabase,
-    RecallQuery, RememberInput, Settings, SharedEmbedder, UnlinkInput,
+    Database, EmbedderGate, EmbedderState, FactId, HostError, LinkInput, MaintenanceOptions,
+    ReadOnlyDatabase, RecallQuery, RememberInput, Settings, UnlinkInput,
 };
 
 use crate::error::{self, Error, Produced, Result, code};
@@ -243,12 +243,14 @@ pub enum Handle {
         /// it would mutate a mapping opened zero-copy — so the query is embedded
         /// out here and passed in as a vector.
         ///
-        /// [`SharedEmbedder`] is the host's own sharing primitive: a refcount,
-        /// no lock. It is what a `recall` on a libuv worker needs, because the
-        /// task outlives the call that scheduled it, and it is all it needs,
-        /// because [`Embedder::embed`] takes `&self`. Several recalls may sit
-        /// in the provider at once.
-        embedder: Option<SharedEmbedder>,
+        /// [`EmbedderGate`] is the host's own type, shared with the writer
+        /// path, and that is the point: the policy for an unreachable provider
+        /// - fail, or answer without the vector - is one implementation rather
+        /// than one per handle kind. It holds no lock across the round trip,
+        /// so several recalls sit in the provider at once, which is what a
+        /// recall on a libuv worker needs (the task outlives the call that
+        /// scheduled it, and [`plugmem_host::Embedder::embed`] takes `&self`).
+        embedder: Arc<EmbedderGate>,
     },
 }
 
@@ -799,9 +801,16 @@ impl Plugmem {
     fn read_source(&self) -> Result<RecallSource> {
         Ok(match self.handle()? {
             Handle::Writer(db) => RecallSource::Writer(WriterSource::Direct(db.clone())),
+            // A whole-database read embeds nothing, so it carries an empty
+            // gate rather than the handle's: no provider, no policy, nothing
+            // that could suspend on its behalf.
             Handle::Reader { db, .. } => RecallSource::Reader {
                 db: Arc::clone(db),
-                embedder: None,
+                embedder: Arc::new(EmbedderGate::new(
+                    None,
+                    Default::default(),
+                    Default::default(),
+                )),
             },
         })
     }
@@ -827,6 +836,55 @@ impl Plugmem {
             revise,
             now: now_ms(),
         }))
+    }
+
+    /// Whether this handle has an embedder, and whether it is usable now.
+    ///
+    /// `"absent"` when none is configured, `"active"` when it is being called,
+    /// `"suspended"` when it is not — either because `suspendEmbedder()` said
+    /// so, or because it failed under `on_error = "degrade"`. A suspended
+    /// memory still remembers, still recalls and still forgets; what it does
+    /// not do is meaning-based ranking.
+    #[napi(ts_return_type = "'absent' | 'active' | 'suspended'")]
+    pub fn embedder_state(&self) -> Result<String> {
+        let state = match self.handle()? {
+            Handle::Writer(db) => db.embedder_state(),
+            Handle::Reader { embedder, .. } => embedder.state(),
+        };
+        Ok(match state {
+            EmbedderState::Absent => "absent",
+            EmbedderState::Active => "active",
+            EmbedderState::Suspended { .. } => "suspended",
+        }
+        .to_string())
+    }
+
+    /// Stops calling the embedder until `resumeEmbedder()`.
+    ///
+    /// For when the caller knows the provider is gone — the machine went
+    /// offline, the model was unloaded — and would rather not pay one failed
+    /// request per verb to rediscover it. Writes made meanwhile store no
+    /// vector; `reembed()` fills them in later. Idempotent, and a no-op
+    /// without an embedder. Works on a read-only handle too, which is the one
+    /// that embeds its own queries.
+    #[napi]
+    pub fn suspend_embedder(&self) -> Result<()> {
+        match self.handle()? {
+            Handle::Writer(db) => db.suspend_embedder(),
+            Handle::Reader { embedder, .. } => embedder.suspend(),
+        }
+        Ok(())
+    }
+
+    /// Calls the embedder again. Nothing is verified here: the next verb that
+    /// needs a vector finds out, and suspends it again if it is still down.
+    #[napi]
+    pub fn resume_embedder(&self) -> Result<()> {
+        match self.handle()? {
+            Handle::Writer(db) => db.resume_embedder(),
+            Handle::Reader { embedder, .. } => embedder.resume(),
+        }
+        Ok(())
     }
 
     /// The open handle, or a "closed" error.
@@ -1684,7 +1742,11 @@ impl OpenTask {
             // and the MCP server use for their read-only paths, so a text
             // `recall` reaches the vector source on every surface.
             let mut settings = settings;
-            let embedder = settings.embedder.take().map(SharedEmbedder::new);
+            let embedder = Arc::new(EmbedderGate::new(
+                settings.embedder.take().map(Arc::from),
+                settings.embed_error_policy,
+                settings.embed_retry,
+            ));
             let ro = Database::open_readonly(&self.path, settings.config).map_err(error::open)?;
             Ok(Handle::Reader {
                 db: Arc::new(ro),
@@ -1969,7 +2031,7 @@ enum RecallSource {
     Writer(WriterSource),
     Reader {
         db: Arc<ReadOnlyDatabase>,
-        embedder: Option<SharedEmbedder>,
+        embedder: Arc<EmbedderGate>,
     },
 }
 
@@ -1995,17 +2057,14 @@ impl Task for RecallTask {
         // the host embeds inside `recall`, outside its lock.
         let embedded = match (&self.vector, &self.source) {
             (Some(_), _) => None,
-            (
-                None,
-                RecallSource::Reader {
-                    embedder: Some(embedder),
-                    ..
-                },
-            ) => match self.args.query.as_deref() {
-                Some(text) => match embedder.embed(&[text]) {
-                    Ok(mut vectors) => vectors
-                        .pop()
-                        .map(|vector| (vector, embedder.space_id().to_owned())),
+            (None, RecallSource::Reader { embedder, .. }) => match self.args.query.as_deref() {
+                // Through the gate, so an unreachable provider means the same
+                // thing here as it does on a writer: an error, or a recall
+                // that answers from the lexical, tag, graph and time sources.
+                // The space check belongs to `recall_in_space` below, which is
+                // the reader's own and runs whether or not this embedded.
+                Some(text) => match embedder.embed_one(text, |_| Ok(())) {
+                    Ok(embedded) => embedded,
                     Err(e) => return Ok(Err(error::engine(e))),
                 },
                 None => None,

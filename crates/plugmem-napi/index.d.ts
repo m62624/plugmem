@@ -887,6 +887,32 @@ export declare class Plugmem {
    * but `close()` makes the moment explicit — e.g. before a read-only reopen.)
    */
   close(): void
+  /**
+   * Whether this handle has an embedder, and whether it is usable now.
+   *
+   * `"absent"` when none is configured, `"active"` when it is being called,
+   * `"suspended"` when it is not — either because `suspendEmbedder()` said
+   * so, or because it failed under `on_error = "degrade"`. A suspended
+   * memory still remembers, still recalls and still forgets; what it does
+   * not do is meaning-based ranking.
+   */
+  embedderState(): 'absent' | 'active' | 'suspended'
+  /**
+   * Stops calling the embedder until `resumeEmbedder()`.
+   *
+   * For when the caller knows the provider is gone — the machine went
+   * offline, the model was unloaded — and would rather not pay one failed
+   * request per verb to rediscover it. Writes made meanwhile store no
+   * vector; `reembed()` fills them in later. Idempotent, and a no-op
+   * without an embedder. Works on a read-only handle too, which is the one
+   * that embeds its own queries.
+   */
+  suspendEmbedder(): void
+  /**
+   * Calls the embedder again. Nothing is verified here: the next verb that
+   * needs a vector finds out, and suspends it again if it is still down.
+   */
+  resumeEmbedder(): void
 }
 /**
  * A resumable byte-level check of one snapshot generation.

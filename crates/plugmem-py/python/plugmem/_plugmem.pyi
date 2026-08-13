@@ -574,6 +574,32 @@ class Plugmem:
         r"""
         Remove a tag from all current facts, preserving historical revisions.
         """
+    def embedder_state(self) -> builtins.str:
+        r"""
+        Whether this memory has an embedder, and whether it is usable now.
+        
+        `"absent"` when none is configured, `"active"` when it is being called,
+        `"suspended"` when it is not — either because `suspend_embedder()` said
+        so, or because it failed under `on_error = "degrade"`. A suspended
+        memory still remembers, recalls and forgets; what it does not do is
+        meaning-based ranking.
+        """
+    def suspend_embedder(self) -> None:
+        r"""
+        Stops calling the embedder until `resume_embedder()`.
+        
+        For when the caller knows the provider is gone — the machine went
+        offline, the model was unloaded — and would rather not pay one failed
+        request per verb to rediscover it. Writes made meanwhile store no
+        vector; `reembed()` fills them in later. Idempotent, and a no-op
+        without an embedder. Works on a read-only handle too, which is the one
+        that embeds its own queries.
+        """
+    def resume_embedder(self) -> None:
+        r"""
+        Calls the embedder again. Nothing is verified here: the next verb that
+        needs a vector finds out, and suspends it again if it is still down.
+        """
     def stats(self) -> Stats:
         r"""
         Engine size counters.
