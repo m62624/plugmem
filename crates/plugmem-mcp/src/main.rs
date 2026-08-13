@@ -159,7 +159,11 @@ fn run(args: Args) -> Result<(), String> {
     // embedder to embed recall queries (the read-only handle has none). Default:
     // open the single writer handle, consuming the settings (embedder included).
     let shared = if read_only {
-        let embedder = settings.embedder;
+        let embedder = plugmem_host::EmbedderGate::new(
+            settings.embedder.map(Arc::from),
+            settings.embed_error_policy,
+            settings.embed_retry,
+        );
         let db = plugmem_host::Database::open_readonly(&path, settings.config)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         rpc::Shared::Reader(Arc::new(tools::ReaderShared::new(db, embedder)))

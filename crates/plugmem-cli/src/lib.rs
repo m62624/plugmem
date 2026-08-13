@@ -25,9 +25,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 use plugmem_host::{
-    Database, ExportedFact, FactId, GuardedRememberOutcome, HostError, LinkInput, MaintenanceMode,
-    MaintenanceOptions, ReadOnlyDatabase, RecallQuery, RecallResult, RememberInput,
-    RememberOutcome, Settings, Stats, TagPage, TagQuery, UnlinkInput, VALID_TO_OPEN,
+    Database, EmbedderGate, ExportedFact, FactId, GuardedRememberOutcome, HostError, LinkInput,
+    MaintenanceMode, MaintenanceOptions, ReadOnlyDatabase, RecallQuery, RecallResult,
+    RememberInput, RememberOutcome, Settings, Stats, TagPage, TagQuery, UnlinkInput, VALID_TO_OPEN,
 };
 use serde_json::json;
 
@@ -161,16 +161,14 @@ fn run_parsed(cli: Cli, out: &mut impl Write) -> u8 {
         };
         match Database::open_readonly(&path, settings.config.clone()) {
             Ok(ro) => {
-                let recall_space = recall_vector.as_ref().and_then(|_| {
-                    settings
-                        .embedder
-                        .as_ref()
-                        .map(|embedder| embedder.space_id())
-                });
+                // The space travels with the vector it belongs to: they come
+                // from one provider call, and pairing them anywhere else is a
+                // chance to pair a vector with the wrong space.
+                let (recall_vector, recall_space) = split_embedded(recall_vector.as_ref());
                 return execute_ro(
                     &ro,
                     &cli.command,
-                    recall_vector.as_deref(),
+                    recall_vector,
                     recall_space,
                     cli.json,
                     out,
@@ -1029,13 +1027,17 @@ fn run_repl_ro_line(
             return;
         }
     };
-    let recall_space = recall_vector.as_ref().and_then(|_| {
-        settings
-            .embedder
-            .as_ref()
-            .map(|embedder| embedder.space_id())
-    });
-    let _ = execute_ro(ro, &cmd, recall_vector.as_deref(), recall_space, json, out);
+    let (vector, space) = split_embedded(recall_vector.as_ref());
+    let _ = execute_ro(ro, &cmd, vector, space, json, out);
+}
+
+/// Splits what [`embed_recall_query`] produced into the two borrowed halves
+/// `execute_ro` takes.
+fn split_embedded(embedded: Option<&(Vec<f32>, String)>) -> (Option<&[f32]>, Option<&str>) {
+    match embedded {
+        Some((vector, space)) => (Some(vector.as_slice()), Some(space.as_str())),
+        None => (None, None),
+    }
 }
 
 /// Embeds a `recall` command's text query into a vector using the configured
@@ -1045,10 +1047,17 @@ fn run_repl_ro_line(
 /// — recall then falls back to lexical/structural sources. Mirrors the host's
 /// "embed before the lock" rule; the embed happens before the open
 /// so a locked database only costs the embed on the rare read-write fallback.
+///
+/// The call goes through an [`EmbedderGate`], which is what makes
+/// `[embedder].on_error` mean the same thing here as it does inside the host:
+/// with `degrade`, an unreachable provider costs this query its vector source
+/// and nothing else. The gate's suspension is per-process and this process is
+/// about to exit, which is exactly right — a one-shot command has no later call
+/// to protect.
 fn embed_recall_query(
     settings: &mut Settings,
     cmd: &Command,
-) -> Result<Option<Vec<f32>>, CliError> {
+) -> Result<Option<(Vec<f32>, String)>, CliError> {
     let Command::Recall {
         query: Some(text),
         vector,
@@ -1062,11 +1071,16 @@ fn embed_recall_query(
     if !vector.is_empty() {
         return Ok(None);
     }
-    let Some(embedder) = settings.embedder.as_ref() else {
+    let Some(embedder) = settings.embedder.take() else {
         return Ok(None);
     };
-    let mut vectors = embedder.embed(&[text.as_str()]).map_err(CliError::Host)?;
-    Ok(vectors.pop())
+    let gate = EmbedderGate::new(
+        Some(std::sync::Arc::from(embedder)),
+        settings.embed_error_policy,
+        settings.embed_retry,
+    );
+    gate.embed_one(text.as_str(), |_| Ok(()))
+        .map_err(CliError::Host)
 }
 
 /// Builds the [`RecallQuery`] for a `recall` command and passes it to `f`.
@@ -1851,6 +1865,8 @@ mod tests {
             database_path: None,
             config: Config::default(),
             embedder,
+            embed_error_policy: plugmem_host::EmbedErrorPolicy::default(),
+            embed_retry: plugmem_host::EmbedRetry::default(),
             snapshot_every_ops: None,
             snapshot_journal_bytes: None,
             maintain_every_forgets: None,
@@ -1869,7 +1885,7 @@ mod tests {
         let mut with = settings_with(Some(Box::new(StubEmbedder)));
         assert_eq!(
             embed_recall_query(&mut with, &recall_cmd(Some("tokio"))).unwrap(),
-            Some(vec![0.1, 0.2, 0.3])
+            Some((vec![0.1, 0.2, 0.3], "cli-stub".to_string()))
         );
 
         // no embedder → None (recall falls back to lexical/structural sources).

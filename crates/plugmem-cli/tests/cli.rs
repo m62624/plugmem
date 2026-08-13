@@ -61,6 +61,10 @@ fn stdout(out: &Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+fn stderr(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
 /// A checked-in fixture file under `tests/fixtures/`.
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -321,6 +325,79 @@ fn recall_with_an_embedder_coexists_with_a_live_writer() {
     assert!(stdout(&r).contains("tokio"), "{}", stdout(&r));
 
     server.join().unwrap();
+}
+
+/// An address nothing listens on: bound, read, and dropped.
+fn dead_embedder_url() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    format!("http://{addr}/v1/embeddings")
+}
+
+#[test]
+fn an_unreachable_embedder_fails_a_recall_by_default_and_degrades_on_request() {
+    // The CLI embeds a text `recall` itself, before opening read-only, so the
+    // policy has to reach that call too — otherwise `on_error = "degrade"`
+    // would be honoured everywhere except the surface a person types into.
+    let dim = 8;
+    let tmp = TempDir::new("embed-degrade");
+    let url = dead_embedder_url();
+
+    let write_config = |name: &str, extra: &str| {
+        let path = tmp.0.join(name);
+        std::fs::write(
+            &path,
+            format!(
+                "[engine]\ndim = {dim}\n\n[embedder]\nurl = \"{url}\"\nmodel = \"mock\"\n{extra}\n"
+            ),
+        )
+        .unwrap();
+        path
+    };
+    let strict = write_config("strict.toml", "");
+    let lenient = write_config("lenient.toml", "on_error = \"degrade\"");
+
+    let plug = |config: &std::path::Path, args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_plugmem-cli"))
+            .arg("--db")
+            .arg(tmp.db())
+            .arg("--config")
+            .arg(config)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // Seeded through the lenient config: the fact is stored without a vector,
+    // which is the state a degraded write leaves behind.
+    let stored = plug(&lenient, &["remember", "a fact about tokio"]);
+    assert_eq!(stored.status.code(), Some(0), "{}", stderr(&stored));
+    assert!(plug(&lenient, &["checkpoint"]).status.success());
+
+    // The default: the provider is unreachable, so the command says so.
+    let strict_recall = plug(&strict, &["recall", "tokio"]);
+    // 2, the CLI's code for a reported error, not 1 (a locked database).
+    assert_eq!(strict_recall.status.code(), Some(2));
+    assert!(
+        stderr(&strict_recall).contains("embedder"),
+        "{}",
+        stderr(&strict_recall)
+    );
+
+    // Degrade: the same query answers from the lexical source instead.
+    let lenient_recall = plug(&lenient, &["recall", "tokio"]);
+    assert_eq!(
+        lenient_recall.status.code(),
+        Some(0),
+        "{}",
+        stderr(&lenient_recall)
+    );
+    assert!(
+        stdout(&lenient_recall).contains("tokio"),
+        "{}",
+        stdout(&lenient_recall)
+    );
 }
 
 #[test]
