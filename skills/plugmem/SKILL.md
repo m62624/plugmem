@@ -463,11 +463,13 @@ For a consumer, three things are worth knowing:
 - `vectors < facts` in `stats` is the durable trace of a degraded stretch, and
   the reason to run a reembed on the next start with a working provider.
 
-Every key of this section also has an environment variable, which is the form
-that fits an outage — nobody wants to edit a config file to get through one:
+These four keys have environment overrides, which is the form that fits an
+outage — nobody wants to edit a config file to get through one:
 `$PLUGMEM_EMBEDDER_ON_ERROR`, `$PLUGMEM_EMBEDDER_TIMEOUT_MS`,
-`$PLUGMEM_EMBEDDER_RETRY_AFTER_MS`, `$PLUGMEM_EMBEDDER_RETRY_MAX_MS`. The
-environment wins over the file, the file over the defaults.
+`$PLUGMEM_EMBEDDER_RETRY_AFTER_MS`, `$PLUGMEM_EMBEDDER_RETRY_MAX_MS` (and
+`$PLUGMEM_EMBEDDER_ENABLED`, which predates them). `url`, `model`, `space_id`
+and `api_key_env` are file-only. The environment wins over the file, the file
+over the defaults.
 
 ### What a mismatched vector space actually does
 

@@ -242,12 +242,15 @@ publishing a generation with a fraction of its vectors. And an explicit
 `suspend_embedder()` outranks every timer — it was a decision, not an
 observation, and only `resume_embedder()` undoes it.
 
-Every key here is also an environment variable, under the usual precedence
+These four keys have environment overrides, under the usual precedence
 (environment over file): `$PLUGMEM_EMBEDDER_ON_ERROR`,
 `$PLUGMEM_EMBEDDER_TIMEOUT_MS`, `$PLUGMEM_EMBEDDER_RETRY_AFTER_MS`,
-`$PLUGMEM_EMBEDDER_RETRY_MAX_MS`. The moment they exist for — "the provider is
-down, run without it for now" — is exactly when editing a config file is the
-wrong thing to ask of somebody.
+`$PLUGMEM_EMBEDDER_RETRY_MAX_MS` — plus `$PLUGMEM_EMBEDDER_ENABLED` from the
+table above. The rest of `[embedder]` (`url`, `model`, `space_id`,
+`api_key_env`) is file-only: those describe *which* provider this is, and
+changing that mid-outage is not what an override is for. The moment these five
+exist for — "the provider is down, run without it for now" — is exactly when
+editing a config file is the wrong thing to ask of somebody.
 
 An active embedder also requires `[engine].dim > 0`. The Node and Python
 bindings additionally take a `dim` open option, for callers with no config file
