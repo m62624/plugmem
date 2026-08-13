@@ -28,9 +28,9 @@ use crate::{messages, rpc};
 ///
 /// The snapshot is behind a `RwLock`: read verbs take the read guard and run
 /// concurrently; `refresh` (rare) takes the write guard to re-map. The embedder
-/// carries no lock at all — [`Embedder::embed`] takes `&self`, so the whole
-/// worker pool can be inside the provider at once, and the HTTP call never
-/// touches the snapshot lock.
+/// carries no lock at all — [`plugmem_host::Embedder::embed`] takes `&self`, so
+/// the whole worker pool can be inside the provider at once, and the HTTP call
+/// never touches the snapshot lock.
 pub struct ReaderShared {
     db: RwLock<ReadOnlyDatabase>,
     embedder: EmbedderGate,
