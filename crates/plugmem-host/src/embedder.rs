@@ -667,6 +667,197 @@ mod tests {
 
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// A fixed instant to measure from, so the assertions below are about the
+    /// arithmetic and not about how fast the machine running them is.
+    ///
+    /// Every timing rule here used to be tested by sleeping through a
+    /// millisecond-scale interval against a real database. That works on an
+    /// idle laptop and fails under `cargo tarpaulin`, whose ptrace
+    /// instrumentation makes a write take long enough that a 20 ms deadline
+    /// has already expired by the time the state is read. The mechanism takes
+    /// `now` as an argument precisely so it can be driven instead of waited
+    /// for.
+    fn t0() -> Instant {
+        Instant::now()
+    }
+
+    #[test]
+    fn a_backoff_doubles_per_consecutive_failure_and_stops_at_its_ceiling() {
+        let retry = EmbedRetry::Backoff {
+            first: Duration::from_secs(1),
+            max: Duration::from_secs(8),
+        };
+        let waits: Vec<Duration> = (1..=6).map(|n| retry.wait(n).unwrap()).collect();
+        assert_eq!(
+            waits,
+            [
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Duration::from_secs(4),
+                Duration::from_secs(8),
+                Duration::from_secs(8),
+                Duration::from_secs(8),
+            ]
+        );
+        // A provider down for a very long time must not shift its way back to
+        // a one-second retry: the doubling saturates rather than wrapping.
+        assert_eq!(retry.wait(64), Some(Duration::from_secs(8)));
+        assert_eq!(retry.wait(u32::MAX), Some(Duration::from_secs(8)));
+    }
+
+    #[test]
+    fn a_fixed_retry_ignores_the_failure_count_and_manual_never_retries() {
+        let fixed = EmbedRetry::Fixed(Duration::from_millis(250));
+        assert_eq!(fixed.wait(1), Some(Duration::from_millis(250)));
+        assert_eq!(fixed.wait(9), Some(Duration::from_millis(250)));
+        assert_eq!(EmbedRetry::Manual.wait(1), None);
+    }
+
+    #[test]
+    fn a_suspension_expires_on_the_next_call_after_its_deadline() {
+        let mut slot = EmbedderSlot::new(Some(Arc::new(NullEmbedder)));
+        let retry = EmbedRetry::Fixed(Duration::from_secs(30));
+        let now = t0();
+
+        slot.note_failure(retry, now);
+        assert!(slot.usable(now).is_none(), "still inside the interval");
+        assert!(matches!(
+            slot.state(),
+            EmbedderState::Suspended { retry_at: Some(_) }
+        ));
+
+        // One second short of the deadline: still suspended.
+        assert!(slot.usable(now + Duration::from_secs(29)).is_none());
+        // At it: the half-open step clears the suspension and hands the
+        // provider back, without any timer having run.
+        assert!(slot.usable(now + Duration::from_secs(30)).is_some());
+        assert_eq!(slot.state(), EmbedderState::Active);
+    }
+
+    #[test]
+    fn consecutive_failures_lengthen_the_wait_and_a_success_resets_it() {
+        let mut slot = EmbedderSlot::new(Some(Arc::new(NullEmbedder)));
+        let retry = EmbedRetry::Backoff {
+            first: Duration::from_secs(1),
+            max: Duration::from_secs(60),
+        };
+        let now = t0();
+
+        slot.note_failure(retry, now);
+        // Second failure, after the first suspension expired: two seconds now,
+        // so one is no longer enough.
+        assert!(slot.usable(now + Duration::from_secs(1)).is_some());
+        slot.note_failure(retry, now + Duration::from_secs(1));
+        assert!(slot.usable(now + Duration::from_secs(2)).is_none());
+        assert!(slot.usable(now + Duration::from_secs(3)).is_some());
+
+        // A success puts the ladder back to the bottom.
+        slot.failures = 0;
+        slot.note_failure(retry, now + Duration::from_secs(3));
+        assert!(slot.usable(now + Duration::from_secs(4)).is_some());
+    }
+
+    #[test]
+    fn an_explicit_suspension_has_no_deadline_and_survives_a_failure() {
+        let mut slot = EmbedderSlot::new(Some(Arc::new(NullEmbedder)));
+        let now = t0();
+        slot.suspended_until = Some(None);
+        slot.note_failure(EmbedRetry::Fixed(Duration::from_millis(1)), now);
+        // A decision is not undone by a clock, however much of it passes.
+        assert!(slot.usable(now + Duration::from_secs(3600)).is_none());
+        assert_eq!(slot.state(), EmbedderState::Suspended { retry_at: None });
+    }
+
+    /// Answers with a count of its own choosing, so the "the provider broke
+    /// its own contract" branch can be reached without a server.
+    struct MiscountingEmbedder(usize);
+
+    impl Embedder for MiscountingEmbedder {
+        fn space_id(&self) -> &str {
+            "miscounting"
+        }
+
+        fn dim(&self) -> usize {
+            4
+        }
+
+        fn embed(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>, HostError> {
+            Ok(vec![vec![0.0; 4]; self.0])
+        }
+    }
+
+    #[test]
+    fn a_provider_answering_with_the_wrong_number_of_vectors_follows_the_policy() {
+        // Not a transport failure, but the same class of problem: the answer
+        // cannot be used. Under `fail` it is an error; under `degrade` it costs
+        // the vector and suspends the provider, exactly like a refused
+        // connection - anything else would let a broken provider quietly write
+        // a vector against the wrong fact.
+        let strict = EmbedderGate::new(
+            Some(Arc::new(MiscountingEmbedder(2))),
+            EmbedErrorPolicy::Fail,
+            EmbedRetry::Manual,
+        );
+        assert!(matches!(
+            strict.embed_one("one text", |_| Ok(())),
+            Err(HostError::Embed(_))
+        ));
+        assert!(matches!(
+            strict.embed_many(&["a", "b", "c"], |_| Ok(())),
+            Err(HostError::Embed(_))
+        ));
+        assert_eq!(strict.state(), EmbedderState::Active);
+
+        let lenient = EmbedderGate::new(
+            Some(Arc::new(MiscountingEmbedder(2))),
+            EmbedErrorPolicy::Degrade,
+            EmbedRetry::Manual,
+        );
+        assert_eq!(lenient.embed_one("one text", |_| Ok(())).unwrap(), None);
+        assert_eq!(lenient.state(), EmbedderState::Suspended { retry_at: None });
+        assert_eq!(lenient.policy(), EmbedErrorPolicy::Degrade);
+    }
+
+    #[test]
+    fn an_empty_batch_answers_without_a_round_trip() {
+        let gate = EmbedderGate::new(
+            Some(Arc::new(Counting(AtomicUsize::new(0)))),
+            EmbedErrorPolicy::Fail,
+            EmbedRetry::Manual,
+        );
+        let (vectors, space) = gate.embed_many(&[], |_| Ok(())).unwrap().unwrap();
+        assert!(vectors.is_empty());
+        assert_eq!(space, "test/counting");
+        assert_eq!(gate.provider().unwrap().dim(), 3);
+    }
+
+    #[test]
+    fn a_refused_space_is_not_a_failure_the_policy_may_swallow() {
+        // `check_space` runs before the provider is called and its error is
+        // the caller's, not the provider's: degrading it would mix two
+        // semantic spaces in one index.
+        let gate = EmbedderGate::new(
+            Some(Arc::new(Counting(AtomicUsize::new(0)))),
+            EmbedErrorPolicy::Degrade,
+            EmbedRetry::Manual,
+        );
+        let refused = gate.embed_one("a text", |_| {
+            Err(HostError::Engine(plugmem_core::Error::UntrackedVectorSpace))
+        });
+        assert!(matches!(refused, Err(HostError::Engine(_))));
+        // And nothing was suspended: the provider never misbehaved.
+        assert_eq!(gate.state(), EmbedderState::Active);
+    }
+
+    #[test]
+    fn a_slot_with_no_provider_is_absent_whatever_is_done_to_it() {
+        let mut slot = EmbedderSlot::new(None);
+        assert_eq!(slot.state(), EmbedderState::Absent);
+        slot.suspended_until = Some(None);
+        assert_eq!(slot.state(), EmbedderState::Absent);
+        assert!(slot.usable(t0()).is_none());
+    }
+
     /// Counts its calls, so a test can tell one shared provider from several
     /// independent ones. State behind an atomic because `embed` takes `&self`
     /// — the arrangement the trait asks a stateful implementation to make.

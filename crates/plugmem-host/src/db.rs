@@ -70,7 +70,6 @@ use crate::storage::{FileScratch, FileStorage, FsyncPolicy};
 /// explicit reembed request.
 pub const DEFAULT_REEMBED_BATCH_SIZE: usize = 128;
 
-
 self_cell::self_cell!(
     /// Owns the memory map and the overlay [`Memory`] that borrows it — the
     /// read-write sibling of `readonly::MappedMemory`. `self_cell` keeps the

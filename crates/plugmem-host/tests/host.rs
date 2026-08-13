@@ -2772,16 +2772,20 @@ fn a_failure_suspends_the_embedder_instead_of_paying_for_it_every_call() {
 }
 
 #[test]
-fn a_backoff_expires_by_itself_and_lengthens_while_the_provider_stays_down() {
+fn a_failure_under_a_backoff_names_the_moment_it_will_try_again() {
+    // The interval is a minute so no machine, however slow, can outrun it: the
+    // *expiry* is tested deterministically in the host's own unit tests, with
+    // an injected clock rather than a sleep. What belongs here is that a real
+    // verb on a real database arms it at all, and that the arming does not cost
+    // a second provider call.
     use std::sync::atomic::Ordering;
     let tmp = TempDir::new("embed-backoff");
-    // Milliseconds, so the test measures the mechanism rather than the clock.
     let (db, down, calls) = flaky_db(
         &tmp,
         plugmem_host::EmbedErrorPolicy::Degrade,
         plugmem_host::EmbedRetry::Backoff {
-            first: std::time::Duration::from_millis(20),
-            max: std::time::Duration::from_millis(80),
+            first: std::time::Duration::from_secs(60),
+            max: std::time::Duration::from_secs(60),
         },
     );
     down.store(true, Ordering::SeqCst);
@@ -2792,33 +2796,11 @@ fn a_backoff_expires_by_itself_and_lengthens_while_the_provider_stays_down() {
         db.embedder_state(),
         plugmem_host::EmbedderState::Suspended { retry_at: Some(_) }
     ));
-    // Immediately after, the provider is not called again.
+
     db.remember(RememberInput::text(2, "second")).unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-
-    std::thread::sleep(std::time::Duration::from_millis(30));
-    db.remember(RememberInput::text(3, "third")).unwrap();
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
-
-    // Second consecutive failure: the wait doubled, so 30ms is no longer
-    // enough to earn another attempt.
-    std::thread::sleep(std::time::Duration::from_millis(30));
-    db.remember(RememberInput::text(4, "fourth")).unwrap();
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
-
-    // A success resets the ladder: the next failure waits the first interval
-    // again rather than continuing to double.
-    down.store(false, Ordering::SeqCst);
-    std::thread::sleep(std::time::Duration::from_millis(60));
-    db.remember(RememberInput::text(5, "fifth")).unwrap();
-    assert_eq!(calls.load(Ordering::SeqCst), 3);
-    assert_eq!(db.stats().vectors, 1);
-
-    down.store(true, Ordering::SeqCst);
-    db.remember(RememberInput::text(6, "sixth")).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(30));
-    db.remember(RememberInput::text(7, "seventh")).unwrap();
-    assert_eq!(calls.load(Ordering::SeqCst), 5);
+    assert_eq!(db.stats().facts, 2);
+    assert_eq!(db.stats().vectors, 0);
 }
 
 #[test]
@@ -2899,28 +2881,6 @@ fn a_reembed_says_suspended_rather_than_unconfigured() {
     // And it works again the moment the provider is back, without reopening.
     db.resume_embedder();
     assert_eq!(db.reembed(3).unwrap().embedded, 1);
-}
-
-#[test]
-fn a_suspended_embedder_is_reported_as_active_once_its_deadline_passes() {
-    // The state read must not claim "suspended" about an embedder the very
-    // next verb would call — a host showing that to a person would be telling
-    // them their memory is degraded when it is not.
-    use std::sync::atomic::Ordering;
-    let tmp = TempDir::new("embed-state");
-    let (db, down, _) = flaky_db(
-        &tmp,
-        plugmem_host::EmbedErrorPolicy::Degrade,
-        plugmem_host::EmbedRetry::Fixed(std::time::Duration::from_millis(20)),
-    );
-    down.store(true, Ordering::SeqCst);
-    db.remember(RememberInput::text(1, "a fact")).unwrap();
-    assert!(matches!(
-        db.embedder_state(),
-        plugmem_host::EmbedderState::Suspended { retry_at: Some(_) }
-    ));
-    std::thread::sleep(std::time::Duration::from_millis(30));
-    assert_eq!(db.embedder_state(), plugmem_host::EmbedderState::Active);
 }
 
 #[test]
