@@ -43,7 +43,11 @@ pub use db::{
     DEFAULT_REEMBED_BATCH_SIZE, Database, DatabaseBuilder, ExportPage, ExportedFact, FactSnapshot,
     RecoverReport,
 };
-pub use embedder::{Embedder, NullEmbedder, OpenAiCompatEmbedder, SharedEmbedder};
+pub use embedder::{
+    DEFAULT_EMBED_RETRY_FIRST, DEFAULT_EMBED_RETRY_MAX, DEFAULT_EMBED_TIMEOUT, EmbedErrorPolicy,
+    EmbedRetry, Embedded, EmbeddedBatch, Embedder, EmbedderGate, EmbedderState, NullEmbedder,
+    OpenAiCompatEmbedder, SharedEmbedder,
+};
 pub use error::HostError;
 pub use paths::{default_config_dir, default_config_path, default_data_dir, default_database_path};
 pub use readonly::{ReadOnlyDatabase, Scrub};

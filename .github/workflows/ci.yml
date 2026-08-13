@@ -387,6 +387,10 @@ jobs:
   napi-npm:
     name: napi npm build
     runs-on: ubuntu-latest
+    # A binding test that deadlocks blocks rather than fails, and the default
+    # is six hours of a runner spent proving it. The suite takes about a
+    # minute.
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: crates/plugmem-napi
@@ -441,6 +445,8 @@ jobs:
   py-wheel:
     name: python wheel
     runs-on: ubuntu-latest
+    # As above: a hung test should cost twenty minutes, not six hours.
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: crates/plugmem-py

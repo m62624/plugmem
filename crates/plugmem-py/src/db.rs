@@ -28,8 +28,8 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
 use plugmem_host::{
-    Database, Embedder, FactId, LinkInput, MaintenanceMode, MaintenanceOptions, ReadOnlyDatabase,
-    RecallQuery, RememberInput, Settings, SharedEmbedder, UnlinkInput,
+    Database, EmbedderGate, EmbedderState, FactId, LinkInput, MaintenanceMode, MaintenanceOptions,
+    ReadOnlyDatabase, RecallQuery, RememberInput, Settings, UnlinkInput,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyMapping, PySequence};
@@ -77,14 +77,18 @@ enum Handle {
         /// the reader's size. The Node binding reaches the same shape through
         /// an `Arc`, which it needs anyway to hand the reader to a worker.
         db: Box<ReadOnlyDatabase>,
-        /// The reader's own embedder, if the config built one.
+        /// The reader's own embedder, and the policy for its failures.
         ///
         /// A [`ReadOnlyDatabase`] deliberately carries none — embedding inside
         /// it would mutate a mapping opened zero-copy — so the query is
         /// embedded out here and passed in as a vector. The CLI and MCP server
         /// do the same on their read-only paths, which is what lets a text
         /// `recall` reach the vector source on every surface.
-        embedder: Option<SharedEmbedder>,
+        ///
+        /// [`EmbedderGate`] is the host's own type, the same one a writer uses
+        /// inside its verbs, so "the provider is unreachable" means one thing
+        /// on both handle kinds instead of one per binding.
+        embedder: EmbedderGate,
     },
 }
 
@@ -272,7 +276,11 @@ impl Plugmem {
         let handle = py.detach(|| -> Result<Handle> {
             if read_only {
                 let mut settings = settings;
-                let embedder = settings.embedder.take().map(SharedEmbedder::new);
+                let embedder = EmbedderGate::new(
+                    settings.embedder.take().map(std::sync::Arc::from),
+                    settings.embed_error_policy,
+                    settings.embed_retry,
+                );
                 let db = Database::open_readonly(&path, settings.config).map_err(error::open)?;
                 Ok(Handle::Reader {
                     db: Box::new(db),
@@ -496,16 +504,15 @@ impl Plugmem {
             // giving it a vector would *replace* its embedder — so the two
             // branches differ in exactly one place and nowhere else.
             let embedded = match handle(&guard)? {
-                Handle::Reader {
-                    embedder: Some(embedder),
-                    ..
-                } if vector.is_none() => match query.as_deref() {
-                    Some(text) => embedder
-                        .embed(&[text])
-                        .map_err(|e| error::EngineError::new_err(format!("embedding failed: {e}")))?
-                        .into_iter()
-                        .next()
-                        .map(|vector| (vector, embedder.space_id().to_owned())),
+                Handle::Reader { embedder, .. } if vector.is_none() => match query.as_deref() {
+                    // Through the gate: an unreachable provider means the same
+                    // here as on a writer — an error, or a recall that answers
+                    // from the lexical, tag, graph and time sources. The space
+                    // check is `recall_in_space`'s below, which runs whether or
+                    // not this embedded.
+                    Some(text) => embedder.embed_one(text, |_| Ok(())).map_err(|e| {
+                        error::EngineError::new_err(format!("embedding failed: {e}"))
+                    })?,
                     None => None,
                 },
                 _ => None,
@@ -674,6 +681,61 @@ impl Plugmem {
             writer(&guard)?.remove_tag(now, &tag).map_err(error::engine)
         })?;
         Ok(RemoveTagReport::from(report))
+    }
+
+    /// Whether this memory has an embedder, and whether it is usable now.
+    ///
+    /// `"absent"` when none is configured, `"active"` when it is being called,
+    /// `"suspended"` when it is not — either because `suspend_embedder()` said
+    /// so, or because it failed under `on_error = "degrade"`. A suspended
+    /// memory still remembers, recalls and forgets; what it does not do is
+    /// meaning-based ranking.
+    fn embedder_state(&self, py: Python<'_>) -> Result<String> {
+        py.detach(|| {
+            let guard = self.handle.read().map_err(|_| error::busy("this memory"))?;
+            let state = match handle(&guard)? {
+                Handle::Writer(db) => db.embedder_state(),
+                Handle::Reader { embedder, .. } => embedder.state(),
+            };
+            Ok(match state {
+                EmbedderState::Absent => "absent",
+                EmbedderState::Active => "active",
+                EmbedderState::Suspended { .. } => "suspended",
+            }
+            .to_string())
+        })
+    }
+
+    /// Stops calling the embedder until `resume_embedder()`.
+    ///
+    /// For when the caller knows the provider is gone — the machine went
+    /// offline, the model was unloaded — and would rather not pay one failed
+    /// request per verb to rediscover it. Writes made meanwhile store no
+    /// vector; `reembed()` fills them in later. Idempotent, and a no-op
+    /// without an embedder. Works on a read-only handle too, which is the one
+    /// that embeds its own queries.
+    fn suspend_embedder(&self, py: Python<'_>) -> Result<()> {
+        py.detach(|| {
+            let guard = self.handle.read().map_err(|_| error::busy("this memory"))?;
+            match handle(&guard)? {
+                Handle::Writer(db) => db.suspend_embedder(),
+                Handle::Reader { embedder, .. } => embedder.suspend(),
+            }
+            Ok(())
+        })
+    }
+
+    /// Calls the embedder again. Nothing is verified here: the next verb that
+    /// needs a vector finds out, and suspends it again if it is still down.
+    fn resume_embedder(&self, py: Python<'_>) -> Result<()> {
+        py.detach(|| {
+            let guard = self.handle.read().map_err(|_| error::busy("this memory"))?;
+            match handle(&guard)? {
+                Handle::Writer(db) => db.resume_embedder(),
+                Handle::Reader { embedder, .. } => embedder.resume(),
+            }
+            Ok(())
+        })
     }
 
     /// Engine size counters.

@@ -228,8 +228,7 @@ Two constraints matter when building on it:
   per conversation, started with `--db <its own memory>`, where the tools have
   no `db` argument at all.
 
-Details in [`specs/10-workspace.md`](specs/10-workspace.md); settings in
-[`crates/plugmem-host/SETTINGS.md`](crates/plugmem-host/SETTINGS.md).
+Details in [`specs/10-workspace.md`](specs/10-workspace.md).
 
 ## Measured scale
 
@@ -358,6 +357,39 @@ in exchange for better word segmentation. The tokenizer emits canonical lexical
 terms; it does not perform
 [stemming](https://en.wikipedia.org/wiki/Stemming) or
 [lemmatization](https://en.wikipedia.org/wiki/Lemmatization).
+
+## Configuration
+
+Everything is optional: with no config file at all, plugmem answers from text,
+tags, the graph and time. One file configures every surface — the CLI, the MCP
+server, the Node addon and the Python package share one loader, one catalogue
+and one precedence rule (**explicit path or flag > environment > config file >
+default**).
+
+```toml
+[engine]
+dim = 768                       # 0 (the default) stores no vectors
+
+[embedder]                      # omit for lexical, tag, graph and time only
+url = "http://localhost:11434/v1/embeddings"
+model = "nomic-embed-text"
+on_error = "degrade"            # keep answering when the provider is down
+```
+
+Three places, and only three:
+
+- [`config.example.toml`](config.example.toml) — every supported key with its
+  default, commented out so copying it does not freeze today's defaults into
+  your config. It is **generated** from the settings catalogue in the code and
+  gated by a test, so it cannot fall behind.
+- [`crates/plugmem-host/SETTINGS.md`](crates/plugmem-host/SETTINGS.md) — the
+  reference: what each key is for, which sections are safe to change on an
+  existing database, the OS-specific paths, and what an unreachable embedder
+  costs.
+- The runtime help of whichever surface you are using —
+  `plugmem-cli help settings`, `plugmem_settings_help`, `settingsHelp()`,
+  `settings_help()` — the same catalogue, answered by the build you are
+  actually running.
 
 ## Install
 

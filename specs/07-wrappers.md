@@ -13,7 +13,7 @@ Priority: flag/parameter > env > config file > default.
   `--db`/`PLUGMEM_DB` may also be a bare memory *name* — see `10-workspace.md`.
 - Config file: `$XDG_CONFIG_HOME/plugmem/config.toml` — `[engine]` (the Config fields
   from `05-api.md`), `[embedder]` (`enabled`, `url`, `model`, `space_id`,
-  `api_key_env`),
+  `api_key_env`, `on_error`, `timeout_ms`, `retry_after_ms`, `retry_max_ms`),
   `[maintenance]` (`auto_after_ops`, `journal_snapshot_bytes`).
 - The default is no embedder (the system must work out of the box with no
   services); configuring `url` and `model` turns on the shared
@@ -21,6 +21,23 @@ Priority: flag/parameter > env > config file > default.
   `PLUGMEM_EMBEDDER_ENABLED=false` keeps the settings but prevents the
   embedder from being created or called. `space_id` defaults to `model` and is
   never inferred with a network request.
+- What an unreachable provider costs is `[embedder].on_error` (`06-host.md`),
+  and it is the same on every surface, because every surface that embeds does
+  it through the host's `EmbedderGate` — including the read-only paths, where
+  the wrapper rather than the engine makes the call. Each of the four new keys
+  also has an environment override (`PLUGMEM_EMBEDDER_ON_ERROR`,
+  `PLUGMEM_EMBEDDER_TIMEOUT_MS`, `PLUGMEM_EMBEDDER_RETRY_AFTER_MS`,
+  `PLUGMEM_EMBEDDER_RETRY_MAX_MS`) under the usual precedence, because the
+  moment they exist for — "the provider is down, run without it for now" — is
+  exactly when editing a config file is the wrong thing to ask of somebody.
+- The bindings expose the switches themselves: `embedderState()`,
+  `suspendEmbedder()` and `resumeEmbedder()` (`embedder_state`,
+  `suspend_embedder`, `resume_embedder` in Python), on a writer, on a read-only
+  handle and on a workspace memory — where each memory keeps its own gate over
+  the workspace's one shared provider, so suspending one leaves its siblings
+  active. The MCP server reports the state in `plugmem_stats` and the CLI in
+  `stats`, since `vectors < facts` is otherwise indistinguishable from a memory
+  that never had an embedder.
 - Locking: FileStorage holds an exclusive lock (see `03-snapshot.md`) — one database,
   one writer. When the database is busy (e.g. an MCP server holds it), the CLI prints
   "database is locked by another process" and exits 1.

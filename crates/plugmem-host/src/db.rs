@@ -38,7 +38,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock as EmbedderLock};
+use std::sync::Arc;
 #[cfg(feature = "counters")]
 use std::sync::{Mutex, MutexGuard};
 #[cfg(not(feature = "counters"))]
@@ -59,7 +59,9 @@ thread_local! {
     static RECALL_SCRATCH: RefCell<RecallScratch> = RefCell::new(RecallScratch::new());
 }
 
-use crate::embedder::Embedder;
+use crate::embedder::{
+    EmbedErrorPolicy, EmbedRetry, Embedded, EmbeddedBatch, Embedder, EmbedderGate, EmbedderState,
+};
 use crate::error::HostError;
 use crate::readonly::{ReadOnlyDatabase, Scrub};
 use crate::storage::{FileScratch, FileStorage, FsyncPolicy};
@@ -67,9 +69,6 @@ use crate::storage::{FileScratch, FileStorage, FsyncPolicy};
 /// Default maximum number of fact texts sent to the embedding provider in one
 /// explicit reembed request.
 pub const DEFAULT_REEMBED_BATCH_SIZE: usize = 128;
-
-/// Automatically produced vectors plus the provider identity that owns them.
-type EmbeddedBatch = (Vec<Vec<f32>>, String);
 
 self_cell::self_cell!(
     /// Owns the memory map and the overlay [`Memory`] that borrows it — the
@@ -333,6 +332,8 @@ pub struct DatabaseBuilder {
     snapshot_journal_bytes: u64,
     maintain_every_forgets: Option<u64>,
     embedder: Option<Box<dyn Embedder>>,
+    embed_error_policy: EmbedErrorPolicy,
+    embed_retry: EmbedRetry,
 }
 
 impl DatabaseBuilder {
@@ -373,6 +374,23 @@ impl DatabaseBuilder {
         self
     }
 
+    /// What to do when the embedder cannot be reached (default:
+    /// [`EmbedErrorPolicy::Fail`]).
+    pub fn on_embed_error(mut self, policy: EmbedErrorPolicy) -> Self {
+        self.embed_error_policy = policy;
+        self
+    }
+
+    /// When a failure-suspended embedder is called again (default:
+    /// [`EmbedRetry::Backoff`] from 1s to 60s).
+    ///
+    /// Only [`EmbedErrorPolicy::Degrade`] ever suspends by itself, so this is
+    /// inert under the default policy.
+    pub fn embed_retry(mut self, retry: EmbedRetry) -> Self {
+        self.embed_retry = retry;
+        self
+    }
+
     /// Opens (or creates) the database at `path`.
     ///
     /// # Errors
@@ -403,7 +421,11 @@ impl DatabaseBuilder {
                     forgets: 0,
                     reembedding: false,
                 }),
-                embedder: EmbedderLock::new(self.embedder.map(Arc::from)),
+                embedder: EmbedderGate::new(
+                    self.embedder.map(Arc::from),
+                    self.embed_error_policy,
+                    self.embed_retry,
+                ),
                 snapshot_every_ops: self.snapshot_every_ops,
                 snapshot_journal_bytes: self.snapshot_journal_bytes,
                 maintain_every_forgets: self.maintain_every_forgets,
@@ -426,11 +448,10 @@ type StateLock = Mutex<State>;
 
 struct Inner {
     state: StateLock,
-    /// Unlocked: [`Embedder::embed`] takes `&self`, so several verbs may be
-    /// inside the provider at once. That is the point — the round trip is the
-    /// slow part of a write, and a lock here would queue every concurrent
-    /// caller behind one HTTP request.
-    embedder: EmbedderLock<Option<Arc<dyn Embedder>>>,
+    /// The provider plus what happens when it cannot be reached. Shared with
+    /// the read-only path in the wrappers, which embeds its own queries — see
+    /// [`EmbedderGate`], and note that it holds no lock across a round trip.
+    embedder: EmbedderGate,
     snapshot_every_ops: u64,
     snapshot_journal_bytes: u64,
     maintain_every_forgets: Option<u64>,
@@ -494,6 +515,8 @@ impl Database {
             snapshot_journal_bytes: 4 * 1024 * 1024,
             maintain_every_forgets: None,
             embedder: None,
+            embed_error_policy: EmbedErrorPolicy::default(),
+            embed_retry: EmbedRetry::default(),
         }
     }
 
@@ -539,12 +562,39 @@ impl Database {
         Ok(guard)
     }
 
-    fn embedder(&self) -> Option<Arc<dyn Embedder>> {
-        self.inner
-            .embedder
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+    /// Whether this database has an embedder, and whether it is usable now.
+    ///
+    /// Reports [`EmbedderState::Suspended`] with the deadline a degraded
+    /// database will retry at, which is the one thing a caller needs to tell a
+    /// person "memory is running without meaning-based recall, and it will try
+    /// again by itself".
+    pub fn embedder_state(&self) -> EmbedderState {
+        self.inner.embedder.state()
+    }
+
+    /// Stops calling the embedder until [`Database::resume_embedder`].
+    ///
+    /// Everything keeps working: a write stores its fact without a vector, a
+    /// text recall answers from the lexical, tag, graph and time sources. This
+    /// is the switch a host throws when it knows the provider is gone — the
+    /// laptop went offline, the model was unloaded — instead of paying a
+    /// failure per verb to rediscover it.
+    ///
+    /// Idempotent, and a no-op when no embedder is configured.
+    pub fn suspend_embedder(&self) {
+        self.inner.embedder.suspend();
+    }
+
+    /// Calls the embedder again.
+    ///
+    /// Nothing is verified here: the next verb that needs a vector finds out,
+    /// and under [`EmbedErrorPolicy::Degrade`] suspends it again if the
+    /// provider is still down. Facts written while it was suspended keep their
+    /// missing vectors until [`Database::reembed`] fills them in.
+    ///
+    /// Idempotent, and a no-op when no embedder is configured.
+    pub fn resume_embedder(&self) {
+        self.inner.embedder.resume();
     }
 
     fn check_vector_space(&self, requested: &str) -> Result<(), HostError> {
@@ -578,9 +628,28 @@ impl Database {
         now: u64,
         batch_size: usize,
     ) -> Result<ReembedReport, HostError> {
-        let embedder = self.embedder().ok_or_else(|| {
-            HostError::Embed("reembed requires a configured embedding provider".into())
-        })?;
+        // The suspended case is named separately on purpose. "You configured
+        // none" sends someone to their config file; the truth may be that the
+        // provider is configured, currently unreachable, and the one thing a
+        // reembed must not do is quietly write a vector axis it could not
+        // compute. Neither policy applies here: a degraded reembed would
+        // publish a generation with a fraction of its vectors and call it
+        // done.
+        let embedder = match (self.embedder_state(), self.inner.embedder.provider()) {
+            (EmbedderState::Active, Some(embedder)) => embedder,
+            (state, _) => {
+                return Err(HostError::Embed(
+                    match state {
+                        EmbedderState::Suspended { .. } => {
+                            "reembed needs the embedding provider, and it is suspended; \
+                             resume it once the provider answers again"
+                        }
+                        _ => "reembed requires a configured embedding provider",
+                    }
+                    .into(),
+                ));
+            }
+        };
         self.reembed_arc(now, embedder, batch_size, false)
     }
 
@@ -705,64 +774,31 @@ impl Database {
             journal_clear
         };
         if install_target {
-            *self
-                .inner
-                .embedder
-                .write()
-                .unwrap_or_else(|e| e.into_inner()) = Some(target);
+            // A new provider answered for every fact in the database, so
+            // whatever the old one's failures were, they are not this one's.
+            self.inner.embedder.install(target);
         }
         journal_clear?;
         Ok(report)
     }
 
-    /// Embeds `text` outside the state lock, when an embedder is
-    /// configured. `None` = leave the input as it was.
-    fn embed_one(&self, text: &str) -> Result<Option<(Vec<f32>, String)>, HostError> {
-        let Some(embedder) = self.embedder() else {
-            return Ok(None);
-        };
-        if embedder.dim() == 0 {
-            return Ok(None);
-        }
-        let space = embedder.space_id().to_owned();
-        self.check_vector_space(&space)?;
-        let mut vs = embedder.embed(&[text])?;
-        if vs.len() != 1 {
-            return Err(HostError::Embed(format!(
-                "expected 1 embedding, got {}",
-                vs.len()
-            )));
-        }
-        Ok(Some((vs.remove(0), space)))
+    /// Embeds `text` outside the state lock, when an embedder is configured
+    /// and usable. `None` = leave the input as it was — which is also what a
+    /// failure returns under [`EmbedErrorPolicy::Degrade`], so the verb above
+    /// stores the fact (or answers the query) without a vector.
+    fn embed_one(&self, text: &str) -> Result<Option<Embedded>, HostError> {
+        self.inner
+            .embedder
+            .embed_one(text, |space| self.check_vector_space(space))
     }
 
-    /// Embeds a whole batch of texts in a **single** embedder call — outside the
-    /// lock, like [`embed_one`](Self::embed_one). `Ok(None)` when no embedder is
-    /// configured or `dim == 0`; otherwise a vector aligned one-to-one with
-    /// `texts` (the provider contract, checked by [`OpenAiCompatEmbedder`]). An
-    /// empty `texts` yields an empty vector without a round-trip. This is the one
-    /// HTTP that [`remember_many`](Self::remember_many) makes for a bulk write.
+    /// Embeds a whole batch of texts in a **single** embedder call — outside
+    /// the lock, like [`embed_one`](Self::embed_one). This is the one HTTP
+    /// that [`remember_many`](Self::remember_many) makes for a bulk write.
     fn embed_many(&self, texts: &[&str]) -> Result<Option<EmbeddedBatch>, HostError> {
-        let Some(embedder) = self.embedder() else {
-            return Ok(None);
-        };
-        if embedder.dim() == 0 {
-            return Ok(None);
-        }
-        if texts.is_empty() {
-            return Ok(Some((Vec::new(), embedder.space_id().to_owned())));
-        }
-        let space = embedder.space_id().to_owned();
-        self.check_vector_space(&space)?;
-        let vectors = embedder.embed(texts)?;
-        if vectors.len() != texts.len() {
-            return Err(HostError::Embed(format!(
-                "expected {} embeddings, got {}",
-                texts.len(),
-                vectors.len()
-            )));
-        }
-        Ok(Some((vectors, space)))
+        self.inner
+            .embedder
+            .embed_many(texts, |space| self.check_vector_space(space))
     }
 
     /// Writes a full snapshot and re-maps the fresh file.

@@ -6,6 +6,7 @@ use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use plugmem_host::{Config, Database};
 
@@ -59,6 +60,10 @@ fn plugmem(db: &std::path::Path, args: &[&str]) -> Output {
 
 fn stdout(out: &Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn stderr(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
 /// A checked-in fixture file under `tests/fixtures/`.
@@ -321,6 +326,347 @@ fn recall_with_an_embedder_coexists_with_a_live_writer() {
     assert!(stdout(&r).contains("tokio"), "{}", stdout(&r));
 
     server.join().unwrap();
+}
+
+/// A mock embedder that serves until the test ends and counts what it embedded.
+///
+/// [`spawn_mock_embedder`] answers a fixed number of requests and is joined to
+/// prove they all arrived — which turns "one request too few" into a hang
+/// rather than a failure. Where the *count* is the assertion, this is the shape
+/// to use: the number is read directly, and a session that stopped embedding
+/// fails on the spot with both numbers printed.
+fn spawn_counting_embedder(dim: usize) -> (String, std::sync::Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let embedded = std::sync::Arc::new(AtomicUsize::new(0));
+    let counter = std::sync::Arc::clone(&embedded);
+    std::thread::spawn(move || {
+        for sock in listener.incoming() {
+            let Ok(mut sock) = sock else { break };
+            let mut buf = vec![0u8; 65536];
+            let mut read = 0usize;
+            let body_start = loop {
+                match sock.read(&mut buf[read..]) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => read += n,
+                }
+                let head = String::from_utf8_lossy(&buf[..read]);
+                if let Some(at) = head.find("\r\n\r\n") {
+                    let len: usize = head
+                        .lines()
+                        .find_map(|l| {
+                            l.strip_prefix("content-length: ")
+                                .or_else(|| l.strip_prefix("Content-Length: "))
+                        })
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    if read >= at + 4 + len {
+                        break at + 4;
+                    }
+                }
+            };
+            let body: serde_json::Value = serde_json::from_slice(&buf[body_start..read]).unwrap();
+            let inputs = body["input"].as_array().unwrap();
+            counter.fetch_add(inputs.len(), Ordering::SeqCst);
+            let data: Vec<serde_json::Value> = inputs
+                .iter()
+                .enumerate()
+                .map(|(i, text)| {
+                    let seed = text.as_str().unwrap().len() as f32;
+                    let embedding: Vec<f32> = (0..dim).map(|j| (seed + j as f32).sin()).collect();
+                    serde_json::json!({ "index": i, "embedding": embedding })
+                })
+                .collect();
+            let payload = serde_json::json!({ "data": data }).to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+                payload.len()
+            );
+            let _ = sock.write_all(response.as_bytes());
+        }
+    });
+    (format!("http://{addr}/v1/embeddings"), embedded)
+}
+
+/// An address nothing listens on: bound, read, and dropped.
+fn dead_embedder_url() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    format!("http://{addr}/v1/embeddings")
+}
+
+#[test]
+fn every_recall_of_a_read_only_repl_session_embeds_its_query() {
+    // The repl is the CLI's long-lived mode, and it runs many commands against
+    // one `Settings`. A first version of the embedder gate *took* the provider
+    // out of the settings for the first recall, so the second and third lines
+    // of a session silently searched without a vector source at all — the
+    // quietest possible regression, since a lexical answer still looks like an
+    // answer.
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let dim = 8;
+    let (url, embedded) = spawn_counting_embedder(dim);
+    let tmp = TempDir::new("repl-embed");
+    let config = tmp.0.join("config.toml");
+    std::fs::write(
+        &config,
+        format!("[engine]\ndim = {dim}\n\n[embedder]\nurl = \"{url}\"\nmodel = \"mock\"\n"),
+    )
+    .unwrap();
+    let plug = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_plugmem-cli"))
+            .arg("--db")
+            .arg(tmp.db())
+            .arg("--config")
+            .arg(&config)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // Seed one fact and publish a generation, so the repl can open read-only.
+    let seeded = plug(&["remember", "a fact about tokio"]);
+    assert!(seeded.status.success(), "{}", stderr(&seeded));
+    assert!(plug(&["checkpoint"]).status.success());
+    assert_eq!(
+        embedded.load(Ordering::SeqCst),
+        1,
+        "the write embedded once"
+    );
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_plugmem-cli"))
+        .arg("--db")
+        .arg(tmp.db())
+        .arg("--config")
+        .arg(&config)
+        .args(["repl", "--read-only"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"recall tokio\nrecall tokio\nrecall tokio\nexit\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "repl exit: {:?}", out.status);
+
+    // Four in total: the seeding write plus one per recall line. Three would
+    // mean a session that embedded once and then quietly stopped.
+    assert_eq!(
+        embedded.load(Ordering::SeqCst),
+        4,
+        "every repl recall must embed its query"
+    );
+}
+
+#[test]
+fn an_unreachable_embedder_fails_a_recall_by_default_and_degrades_on_request() {
+    // The CLI embeds a text `recall` itself, before opening read-only, so the
+    // policy has to reach that call too — otherwise `on_error = "degrade"`
+    // would be honoured everywhere except the surface a person types into.
+    let dim = 8;
+    let tmp = TempDir::new("embed-degrade");
+    let url = dead_embedder_url();
+
+    let write_config = |name: &str, extra: &str| {
+        let path = tmp.0.join(name);
+        std::fs::write(
+            &path,
+            format!(
+                "[engine]\ndim = {dim}\n\n[embedder]\nurl = \"{url}\"\nmodel = \"mock\"\n{extra}\n"
+            ),
+        )
+        .unwrap();
+        path
+    };
+    let strict = write_config("strict.toml", "");
+    let lenient = write_config("lenient.toml", "on_error = \"degrade\"");
+
+    let plug = |config: &std::path::Path, args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_plugmem-cli"))
+            .arg("--db")
+            .arg(tmp.db())
+            .arg("--config")
+            .arg(config)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // Seeded through the lenient config: the fact is stored without a vector,
+    // which is the state a degraded write leaves behind.
+    let stored = plug(&lenient, &["remember", "a fact about tokio"]);
+    assert_eq!(stored.status.code(), Some(0), "{}", stderr(&stored));
+    assert!(plug(&lenient, &["checkpoint"]).status.success());
+
+    // The default: the provider is unreachable, so the command says so.
+    let strict_recall = plug(&strict, &["recall", "tokio"]);
+    // 2, the CLI's code for a reported error, not 1 (a locked database).
+    assert_eq!(strict_recall.status.code(), Some(2));
+    assert!(
+        stderr(&strict_recall).contains("embedder"),
+        "{}",
+        stderr(&strict_recall)
+    );
+
+    // Degrade: the same query answers from the lexical source instead.
+    let lenient_recall = plug(&lenient, &["recall", "tokio"]);
+    assert_eq!(
+        lenient_recall.status.code(),
+        Some(0),
+        "{}",
+        stderr(&lenient_recall)
+    );
+    assert!(
+        stdout(&lenient_recall).contains("tokio"),
+        "{}",
+        stdout(&lenient_recall)
+    );
+}
+
+#[test]
+fn a_recall_that_falls_back_to_the_writer_embeds_its_query_once() {
+    // The read-only open fails on a database with no published generation yet,
+    // and the read-write path embeds inside `Database::recall`. Embedding
+    // before the open therefore paid for the same query twice — invisible in
+    // the answer, and a doubled bill on a metered provider.
+    let dim = 8;
+    let (url, embedded) = spawn_counting_embedder(dim);
+    let tmp = TempDir::new("fallback-embed");
+    let config = tmp.0.join("config.toml");
+    std::fs::write(
+        &config,
+        format!("[engine]\ndim = {dim}\n\n[embedder]\nurl = \"{url}\"\nmodel = \"mock\"\n"),
+    )
+    .unwrap();
+    let plug = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_plugmem-cli"))
+            .arg("--db")
+            .arg(tmp.db())
+            .arg("--config")
+            .arg(&config)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    let stored = plug(&["remember", "a fact about tokio"]);
+    assert_eq!(stored.status.code(), Some(0), "{}", stderr(&stored));
+    assert_eq!(
+        embedded.load(Ordering::SeqCst),
+        1,
+        "the write embedded once"
+    );
+
+    // No checkpoint: there is no snapshot to map, so this recall takes the
+    // read-write fallback.
+    let recalled = plug(&["recall", "tokio"]);
+    assert_eq!(recalled.status.code(), Some(0), "{}", stderr(&recalled));
+    assert_eq!(
+        embedded.load(Ordering::SeqCst),
+        2,
+        "the fallback recall must embed once, not once per path"
+    );
+
+    // And the read-only path still embeds exactly once, now that a generation
+    // exists to map.
+    assert!(plug(&["checkpoint"]).status.success());
+    let readonly = plug(&["recall", "tokio"]);
+    assert_eq!(readonly.status.code(), Some(0), "{}", stderr(&readonly));
+    assert_eq!(embedded.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn stats_names_the_embedder_state_the_vector_count_cannot_explain() {
+    // `vectors` below `facts` looks the same whether the provider died
+    // mid-write or was never configured, and a person reading `stats` has no
+    // other way to tell. The MCP server answers this in `plugmem_stats`; the
+    // CLI printing nothing would make the same question unanswerable at a
+    // terminal.
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let dim = 8;
+    let tmp = TempDir::new("stats-embedder");
+    let url = dead_embedder_url();
+    let config = tmp.0.join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[engine]\ndim = {dim}\n\n[embedder]\nurl = \"{url}\"\nmodel = \"mock\"\n\
+             on_error = \"degrade\"\n"
+        ),
+    )
+    .unwrap();
+    let bare = tmp.0.join("bare.toml");
+    std::fs::write(&bare, format!("[engine]\ndim = {dim}\n")).unwrap();
+
+    let plug = |config: &std::path::Path, args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_plugmem-cli"))
+            .arg("--db")
+            .arg(tmp.db())
+            .arg("--config")
+            .arg(config)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // No embedder in the config at all: "absent", and the writer path prints
+    // it too (this database has no snapshot yet, so `stats` opens read-write).
+    let absent = plug(&bare, &["stats"]);
+    assert!(
+        stdout(&absent).contains("embedder    absent"),
+        "{}",
+        stdout(&absent)
+    );
+
+    // Configured but never called yet: "active". Nothing has failed, and a
+    // state read must not invent a failure to report.
+    let stored = plug(&config, &["remember", "a fact about tokio"]);
+    assert_eq!(stored.status.code(), Some(0), "{}", stderr(&stored));
+    assert!(plug(&config, &["checkpoint"]).status.success());
+    let json = plug(&config, &["--json", "stats"]);
+    assert!(
+        stdout(&json).contains("\"embedder\":\"active\""),
+        "{}",
+        stdout(&json)
+    );
+
+    // And after a failure inside one process: "suspended". It has to be one
+    // process, because the suspension is per-process state — which is exactly
+    // why a one-shot command can only ever report "active" here.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_plugmem-cli"))
+        .arg("--db")
+        .arg(tmp.db())
+        .arg("--config")
+        .arg(&config)
+        .args(["repl", "--read-only"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"recall tokio\nstats\nexit\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "repl exit: {:?}", out.status);
+    assert!(
+        stdout(&out).contains("embedder    suspended"),
+        "{}",
+        stdout(&out)
+    );
 }
 
 #[test]

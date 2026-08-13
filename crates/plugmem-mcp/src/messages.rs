@@ -20,7 +20,10 @@ pub const ARG_FORMAT: &str = "Output format. \"json\" (default) returns compact 
 
 /// `plugmem_stats` tool description.
 pub const STATS_TOOL: &str = "Return engine size counters for the memory: facts, entities, terms, current edges, edge \
-history versions, vectors, HNSW coverage, ids, and the database uuid. A cheap health/size probe.";
+history versions, vectors, HNSW coverage, ids, and the database uuid. A cheap health/size probe. \
+Also returns `embedder`: \"absent\" (none configured), \"active\", or \"suspended\" - the provider \
+is unreachable and this memory is answering without meaning-based ranking, which is why `vectors` \
+may be lower than `facts`.";
 
 /// `plugmem_version` tool description — the MCP analog of `plugmem-cli --version`.
 pub const VERSION_TOOL: &str = "Return the running plugmem version (e.g. \"plugmem 0.1.0\"). Call \

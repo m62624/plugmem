@@ -25,17 +25,26 @@
 //! with the feature off, do not pull the `toml` parser).
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::{
-    Config, Database, DatabaseBuilder, Embedder, FsyncPolicy, HostError, MAX_OPEN_CEILING,
-    OpenAiCompatEmbedder, Opener, SettingWarning, SharedEmbedder, Workspace, WorkspaceLayout,
-    WorkspaceLimits, settings_help::settings_help,
+    Config, Database, DatabaseBuilder, EmbedErrorPolicy, EmbedRetry, Embedder, FsyncPolicy,
+    HostError, MAX_OPEN_CEILING, OpenAiCompatEmbedder, Opener, SettingWarning, SharedEmbedder,
+    Workspace, WorkspaceLayout, WorkspaceLimits, settings_help::settings_help,
 };
 
 /// Environment variable naming the config file (below an explicit path).
 const ENV_CONFIG: &str = "PLUGMEM_CONFIG";
 /// Environment variable that overrides `[embedder].enabled`.
 const ENV_EMBEDDER_ENABLED: &str = "PLUGMEM_EMBEDDER_ENABLED";
+/// Environment variable that overrides `[embedder].on_error`.
+const ENV_EMBEDDER_ON_ERROR: &str = "PLUGMEM_EMBEDDER_ON_ERROR";
+/// Environment variable that overrides `[embedder].timeout_ms`.
+const ENV_EMBEDDER_TIMEOUT_MS: &str = "PLUGMEM_EMBEDDER_TIMEOUT_MS";
+/// Environment variable that overrides `[embedder].retry_after_ms`.
+const ENV_EMBEDDER_RETRY_AFTER_MS: &str = "PLUGMEM_EMBEDDER_RETRY_AFTER_MS";
+/// Environment variable that overrides `[embedder].retry_max_ms`.
+const ENV_EMBEDDER_RETRY_MAX_MS: &str = "PLUGMEM_EMBEDDER_RETRY_MAX_MS";
 // Keep these inventories next to the parser. The settings-help tests compare
 // them with the public documentation catalogue, so adding a parser key without
 // adding its help entry fails loudly.
@@ -67,8 +76,17 @@ pub(crate) const RECALL_SETTING_KEYS: &[&str] = &[
 pub(crate) const INDEX_SETTING_KEYS: &[&str] = &["hnsw_ef_construction", "flat_to_hnsw"];
 pub(crate) const DATABASE_SETTING_KEYS: &[&str] = &["path"];
 pub(crate) const WORKSPACE_SETTING_KEYS: &[&str] = &["dir", "max_open", "idle_timeout_ms"];
-pub(crate) const EMBEDDER_SETTING_KEYS: &[&str] =
-    &["enabled", "url", "model", "space_id", "api_key_env"];
+pub(crate) const EMBEDDER_SETTING_KEYS: &[&str] = &[
+    "enabled",
+    "url",
+    "model",
+    "space_id",
+    "api_key_env",
+    "on_error",
+    "timeout_ms",
+    "retry_after_ms",
+    "retry_max_ms",
+];
 pub(crate) const MAINTENANCE_SETTING_KEYS: &[&str] = &[
     "snapshot_every_ops",
     "snapshot_journal_bytes",
@@ -105,6 +123,14 @@ pub struct Settings {
     /// The embedder built from `[embedder]`, or `None` (lexical/graph/time
     /// recall still work without one).
     pub embedder: Option<Box<dyn Embedder>>,
+    /// `[embedder].on_error` — what a verb does when the provider cannot be
+    /// reached. Defaults to [`EmbedErrorPolicy::Fail`], which is what every
+    /// release before this one did.
+    pub embed_error_policy: EmbedErrorPolicy,
+    /// `[embedder].retry_after_ms` / `retry_max_ms` — when a database that
+    /// suspended its own embedder calls it again. Inert unless the policy is
+    /// [`EmbedErrorPolicy::Degrade`], since nothing else suspends by itself.
+    pub embed_retry: EmbedRetry,
     /// `[maintenance].snapshot_every_ops`, if set.
     pub snapshot_every_ops: Option<u64>,
     /// `[maintenance].snapshot_journal_bytes`, if set.
@@ -214,15 +240,44 @@ impl Settings {
             }
         }
 
+        // Environment over file, for every key of this section rather than
+        // for one of them: the operational moment these exist for - "the
+        // provider is down, run without it for now" - is exactly when editing
+        // a config file is the wrong thing to ask of somebody.
         if let Some(enabled) = std::env::var_os(ENV_EMBEDDER_ENABLED) {
             embedder.enabled = Some(parse_embedder_enabled(&enabled.to_string_lossy())?);
         }
+        if let Some(policy) = std::env::var_os(ENV_EMBEDDER_ON_ERROR) {
+            embedder.on_error = Some(parse_on_error(&policy.to_string_lossy())?);
+        }
+        if let Some(ms) = std::env::var_os(ENV_EMBEDDER_TIMEOUT_MS) {
+            embedder.timeout = Some(parse_timeout_ms(&env_number(
+                &ms.to_string_lossy(),
+                ENV_EMBEDDER_TIMEOUT_MS,
+            )?));
+        }
+        if let Some(ms) = std::env::var_os(ENV_EMBEDDER_RETRY_AFTER_MS) {
+            embedder.retry_after_ms = Some(env_number(
+                &ms.to_string_lossy(),
+                ENV_EMBEDDER_RETRY_AFTER_MS,
+            )?);
+        }
+        if let Some(ms) = std::env::var_os(ENV_EMBEDDER_RETRY_MAX_MS) {
+            embedder.retry_max_ms = Some(env_number(
+                &ms.to_string_lossy(),
+                ENV_EMBEDDER_RETRY_MAX_MS,
+            )?);
+        }
 
+        let embed_error_policy = embedder.on_error.unwrap_or_default();
+        let embed_retry = embedder.retry();
         let embedder = embedder.build(config.dim)?;
         Ok(Settings {
             database_path,
             config,
             embedder,
+            embed_error_policy,
+            embed_retry,
             snapshot_every_ops,
             snapshot_journal_bytes,
             maintain_every_forgets,
@@ -253,6 +308,9 @@ impl Settings {
         if let Some(e) = self.embedder {
             b = b.embedder(e);
         }
+        b = b
+            .on_embed_error(self.embed_error_policy)
+            .embed_retry(self.embed_retry);
         Ok(b.open(path)?.0)
     }
 
@@ -276,6 +334,8 @@ impl Settings {
         let Settings {
             config,
             embedder,
+            embed_error_policy,
+            embed_retry,
             snapshot_every_ops,
             snapshot_journal_bytes,
             maintain_every_forgets,
@@ -298,6 +358,13 @@ impl Settings {
             if let Some(e) = &shared {
                 b = b.embedder(Box::new(e.clone()));
             }
+            // Every database in a workspace shares one provider, so they must
+            // also share what happens when it stops answering; a per-database
+            // default here would degrade one memory and fail another against
+            // the same dead endpoint.
+            b = b
+                .on_embed_error(embed_error_policy)
+                .embed_retry(embed_retry);
             Ok(b.open(path)?.0)
         });
         Ok(Workspace::new(
@@ -382,6 +449,50 @@ fn parse_fsync(t: &toml::Table) -> Result<Option<FsyncPolicy>, SettingsError> {
             "[maintenance].fsync must be \"each_op\" or \"on_snapshot\", got \"{other}\""
         ))),
     }
+}
+
+/// `"fail"` / `"degrade"`, from a file or from the environment.
+fn parse_on_error(value: &str) -> Result<EmbedErrorPolicy, SettingsError> {
+    match value {
+        "fail" => Ok(EmbedErrorPolicy::Fail),
+        "degrade" => Ok(EmbedErrorPolicy::Degrade),
+        other => Err(SettingsError::config(format!(
+            "[embedder].on_error must be \"fail\" or \"degrade\", got \"{other}\""
+        ))),
+    }
+}
+
+/// A non-negative integer from a TOML value, refused rather than ignored.
+///
+/// [`table_u64`] drops what it cannot read, which is right for a knob whose
+/// absence means "engine default". These four decide whether a memory keeps
+/// working when its provider dies, and a silently dropped `timeout_ms = "5s"`
+/// would leave somebody sure they had bounded a wait they had not.
+fn table_number(value: &toml::Value, key: &str) -> Result<u64, SettingsError> {
+    value
+        .as_integer()
+        .filter(|n| *n >= 0)
+        .map(|n| n as u64)
+        .ok_or_else(|| {
+            SettingsError::config(format!(
+                "[embedder].{key} must be a non-negative integer number of milliseconds"
+            ))
+        })
+}
+
+/// The same, from an environment variable.
+fn env_number(value: &str, var: &str) -> Result<u64, SettingsError> {
+    value.trim().parse::<u64>().map_err(|_| {
+        SettingsError::config(format!(
+            "{var} must be a non-negative integer number of milliseconds, got \"{value}\""
+        ))
+    })
+}
+
+/// `0` means "no timeout" — the one spelling of "wait indefinitely" a TOML
+/// integer has, and the behaviour every release before this one had.
+fn parse_timeout_ms(ms: &u64) -> Option<Duration> {
+    (*ms > 0).then(|| Duration::from_millis(*ms))
 }
 
 pub(crate) fn table_u64(t: &toml::Table, key: &str) -> Option<u64> {
@@ -508,6 +619,14 @@ struct EmbedderCfg {
     model: Option<String>,
     space_id: Option<String>,
     api_key_env: Option<String>,
+    on_error: Option<EmbedErrorPolicy>,
+    /// `None` = the provider's own default; `Some(None)` = wait forever.
+    timeout: Option<Option<Duration>>,
+    /// Milliseconds as written: `None` = backoff, `Some(0)` = manual,
+    /// `Some(n)` = a fixed interval. Turned into an [`EmbedRetry`] by
+    /// [`EmbedderCfg::retry`], which is the only place that mapping lives.
+    retry_after_ms: Option<u64>,
+    retry_max_ms: Option<u64>,
 }
 
 impl EmbedderCfg {
@@ -531,7 +650,47 @@ impl EmbedderCfg {
         if let Some(v) = s(t, EMBEDDER_SETTING_KEYS[4]) {
             self.api_key_env = Some(v);
         }
+        if let Some(value) = t.get(EMBEDDER_SETTING_KEYS[5]) {
+            let text = value
+                .as_str()
+                .ok_or_else(|| SettingsError::config("[embedder].on_error must be a string"))?;
+            self.on_error = Some(parse_on_error(text)?);
+        }
+        if let Some(value) = t.get(EMBEDDER_SETTING_KEYS[6]) {
+            self.timeout = Some(parse_timeout_ms(&table_number(
+                value,
+                EMBEDDER_SETTING_KEYS[6],
+            )?));
+        }
+        if let Some(value) = t.get(EMBEDDER_SETTING_KEYS[7]) {
+            self.retry_after_ms = Some(table_number(value, EMBEDDER_SETTING_KEYS[7])?);
+        }
+        if let Some(value) = t.get(EMBEDDER_SETTING_KEYS[8]) {
+            self.retry_max_ms = Some(table_number(value, EMBEDDER_SETTING_KEYS[8])?);
+        }
         Ok(())
+    }
+
+    /// How a suspended embedder comes back, from the two milliseconds keys.
+    ///
+    /// One function so the file, the environment and the defaults cannot
+    /// disagree about what "0" means, and so the mapping is documented in
+    /// exactly one place:
+    ///
+    /// - nothing written -> the default backoff (1s doubling to `retry_max_ms`);
+    /// - `retry_after_ms = 0` -> never; the host resumes it explicitly;
+    /// - `retry_after_ms = n` -> that interval, every time.
+    fn retry(&self) -> EmbedRetry {
+        match self.retry_after_ms {
+            None => EmbedRetry::Backoff {
+                first: crate::DEFAULT_EMBED_RETRY_FIRST,
+                max: self
+                    .retry_max_ms
+                    .map_or(crate::DEFAULT_EMBED_RETRY_MAX, Duration::from_millis),
+            },
+            Some(0) => EmbedRetry::Manual,
+            Some(ms) => EmbedRetry::Fixed(Duration::from_millis(ms)),
+        }
     }
 
     /// Builds the one supported embedder. An explicitly disabled embedder, or
@@ -560,6 +719,9 @@ impl EmbedderCfg {
             ));
         }
         let mut e = OpenAiCompatEmbedder::new(&url, &model, dim);
+        if let Some(timeout) = self.timeout {
+            e = e.with_timeout(timeout);
+        }
         if let Some(space_id) = &self.space_id {
             e = e.with_space_id(space_id);
         }
@@ -669,6 +831,122 @@ mod tests {
     }
 
     #[test]
+    fn embedder_failure_policy_reads_every_key() {
+        let table = toml_of(&[
+            "[embedder]",
+            "enabled = true",
+            r#"url = "http://localhost:11434/v1/embeddings""#,
+            r#"model = "nomic-embed-text""#,
+            r#"on_error = "degrade""#,
+            "timeout_ms = 2500",
+            "retry_after_ms = 750",
+            "[engine]",
+            "dim = 8",
+        ]);
+        let s = Settings::from_table(Some(&table)).unwrap();
+        assert_eq!(s.embed_error_policy, EmbedErrorPolicy::Degrade);
+        assert_eq!(s.embed_retry, EmbedRetry::Fixed(Duration::from_millis(750)));
+    }
+
+    #[test]
+    fn an_unconfigured_embedder_section_keeps_the_old_behaviour() {
+        // The default matters more than the feature: somebody who upgrades and
+        // changes nothing must still get the error they get today.
+        let table = toml_of(&["[engine]", "dim = 8"]);
+        let s = Settings::from_table(Some(&table)).unwrap();
+        assert_eq!(s.embed_error_policy, EmbedErrorPolicy::Fail);
+        assert_eq!(
+            s.embed_retry,
+            EmbedRetry::Backoff {
+                first: crate::DEFAULT_EMBED_RETRY_FIRST,
+                max: crate::DEFAULT_EMBED_RETRY_MAX,
+            }
+        );
+    }
+
+    #[test]
+    fn retry_keys_map_onto_the_three_shapes() {
+        // One table, because the mapping is the thing being tested and it is
+        // easy to get one arm of it wrong in isolation.
+        let cfg = |lines: &[&str]| {
+            let mut lines = lines.to_vec();
+            lines.insert(0, "[embedder]");
+            Settings::from_table(Some(&toml_of(&lines)))
+                .unwrap()
+                .embed_retry
+        };
+        assert_eq!(cfg(&["retry_after_ms = 0"]), EmbedRetry::Manual);
+        assert_eq!(
+            cfg(&["retry_after_ms = 250"]),
+            EmbedRetry::Fixed(Duration::from_millis(250))
+        );
+        assert_eq!(
+            cfg(&["retry_max_ms = 5000"]),
+            EmbedRetry::Backoff {
+                first: crate::DEFAULT_EMBED_RETRY_FIRST,
+                max: Duration::from_millis(5000),
+            }
+        );
+        // A cap without a doubling to cap is not an error, it is simply unused
+        // — saying so in a test keeps somebody from "fixing" it later.
+        assert_eq!(
+            cfg(&["retry_after_ms = 100", "retry_max_ms = 5000"]),
+            EmbedRetry::Fixed(Duration::from_millis(100))
+        );
+    }
+
+    #[test]
+    fn a_malformed_failure_key_is_refused_rather_than_ignored() {
+        // These four decide whether a memory keeps working when its provider
+        // dies. A dropped value would leave somebody sure they configured
+        // something they did not.
+        for lines in [
+            vec!["[embedder]", r#"on_error = "sometimes""#],
+            vec!["[embedder]", "on_error = true"],
+            vec!["[embedder]", r#"timeout_ms = "5s""#],
+            vec!["[embedder]", "timeout_ms = -1"],
+            vec!["[embedder]", r#"retry_after_ms = "soon""#],
+            vec!["[embedder]", "retry_max_ms = -5"],
+        ] {
+            let table = toml_of(&lines);
+            assert!(
+                matches!(
+                    Settings::from_table(Some(&table)),
+                    Err(SettingsError::Config(_))
+                ),
+                "accepted {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_zero_timeout_means_wait_indefinitely() {
+        // TOML has no "unset" to write in place of a number, so zero carries
+        // it — the same spelling every release before this one had by default.
+        assert_eq!(parse_timeout_ms(&0), None);
+        assert_eq!(parse_timeout_ms(&1500), Some(Duration::from_millis(1500)));
+    }
+
+    #[test]
+    fn the_environment_parsers_answer_the_same_way_the_file_does() {
+        // The env overrides cannot be exercised through `std::env::set_var`
+        // (it is unsafe and racy across test threads), so the parsers they
+        // share with the file are tested directly instead.
+        assert_eq!(
+            parse_on_error("degrade").unwrap(),
+            EmbedErrorPolicy::Degrade
+        );
+        assert_eq!(parse_on_error("fail").unwrap(), EmbedErrorPolicy::Fail);
+        assert!(parse_on_error("Degrade").is_err());
+        assert_eq!(
+            env_number("2500", "PLUGMEM_EMBEDDER_TIMEOUT_MS").unwrap(),
+            2500
+        );
+        assert!(env_number("-1", "PLUGMEM_EMBEDDER_TIMEOUT_MS").is_err());
+        assert!(env_number("2.5", "PLUGMEM_EMBEDDER_TIMEOUT_MS").is_err());
+    }
+
+    #[test]
     fn database_path_reads_and_validates_from_config() {
         let table: toml::Table = "[database]\npath = \"/tmp/memory.plugmem\""
             .parse()
@@ -698,8 +976,7 @@ mod tests {
             enabled: Some(true),
             url: Some("http://127.0.0.1:0/v1/embeddings".into()),
             model: Some("m".into()),
-            space_id: None,
-            api_key_env: None,
+            ..Default::default()
         }
         .build(8)
         .unwrap();
@@ -708,6 +985,8 @@ mod tests {
             database_path: None,
             config,
             embedder,
+            embed_error_policy: EmbedErrorPolicy::default(),
+            embed_retry: EmbedRetry::default(),
             snapshot_every_ops: Some(4),
             snapshot_journal_bytes: Some(4096),
             maintain_every_forgets: Some(2),
@@ -868,16 +1147,15 @@ mod tests {
             enabled: Some(true),
             url: Some("http://x/v1/embeddings".into()),
             model: Some("m".into()),
-            space_id: None,
-            api_key_env: None,
+            ..Default::default()
         };
         assert!(matches!(zero_dim.build(0), Err(SettingsError::Config(_))));
         let ok = EmbedderCfg {
             enabled: None,
             url: Some("http://x/v1/embeddings".into()),
             model: Some("m".into()),
-            space_id: None,
             api_key_env: Some("PLUGMEM_TEST_KEY_UNSET".into()),
+            ..Default::default()
         };
         assert!(ok.build(384).unwrap().is_some());
         let disabled = EmbedderCfg {

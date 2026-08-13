@@ -372,55 +372,63 @@ Without a config, plugmem answers from text, tags, the graph and time. Add an
 source something to work with — see
 [Do you need an embedder?](#do-you-need-an-embedder) for the trade.
 
-The file is resolved the same way on every surface — CLI, MCP server, Node and
-Python: an explicit path, then `$PLUGMEM_CONFIG`, then the platform config
-directory — `$XDG_CONFIG_HOME/plugmem/config.toml` on Linux,
-`~/Library/Application Support/plugmem/config.toml` on macOS,
-`%APPDATA%\plugmem\config\config.toml` on Windows.
+The file resolves the same way on every surface: an explicit path, then
+`$PLUGMEM_CONFIG`, then the platform config directory.
 
 ```toml
 # plugmem.toml
-[database]
-path = "~/.local/share/plugmem/agent.plugmem"
-
 [engine]
-dim = 1536
+dim = 1536                      # 0 (the default) stores no vectors
 
-# Optional. Delete this section and everything still works, minus the vector
-# source.
-[embedder]
-enabled = true
+[embedder]                      # omit for lexical, tag, graph and time only
 url = "https://api.openai.com/v1/embeddings"
 model = "text-embedding-3-small"
-space_id = "text-embedding-3-small@v1" # optional; defaults to model
 api_key_env = "OPENAI_API_KEY"
-
-[recall]
-w_bm25 = 1.0        # weight of the lexical source
-w_vec = 1.0         # weight of the vector source
-w_graph = 0.7       # weight of the graph source
-half_life_days = 30 # how fast the recency boost decays
-graph_depth = 2     # default hops, overridable per call
+on_error = "degrade"            # keep answering when the provider is down
 ```
 
 ```python
 db = plugmem.Plugmem.open("agent.plugmem", config="plugmem.toml")
 ```
 
-The host uses one `OpenAiCompatEmbedder` implementation for OpenAI, Ollama,
-LM Studio, vLLM and other OpenAI-compatible servers. `url` is the complete
-embeddings endpoint exactly as provided (nothing is appended), and `model` is
-the model name understood by that server. `space_id` optionally identifies the
-exact semantic space and defaults to `model`; it is never discovered over the
-network. Set `enabled = false` to keep the
-settings without creating or calling the embedder; `$PLUGMEM_EMBEDDER_ENABLED`
-overrides it with `true` or `false`.
+Every other key, its default and the OS-specific paths live in one place:
 
-A mismatch does **not** stop the database opening, on a writer or a read-only
-handle, and loses nothing. What fails is exactly two things: `recall` with a
-`query` and `remember` with `text`. Everything else - `stats`, `get`, `tags_of`,
+- [`config.example.toml`](https://github.com/m62624/plugmem/blob/main/config.example.toml) — every key with its default, commented
+  out, ready to copy.
+- [SETTINGS.md](https://github.com/m62624/plugmem/blob/main/crates/plugmem-host/SETTINGS.md) — the reference, including which sections are safe
+  to change on an existing database.
+- `plugmem.settings_help()` — the same catalogue, without opening anything.
+
+What is specific to this binding:
+
+- **`dim=` is an open option too**, for callers with no config file. If the
+  config built an embedder, that embedder's dimension governs and `dim` must
+  agree with it.
+- **`embedder_state()`** answers `"absent"`, `"active"` or `"suspended"`, and
+  `suspend_embedder()` / `resume_embedder()` are the manual switches. With
+  `on_error = "degrade"` the binding does it for itself: a failed call costs the
+  vector rather than the verb, and `reembed()` fills the missing vectors in
+  later. Both work on a read-only handle, which is the one that embeds its own
+  queries, and on a `WorkspaceMemory` — one shared provider, but a gate per
+  memory, so suspending one leaves its siblings answering with vectors.
+- **Unknown keys are a value, not a printed warning** — a library has nowhere
+  sensible to print. Read them once after opening:
+
+  ```python
+  db = plugmem.Plugmem.open("agent.plugmem", config="plugmem.toml")
+  for warning in db.config_warnings():
+      print(warning)
+  # [recall] unknown key `w_vector` — did you mean `w_vec`?
+  ```
+
+### A vector space that no longer matches
+
+Changing `model`, `space_id` or `dim` on a database that already holds vectors
+does **not** stop it opening, on a writer or a read-only handle, and loses
+nothing. What fails is exactly two things: `recall` with a `query` and
+`remember` with `text`. Everything else — `stats`, `get`, `tags_of`,
 `list_tags`, entity/graph recall, `export_page`, `forget`, `link`, `verify`,
-`maintain`, `checkpoint`, `reembed` - keeps answering. So the content is safe
+`maintain`, `checkpoint`, `reembed` — keeps answering. So the content is safe
 and recovery is always available, and a consumer only finds out at its first
 lookup after the change: detect it by making the cheapest text recall and
 watching for the error, rather than from a note of what was configured last
@@ -428,28 +436,10 @@ time.
 
 `reembed` is idempotent; it rebuilds ONE database, so a workspace needs a pass
 over every memory in it. On an EMPTY database it still makes one request whose
-input is the empty string - a provider that rejects empty input fails a rebuild
+input is the empty string — a provider that rejects empty input fails a rebuild
 that had nothing to rebuild. And switching an embedder on over a database built
 without one breaks nothing and warns about nothing: compare `stats().vectors`
 with `stats().facts` to notice the facts that have no vectors yet.
-
-
-`plugmem.settings_help()` returns the whole catalogue — every section, key,
-type, default and what it does — without opening anything.
-
-### When a key is misspelled
-
-A typo in a key used to change nothing, silently. Now it is reported:
-
-```python
-db = plugmem.Plugmem.open("agent.plugmem", config="plugmem.toml")
-for warning in db.config_warnings():
-    print(warning)
-# [recall] unknown key `w_vector` — did you mean `w_vec`?
-```
-
-It is a value rather than a printed warning because a library has nowhere
-sensible to print. Read it once after opening and log it your own way.
 
 ## Threads and the GIL
 

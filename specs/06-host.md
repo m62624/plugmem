@@ -126,6 +126,55 @@ and is persisted beside the vectors. Opening an existing database with new targe
 settings adopts the stored dimension for normal reads; automatic embedding
 then returns `VectorSpaceMismatch` until the caller explicitly reembeds.
 
+**When it cannot be reached.** A provider that refuses the connection, times
+out or answers with something other than the documented shape used to fail the
+verb, and that was the only option: `remember` and a text `recall` both embed,
+so a stopped provider took every write and every meaning-based read with it —
+while the database itself was perfectly usable, exactly as it is when no
+embedder was ever configured.
+
+`[embedder].on_error` decides which happens:
+
+- `fail` (the default, and what every release before 0.12 did) propagates
+  `HostError::Embed`.
+- `degrade` carries on **without** the vector: the fact is stored, the query is
+  answered from the lexical, tag, graph and time sources, and the embedder is
+  *suspended* so the next call does not pay the same failure again. Nothing is
+  lost that a later `reembed` cannot restore from the stored text — a fact
+  without a vector is the state every fact has in a database written with no
+  embedder.
+
+The suspension retries by itself: `[embedder].retry_after_ms` unset means one
+second, doubling up to `retry_max_ms` (60s), reset by the first success; `0`
+means never (the host calls `resume_embedder`); any other value is that fixed
+interval. There is no timer and no background probe — the retry rides on the
+next call that wanted an embedding anyway.
+
+Three failures are deliberately **not** degraded, under either policy:
+
+- `VectorSpaceMismatch`. The provider answered, and its answer belongs to a
+  different semantic space; storing it would mix two spaces in one index, and
+  no later repair can tell the halves apart.
+- `reembed` while suspended. It refuses rather than publishing a generation
+  with a fraction of its vectors, and says "suspended" rather than "you
+  configured none".
+- An explicit `Database::suspend_embedder()`. It outranks any retry timer,
+  because it was a decision rather than an observation; `resume_embedder()`
+  undoes it.
+
+`[embedder].timeout_ms` (10s by default, `0` = wait indefinitely) bounds one
+request end to end. Without it, degrading is late by however long a hung server
+hangs — which is the failure it is most needed for, since a provider that is
+simply not listening refuses the connection immediately.
+
+All of it lives in `EmbedderGate` rather than in `Database`, because there are
+two callers and they must not drift: a writer embeds inside its verbs, and every
+wrapper over a zero-copy `ReadOnlyDatabase` embeds its own query (the reader
+carries no provider by design). `Database::embedder_state()` — and the gate's
+own `state()` — reports `Absent`, `Active` or `Suspended { retry_at }`, which is
+what lets a surface tell a person that their memory is running without
+meaning-based ranking and will try again by itself.
+
 **No lock sits in front of it.** `embed` takes `&self` (`05-api.md`), so a
 `Database` holds its embedder unlocked and `SharedEmbedder` — the handle a
 workspace clones into every memory so a hundred chats do not open a hundred HTTP

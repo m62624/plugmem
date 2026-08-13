@@ -2,7 +2,20 @@
 
 This is the canonical configuration reference for `plugmem-host` and every
 wrapper that uses it: `plugmem-cli`, `plugmem-mcp`, `plugmem-napi` and
-`plugmem-py`.
+`plugmem-py`. Every tuning knob, every default and every surface-specific
+override is described here and **only** here — a crate README that repeated
+them would be a copy that ages.
+
+Two companions, neither of them a second reference:
+
+- [`config.example.toml`](../../config.example.toml) at the repository root —
+  every key with its default, ready to copy, **generated** from the same
+  catalogue this document describes and gated by a test, so it cannot drift.
+- The runtime help each surface serves (`plugmem-cli help settings`,
+  `plugmem_settings_help`, `settingsHelp()`, `settings_help()`) — the same
+  catalogue, answered by the build you are actually running.
+
+This file is the one that says *why*.
 
 ## Config-file discovery
 
@@ -45,47 +58,22 @@ it still requires enough free disk for snapshots and maintenance temporary
 files. Use an explicit path when the database belongs on a particular disk or
 project.
 
-## Example
+## The smallest useful config
 
 ```toml
-[database]
-# Optional. An explicit --db or open path and PLUGMEM_DB override this.
-path = "/path/to/memory.plugmem"
-
 [engine]
-dim = 768              # 0 disables vectors
-max_bytes = 2147483648
-max_text = 4096
-max_blob = 65536
+dim = 768                       # 0 (the default) stores no vectors
 
-# Optional. Every key here has a tuned default — reach for this section when a
-# specific memory answers badly, not before.
-[recall]
-w_vec = 2.0            # trust meaning over keywords in this memory
-half_life_days = 30    # and treat anything older than a month as stale
-
-[index]
-flat_to_hnsw = 50000   # this memory is small; stay exact for longer
-
-[embedder]
-enabled = true
+[embedder]                      # omit for lexical, tag, graph and time only
 url = "http://localhost:11434/v1/embeddings"
 model = "nomic-embed-text"
-# space_id = "nomic-embed-text@v1" # optional; defaults to model
-# api_key_env = "OPENAI_API_KEY" # name of the env var holding the token
-
-[maintenance]
-snapshot_every_ops = 1024
-snapshot_journal_bytes = 4194304
-maintain_every_forgets = 100
-
-# CLI only: facts per `import` batch.
-batch_size = 128
-
-[server]
-# MCP only: defaults to half of available cores, at least one.
-workers = 4
+on_error = "degrade"            # keep answering when the provider is down
 ```
+
+Everything else has a default worth keeping until a specific memory behaves
+badly. For the complete file — every key, its type, its default, commented out
+so copying it does not freeze today's defaults into your config — see
+[`config.example.toml`](../../config.example.toml).
 
 ## Sections
 
@@ -223,8 +211,53 @@ accepts only `true` or `false`.
 | `model` | unset | Embedding model name understood by the selected server. Required for an active embedder. |
 | `space_id` | `model` | Stable identity of the vectors' semantic space. Set an exact model revision or digest when `model` is an alias. |
 | `api_key_env` | unset | Environment variable containing the bearer token. |
+| `on_error` | `fail` | What an unreachable provider costs. `fail` propagates the error; `degrade` stores or answers without the vector and suspends the embedder. |
+| `timeout_ms` | `10000` | Deadline for one embeddings request, end to end. `0` waits indefinitely. |
+| `retry_after_ms` | unset | Fixed wait before a suspended embedder is called again. Unset means 1s doubling to `retry_max_ms`; `0` means never, until the host resumes it. |
+| `retry_max_ms` | `60000` | Ceiling the default doubling retry grows to. Ignored when `retry_after_ms` is set. |
 
-An active embedder also requires `[engine].dim > 0`. All supported providers
+**When the provider stops answering.** Until 0.12 that failed the verb, and
+there was nothing else it could do: `remember` and a text `recall` both embed,
+so a stopped Ollama took every write and every meaning-based read with it —
+even though the database itself was perfectly usable, exactly as it is when no
+embedder was ever configured.
+
+`on_error = "degrade"` carries on without the vector instead. The fact is
+stored, the query is answered from the lexical, tag, graph and time sources,
+and the embedder is *suspended* so the next call does not pay the same failure
+again — which matters more than it sounds, since otherwise a dead provider
+costs a full timeout on every verb of every turn. Facts written meanwhile are
+not damaged: they are in the state every fact is in when a memory is written
+with no embedder, and `reembed` fills their vectors in from the stored text.
+
+A suspension lifts by itself on the next call after the wait, and the wait
+doubles while the provider stays down (1s, 2s, 4s … up to `retry_max_ms`),
+resetting on the first success. There is no timer and no background probe: the
+retry rides on the next call that wanted an embedding anyway.
+
+Three things stay loud under both policies. A vector-space mismatch is an
+error, because mixing two semantic spaces in one index cannot be untangled
+afterwards. A `reembed` refuses while the embedder is suspended, rather than
+publishing a generation with a fraction of its vectors. And an explicit
+`suspend_embedder()` outranks every timer — it was a decision, not an
+observation, and only `resume_embedder()` undoes it.
+
+These four keys have environment overrides, under the usual precedence
+(environment over file): `$PLUGMEM_EMBEDDER_ON_ERROR`,
+`$PLUGMEM_EMBEDDER_TIMEOUT_MS`, `$PLUGMEM_EMBEDDER_RETRY_AFTER_MS`,
+`$PLUGMEM_EMBEDDER_RETRY_MAX_MS` — plus `$PLUGMEM_EMBEDDER_ENABLED` from the
+table above. The rest of `[embedder]` (`url`, `model`, `space_id`,
+`api_key_env`) is file-only: those describe *which* provider this is, and
+changing that mid-outage is not what an override is for. The moment these five
+exist for — "the provider is down, run without it for now" — is exactly when
+editing a config file is the wrong thing to ask of somebody.
+
+An active embedder also requires `[engine].dim > 0`. The Node and Python
+bindings additionally take a `dim` open option, for callers with no config file
+at all: when the config *did* build an embedder, that embedder's dimension is
+authoritative and `dim` must agree with it, or the open is refused rather than
+quietly reconciled — vectors of two different widths in one file are not
+something a later run can untangle. All supported providers
 use the same OpenAI-compatible HTTP shape. `space_id` is a local declaration:
 Plugmem never probes the endpoint to discover it. Equal ids assert compatible
 vectors; changing the id requires an explicit reembed.
@@ -238,6 +271,13 @@ vectors; changing the id requires an explicit reembed.
 | `maintain_every_forgets` | off | Run policy maintenance after this many forgets. |
 | `fsync` | `each_op` | When journal appends reach the disk. `each_op`: every acknowledged write survives a power cut. `on_snapshot`: faster, but an OS crash may lose the journal tail written since the last snapshot. |
 | `batch_size` | `128` | CLI-only `import` batch size; `--batch` overrides it. |
+
+`batch_size` is the one maintenance key that is not about durability. The CLI's
+`import` streams the file in batches of it: one embedder round trip and one
+journal fsync per batch, so a bulk load with an embedder makes one HTTP call per
+batch instead of one per fact, and the file is never fully read into memory.
+Larger batches mean fewer round trips but a bigger request body and more memory
+held at once.
 
 One maintenance trigger has no key and is always on: a database that outgrows
 (or falls far below) its shard layout re-shards itself on the next write. It

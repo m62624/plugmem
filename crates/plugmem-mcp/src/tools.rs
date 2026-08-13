@@ -12,9 +12,9 @@
 use std::sync::RwLock;
 
 use plugmem_host::{
-    Database, DbEntry, DbName, Embedder, FactId, HostError, IfMissing, LinkInput, MaintenanceMode,
-    MaintenanceOptions, ReadOnlyDatabase, RecallQuery, RememberInput, TagQuery, UnlinkInput,
-    Workspace,
+    Database, DbEntry, DbName, EmbedderGate, EmbedderState, FactId, HostError, IfMissing,
+    LinkInput, MaintenanceMode, MaintenanceOptions, ReadOnlyDatabase, RecallQuery, RememberInput,
+    TagQuery, UnlinkInput, Workspace,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -28,21 +28,33 @@ use crate::{messages, rpc};
 ///
 /// The snapshot is behind a `RwLock`: read verbs take the read guard and run
 /// concurrently; `refresh` (rare) takes the write guard to re-map. The embedder
-/// carries no lock at all — [`Embedder::embed`] takes `&self`, so the whole
-/// worker pool can be inside the provider at once, and the HTTP call never
-/// touches the snapshot lock.
+/// carries no lock at all — [`plugmem_host::Embedder::embed`] takes `&self`, so
+/// the whole worker pool can be inside the provider at once, and the HTTP call
+/// never touches the snapshot lock.
 pub struct ReaderShared {
     db: RwLock<ReadOnlyDatabase>,
-    embedder: Option<Box<dyn Embedder>>,
+    embedder: EmbedderGate,
 }
 
 impl ReaderShared {
     /// Wrap a read-only handle and its optional embedder for sharing.
-    pub fn new(db: ReadOnlyDatabase, embedder: Option<Box<dyn Embedder>>) -> Self {
+    ///
+    /// The embedder arrives inside an [`EmbedderGate`] — the host's own type,
+    /// the one a writer uses inside its verbs — so `[embedder].on_error` means
+    /// the same thing on this surface as on every other. It matters more here
+    /// than anywhere: a server outlives its provider's outages, and without the
+    /// gate one dead endpoint would fail every `recall` this process ever
+    /// answers, each after a full timeout.
+    pub fn new(db: ReadOnlyDatabase, embedder: EmbedderGate) -> Self {
         Self {
             db: RwLock::new(db),
             embedder,
         }
+    }
+
+    /// Whether the embedder is configured, and usable right now.
+    pub fn embedder_state(&self) -> EmbedderState {
+        self.embedder.state()
     }
 }
 
@@ -153,7 +165,14 @@ pub fn call(db: &Database, id: Value, params: Option<&Value>) -> Value {
         LINK => link(db, id, args),
         UNLINK => unlink(db, id, args),
         SHOW => show(db, id, args),
-        STATS => rpc::tool_result(id, render(&db.stats(), format_arg(args)), false),
+        STATS => rpc::tool_result(
+            id,
+            render(
+                &stats_json(db.stats(), db.embedder_state()),
+                format_arg(args),
+            ),
+            false,
+        ),
         TAGS => tags(db, id, args),
         EXPORT => {
             let mut edges = Vec::new();
@@ -246,7 +265,14 @@ pub fn call_ro(reader: &ReaderShared, id: Value, params: Option<&Value>) -> Valu
         }
         STATS => {
             let stats = reader.db.read().expect("snapshot lock").stats();
-            rpc::tool_result(id, render(&stats, format_arg(args)), false)
+            rpc::tool_result(
+                id,
+                render(
+                    &stats_json(stats, reader.embedder_state()),
+                    format_arg(args),
+                ),
+                false,
+            )
         }
         TAGS => {
             let db = reader.db.read().expect("snapshot lock");
@@ -548,12 +574,13 @@ fn recall_ro(reader: &ReaderShared, id: Value, args: Option<&Value>) -> Value {
     // whole reason the pool has more than one.
     let (vector, vector_space) = match (explicit, query.as_deref()) {
         (Some(vector), _) => (Some(vector), None),
-        (None, Some(text)) => match reader.embedder.as_ref() {
-            Some(e) => match e.embed(&[text]) {
-                Ok(mut v) => (v.pop(), Some(e.space_id().to_owned())),
-                Err(e) => return tool_error(id, &e),
-            },
-            None => (None, None),
+        (None, Some(text)) => match reader.embedder.embed_one(text, |_| Ok(())) {
+            Ok(Some((vector, space))) => (Some(vector), Some(space)),
+            // No provider, a suspended one, or one that just failed under
+            // `on_error = "degrade"`: answer from the lexical, tag, graph and
+            // time sources rather than not answering.
+            Ok(None) => (None, None),
+            Err(e) => return tool_error(id, &e),
         },
         (None, None) => (None, None),
     };
@@ -1408,6 +1435,27 @@ fn export_json<F: Serialize>(facts: F, edges: Vec<Value>) -> Value {
     json!({ "facts": facts, "edges": edges })
 }
 
+/// The size counters plus one field the counters cannot explain.
+///
+/// `vectors < facts` is the visible symptom of a provider that was unreachable
+/// while something was written, and a reader who cannot see `embedder` has no
+/// way to tell that apart from a memory that never had an embedder at all.
+/// `"suspended"` says which, and says it is temporary.
+fn stats_json(stats: plugmem_host::Stats, embedder: EmbedderState) -> Value {
+    let mut value = serde_json::to_value(stats).unwrap_or_else(|_| json!({}));
+    if let Some(map) = value.as_object_mut() {
+        map.insert(
+            "embedder".into(),
+            json!(match embedder {
+                EmbedderState::Absent => "absent",
+                EmbedderState::Active => "active",
+                EmbedderState::Suspended { .. } => "suspended",
+            }),
+        );
+    }
+    value
+}
+
 fn render<T: Serialize>(value: &T, format: &str) -> String {
     let out = if format == "human" {
         serde_json::to_string_pretty(value)
@@ -2089,7 +2137,14 @@ mod tests {
             .unwrap();
         db.checkpoint(2).unwrap();
         let reader = Database::open_readonly(tmp.db(), config).unwrap();
-        let shared = ReaderShared::new(reader, Some(Box::new(OtherEmbedder)));
+        let shared = ReaderShared::new(
+            reader,
+            EmbedderGate::new(
+                Some(std::sync::Arc::new(OtherEmbedder)),
+                Default::default(),
+                Default::default(),
+            ),
+        );
         let response = call_ro(
             &shared,
             json!(1),
@@ -2097,6 +2152,91 @@ mod tests {
         );
         assert!(is_error(&response));
         assert!(text(&response).contains("vector space"));
+    }
+
+    /// An embedder that is always unreachable, the way a stopped Ollama is.
+    struct DeadEmbedder;
+
+    impl plugmem_host::Embedder for DeadEmbedder {
+        fn space_id(&self) -> &str {
+            "mcp-stub"
+        }
+
+        fn dim(&self) -> usize {
+            3
+        }
+
+        fn embed(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>, HostError> {
+            Err(HostError::Embed("connection refused".into()))
+        }
+    }
+
+    #[test]
+    fn a_read_only_server_degrades_rather_than_failing_every_recall() {
+        // A server outlives its provider's outages. Without the shared gate,
+        // one dead endpoint failed every `recall` this process would ever
+        // answer — each after a full timeout — because the read-only path
+        // embeds its own query and had nowhere to put the failure.
+        let tmp = TempDir::new("readonly-degrade");
+        let mut config = Config::default();
+        config.dim = 3;
+        let (db, _) = Database::builder(config.clone())
+            .embedder(Box::new(StubEmbedder))
+            .open(tmp.db())
+            .unwrap();
+        db.remember(plugmem_host::RememberInput::text(1, "stored vector"))
+            .unwrap();
+        db.checkpoint(2).unwrap();
+        let reader = Database::open_readonly(tmp.db(), config).unwrap();
+
+        let strict = ReaderShared::new(
+            Database::open_readonly(tmp.db(), {
+                let mut c = Config::default();
+                c.dim = 3;
+                c
+            })
+            .unwrap(),
+            EmbedderGate::new(
+                Some(std::sync::Arc::new(DeadEmbedder)),
+                plugmem_host::EmbedErrorPolicy::Fail,
+                Default::default(),
+            ),
+        );
+        let refused = call_ro(
+            &strict,
+            json!(1),
+            Some(&params(RECALL, json!({"query": "stored"}))),
+        );
+        assert!(is_error(&refused));
+
+        let lenient = ReaderShared::new(
+            reader,
+            EmbedderGate::new(
+                Some(std::sync::Arc::new(DeadEmbedder)),
+                plugmem_host::EmbedErrorPolicy::Degrade,
+                plugmem_host::EmbedRetry::Manual,
+            ),
+        );
+        let answered = call_ro(
+            &lenient,
+            json!(2),
+            Some(&params(RECALL, json!({"query": "stored"}))),
+        );
+        assert!(!is_error(&answered), "{}", text(&answered));
+        assert!(text(&answered).contains("stored vector"));
+        assert_eq!(
+            lenient.embedder_state(),
+            EmbedderState::Suspended { retry_at: None }
+        );
+
+        // And `stats` is where a reader finds out, without guessing from the
+        // vector count.
+        let stats = call_ro(&lenient, json!(3), Some(&params(STATS, json!({}))));
+        assert!(
+            text(&stats).contains("\"embedder\":\"suspended\""),
+            "{}",
+            text(&stats)
+        );
     }
 
     #[test]
@@ -2195,7 +2335,10 @@ mod tests {
             db.checkpoint(now_ms()).unwrap();
         }
         let ro = Database::open_readonly(tmp.db(), Config::default()).unwrap();
-        let reader = ReaderShared::new(ro, None);
+        let reader = ReaderShared::new(
+            ro,
+            EmbedderGate::new(None, Default::default(), Default::default()),
+        );
 
         // missing params / unknown tool.
         assert_eq!(call_ro(&reader, json!(1), None)["error"]["code"], -32602);

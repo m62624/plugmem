@@ -389,7 +389,14 @@ The config file itself resolves as `--config` (or the `config` option passed to
 Database-path precedence is an explicit `--db` or `open` path, then
 `$PLUGMEM_DB`, then `[database].path`, then the platform data directory.
 
-The common shape is:
+The common shape is below. It is **not** the whole catalogue — there are around
+forty keys, and the settings-help call above prints every one of them with its
+default, read out of the running build rather than out of this document. Two
+files carry the same thing for a person to read:
+https://github.com/m62624/plugmem/blob/main/config.example.toml (every key,
+commented out, ready to copy) and
+https://github.com/m62624/plugmem/blob/main/crates/plugmem-host/SETTINGS.md
+(what each one is for).
 
 ```toml
 [database]
@@ -415,6 +422,10 @@ enabled = false                # keep settings but do not create/use the embedde
 # model = "nomic-embed-text"
 # space_id = "nomic-embed-text@v1" # optional; defaults to model, never probed
 # api_key_env = "OPENAI_API_KEY" # env var containing the bearer token
+# on_error = "degrade"           # keep working when the provider is unreachable
+# timeout_ms = 10000             # one request, end to end; 0 waits forever
+# retry_after_ms = 0             # a suspended embedder: 0 = only on request,
+#                                # unset = 1s doubling to retry_max_ms (60s)
 
 [maintenance]
 snapshot_every_ops = 1024
@@ -426,6 +437,42 @@ snapshot_journal_bytes = 4194304
 alias. Plugmem trusts the value and never probes the provider to discover it.
 Changing it for an existing vector database requires an explicit reembed;
 routine and automatic maintenance never calls the model.
+
+### When the provider is simply unreachable
+
+A different failure from the one below, and the more common one: the endpoint
+refuses the connection, times out, or answers with something else. By default
+that fails the verb — `remember` and a text `recall` both embed, so a stopped
+Ollama takes every write and every meaning-based read with it.
+
+`[embedder].on_error = "degrade"` carries on without the vector instead: the
+fact is stored, the query is answered from the lexical, tag, graph and time
+sources, and the embedder is suspended so the next call does not pay the same
+failure again. It retries by itself (1s, doubling to a minute, reset by the
+first success), and `reembed` fills in the missing vectors from the stored text
+once the provider is back. Nothing needs reopening.
+
+For a consumer, three things are worth knowing:
+
+- `embedder_state()` / `embedderState()` answers `absent`, `active` or
+  `suspended` — the honest way to tell a person "your memory is running
+  without meaning-based ranking right now". The MCP server puts the same word
+  in `plugmem_stats`, and `plugmem-cli stats` prints it as `embedder`.
+- `suspend_embedder()` / `resume_embedder()` are the manual switches, for when
+  the caller already knows the provider is gone. All three exist on a writer,
+  on a read-only handle and on a workspace memory; a workspace shares one
+  provider but gives each memory its own gate, so suspending one memory leaves
+  its siblings embedding.
+- `vectors < facts` in `stats` is the durable trace of a degraded stretch, and
+  the reason to run a reembed on the next start with a working provider.
+
+These four keys have environment overrides, which is the form that fits an
+outage — nobody wants to edit a config file to get through one:
+`$PLUGMEM_EMBEDDER_ON_ERROR`, `$PLUGMEM_EMBEDDER_TIMEOUT_MS`,
+`$PLUGMEM_EMBEDDER_RETRY_AFTER_MS`, `$PLUGMEM_EMBEDDER_RETRY_MAX_MS` (and
+`$PLUGMEM_EMBEDDER_ENABLED`, which predates them). `url`, `model`, `space_id`
+and `api_key_env` are file-only. The environment wins over the file, the file
+over the defaults.
 
 ### What a mismatched vector space actually does
 
@@ -508,7 +555,7 @@ comparison line:
 plugmem version check: skill <marker> vs engine <reported> → OK | MISMATCH
 ```
 
-<!-- skill-version: 0.11.0 -->
+<!-- skill-version: 0.12.0 -->
 
 If they differ in ANY way: **stop**, warn the user that skill and engine
 describe different functionality, and proceed only on their explicit

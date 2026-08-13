@@ -138,7 +138,7 @@ engine keeps no clock, so `now` comes from the system clock at each call.
 | `link <SRC> <REL> <DST> [--provenance FACT_ID]` | upsert a typed edge between entities. `--provenance` records the fact the edge follows from, and graph recall returns it |
 | `unlink <SRC> <REL> <DST>` | close the current typed edge while preserving `--as-of` history |
 | `show <ID>` | one fact's full card — text, both time axes, state |
-| `stats` | engine size counters |
+| `stats` | engine size counters, plus `embedder`: `absent`, `active` or `suspended` — which is what tells `vectors < facts` after a provider outage apart from a memory that never had an embedder |
 | `maintain [--mode M]` | policy-driven maintenance: cheap no-op, tombstone compaction, text reindex or bounded HNSW work. `M` is `auto` (default), `compact`, `reindex-text`, `optimize-vectors` or `full`; only `full` repacks the edge arenas, and no mode drops history |
 | `maintain --reembed [--batch-size N]` | explicitly recompute every retained fact with the configured embedder, rebuild HNSW and atomically publish the new vector space; never implied by `auto` |
 | `checkpoint` | flush the journal into a fresh snapshot and clear it (leaves the database checkpointed) |
@@ -166,9 +166,12 @@ flow.
 Read-only commands (`recall`, `show`, `stats`, `tags`, `export`) open the snapshot
 **zero-copy over an mmap** (a shared lock, so several may run at once and
 the whole file is not loaded) — falling back to a normal open if the
-journal is un-checkpointed. `recall` uses that fast path only when no
-embedder is configured, because embedding the query needs the read-write
-handle. `scrub` also takes the shared mmap open, so it needs a checkpointed
+journal is un-checkpointed. A text `recall` takes that fast path with an
+embedder too: the CLI embeds the query itself once the snapshot is open,
+because the zero-copy handle cannot embed into its own mapping. (It embeds
+*after* the open, so the read-write fallback — a fresh or journal-dirty
+database — pays for one embedding rather than two.) `scrub` also takes the
+shared mmap open, so it needs a checkpointed
 database — run `checkpoint` (or `maintain`) first if the journal is dirty.
 
 ### Examples
@@ -319,80 +322,43 @@ plugmem(ro)> exit
 ## Configuration
 
 Optional `config.toml`, found by `--config PATH`, then `$PLUGMEM_CONFIG`, then
-the platform config directory (all optional — the CLI works with none).
+the platform config directory — all optional, the CLI works with none.
 Precedence overall is **explicit path/flag > environment > config file >
-platform default**. See the [full settings reference](https://github.com/m62624/plugmem/blob/main/crates/plugmem-host/SETTINGS.md)
-for all fields and OS-specific paths.
+platform default**.
 
 ```toml
-[database]
-path = "/path/to/memory.plugmem" # optional example; --db and PLUGMEM_DB win
-
 [engine]
-dim = 768              # embedding size (0 = vectors off); also max_bytes,
-                       # max_text, max_blob. What the database is *built* with:
-                       # changing one on an existing file is refused.
+dim = 768                       # 0 (the default) stores no vectors
 
-[recall]               # optional — every key has a tuned default
-w_vec = 2.0            # weight of the vector source (0 turns it off)
-half_life_days = 30    # age at which the recency discount has halved
-                       # also: w_bm25, w_graph, w_time, w_recency, rrf_k,
-                       # bm25_k1, bm25_b, graph_depth, graph_decay,
-                       # hnsw_ef_search, similar_cos, similar_jaccard
-
-[index]                # optional
-flat_to_hnsw = 50000   # vectors before maintenance builds the HNSW graph
-                       # also: hnsw_ef_construction
-
-[embedder]             # optional — omit for lexical/tags/graph/time only
-enabled = true         # false keeps settings but makes no embedder calls
+[embedder]                      # omit for lexical, tag, graph and time only
 url = "http://localhost:11434/v1/embeddings"
 model = "nomic-embed-text"
-space_id = "nomic-embed-text@v1" # optional; defaults to model
-api_key_env = "OPENAI_API_KEY"   # env var holding the bearer token
-
-[maintenance]
-snapshot_every_ops = 1024
-snapshot_journal_bytes = 4194304
-maintain_every_forgets = 100     # optional auto-purge
-batch_size = 128                 # facts per `import` batch (--batch overrides)
+on_error = "degrade"            # keep answering when the provider is down
 ```
 
-`import` streams the file in batches of `batch_size` (default 128; `--batch N`
-overrides it): each batch is a single embedder round-trip and a single journal
-fsync, so a bulk load with an embedder makes one HTTP call per batch instead of
-one per fact, and the file is never fully read into memory. Larger batches mean
-fewer round-trips but a bigger request body and more memory per batch.
+That is the whole of what most memories need. Every other key, what it costs
+and when to reach for it lives in one place:
 
-The embedder is what unlocks the **vector** recall source: without an active
-`[embedder]`, `remember`/`recall` still answer from lexical, tag, graph and
-temporal evidence, but no embeddings are computed. The host creates its one
-`OpenAiCompatEmbedder` implementation for any OpenAI-compatible server —
-OpenAI, Ollama, LM Studio, vLLM or llama.cpp-server. Set `enabled = false` to
-keep the URL/model settings without creating the client; the environment
-variable `$PLUGMEM_EMBEDDER_ENABLED` overrides the config value with `true` or
-`false`. `api_key_env` names the environment variable that contains the
-bearer token.
+- [`config.example.toml`](https://github.com/m62624/plugmem/blob/main/config.example.toml) — every key with its default, commented
+  out, ready to copy.
+- [SETTINGS.md](https://github.com/m62624/plugmem/blob/main/crates/plugmem-host/SETTINGS.md) — the reference: what each key is for, the
+  OS-specific paths, and which sections are safe to change on an existing
+  database.
+- `plugmem-cli help settings` (or `--json`) — the same catalogue, answered by
+  the binary you are running.
 
-`[recall]` and `[index]` are safe to change on an existing memory: reopening
-with different weights is how you change the ranking, and the next `checkpoint`
-records them in the file. Reach for them when a specific memory answers badly —
-the defaults are tuned, and `w_bm25 = 0` (say) is mostly useful for asking what
-one source alone thinks.
-
-A key nothing recognises is **reported, not ignored**, on stderr. Refusing it
-would mean an older binary could not read a newer config, but staying silent
-would leave you believing you had tuned something:
+A key nothing recognises is **reported on stderr, not ignored**: a misspelled
+`w_vec` changes no behaviour, and silence would leave you believing you had
+tuned something.
 
 ```console
 $ plugmem-cli stats
 plugmem: unknown config section [engin] — did you mean `engine`?
 plugmem: unknown setting [recall].w_vector — did you mean `w_vec`?
+embedder    absent
 facts       0
 ...
 ```
-
-Run `plugmem-cli help settings` for the complete catalogue with every default.
 
 ## Exit codes
 
