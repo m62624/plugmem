@@ -1,6 +1,6 @@
 [package]
 name = "plugmem-bench-charts"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 publish = false
 description = "Renders the benchmark-matrix TSV into the README chart SVGs (plotters, pure Rust — no browser; log axis for order-of-magnitude metrics)."
