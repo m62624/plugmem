@@ -21,6 +21,14 @@ serde_json = { workspace = true }
 serde = { workspace = true, optional = true }
 toml = { workspace = true, optional = true }
 
+[[bin]]
+# Regenerates the workspace's `config.example.toml` from the settings
+# catalogue. Requires the `config` feature (the catalogue is part of the TOML
+# loader), which is on by default.
+name = "config_example"
+path = "src/bin/config_example.rs"
+required-features = ["config"]
+
 [features]
 # The native host is the configuration boundary, so TOML settings are
 # available by default. Consumers that only construct `Config` in code can

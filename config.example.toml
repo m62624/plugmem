@@ -1,0 +1,154 @@
+# plugmem — every supported config.toml key, with its default.
+#
+# GENERATED from the settings catalogue. Do not edit: run
+#   cargo run -p plugmem-host --bin config_example
+# and commit the result. A test fails when this file and the
+# catalogue disagree, so an edit here is undone by the next run.
+#
+# Every key below is commented out and shows the default this build
+# uses. Uncomment only what you mean to change — a config that sets
+# everything explicitly freezes today's defaults, and never picks up
+# a better one.
+#
+# What each setting is FOR, and when changing it is a good idea,
+# lives in crates/plugmem-host/SETTINGS.md. This file is the shape;
+# that file is the reasoning.
+#
+# Config file precedence, highest first:
+#   1. --config PATH
+#   2. $PLUGMEM_CONFIG
+#   3. platform default config path
+#   4. built-in defaults
+
+[database]
+# path — Persistent database file; an explicit --db or open path and PLUGMEM_DB override it
+# path string, default: platform data directory/memory.plugmem
+# path = "/var/lib/plugmem/memory.plugmem"
+
+[workspace]
+# dir — Directory of named databases; unset means the single-database default
+# path string, default: unset (one database, no workspace)
+# dir = "/var/lib/plugmem/memories"
+# max_open — Hard limit on open workspace databases; an inactive least-recently-used entry is closed, all-active returns Busy
+# positive integer, default: 16
+# max_open = 16
+# idle_timeout_ms — Close a workspace database unused this long, releasing its lock; 0 never closes
+# non-negative integer, default: 60000
+# idle_timeout_ms = 60000
+
+[engine]
+# dim — Embedding dimension; 0 disables vector storage
+# non-negative integer, default: 0
+# dim = 768
+# max_bytes — Ceiling applied to each byte pool separately, not to their sum
+# non-negative integer, default: 2147483648
+# max_bytes = 2147483648
+# max_text — Maximum fact text length in bytes
+# non-negative integer, default: 4096
+# max_text = 4096
+# max_blob — Maximum single blob length in bytes
+# non-negative integer, default: 65536
+# max_blob = 65536
+
+[recall]
+# bm25_k1 — BM25 term-frequency saturation: higher lets a repeated word keep counting
+# number > 0, default: 1.2
+# bm25_k1 = 1.2
+# bm25_b — BM25 length normalisation: 0 ignores fact length, 1 penalises long facts fully
+# number in [0, 1], default: 0.75
+# bm25_b = 0.75
+# rrf_k — Reciprocal-rank-fusion constant: larger flattens the gap between rank 1 and rank 10
+# integer >= 1, default: 60
+# rrf_k = 60
+# w_bm25 — Weight of the lexical source in the fused score; 0 switches it off
+# number >= 0, default: 1.0
+# w_bm25 = 1.0
+# w_vec — Weight of the vector source; 0 switches it off (and costs nothing when dim = 0)
+# number >= 0, default: 1.0
+# w_vec = 1.0
+# w_graph — Weight of the entity-graph source; 0 switches off relational expansion
+# number >= 0, default: 1.0
+# w_graph = 1.0
+# w_time — Weight of the temporal source (the recorded_at window); 0 switches it off
+# number >= 0, default: 1.0
+# w_time = 1.0
+# w_recency — How much a fact's age discounts it, on top of the sources above
+# number >= 0, default: 0.25
+# w_recency = 0.25
+# half_life_days — Age at which the recency discount has halved; larger keeps old facts competitive
+# integer >= 1, default: 180
+# half_life_days = 180
+# graph_depth — Default hops the graph source may follow from an anchor entity; a recall's own `graph_depth` overrides it. Uncapped — the walk is bounded by its entity and edge caps, not by depth
+# non-negative integer, default: 2
+# graph_depth = 2
+# graph_decay — How much each extra hop discounts a fact reached through the graph
+# number in (0, 1], default: 0.5
+# graph_decay = 0.5
+# hnsw_ef_search — Default HNSW beam width; higher is more accurate and slower. A recall's own `ef` overrides it, and it does nothing while the index is still flat
+# integer >= 1, default: 64
+# hnsw_ef_search = 64
+# similar_cos — Cosine above which remember reports an existing fact as possibly conflicting (it never revises on its own)
+# number in [0, 1], default: 0.85
+# similar_cos = 0.85
+# similar_jaccard — Token overlap above which remember reports a possible conflict, for memories with no vectors
+# number in [0, 1], default: 0.5
+# similar_jaccard = 0.5
+
+[index]
+# hnsw_ef_construction — Beam width while building the vector graph: higher builds a better index, slower
+# integer >= hnsw_m (16 by default), default: 200
+# hnsw_ef_construction = 200
+# flat_to_hnsw — Vector count at which maintenance stops scanning flat and builds the HNSW graph
+# integer >= 1, default: 24000
+# flat_to_hnsw = 24000
+
+[embedder]
+# enabled — Enable or disable creation and use of the configured OpenAI-compatible embedder
+# boolean, default: automatic
+# enabled = true
+# url — OpenAI-compatible /v1/embeddings endpoint
+# string, default: unset
+# url = "http://localhost:11434/v1/embeddings"
+# model — Embedding model name
+# string, default: unset
+# model = "nomic-embed-text"
+# space_id — Stable semantic-space identity; change it only for incompatible vectors and reembed explicitly
+# string, default: model
+# space_id = "nomic-embed-text@v1"
+# api_key_env — Environment variable containing the bearer token
+# string, default: unset
+# api_key_env = "OPENAI_API_KEY"
+# on_error — Unreachable provider: fail the verb, or store/answer without a vector and suspend the embedder
+# "fail" | "degrade", default: fail
+# on_error = "fail"
+# timeout_ms — Deadline for one embeddings request end to end; 0 waits indefinitely
+# non-negative integer, default: 10000
+# timeout_ms = 10000
+# retry_after_ms — Fixed wait before a suspended embedder is called again; 0 waits for an explicit resume
+# non-negative integer, default: unset (1s doubling to retry_max_ms)
+# retry_after_ms = 0
+# retry_max_ms — Ceiling the default doubling retry grows to; ignored when retry_after_ms is set
+# non-negative integer, default: 60000
+# retry_max_ms = 60000
+
+[maintenance]
+# snapshot_every_ops — Snapshot after this many mutations
+# non-negative integer, default: 1024
+# snapshot_every_ops = 1024
+# snapshot_journal_bytes — Snapshot when the journal reaches this size
+# non-negative integer, default: 4194304
+# snapshot_journal_bytes = 4194304
+# maintain_every_forgets — Run policy maintenance after this many forgets
+# non-negative integer, default: off
+# maintain_every_forgets = 100
+# fsync — When journal appends reach the disk. "each_op": every acknowledged write survives a power cut. "on_snapshot": faster, an OS crash may lose the journal tail since the last snapshot
+# "each_op" | "on_snapshot", default: each_op
+# fsync = "each_op"
+# batch_size — CLI import facts per embedding request and journal fsync
+# positive integer, default: 128, read only by CLI
+# batch_size = 128
+
+[server]
+# workers — MCP worker threads
+# positive integer, default: half of available cores, read only by MCP
+# workers = 4

@@ -38,7 +38,11 @@ needs.
 ## Configuration
 
 The shared `config.toml` loader and platform-aware database paths are documented
-in the [full settings reference](https://github.com/m62624/plugmem/blob/main/crates/plugmem-host/SETTINGS.md).
+in the [full settings reference](https://github.com/m62624/plugmem/blob/main/crates/plugmem-host/SETTINGS.md),
+with a ready-to-copy
+[`config.example.toml`](https://github.com/m62624/plugmem/blob/main/config.example.toml)
+generated from the same catalogue this crate serves at runtime through
+[`settings_help`](https://docs.rs/plugmem-host/latest/plugmem_host/fn.settings_help.html).
 [`plugmem-cli`](https://docs.rs/plugmem-cli/latest),
 [`plugmem-mcp`](https://docs.rs/plugmem-mcp/latest),
 [`plugmem-napi`](https://github.com/m62624/plugmem/tree/main/crates/plugmem-napi) and

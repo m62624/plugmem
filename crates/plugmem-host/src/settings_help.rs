@@ -77,6 +77,15 @@ pub struct SettingDoc {
     pub default: &'static str,
     /// What the setting controls.
     pub description: &'static str,
+    /// A valid TOML value for this key.
+    ///
+    /// Not a second opinion about the default — several defaults cannot be
+    /// written as a value at all ("automatic", "off", "half of available
+    /// cores"), and `config.example.toml` still has to show a line somebody
+    /// can uncomment. It is also what makes that file testable: the generator
+    /// renders an all-keys-set variant, and a test parses it through the real
+    /// loader and requires zero warnings.
+    pub example: &'static str,
     /// The wrapper(s) that consume the setting.
     pub scope: SettingScope,
 }
@@ -156,6 +165,74 @@ impl SettingsHelp {
             }
         }
         out
+    }
+
+    /// Renders `config.example.toml`: every supported key, with its default,
+    /// its type and one line about what it does.
+    ///
+    /// Generated rather than written, because a hand-kept example is another
+    /// copy of the catalogue that ages without anyone noticing — which is
+    /// exactly what happened to the four README samples this replaces. A test
+    /// compares the committed file with this output, so the two cannot drift.
+    ///
+    /// **Every line is commented out.** An example that sets forty keys
+    /// explicitly freezes today's defaults into the config of everyone who
+    /// copies it: a later release improves `flat_to_hnsw` and they never see
+    /// it. Uncomment the two or three you actually mean to change.
+    ///
+    /// `set` renders the same file with every key *active*, which is what the
+    /// test parses through the real loader — an example nothing can parse is
+    /// worth less than no example.
+    pub fn render_config_example(self, set: bool) -> String {
+        // One line per push rather than one long escaped literal: the header
+        // is prose a person reads first, and it should be as easy to fix here
+        // as it is to read there.
+        let mut output = String::new();
+        for line in [
+            "# plugmem — every supported config.toml key, with its default.",
+            "#",
+            "# GENERATED from the settings catalogue. Do not edit: run",
+            "#   cargo run -p plugmem-host --bin config_example",
+            "# and commit the result. A test fails when this file and the",
+            "# catalogue disagree, so an edit here is undone by the next run.",
+            "#",
+            "# Every key below is commented out and shows the default this build",
+            "# uses. Uncomment only what you mean to change — a config that sets",
+            "# everything explicitly freezes today's defaults, and never picks up",
+            "# a better one.",
+            "#",
+            "# What each setting is FOR, and when changing it is a good idea,",
+            "# lives in crates/plugmem-host/SETTINGS.md. This file is the shape;",
+            "# that file is the reasoning.",
+            "#",
+        ] {
+            output.push_str(line);
+            output.push('\n');
+        }
+        output.push_str("# Config file precedence, highest first:\n");
+        for (index, source) in self.config_path_precedence.iter().enumerate() {
+            let _ = writeln!(output, "#   {}. {source}", index + 1);
+        }
+
+        let mut section = None;
+        for doc in self.docs {
+            if section != Some(doc.section) {
+                let _ = write!(output, "\n[{}]\n", doc.section);
+                section = Some(doc.section);
+            }
+            let scope = match doc.scope {
+                SettingScope::Shared => String::new(),
+                other => format!(", read only by {}", other.as_str()),
+            };
+            let _ = writeln!(
+                output,
+                "# {} — {}\n# {}, default: {}{}",
+                doc.key, doc.description, doc.value_type, doc.default, scope
+            );
+            let prefix = if set { "" } else { "# " };
+            let _ = writeln!(output, "{prefix}{} = {}", doc.key, doc.example);
+        }
+        output
     }
 
     /// Render the catalogue for a terminal or a human-facing tool response.
@@ -254,6 +331,7 @@ const DOCS: &[SettingDoc] = &[
         key: "path",
         value_type: "path string",
         default: "platform data directory/memory.plugmem",
+        example: "\"/var/lib/plugmem/memory.plugmem\"",
         description: "Persistent database file; an explicit --db or open path and PLUGMEM_DB override it",
         scope: SettingScope::Shared,
     },
@@ -262,6 +340,7 @@ const DOCS: &[SettingDoc] = &[
         key: "dir",
         value_type: "path string",
         default: "unset (one database, no workspace)",
+        example: "\"/var/lib/plugmem/memories\"",
         description: "Directory of named databases; unset means the single-database default",
         scope: SettingScope::Shared,
     },
@@ -270,6 +349,7 @@ const DOCS: &[SettingDoc] = &[
         key: "max_open",
         value_type: "positive integer",
         default: "16",
+        example: "16",
         description: "Hard limit on open workspace databases; an inactive least-recently-used entry is closed, all-active returns Busy",
         scope: SettingScope::Shared,
     },
@@ -278,6 +358,7 @@ const DOCS: &[SettingDoc] = &[
         key: "idle_timeout_ms",
         value_type: "non-negative integer",
         default: "60000",
+        example: "60000",
         description: "Close a workspace database unused this long, releasing its lock; 0 never closes",
         scope: SettingScope::Shared,
     },
@@ -286,6 +367,7 @@ const DOCS: &[SettingDoc] = &[
         key: "dim",
         value_type: "non-negative integer",
         default: "0",
+        example: "768",
         description: "Embedding dimension; 0 disables vector storage",
         scope: SettingScope::Shared,
     },
@@ -294,6 +376,7 @@ const DOCS: &[SettingDoc] = &[
         key: "max_bytes",
         value_type: "non-negative integer",
         default: "2147483648",
+        example: "2147483648",
         description: "Ceiling applied to each byte pool separately, not to their sum",
         scope: SettingScope::Shared,
     },
@@ -302,6 +385,7 @@ const DOCS: &[SettingDoc] = &[
         key: "max_text",
         value_type: "non-negative integer",
         default: "4096",
+        example: "4096",
         description: "Maximum fact text length in bytes",
         scope: SettingScope::Shared,
     },
@@ -310,6 +394,7 @@ const DOCS: &[SettingDoc] = &[
         key: "max_blob",
         value_type: "non-negative integer",
         default: "65536",
+        example: "65536",
         description: "Maximum single blob length in bytes",
         scope: SettingScope::Shared,
     },
@@ -318,6 +403,7 @@ const DOCS: &[SettingDoc] = &[
         key: "bm25_k1",
         value_type: "number > 0",
         default: "1.2",
+        example: "1.2",
         description: "BM25 term-frequency saturation: higher lets a repeated word keep counting",
         scope: SettingScope::Shared,
     },
@@ -326,6 +412,7 @@ const DOCS: &[SettingDoc] = &[
         key: "bm25_b",
         value_type: "number in [0, 1]",
         default: "0.75",
+        example: "0.75",
         description: "BM25 length normalisation: 0 ignores fact length, 1 penalises long facts fully",
         scope: SettingScope::Shared,
     },
@@ -334,6 +421,7 @@ const DOCS: &[SettingDoc] = &[
         key: "rrf_k",
         value_type: "integer >= 1",
         default: "60",
+        example: "60",
         description: "Reciprocal-rank-fusion constant: larger flattens the gap between rank 1 and rank 10",
         scope: SettingScope::Shared,
     },
@@ -342,6 +430,7 @@ const DOCS: &[SettingDoc] = &[
         key: "w_bm25",
         value_type: "number >= 0",
         default: "1.0",
+        example: "1.0",
         description: "Weight of the lexical source in the fused score; 0 switches it off",
         scope: SettingScope::Shared,
     },
@@ -350,6 +439,7 @@ const DOCS: &[SettingDoc] = &[
         key: "w_vec",
         value_type: "number >= 0",
         default: "1.0",
+        example: "1.0",
         description: "Weight of the vector source; 0 switches it off (and costs nothing when dim = 0)",
         scope: SettingScope::Shared,
     },
@@ -358,6 +448,7 @@ const DOCS: &[SettingDoc] = &[
         key: "w_graph",
         value_type: "number >= 0",
         default: "1.0",
+        example: "1.0",
         description: "Weight of the entity-graph source; 0 switches off relational expansion",
         scope: SettingScope::Shared,
     },
@@ -366,6 +457,7 @@ const DOCS: &[SettingDoc] = &[
         key: "w_time",
         value_type: "number >= 0",
         default: "1.0",
+        example: "1.0",
         description: "Weight of the temporal source (the recorded_at window); 0 switches it off",
         scope: SettingScope::Shared,
     },
@@ -374,6 +466,7 @@ const DOCS: &[SettingDoc] = &[
         key: "w_recency",
         value_type: "number >= 0",
         default: "0.25",
+        example: "0.25",
         description: "How much a fact's age discounts it, on top of the sources above",
         scope: SettingScope::Shared,
     },
@@ -382,6 +475,7 @@ const DOCS: &[SettingDoc] = &[
         key: "half_life_days",
         value_type: "integer >= 1",
         default: "180",
+        example: "180",
         description: "Age at which the recency discount has halved; larger keeps old facts competitive",
         scope: SettingScope::Shared,
     },
@@ -390,6 +484,7 @@ const DOCS: &[SettingDoc] = &[
         key: "graph_depth",
         value_type: "non-negative integer",
         default: "2",
+        example: "2",
         description: "Default hops the graph source may follow from an anchor entity; a recall's own `graph_depth` overrides it. Uncapped — the walk is bounded by its entity and edge caps, not by depth",
         scope: SettingScope::Shared,
     },
@@ -398,6 +493,7 @@ const DOCS: &[SettingDoc] = &[
         key: "graph_decay",
         value_type: "number in (0, 1]",
         default: "0.5",
+        example: "0.5",
         description: "How much each extra hop discounts a fact reached through the graph",
         scope: SettingScope::Shared,
     },
@@ -406,6 +502,7 @@ const DOCS: &[SettingDoc] = &[
         key: "hnsw_ef_search",
         value_type: "integer >= 1",
         default: "64",
+        example: "64",
         description: "Default HNSW beam width; higher is more accurate and slower. A recall's own `ef` overrides it, and it does nothing while the index is still flat",
         scope: SettingScope::Shared,
     },
@@ -414,6 +511,7 @@ const DOCS: &[SettingDoc] = &[
         key: "similar_cos",
         value_type: "number in [0, 1]",
         default: "0.85",
+        example: "0.85",
         description: "Cosine above which remember reports an existing fact as possibly conflicting (it never revises on its own)",
         scope: SettingScope::Shared,
     },
@@ -422,6 +520,7 @@ const DOCS: &[SettingDoc] = &[
         key: "similar_jaccard",
         value_type: "number in [0, 1]",
         default: "0.5",
+        example: "0.5",
         description: "Token overlap above which remember reports a possible conflict, for memories with no vectors",
         scope: SettingScope::Shared,
     },
@@ -430,6 +529,7 @@ const DOCS: &[SettingDoc] = &[
         key: "hnsw_ef_construction",
         value_type: "integer >= hnsw_m (16 by default)",
         default: "200",
+        example: "200",
         description: "Beam width while building the vector graph: higher builds a better index, slower",
         scope: SettingScope::Shared,
     },
@@ -438,6 +538,7 @@ const DOCS: &[SettingDoc] = &[
         key: "flat_to_hnsw",
         value_type: "integer >= 1",
         default: "24000",
+        example: "24000",
         description: "Vector count at which maintenance stops scanning flat and builds the HNSW graph",
         scope: SettingScope::Shared,
     },
@@ -446,6 +547,7 @@ const DOCS: &[SettingDoc] = &[
         key: "enabled",
         value_type: "boolean",
         default: "automatic",
+        example: "true",
         description: "Enable or disable creation and use of the configured OpenAI-compatible embedder",
         scope: SettingScope::Shared,
     },
@@ -454,6 +556,7 @@ const DOCS: &[SettingDoc] = &[
         key: "url",
         value_type: "string",
         default: "unset",
+        example: "\"http://localhost:11434/v1/embeddings\"",
         description: "OpenAI-compatible /v1/embeddings endpoint",
         scope: SettingScope::Shared,
     },
@@ -462,6 +565,7 @@ const DOCS: &[SettingDoc] = &[
         key: "model",
         value_type: "string",
         default: "unset",
+        example: "\"nomic-embed-text\"",
         description: "Embedding model name",
         scope: SettingScope::Shared,
     },
@@ -470,6 +574,7 @@ const DOCS: &[SettingDoc] = &[
         key: "space_id",
         value_type: "string",
         default: "model",
+        example: "\"nomic-embed-text@v1\"",
         description: "Stable semantic-space identity; change it only for incompatible vectors and reembed explicitly",
         scope: SettingScope::Shared,
     },
@@ -478,6 +583,7 @@ const DOCS: &[SettingDoc] = &[
         key: "api_key_env",
         value_type: "string",
         default: "unset",
+        example: "\"OPENAI_API_KEY\"",
         description: "Environment variable containing the bearer token",
         scope: SettingScope::Shared,
     },
@@ -486,6 +592,7 @@ const DOCS: &[SettingDoc] = &[
         key: "on_error",
         value_type: "\"fail\" | \"degrade\"",
         default: "fail",
+        example: "\"fail\"",
         description: "Unreachable provider: fail the verb, or store/answer without a vector and suspend the embedder",
         scope: SettingScope::Shared,
     },
@@ -494,6 +601,7 @@ const DOCS: &[SettingDoc] = &[
         key: "timeout_ms",
         value_type: "non-negative integer",
         default: "10000",
+        example: "10000",
         description: "Deadline for one embeddings request end to end; 0 waits indefinitely",
         scope: SettingScope::Shared,
     },
@@ -502,6 +610,7 @@ const DOCS: &[SettingDoc] = &[
         key: "retry_after_ms",
         value_type: "non-negative integer",
         default: "unset (1s doubling to retry_max_ms)",
+        example: "0",
         description: "Fixed wait before a suspended embedder is called again; 0 waits for an explicit resume",
         scope: SettingScope::Shared,
     },
@@ -510,6 +619,7 @@ const DOCS: &[SettingDoc] = &[
         key: "retry_max_ms",
         value_type: "non-negative integer",
         default: "60000",
+        example: "60000",
         description: "Ceiling the default doubling retry grows to; ignored when retry_after_ms is set",
         scope: SettingScope::Shared,
     },
@@ -518,6 +628,7 @@ const DOCS: &[SettingDoc] = &[
         key: "snapshot_every_ops",
         value_type: "non-negative integer",
         default: "1024",
+        example: "1024",
         description: "Snapshot after this many mutations",
         scope: SettingScope::Shared,
     },
@@ -526,6 +637,7 @@ const DOCS: &[SettingDoc] = &[
         key: "snapshot_journal_bytes",
         value_type: "non-negative integer",
         default: "4194304",
+        example: "4194304",
         description: "Snapshot when the journal reaches this size",
         scope: SettingScope::Shared,
     },
@@ -534,6 +646,7 @@ const DOCS: &[SettingDoc] = &[
         key: "maintain_every_forgets",
         value_type: "non-negative integer",
         default: "off",
+        example: "100",
         description: "Run policy maintenance after this many forgets",
         scope: SettingScope::Shared,
     },
@@ -542,6 +655,7 @@ const DOCS: &[SettingDoc] = &[
         key: "fsync",
         value_type: "\"each_op\" | \"on_snapshot\"",
         default: "each_op",
+        example: "\"each_op\"",
         description: "When journal appends reach the disk. \"each_op\": every acknowledged write \
 survives a power cut. \"on_snapshot\": faster, an OS crash may lose the journal tail since the \
 last snapshot",
@@ -552,6 +666,7 @@ last snapshot",
         key: "batch_size",
         value_type: "positive integer",
         default: "128",
+        example: "128",
         description: "CLI import facts per embedding request and journal fsync",
         scope: SettingScope::Cli,
     },
@@ -560,6 +675,7 @@ last snapshot",
         key: "workers",
         value_type: "positive integer",
         default: "half of available cores",
+        example: "4",
         description: "MCP worker threads",
         scope: SettingScope::Mcp,
     },
@@ -732,6 +848,69 @@ mod tests {
             assert!(!doc.value_type.is_empty());
             assert!(!doc.default.is_empty());
             assert!(!doc.description.is_empty());
+            assert!(!doc.example.is_empty(), "{}.{}", doc.section, doc.key);
+        }
+    }
+
+    /// The committed example, read from the workspace root.
+    fn committed_example() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("config.example.toml");
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+    }
+
+    #[test]
+    fn the_committed_config_example_matches_the_catalogue() {
+        // The gate the whole generated-file arrangement exists for: add a
+        // setting, forget the example, and CI says so here rather than a user
+        // finding a key nobody documented. The same idiom the Node binding's
+        // `index.d.ts` and the Python binding's `.pyi` are held to.
+        assert_eq!(
+            committed_example(),
+            settings_help().render_config_example(false),
+            "config.example.toml is stale — run \
+             `cargo run -p plugmem-host --bin config_example` and commit it"
+        );
+    }
+
+    #[test]
+    fn the_example_is_a_config_the_loader_accepts() {
+        // An example nobody can parse is worth less than no example. Every key
+        // active, through the real loader: an unknown key, a value of the wrong
+        // shape, or one the engine's own validation refuses all fail here — and
+        // the catalogue is where each of them would have come from.
+        let table: toml::Table = settings_help()
+            .render_config_example(true)
+            .parse()
+            .expect("the generated example must be valid TOML");
+        let settings = crate::Settings::from_table(Some(&table))
+            .expect("the generated example must load through the real settings loader");
+        assert_eq!(
+            settings.warnings,
+            vec![],
+            "the example names a key no surface claims"
+        );
+        // The values are the ones the catalogue advertises, not merely some
+        // parseable ones.
+        assert_eq!(settings.config.dim, 768);
+        assert_eq!(settings.embed_error_policy, crate::EmbedErrorPolicy::Fail);
+        assert!(settings.embedder.is_some());
+    }
+
+    #[test]
+    fn every_key_of_the_committed_example_is_commented_out() {
+        // A copied example that sets forty keys freezes today's defaults into
+        // somebody's config for good, so the committed file must be inert.
+        let table: toml::Table = committed_example()
+            .parse()
+            .expect("the committed example must be valid TOML");
+        for (section, entries) in &table {
+            assert!(
+                entries.as_table().is_some_and(toml::Table::is_empty),
+                "[{section}] has an active key; the example must be all comments"
+            );
         }
     }
 

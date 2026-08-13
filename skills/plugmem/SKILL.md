@@ -391,7 +391,12 @@ Database-path precedence is an explicit `--db` or `open` path, then
 
 The common shape is below. It is **not** the whole catalogue — there are around
 forty keys, and the settings-help call above prints every one of them with its
-default, read out of the running build rather than out of this document:
+default, read out of the running build rather than out of this document. Two
+files carry the same thing for a person to read:
+https://github.com/m62624/plugmem/blob/main/config.example.toml (every key,
+commented out, ready to copy) and
+https://github.com/m62624/plugmem/blob/main/crates/plugmem-host/SETTINGS.md
+(what each one is for).
 
 ```toml
 [database]

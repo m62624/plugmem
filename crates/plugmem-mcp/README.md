@@ -333,95 +333,50 @@ monopolizing the box. Override it with `[server].workers` or `--workers`.
 ## Configuration
 
 Optional `config.toml`, found by `--config PATH`, then `$PLUGMEM_CONFIG`, then
-the platform config directory. The engine, database, embedder and maintenance
-sections are the **same** shared loader the CLI uses; MCP adds one `[server]`
-section. See the [full settings reference](https://github.com/m62624/plugmem/blob/main/crates/plugmem-host/SETTINGS.md) for
-all fields and OS-specific paths.
+the platform config directory. The database, engine, recall, index, embedder and
+maintenance sections are the **same** shared loader every surface uses; the
+server adds one section of its own.
 
 ```toml
-[database]
-path = "/path/to/memory.plugmem" # optional example; --db and PLUGMEM_DB win
-
 [server]
-workers = 4            # worker threads (default: half the cores)
+workers = 4                     # default: half the cores, at least one
 
 [engine]
-dim = 768              # embedding size (0 = vectors off); what the database is
-                       # *built* with — changing one later is refused
+dim = 768                       # 0 (the default) stores no vectors
 
-[recall]               # optional — every key has a tuned default
-w_vec = 2.0            # weight of the vector source (0 turns it off)
-half_life_days = 30    # age at which the recency discount has halved
-                       # also: w_bm25, w_graph, w_time, w_recency, rrf_k,
-                       # bm25_k1, bm25_b, graph_depth, graph_decay,
-                       # hnsw_ef_search, similar_cos, similar_jaccard
-
-[index]                # optional
-flat_to_hnsw = 50000   # vectors before maintenance builds the HNSW graph
-
-[embedder]             # optional — omit for lexical/tags/graph/time only
-enabled = true         # false keeps settings but makes no embedder calls
+[embedder]                      # omit for lexical, tag, graph and time only
 url = "http://localhost:11434/v1/embeddings"
 model = "nomic-embed-text"
-space_id = "nomic-embed-text@v1" # optional; defaults to model
-api_key_env = "OPENAI_API_KEY" # env var holding the bearer token
-on_error = "fail"      # or "degrade": answer without the vector instead
-timeout_ms = 10000     # one request, end to end; 0 waits indefinitely
-retry_after_ms = 0     # a suspended embedder: 0 = never on its own,
-                       # unset = 1s doubling to retry_max_ms (60s)
-
-[maintenance]
-snapshot_every_ops = 1024
-maintain_every_forgets = 100
+on_error = "degrade"            # keep answering when the provider is down
 ```
 
-`plugmem_remember`, `plugmem_revise` and `plugmem_recall` also take an optional
-`vector`: a precomputed embedding (an array of numbers whose length equals
-`dim`) that **replaces** the configured embedder for that call — nothing is sent
-to the provider. Arguments that narrow an answer are validated rather than
-guessed: `range` must be exactly `[from, to]`, and `as_of` / `valid_from` must
-each be a whole non-negative unix-millisecond number. A malformed one is a tool
-error, not an answer quietly computed without it.
+Every other key, and what each one costs, lives in one place:
 
-The embedder unlocks the **vector** recall source; without an active
-`[embedder]`, recall still answers from lexical, tag, graph and temporal
-evidence. The host uses one `OpenAiCompatEmbedder` implementation for
-OpenAI-compatible OpenAI, Ollama, LM Studio, vLLM and llama.cpp-server
-endpoints. Set `enabled = false` to keep the settings but make no embedder
-calls. `$PLUGMEM_EMBEDDER_ENABLED` overrides `[embedder].enabled` with `true`
-or `false`, and `api_key_env` names the environment variable containing the
-bearer token.
+- [`config.example.toml`](https://github.com/m62624/plugmem/blob/main/config.example.toml) — every key with its default, commented
+  out, ready to copy.
+- [SETTINGS.md](https://github.com/m62624/plugmem/blob/main/crates/plugmem-host/SETTINGS.md) — the reference, including which sections are safe
+  to change on an existing database.
+- `plugmem_settings_help` with `format: "json"` or `"human"` — the same
+  catalogue, read by the model at runtime.
 
-When the provider cannot be reached — a stopped Ollama, a laptop that went
-offline, a model that was unloaded — `on_error` decides what that costs.
-`fail`, the default, propagates the error, which is what every release before
-0.12 did. `degrade` carries on **without** the vector: the fact is stored, the
-query is answered from the lexical, tag, graph and time sources, and the
-embedder is suspended so the next call does not pay the same failure again. A
-fact stored that way is not damaged — it is in the state every fact is in when
-a memory is written with no embedder, and `reembed` fills the vectors in from
-the stored text once the provider answers again. A suspension lifts by itself
-after `retry_after_ms` (unset: one second, doubling to `retry_max_ms`, reset by
-the first success). A vector-space mismatch is never degraded, and a `reembed`
-refuses while the embedder is suspended rather than publishing half a vector
-axis. Each of these keys has an environment override under the usual
-precedence: `$PLUGMEM_EMBEDDER_ON_ERROR`, `$PLUGMEM_EMBEDDER_TIMEOUT_MS`,
-`$PLUGMEM_EMBEDDER_RETRY_AFTER_MS`, `$PLUGMEM_EMBEDDER_RETRY_MAX_MS`.
+Two things a model using this server should know. `plugmem_remember`,
+`plugmem_revise` and `plugmem_recall` take an optional `vector` — a precomputed
+embedding whose length equals `dim` — which **replaces** the configured embedder
+for that call, so nothing is sent to the provider. Arguments that narrow an
+answer are validated rather than guessed: `range` must be exactly `[from, to]`,
+and `as_of` / `valid_from` must each be a whole non-negative unix-millisecond
+number. A malformed one is a tool error, not an answer quietly computed without
+it. And `plugmem_stats` reports
+the embedder as `"absent"`, `"active"` or `"suspended"`, which is how a reader
+tells a memory degraded by an unreachable provider (`vectors` below `facts`)
+from one that never had an embedder at all.
 
-`plugmem_stats` reports the embedder as `"absent"`, `"active"` or
-`"suspended"`, so a model reading `vectors` lower than `facts` can tell a
-degraded memory from one that never had an embedder.
-
-`[recall]` and `[index]` are safe to change on an existing memory — reopening
-with different weights is how the ranking changes — while `[engine]` is not.
-A key nothing recognises is reported on **stderr** (stdout carries the JSON-RPC
-framing, so nothing else can go there) rather than silently ignored:
+A key nothing recognises is reported on **stderr** — stdout carries the JSON-RPC
+framing, so nothing else can go there — rather than silently ignored:
 
 ```text
 plugmem-mcp: unknown setting [recall].w_vector — did you mean `w_vec`?
 ```
-
-The model can read the whole catalogue at runtime with `plugmem_settings_help`.
 
 ## License
 

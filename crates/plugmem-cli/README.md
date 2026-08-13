@@ -319,90 +319,34 @@ plugmem(ro)> exit
 ## Configuration
 
 Optional `config.toml`, found by `--config PATH`, then `$PLUGMEM_CONFIG`, then
-the platform config directory (all optional — the CLI works with none).
+the platform config directory — all optional, the CLI works with none.
 Precedence overall is **explicit path/flag > environment > config file >
-platform default**. See the [full settings reference](https://github.com/m62624/plugmem/blob/main/crates/plugmem-host/SETTINGS.md)
-for all fields and OS-specific paths.
+platform default**.
 
 ```toml
-[database]
-path = "/path/to/memory.plugmem" # optional example; --db and PLUGMEM_DB win
-
 [engine]
-dim = 768              # embedding size (0 = vectors off); also max_bytes,
-                       # max_text, max_blob. What the database is *built* with:
-                       # changing one on an existing file is refused.
+dim = 768                       # 0 (the default) stores no vectors
 
-[recall]               # optional — every key has a tuned default
-w_vec = 2.0            # weight of the vector source (0 turns it off)
-half_life_days = 30    # age at which the recency discount has halved
-                       # also: w_bm25, w_graph, w_time, w_recency, rrf_k,
-                       # bm25_k1, bm25_b, graph_depth, graph_decay,
-                       # hnsw_ef_search, similar_cos, similar_jaccard
-
-[index]                # optional
-flat_to_hnsw = 50000   # vectors before maintenance builds the HNSW graph
-                       # also: hnsw_ef_construction
-
-[embedder]             # optional — omit for lexical/tags/graph/time only
-enabled = true         # false keeps settings but makes no embedder calls
+[embedder]                      # omit for lexical, tag, graph and time only
 url = "http://localhost:11434/v1/embeddings"
 model = "nomic-embed-text"
-space_id = "nomic-embed-text@v1" # optional; defaults to model
-api_key_env = "OPENAI_API_KEY"   # env var holding the bearer token
-on_error = "fail"      # or "degrade": answer without the vector instead
-timeout_ms = 10000     # one request, end to end; 0 waits indefinitely
-retry_after_ms = 0     # a suspended embedder: 0 = never on its own,
-                       # unset = 1s doubling to retry_max_ms (60s)
-
-[maintenance]
-snapshot_every_ops = 1024
-snapshot_journal_bytes = 4194304
-maintain_every_forgets = 100     # optional auto-purge
-batch_size = 128                 # facts per `import` batch (--batch overrides)
+on_error = "degrade"            # keep answering when the provider is down
 ```
 
-`import` streams the file in batches of `batch_size` (default 128; `--batch N`
-overrides it): each batch is a single embedder round-trip and a single journal
-fsync, so a bulk load with an embedder makes one HTTP call per batch instead of
-one per fact, and the file is never fully read into memory. Larger batches mean
-fewer round-trips but a bigger request body and more memory per batch.
+That is the whole of what most memories need. Every other key, what it costs
+and when to reach for it lives in one place:
 
-The embedder is what unlocks the **vector** recall source: without an active
-`[embedder]`, `remember`/`recall` still answer from lexical, tag, graph and
-temporal evidence, but no embeddings are computed. The host creates its one
-`OpenAiCompatEmbedder` implementation for any OpenAI-compatible server —
-OpenAI, Ollama, LM Studio, vLLM or llama.cpp-server. Set `enabled = false` to
-keep the URL/model settings without creating the client; the environment
-variable `$PLUGMEM_EMBEDDER_ENABLED` overrides the config value with `true` or
-`false`. `api_key_env` names the environment variable that contains the
-bearer token.
+- [`config.example.toml`](https://github.com/m62624/plugmem/blob/main/config.example.toml) — every key with its default, commented
+  out, ready to copy.
+- [SETTINGS.md](https://github.com/m62624/plugmem/blob/main/crates/plugmem-host/SETTINGS.md) — the reference: what each key is for, the
+  OS-specific paths, and which sections are safe to change on an existing
+  database.
+- `plugmem-cli help settings` (or `--json`) — the same catalogue, answered by
+  the binary you are running.
 
-When the provider cannot be reached — a stopped Ollama, a laptop that went
-offline, a model that was unloaded — `on_error` decides what that costs.
-`fail`, the default, propagates the error, which is what every release before
-0.12 did. `degrade` carries on **without** the vector: the fact is stored, the
-query is answered from the lexical, tag, graph and time sources, and the
-embedder is suspended so the next call does not pay the same failure again. A
-fact stored that way is not damaged — it is in the state every fact is in when
-a memory is written with no embedder, and `reembed` fills the vectors in from
-the stored text once the provider answers again. A suspension lifts by itself
-after `retry_after_ms` (unset: one second, doubling to `retry_max_ms`, reset by
-the first success). A vector-space mismatch is never degraded, and a `reembed`
-refuses while the embedder is suspended rather than publishing half a vector
-axis. Each of these keys has an environment override under the usual
-precedence: `$PLUGMEM_EMBEDDER_ON_ERROR`, `$PLUGMEM_EMBEDDER_TIMEOUT_MS`,
-`$PLUGMEM_EMBEDDER_RETRY_AFTER_MS`, `$PLUGMEM_EMBEDDER_RETRY_MAX_MS`.
-
-`[recall]` and `[index]` are safe to change on an existing memory: reopening
-with different weights is how you change the ranking, and the next `checkpoint`
-records them in the file. Reach for them when a specific memory answers badly —
-the defaults are tuned, and `w_bm25 = 0` (say) is mostly useful for asking what
-one source alone thinks.
-
-A key nothing recognises is **reported, not ignored**, on stderr. Refusing it
-would mean an older binary could not read a newer config, but staying silent
-would leave you believing you had tuned something:
+A key nothing recognises is **reported on stderr, not ignored**: a misspelled
+`w_vec` changes no behaviour, and silence would leave you believing you had
+tuned something.
 
 ```console
 $ plugmem-cli stats
@@ -411,8 +355,6 @@ plugmem: unknown setting [recall].w_vector — did you mean `w_vec`?
 facts       0
 ...
 ```
-
-Run `plugmem-cli help settings` for the complete catalogue with every default.
 
 ## Exit codes
 

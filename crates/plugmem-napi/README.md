@@ -447,97 +447,53 @@ the platform config directory, then defaults. The database path resolves from an
 explicit argument, then `$PLUGMEM_DB`, then `[database].path`, then the platform
 data directory.
 
-```typescript
-const db = await Plugmem.open(undefined, { config: "./plugmem.toml" });
+```javascript
+const db = await Plugmem.open("agent.plugmem", { config: "./plugmem.toml" });
 ```
 
 ```toml
 # plugmem.toml
-[database]
-path = "/path/to/memory.plugmem"
-
 [engine]
-dim = 768                     # embedding size (0 = vectors off)
+dim = 768                       # 0 (the default) stores no vectors
 
-[recall]                      # optional — every key has a tuned default
-w_vec = 2.0                   # trust meaning over keywords in this memory
-half_life_days = 30           # and treat anything older than a month as stale
-
-[embedder]                    # optional — omit for lexical/tag/graph/time only
-enabled = true                # false keeps settings but makes no embedder calls
-url   = "http://localhost:11434/v1/embeddings"
+[embedder]                      # omit for lexical, tag, graph and time only
+url = "http://localhost:11434/v1/embeddings"
 model = "nomic-embed-text"
-space_id = "nomic-embed-text@v1" # optional; defaults to model
-api_key_env = "OPENAI_API_KEY" # env var holding the bearer token
-on_error = "fail"      # or "degrade": answer without the vector instead
-timeout_ms = 10000     # one request, end to end; 0 waits indefinitely
-retry_after_ms = 0     # a suspended embedder: 0 = never on its own,
-                       # unset = 1s doubling to retry_max_ms (60s)
-
-[maintenance]
-fsync = "each_op"             # or "on_snapshot": faster, loses the journal tail on an OS crash
+on_error = "degrade"            # keep answering when the provider is down
 ```
 
-`[engine]` is what a database is *built* with; changing one of those on an
-existing file is refused. `[recall]` and `[index]` are the opposite — reopening
-with different weights is how you change the ranking, so tune them freely. All
-of them are in the [full settings reference](https://github.com/m62624/plugmem/blob/main/crates/plugmem-host/SETTINGS.md).
+Every other key, its default and what it costs live in one place:
 
-### When a key is misspelled
+- [`config.example.toml`](https://github.com/m62624/plugmem/blob/main/config.example.toml) — every key with its default, commented
+  out, ready to copy.
+- [SETTINGS.md](https://github.com/m62624/plugmem/blob/main/crates/plugmem-host/SETTINGS.md) — the reference: what each key is for, which
+  sections are safe to change on an existing database, and the OS-specific
+  paths.
+- `settingsHelp()` — the same catalogue from the addon you have loaded.
 
-Unknown keys and sections do not stop anything, but they are not swallowed
-either — a misspelled `w_vec` changes no behaviour, and silence would leave you
-believing you had tuned something. **Read them once after opening**, because a
-native addon has nowhere sensible to print:
+What is specific to this binding:
 
-```javascript
-const db = await Plugmem.open("agent.plugmem", { config: "./plugmem.toml" });
-for (const warning of db.configWarnings()) console.warn(warning);
-// unknown setting [recall].w_vector — did you mean `w_vec`?
-```
+- **`dim` is an open option too**, for callers with no config file. If the
+  config built an embedder, that embedder's dimension governs and `dim` must
+  agree with it.
+- **A text-only `remember`/`recall` embeds automatically**, and the provider's
+  HTTP call happens outside the engine lock — including on a read-only handle,
+  which embeds its query out here because the engine cannot embed into a
+  zero-copy mapping.
+- **`embedderState()`** answers `'absent' | 'active' | 'suspended'`, and
+  `suspendEmbedder()` / `resumeEmbedder()` are the manual switches, for when you
+  already know the provider is gone. With `on_error = "degrade"` the addon does
+  this for itself: a failed call costs the vector and suspends the embedder
+  rather than failing the verb, and `reembed()` fills the missing vectors in
+  later.
+- **Unknown keys are returned, not printed.** A native addon has nowhere
+  sensible to write, so read them once after opening:
 
-With an `[embedder]`, a text-only `remember`/`recall` embeds automatically, and
-the provider's HTTP call happens outside the engine lock. The `dim` open option
-sets the embedding size when there is no config; if the config built an
-embedder, its dimension governs and `dim` must agree.
-
-The host uses one `OpenAiCompatEmbedder` implementation for OpenAI, Ollama,
-LM Studio, vLLM and other OpenAI-compatible servers. `url` is the complete
-embeddings endpoint exactly as provided (nothing is appended), and `model` is
-the model name understood by that server. `space_id` optionally identifies the
-exact semantic space and defaults to `model`; it is never discovered over the
-network. Set `enabled = false` to keep the
-settings without creating or calling the embedder; `$PLUGMEM_EMBEDDER_ENABLED`
-overrides it with `true` or `false`.
-
-When the provider cannot be reached — a stopped Ollama, a laptop that went
-offline, a model that was unloaded — `on_error` decides what that costs.
-`fail`, the default, propagates the error, which is what every release before
-0.12 did. `degrade` carries on **without** the vector: the fact is stored, the
-query is answered from the lexical, tag, graph and time sources, and the
-embedder is suspended so the next call does not pay the same failure again. A
-fact stored that way is not damaged — it is in the state every fact is in when
-a memory is written with no embedder, and `reembed` fills the vectors in from
-the stored text once the provider answers again. A suspension lifts by itself
-after `retry_after_ms` (unset: one second, doubling to `retry_max_ms`, reset by
-the first success). A vector-space mismatch is never degraded, and a `reembed`
-refuses while the embedder is suspended rather than publishing half a vector
-axis. Each of these keys has an environment override under the usual
-precedence: `$PLUGMEM_EMBEDDER_ON_ERROR`, `$PLUGMEM_EMBEDDER_TIMEOUT_MS`,
-`$PLUGMEM_EMBEDDER_RETRY_AFTER_MS`, `$PLUGMEM_EMBEDDER_RETRY_MAX_MS`.
-
-`embedderState()` answers `'absent' | 'active' | 'suspended'`, and
-`suspendEmbedder()` / `resumeEmbedder()` are the manual switches — for when the
-caller already knows the provider is gone and would rather not pay one failed
-request to rediscover it. Both work on a read-only handle too.
-
-A read-only handle cannot embed inside the engine — writing into a zero-copy
-mapping is exactly what read-only exists to avoid — so this binding embeds the
-query itself before the read. A text `recall` reaches the vector source in both
-modes.
-
-The [full settings reference](https://github.com/m62624/plugmem/blob/main/crates/plugmem-host/SETTINGS.md)
-lists every field and the OS-specific paths.
+  ```javascript
+  const db = await Plugmem.open("agent.plugmem", { config: "./plugmem.toml" });
+  for (const warning of db.configWarnings()) console.warn(warning);
+  // unknown setting [recall].w_vector — did you mean `w_vec`?
+  ```
 
 ## Async and the event loop
 
