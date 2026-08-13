@@ -6,6 +6,7 @@ use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use plugmem_host::{Config, Database};
 
@@ -327,12 +328,142 @@ fn recall_with_an_embedder_coexists_with_a_live_writer() {
     server.join().unwrap();
 }
 
+/// A mock embedder that serves until the test ends and counts what it embedded.
+///
+/// [`spawn_mock_embedder`] answers a fixed number of requests and is joined to
+/// prove they all arrived — which turns "one request too few" into a hang
+/// rather than a failure. Where the *count* is the assertion, this is the shape
+/// to use: the number is read directly, and a session that stopped embedding
+/// fails on the spot with both numbers printed.
+fn spawn_counting_embedder(dim: usize) -> (String, std::sync::Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let embedded = std::sync::Arc::new(AtomicUsize::new(0));
+    let counter = std::sync::Arc::clone(&embedded);
+    std::thread::spawn(move || {
+        for sock in listener.incoming() {
+            let Ok(mut sock) = sock else { break };
+            let mut buf = vec![0u8; 65536];
+            let mut read = 0usize;
+            let body_start = loop {
+                match sock.read(&mut buf[read..]) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => read += n,
+                }
+                let head = String::from_utf8_lossy(&buf[..read]);
+                if let Some(at) = head.find("\r\n\r\n") {
+                    let len: usize = head
+                        .lines()
+                        .find_map(|l| {
+                            l.strip_prefix("content-length: ")
+                                .or_else(|| l.strip_prefix("Content-Length: "))
+                        })
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    if read >= at + 4 + len {
+                        break at + 4;
+                    }
+                }
+            };
+            let body: serde_json::Value = serde_json::from_slice(&buf[body_start..read]).unwrap();
+            let inputs = body["input"].as_array().unwrap();
+            counter.fetch_add(inputs.len(), Ordering::SeqCst);
+            let data: Vec<serde_json::Value> = inputs
+                .iter()
+                .enumerate()
+                .map(|(i, text)| {
+                    let seed = text.as_str().unwrap().len() as f32;
+                    let embedding: Vec<f32> = (0..dim).map(|j| (seed + j as f32).sin()).collect();
+                    serde_json::json!({ "index": i, "embedding": embedding })
+                })
+                .collect();
+            let payload = serde_json::json!({ "data": data }).to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+                payload.len()
+            );
+            let _ = sock.write_all(response.as_bytes());
+        }
+    });
+    (format!("http://{addr}/v1/embeddings"), embedded)
+}
+
 /// An address nothing listens on: bound, read, and dropped.
 fn dead_embedder_url() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     drop(listener);
     format!("http://{addr}/v1/embeddings")
+}
+
+#[test]
+fn every_recall_of_a_read_only_repl_session_embeds_its_query() {
+    // The repl is the CLI's long-lived mode, and it runs many commands against
+    // one `Settings`. A first version of the embedder gate *took* the provider
+    // out of the settings for the first recall, so the second and third lines
+    // of a session silently searched without a vector source at all — the
+    // quietest possible regression, since a lexical answer still looks like an
+    // answer.
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let dim = 8;
+    let (url, embedded) = spawn_counting_embedder(dim);
+    let tmp = TempDir::new("repl-embed");
+    let config = tmp.0.join("config.toml");
+    std::fs::write(
+        &config,
+        format!("[engine]\ndim = {dim}\n\n[embedder]\nurl = \"{url}\"\nmodel = \"mock\"\n"),
+    )
+    .unwrap();
+    let plug = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_plugmem-cli"))
+            .arg("--db")
+            .arg(tmp.db())
+            .arg("--config")
+            .arg(&config)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // Seed one fact and publish a generation, so the repl can open read-only.
+    let seeded = plug(&["remember", "a fact about tokio"]);
+    assert!(seeded.status.success(), "{}", stderr(&seeded));
+    assert!(plug(&["checkpoint"]).status.success());
+    assert_eq!(
+        embedded.load(Ordering::SeqCst),
+        1,
+        "the write embedded once"
+    );
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_plugmem-cli"))
+        .arg("--db")
+        .arg(tmp.db())
+        .arg("--config")
+        .arg(&config)
+        .args(["repl", "--read-only"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"recall tokio\nrecall tokio\nrecall tokio\nexit\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "repl exit: {:?}", out.status);
+
+    // Four in total: the seeding write plus one per recall line. Three would
+    // mean a session that embedded once and then quietly stopped.
+    assert_eq!(
+        embedded.load(Ordering::SeqCst),
+        4,
+        "every repl recall must embed its query"
+    );
 }
 
 #[test]

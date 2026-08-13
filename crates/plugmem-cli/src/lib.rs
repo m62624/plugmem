@@ -21,13 +21,15 @@ use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 use plugmem_host::{
-    Database, EmbedderGate, ExportedFact, FactId, GuardedRememberOutcome, HostError, LinkInput,
-    MaintenanceMode, MaintenanceOptions, ReadOnlyDatabase, RecallQuery, RecallResult,
-    RememberInput, RememberOutcome, Settings, Stats, TagPage, TagQuery, UnlinkInput, VALID_TO_OPEN,
+    Database, Embedder, EmbedderGate, ExportedFact, FactId, GuardedRememberOutcome, HostError,
+    LinkInput, MaintenanceMode, MaintenanceOptions, ReadOnlyDatabase, RecallQuery, RecallResult,
+    RememberInput, RememberOutcome, Settings, SharedEmbedder, Stats, TagPage, TagQuery,
+    UnlinkInput, VALID_TO_OPEN,
 };
 use serde_json::json;
 
@@ -155,7 +157,8 @@ fn run_parsed(cli: Cli, out: &mut impl Write) -> u8 {
             | Command::Recall { .. }
     );
     if readonly_ok {
-        let recall_vector = match embed_recall_query(&mut settings, &cli.command) {
+        let gate = embedder_gate(&mut settings);
+        let recall_vector = match embed_recall_query(&gate, &cli.command) {
             Ok(v) => v,
             Err(e) => return report_err(&e),
         };
@@ -922,6 +925,11 @@ fn run_repl_ro(
     input: impl BufRead,
     out: &mut impl Write,
 ) -> u8 {
+    // One gate for the whole session, not one per line: a repl is the CLI's
+    // long-lived mode, so a provider that goes down mid-session should be
+    // noticed once and stay noticed until it comes back, exactly as in a
+    // server.
+    let gate = embedder_gate(&mut settings);
     let mut ro = match Database::open_readonly(path, settings.config.clone()) {
         Ok(ro) => ro,
         Err(HostError::Locked { path }) => return report_locked(&path),
@@ -976,7 +984,7 @@ fn run_repl_ro(
                 }
                 Err(e) => write_err(out, &CliError::Host(e)),
             },
-            _ => run_repl_ro_line(&ro, &mut settings, line, json, out),
+            _ => run_repl_ro_line(&ro, &gate, line, json, out),
         }
         eprint!("plugmem(ro)> ");
     }
@@ -989,7 +997,7 @@ fn run_repl_ro(
 /// the read verbs (writes/one-shot are not available without the writer lock).
 fn run_repl_ro_line(
     ro: &ReadOnlyDatabase,
-    settings: &mut Settings,
+    gate: &EmbedderGate,
     line: &str,
     json: bool,
     out: &mut impl Write,
@@ -1020,7 +1028,7 @@ fn run_repl_ro_line(
     }
     // Embed a text recall query up front, exactly like the one-shot read-only
     // path — the read-only handle carries no embedder of its own.
-    let recall_vector = match embed_recall_query(settings, &cmd) {
+    let recall_vector = match embed_recall_query(gate, &cmd) {
         Ok(v) => v,
         Err(e) => {
             write_err(out, &e);
@@ -1040,6 +1048,29 @@ fn split_embedded(embedded: Option<&(Vec<f32>, String)>) -> (Option<&[f32]>, Opt
     }
 }
 
+/// Splits the configured provider into two handles: one for the gate that
+/// embeds recall queries out here, one left in [`Settings`] for a database open
+/// that may still happen.
+///
+/// It is the same client either way — [`SharedEmbedder`] is a refcount, not a
+/// copy, so nothing is opened twice. Splitting rather than *moving* is the
+/// whole point: a read-only open can fail and fall back to the writer path, and
+/// a repl session runs many commands against one `Settings`. Moving the
+/// embedder out for the first recall left both of those silently vectorless —
+/// a write storing facts with no vector and saying nothing is exactly the
+/// failure this policy work exists to end.
+fn embedder_gate(settings: &mut Settings) -> EmbedderGate {
+    let shared = settings.embedder.take().map(SharedEmbedder::new);
+    if let Some(shared) = &shared {
+        settings.embedder = Some(Box::new(shared.clone()));
+    }
+    EmbedderGate::new(
+        shared.map(|shared| Arc::new(shared) as Arc<dyn Embedder>),
+        settings.embed_error_policy,
+        settings.embed_retry,
+    )
+}
+
 /// Embeds a `recall` command's text query into a vector using the configured
 /// embedder, so the read-only path (which carries no embedder) can still search
 /// by meaning while a writer process holds the database. Returns `None` when the
@@ -1055,7 +1086,7 @@ fn split_embedded(embedded: Option<&(Vec<f32>, String)>) -> (Option<&[f32]>, Opt
 /// about to exit, which is exactly right — a one-shot command has no later call
 /// to protect.
 fn embed_recall_query(
-    settings: &mut Settings,
+    gate: &EmbedderGate,
     cmd: &Command,
 ) -> Result<Option<(Vec<f32>, String)>, CliError> {
     let Command::Recall {
@@ -1071,14 +1102,6 @@ fn embed_recall_query(
     if !vector.is_empty() {
         return Ok(None);
     }
-    let Some(embedder) = settings.embedder.take() else {
-        return Ok(None);
-    };
-    let gate = EmbedderGate::new(
-        Some(std::sync::Arc::from(embedder)),
-        settings.embed_error_policy,
-        settings.embed_retry,
-    );
     gate.embed_one(text.as_str(), |_| Ok(()))
         .map_err(CliError::Host)
 }
@@ -1879,33 +1902,69 @@ mod tests {
         }
     }
 
+    /// A gate over whatever `settings_with` was handed, built the way the real
+    /// call sites build it.
+    fn gate_of(settings: &mut Settings) -> plugmem_host::EmbedderGate {
+        embedder_gate(settings)
+    }
+
+    #[test]
+    fn the_gate_leaves_a_handle_behind_for_a_database_open() {
+        // The bug this exists to prevent: moving the embedder out of
+        // `Settings` for the first recall left the writer fallback — and every
+        // later line of a repl session — silently without one, storing facts
+        // with no vector and saying nothing about it.
+        let mut settings = settings_with(Some(Box::new(StubEmbedder)));
+        let gate = gate_of(&mut settings);
+        assert!(
+            settings.embedder.is_some(),
+            "a database opened after this would have no embedder"
+        );
+        assert_eq!(settings.embedder.as_ref().unwrap().space_id(), "cli-stub");
+        // One client shared, not two: the gate holds the same provider the
+        // settings kept.
+        assert_eq!(gate.provider().unwrap().space_id(), "cli-stub");
+
+        // A session asks many times; every one of them still embeds.
+        for _ in 0..3 {
+            assert_eq!(
+                embed_recall_query(&gate, &recall_cmd(Some("tokio"))).unwrap(),
+                Some((vec![0.1, 0.2, 0.3], "cli-stub".to_string()))
+            );
+        }
+    }
+
     #[test]
     fn embed_recall_query_embeds_recall_text_only_when_an_embedder_is_set() {
         // recall text + embedder → a vector.
         let mut with = settings_with(Some(Box::new(StubEmbedder)));
+        let with = gate_of(&mut with);
         assert_eq!(
-            embed_recall_query(&mut with, &recall_cmd(Some("tokio"))).unwrap(),
+            embed_recall_query(&with, &recall_cmd(Some("tokio"))).unwrap(),
             Some((vec![0.1, 0.2, 0.3], "cli-stub".to_string()))
         );
 
         // no embedder → None (recall falls back to lexical/structural sources).
         let mut without = settings_with(None);
+        let without = gate_of(&mut without);
         assert_eq!(
-            embed_recall_query(&mut without, &recall_cmd(Some("tokio"))).unwrap(),
+            embed_recall_query(&without, &recall_cmd(Some("tokio"))).unwrap(),
             None
         );
 
         // recall with no query text → None (nothing to embed).
         let mut with_empty = settings_with(Some(Box::new(StubEmbedder)));
+        let with_empty = gate_of(&mut with_empty);
         assert_eq!(
-            embed_recall_query(&mut with_empty, &recall_cmd(None)).unwrap(),
+            embed_recall_query(&with_empty, &recall_cmd(None)).unwrap(),
             None
         );
 
         // a non-recall command → None even with an embedder configured.
         let mut with_stats = settings_with(Some(Box::new(StubEmbedder)));
+        let with_stats = gate_of(&mut with_stats);
         assert_eq!(
-            embed_recall_query(&mut with_stats, &Command::Stats).unwrap(),
+            embed_recall_query(&with_stats, &Command::Stats).unwrap(),
             None
         );
     }
