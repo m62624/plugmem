@@ -1,0 +1,6 @@
+# Generated-and-committed artifacts are written with LF by the generators that
+# produce them. Checking them out with CRLF (the Windows default) would make a
+# freshly regenerated file look like a whole-file diff, so pin them.
+config.example.toml text eol=lf
+crates/plugmem-napi/index.d.ts text eol=lf
+crates/plugmem-py/python/plugmem/_plugmem.pyi text eol=lf

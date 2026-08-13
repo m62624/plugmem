@@ -852,13 +852,22 @@ mod tests {
         }
     }
 
-    /// The committed example, read from the workspace root.
+    /// The committed example, read from the workspace root, with its line
+    /// endings normalised.
+    ///
+    /// The generator writes `\n`, but what a checkout puts on disk is git's
+    /// choice, not ours: with `core.autocrlf=true` — the Windows default —
+    /// every line arrives as `\r\n`, and a byte comparison would call a
+    /// perfectly current file stale. The test is about which keys and defaults
+    /// the file states, so it compares the text and not the platform.
     fn committed_example() -> String {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
             .join("config.example.toml");
-        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        text.replace("\r\n", "\n")
     }
 
     #[test]
