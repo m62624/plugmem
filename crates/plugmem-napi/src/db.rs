@@ -851,12 +851,7 @@ impl Plugmem {
             Handle::Writer(db) => db.embedder_state(),
             Handle::Reader { embedder, .. } => embedder.state(),
         };
-        Ok(match state {
-            EmbedderState::Absent => "absent",
-            EmbedderState::Active => "active",
-            EmbedderState::Suspended { .. } => "suspended",
-        }
-        .to_string())
+        Ok(embedder_state_name(state).to_string())
     }
 
     /// Stops calling the embedder until `resumeEmbedder()`.
@@ -1174,6 +1169,78 @@ impl Task for WriterGetTask {
             .map(types::to_typed)
             .transpose()
             .map_err(error::into_napi)
+    }
+}
+
+/// Reads one named memory's embedder state through a scoped lease.
+///
+/// A workspace shares one provider between its memories but gives each its own
+/// gate, so this answers for *this* memory: another one that never called the
+/// dead endpoint is still `active`.
+pub struct EmbedderStateTask {
+    source: WriterSource,
+}
+
+impl EmbedderStateTask {
+    pub(crate) fn new(source: WriterSource) -> Self {
+        Self { source }
+    }
+}
+
+impl Task for EmbedderStateTask {
+    type Output = Produced<EmbedderState>;
+    type JsValue = String;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        Ok(self.source.read(|db| Ok(db.embedder_state())))
+    }
+
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        output
+            .map_err(|e| error::to_js(env, e))
+            .map(|state| embedder_state_name(state).to_string())
+    }
+}
+
+/// Throws one named memory's embedder switch, through a scoped lease.
+pub struct EmbedderSwitchTask {
+    source: WriterSource,
+    resume: bool,
+}
+
+impl EmbedderSwitchTask {
+    pub(crate) fn new(source: WriterSource, resume: bool) -> Self {
+        Self { source, resume }
+    }
+}
+
+impl Task for EmbedderSwitchTask {
+    type Output = Produced<()>;
+    type JsValue = ();
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        Ok(self.source.read(|db| {
+            if self.resume {
+                db.resume_embedder();
+            } else {
+                db.suspend_embedder();
+            }
+            Ok(())
+        }))
+    }
+
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        output.map_err(|e| error::to_js(env, e))
+    }
+}
+
+/// The one word every surface uses for a state, so a program that learned it
+/// from `plugmem_stats` reads the same one here.
+pub(crate) fn embedder_state_name(state: EmbedderState) -> &'static str {
+    match state {
+        EmbedderState::Absent => "absent",
+        EmbedderState::Active => "active",
+        EmbedderState::Suspended { .. } => "suspended",
     }
 }
 

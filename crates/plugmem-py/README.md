@@ -409,7 +409,8 @@ What is specific to this binding:
   `on_error = "degrade"` the binding does it for itself: a failed call costs the
   vector rather than the verb, and `reembed()` fills the missing vectors in
   later. Both work on a read-only handle, which is the one that embeds its own
-  queries.
+  queries, and on a `WorkspaceMemory` — one shared provider, but a gate per
+  memory, so suspending one leaves its siblings answering with vectors.
 - **Unknown keys are a value, not a printed warning** — a library has nowhere
   sensible to print. Read them once after opening:
 

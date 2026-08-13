@@ -32,9 +32,12 @@ Priority: flag/parameter > env > config file > default.
   exactly when editing a config file is the wrong thing to ask of somebody.
 - The bindings expose the switches themselves: `embedderState()`,
   `suspendEmbedder()` and `resumeEmbedder()` (`embedder_state`,
-  `suspend_embedder`, `resume_embedder` in Python), on both handle kinds. The
-  MCP server reports the state in `plugmem_stats`, since `vectors < facts` is
-  otherwise indistinguishable from a memory that never had an embedder.
+  `suspend_embedder`, `resume_embedder` in Python), on a writer, on a read-only
+  handle and on a workspace memory — where each memory keeps its own gate over
+  the workspace's one shared provider, so suspending one leaves its siblings
+  active. The MCP server reports the state in `plugmem_stats` and the CLI in
+  `stats`, since `vectors < facts` is otherwise indistinguishable from a memory
+  that never had an embedder.
 - Locking: FileStorage holds an exclusive lock (see `03-snapshot.md`) — one database,
   one writer. When the database is busy (e.g. an MCP server holds it), the CLI prints
   "database is locked by another process" and exits 1.

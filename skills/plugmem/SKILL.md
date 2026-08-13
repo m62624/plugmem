@@ -457,9 +457,12 @@ For a consumer, three things are worth knowing:
 - `embedder_state()` / `embedderState()` answers `absent`, `active` or
   `suspended` — the honest way to tell a person "your memory is running
   without meaning-based ranking right now". The MCP server puts the same word
-  in `plugmem_stats`.
+  in `plugmem_stats`, and `plugmem-cli stats` prints it as `embedder`.
 - `suspend_embedder()` / `resume_embedder()` are the manual switches, for when
-  the caller already knows the provider is gone.
+  the caller already knows the provider is gone. All three exist on a writer,
+  on a read-only handle and on a workspace memory; a workspace shares one
+  provider but gives each memory its own gate, so suspending one memory leaves
+  its siblings embedding.
 - `vectors < facts` in `stats` is the durable trace of a degraded stretch, and
   the reason to run a reembed on the next start with a working provider.
 

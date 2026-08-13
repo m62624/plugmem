@@ -1307,6 +1307,26 @@ class WorkspaceMemory:
     def maintain(self, mode: builtins.str = ...) -> MaintainReport: ...
     def reembed(self, batch_size: builtins.int = ...) -> ReembedReport: ...
     def checkpoint(self) -> None: ...
+    def embedder_state(self) -> builtins.str:
+        r"""
+        Whether this memory has an embedder, and whether it is usable now:
+        `"absent"`, `"active"` or `"suspended"`.
+        
+        A workspace shares one provider between its memories, but each memory
+        keeps its own gate — so this answers for this memory alone. A sibling
+        that has not called the dead endpoint yet still reports `"active"`.
+        """
+    def suspend_embedder(self) -> None:
+        r"""
+        Stops calling this memory's embedder until `resume_embedder()`. Writes
+        made meanwhile store no vector; `reembed()` fills them in later.
+        """
+    def resume_embedder(self) -> None:
+        r"""
+        Calls this memory's embedder again. Nothing is verified here: the next
+        verb that needs a vector finds out, and suspends it again if it is
+        still down.
+        """
     def __repr__(self) -> builtins.str: ...
 
 @typing.final

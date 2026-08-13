@@ -197,3 +197,51 @@ def test_a_suspended_embedder_refuses_a_reembed(
             db.reembed()
         db.resume_embedder()
         assert db.reembed().embedded == 1
+
+
+def test_a_workspace_memory_reports_and_switches_its_own_embedder(
+    tmp_path: Path, embedder: _Embedder
+) -> None:
+    # A workspace shares one provider between its memories and gives each its
+    # own gate. Without these three verbs on `WorkspaceMemory`, a caller
+    # working through a workspace could write vectorless facts for an hour and
+    # have no way to ask why: `vectors < facts` looks exactly like a memory
+    # that never had an embedder.
+    config = config_file(tmp_path, embedder.url)
+    ws = plugmem.Workspace(str(tmp_path / "ws"), config=config)
+    chat = ws.memory("chat-1")
+    other = ws.memory("chat-2")
+    chat.remember("the cache is off")
+    other.remember("the deploy is manual")
+    assert chat.embedder_state() == "active"
+    assert chat.stats().vectors == 1
+
+    chat.suspend_embedder()
+    assert chat.embedder_state() == "suspended"
+    chat.remember("the warmup runs first")
+    assert chat.stats().facts == 2
+    assert chat.stats().vectors == 1
+
+    # The sibling shares the provider, not the gate.
+    assert other.embedder_state() == "active"
+
+    chat.resume_embedder()
+    assert chat.embedder_state() == "active"
+    chat.remember("the queue drains on exit")
+    assert chat.stats().vectors == 2
+
+
+def test_a_workspace_memory_degrades_on_an_unreachable_provider(
+    tmp_path: Path,
+) -> None:
+    config = config_file(
+        tmp_path, dead_url(), 'on_error = "degrade"\nretry_after_ms = 0'
+    )
+    ws = plugmem.Workspace(str(tmp_path / "ws"), config=config)
+    chat = ws.memory("chat-1")
+    chat.remember("a fact nobody could embed")
+    assert chat.embedder_state() == "suspended"
+    stats = chat.stats()
+    assert stats.facts == 1
+    assert stats.vectors == 0
+    assert len(chat.recall("fact").facts) == 1

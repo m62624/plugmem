@@ -278,6 +278,40 @@ impl WorkspaceMemory {
     pub fn checkpoint(&self) -> Result<AsyncTask<CheckpointTask>> {
         Ok(writer_checkpoint_task(self.source()?))
     }
+
+    /// Whether this memory has an embedder, and whether it is usable now:
+    /// `"absent"`, `"active"` or `"suspended"`.
+    ///
+    /// A workspace shares one provider between its memories, but each memory
+    /// keeps its own gate — so this answers for this memory alone. A sibling
+    /// that has not called the dead endpoint yet still reports `"active"`.
+    #[napi(ts_return_type = "Promise<'absent' | 'active' | 'suspended'>")]
+    pub fn embedder_state(&self) -> Result<AsyncTask<crate::db::EmbedderStateTask>> {
+        Ok(AsyncTask::new(crate::db::EmbedderStateTask::new(
+            self.source()?,
+        )))
+    }
+
+    /// Stops calling this memory's embedder until `resumeEmbedder()`. Writes
+    /// made meanwhile store no vector; `reembed()` fills them in later.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn suspend_embedder(&self) -> Result<AsyncTask<crate::db::EmbedderSwitchTask>> {
+        Ok(AsyncTask::new(crate::db::EmbedderSwitchTask::new(
+            self.source()?,
+            false,
+        )))
+    }
+
+    /// Calls this memory's embedder again. Nothing is verified here: the next
+    /// verb that needs a vector finds out, and suspends it again if it is
+    /// still down.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn resume_embedder(&self) -> Result<AsyncTask<crate::db::EmbedderSwitchTask>> {
+        Ok(AsyncTask::new(crate::db::EmbedderSwitchTask::new(
+            self.source()?,
+            true,
+        )))
+    }
 }
 
 #[napi]

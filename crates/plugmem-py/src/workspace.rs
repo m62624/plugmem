@@ -529,6 +529,51 @@ impl WorkspaceMemory {
         })
     }
 
+    /// Whether this memory has an embedder, and whether it is usable now:
+    /// `"absent"`, `"active"` or `"suspended"`.
+    ///
+    /// A workspace shares one provider between its memories, but each memory
+    /// keeps its own gate — so this answers for this memory alone. A sibling
+    /// that has not called the dead endpoint yet still reports `"active"`.
+    fn embedder_state(&self, py: Python<'_>) -> Result<String> {
+        let target = self.target()?;
+        py.detach(move || {
+            target.with_database(IfMissing::Fail, |db| {
+                Ok(match db.embedder_state() {
+                    plugmem_host::EmbedderState::Absent => "absent",
+                    plugmem_host::EmbedderState::Active => "active",
+                    plugmem_host::EmbedderState::Suspended { .. } => "suspended",
+                }
+                .to_string())
+            })
+        })
+    }
+
+    /// Stops calling this memory's embedder until `resume_embedder()`. Writes
+    /// made meanwhile store no vector; `reembed()` fills them in later.
+    fn suspend_embedder(&self, py: Python<'_>) -> Result<()> {
+        let target = self.target()?;
+        py.detach(move || {
+            target.with_database(IfMissing::Fail, |db| {
+                db.suspend_embedder();
+                Ok(())
+            })
+        })
+    }
+
+    /// Calls this memory's embedder again. Nothing is verified here: the next
+    /// verb that needs a vector finds out, and suspends it again if it is
+    /// still down.
+    fn resume_embedder(&self, py: Python<'_>) -> Result<()> {
+        let target = self.target()?;
+        py.detach(move || {
+            target.with_database(IfMissing::Fail, |db| {
+                db.resume_embedder();
+                Ok(())
+            })
+        })
+    }
+
     fn __repr__(&self) -> String {
         format!("WorkspaceMemory(name={:?})", self.name.to_string())
     }

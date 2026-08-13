@@ -485,7 +485,9 @@ What is specific to this binding:
   already know the provider is gone. With `on_error = "degrade"` the addon does
   this for itself: a failed call costs the vector and suspends the embedder
   rather than failing the verb, and `reembed()` fills the missing vectors in
-  later.
+  later. A `WorkspaceMemory` has the same three, as promises: one shared
+  provider, but a gate per memory, so suspending one leaves its siblings
+  answering with vectors.
 - **Unknown keys are returned, not printed.** A native addon has nowhere
   sensible to write, so read them once after opening:
 

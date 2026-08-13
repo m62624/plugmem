@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const require = createRequire(import.meta.url);
-const { Plugmem } = require("../index.js");
+const { Plugmem, Workspace } = require("../index.js");
 
 const DIM = 8;
 
@@ -213,5 +213,74 @@ test("a suspended embedder refuses a reembed instead of writing half a vector ax
     });
   } finally {
     await live.stop();
+  }
+});
+
+test("a workspace memory reports and switches its own embedder", async () => {
+  // A workspace shares one provider between its memories and gives each its
+  // own gate. Without these three verbs on `WorkspaceMemory`, a caller working
+  // through a workspace could write vectorless facts for an hour and have no
+  // way to ask why — `vectors < facts` looks the same as never having had an
+  // embedder.
+  const live = await liveEndpoint();
+  const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-ws-degrade-"));
+  const config = join(dir, "config.toml");
+  writeFileSync(
+    config,
+    `[engine]\ndim = ${DIM}\n[embedder]\nurl = "${live.url}"\nmodel = "test"\n`,
+  );
+  const ws = new Workspace(dir, { config });
+  try {
+    const chat = ws.memory("chat-1");
+    const other = ws.memory("chat-2");
+    await chat.remember({ text: "the cache is off" });
+    await other.remember({ text: "the deploy is manual" });
+    assert.equal(await chat.embedderState(), "active");
+    assert.equal((await chat.stats()).vectors, 1);
+
+    // Suspended: this memory writes without vectors, and says so.
+    await chat.suspendEmbedder();
+    assert.equal(await chat.embedderState(), "suspended");
+    await chat.remember({ text: "the warmup runs first" });
+    const suspended = await chat.stats();
+    assert.equal(suspended.facts, 2);
+    assert.equal(suspended.vectors, 1, "the second fact stored no vector");
+
+    // Its sibling shares the provider, not the gate.
+    assert.equal(await other.embedderState(), "active");
+
+    // And back: a resumed memory embeds again, without reopening anything.
+    await chat.resumeEmbedder();
+    assert.equal(await chat.embedderState(), "active");
+    await chat.remember({ text: "the queue drains on exit" });
+    assert.equal((await chat.stats()).vectors, 2);
+  } finally {
+    ws.close();
+    rmSync(dir, { recursive: true, force: true });
+    await live.stop();
+  }
+});
+
+test("a workspace memory degrades on an unreachable provider like any other", async () => {
+  const url = await deadEndpoint();
+  const dir = mkdtempSync(join(tmpdir(), "plugmem-napi-ws-dead-"));
+  const config = join(dir, "config.toml");
+  writeFileSync(
+    config,
+    `[engine]\ndim = ${DIM}\n[embedder]\nurl = "${url}"\nmodel = "test"\n` +
+      'on_error = "degrade"\nretry_after_ms = 0\n',
+  );
+  const ws = new Workspace(dir, { config });
+  try {
+    const chat = ws.memory("chat-1");
+    await chat.remember({ text: "a fact nobody could embed" });
+    assert.equal(await chat.embedderState(), "suspended");
+    const stats = await chat.stats();
+    assert.equal(stats.facts, 1);
+    assert.equal(stats.vectors, 0);
+    assert.equal((await chat.recall({ query: "fact" })).facts.length, 1);
+  } finally {
+    ws.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
